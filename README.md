@@ -1,0 +1,213 @@
+# mandala-computer-mcp
+
+An [MCP](https://modelcontextprotocol.io) server for
+[Mandala Computer](https://mandala.computer) — cloud desktops for AI agents.
+
+Point Claude Code, Claude Desktop, or anything else that speaks MCP at a real
+Linux desktop it can **see and drive**. Screenshots come back as images, so the
+model looks at the screen and clicks what it sees.
+
+> **Status: alpha, unpublished.** The tool surface is settling; expect breaking
+> changes before 1.0. Tracks the platform's `/api/v1`, which is itself still
+> moving.
+
+## Install
+
+You need an API key from the dashboard — **Settings → API keys**, a `com_…`
+string. It is scoped to your account and it is every computer on it, so treat it
+the way you would treat a password.
+
+**Claude Code**
+
+```sh
+claude mcp add mandala -e MANDALA_API_KEY=com_… -- npx -y mandala-computer-mcp
+```
+
+**Claude Desktop** — in `claude_desktop_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "mandala": {
+      "command": "npx",
+      "args": ["-y", "mandala-computer-mcp"],
+      "env": { "MANDALA_API_KEY": "com_…" }
+    }
+  }
+}
+```
+
+Nothing is hosted and nothing is operated: your MCP client starts this as a
+subprocess, and it talks to `https://app.mandala.computer/api/v1` with your key.
+
+## Use
+
+Ask for what you want. A first session usually goes:
+
+> Create a computer from the base template, open example.com, and show me what's
+> on the screen.
+
+Under that, the model is doing roughly this:
+
+```
+create_computer(template="base")     → builds it and selects it for the session
+wait_for_computer(until="guest")     → the desktop inside is answering, not just the VM
+open_url(url="https://example.com")  → puts the page on the screen
+screenshot()                         → an image the model can point at
+click(x=640, y=400)                  → clicks what it saw
+screenshot()                         → looks again
+```
+
+`use_computer` binds a machine to the session, so every later call can leave
+`computer_id` out. Pass `computer_id` explicitly on any call to override it
+without changing the binding, which is how you drive two machines at once.
+
+Set `MANDALA_COMPUTER_ID` to bind one at startup and skip `use_computer`
+entirely.
+
+## The tools
+
+**Choosing a machine** — `list_templates`, `list_computers`, `get_computer`,
+`use_computer`, `wait_for_computer`, `get_desktop_url`
+
+**Lifecycle** — `create_computer`, `start_computer`, `stop_computer`,
+`suspend_computer`, `restart_computer`, `update_computer`, `clone_computer`,
+`delete_computer`
+
+**Driving the desktop** — `screenshot`, `click`, `type_text`, `press_key`,
+`scroll`, `drag`, `move_mouse`, `mouse_button`, `cursor_position`, `wait`
+
+**Inside the guest** — `exec`, `exec_poll`, `exec_kill`, `open_url`,
+`list_windows`, `window_action`, `read_file`, `write_file`
+
+**Snapshots** — `list_snapshots`, `create_snapshot`, `restore_snapshot`,
+`clone_snapshot`, `snapshot_schedule`, `delete_snapshot`
+
+**Delegating** — `run_agent`, registered only when `MANDALA_MODEL_KEY` is set.
+
+## Things worth knowing
+
+**A screenshot is how you find out what happened.** Nothing on a desktop reports
+back. The tools say so in their own descriptions, and the server's instructions
+say it once more, because a model that acts without looking is the single most
+common way one of these sessions goes wrong.
+
+**`running` does not mean ready.** A computer reports running when the
+hypervisor has started the VM; the desktop inside comes up seconds later.
+`wait_for_computer(until="guest")` waits for the software to answer, which is
+what `exec`, files and a painted screen actually need.
+
+**`exec` runs as root with no display.** A GUI application started without
+`desktop: true` cannot draw. `open_url` is the reliable way to put a web page on
+the screen — and it returns before the browser paints, sometimes by ten seconds.
+
+**Anything slow wants `background: true`.** A build or an install run in the
+foreground comes back as a timeout, with the work still going inside the guest
+and its output unreadable. With a handle you get the exit code and the output,
+and `exec_kill` stops it.
+
+**`list_windows` sees what a screenshot cannot.** It is how you tell an
+application that failed to start from one that has not painted yet. Match on
+`class` (the application), not `title` (whatever page it is showing).
+
+**Computers suspend themselves.** After 30 minutes untouched, by default. Input,
+`exec` and file transfers count as use and resume it automatically;
+**screenshots deliberately do not**, so a loop that only watches can see its own
+machine go down under it.
+
+**A 409 usually clears; a 400 never does.** A guest still booting or a busy
+guest agent answers 409. The platform's own error messages come through
+unedited, because they are written to be acted on.
+
+**Desktop links are credentials.** `get_desktop_url` returns the watch-only URL
+by default — the platform drops input on that socket, so it is safe to hand to
+somebody. `control: true` returns the full-control one, which is root-equivalent
+on that machine. Neither appears in any other tool's output, deliberately: a
+tool result lands in a model's context and from there in whatever captured it.
+
+## Running it as a service
+
+The same server speaks streamable HTTP, for clients that cannot spawn a
+subprocess — claude.ai, mobile, a shared team endpoint:
+
+```sh
+MANDALA_ALLOWED_HOSTS=mcp.mandala.computer npx mandala-computer-mcp --http --port 3000
+```
+
+```sh
+claude mcp add --transport http mandala https://mcp.mandala.computer/mcp \
+  --header "Authorization: Bearer com_…"
+```
+
+**It holds no credential of its own.** Each caller's key arrives as their own
+bearer token and is used only for their session; there is no store, and nothing
+outlives a session but a digest of the key — kept so that a later request can be
+shown to come from the same holder, which means a leaked session id on its own
+is not enough to drive somebody else's desktop.
+
+That is also why anyone can run their own: point the same container at the same
+API and it works, with no secret to provision.
+
+### Configuration
+
+| Variable | Meaning |
+| --- | --- |
+| `MANDALA_API_KEY` | `com_…` from Settings → API keys. Required on stdio; over HTTP each caller sends their own. |
+| `MANDALA_BASE_URL` | Defaults to `https://app.mandala.computer/api/v1`. |
+| `MANDALA_COMPUTER_ID` | Bind a computer at startup, so `use_computer` is not needed. |
+| `MANDALA_MODEL_KEY` | An Anthropic key. Enables `run_agent`, which runs the platform's own loop on that key. |
+| `MANDALA_NO_LIFECYCLE` | `1` withholds `create_computer`, `clone_computer`, `delete_computer` and `delete_snapshot`. |
+| `PORT`, `HOST` | For `--http`. Default `3000`, `127.0.0.1`. |
+| `MANDALA_ALLOWED_HOSTS`, `MANDALA_ALLOWED_ORIGINS` | Comma-separated. Setting either enables DNS-rebinding protection. |
+
+`run_agent` deserves a note. It hands a task to the platform's own agent loop,
+which drives the computer inside the platform and answers with a sentence. Worth
+it when a stretch of pixel work would otherwise cost the calling model a
+screenshot per step — ten clicks stop being ten images. It bills your Anthropic
+key, and the platform never stores that key.
+
+## Development
+
+```sh
+npm install
+npm test          # vitest, plus the surface check below
+npm run build
+npm run lint
+```
+
+### The surface check
+
+The platform allowlists every route `/api/v1` will answer and 404s the rest.
+`test/allowlist.ts` mirrors that table, and the tests assert two things: that
+every call this server can make lands on an allowlisted route, and that the gap
+between the platform's surface and this server's coverage is *exactly* the set
+written down in `UNIMPLEMENTED`. A route added upstream becomes a failing test
+here rather than a feature nobody noticed.
+
+`npm run check:surface` goes further and diffs the mirror against the real
+`V1_ROUTES` in the platform repo, whenever that repo happens to be checked out
+next door — or wherever `MANDALA_PLATFORM_REPO` points. It skips silently when
+it is not there, which is the ordinary case in CI on this repository.
+
+```
+check:surface — in step with /Users/…/mandala-computer (30 routes).
+```
+
+### Where the platform's rules live
+
+This server gets no privileged access. Everything it does goes through the same
+curated `/api/v1` surface the Python SDK uses, owner-scoped to the key's account
+and audited against it. Anything it needs that `/api/v1` does not expose is a
+change to the platform's route table, not a wider pass-through here — see the
+long note at the top of `web/lib/surface.ts` in the platform repo for why that
+boundary is where it is.
+
+## See also
+
+- [mandala-computer-python](https://github.com/mboyd1/mandala-computer-python) —
+  the Python SDK, for writing code against the same API rather than driving it
+  from a model.
+
+## Licence
+
+MIT.

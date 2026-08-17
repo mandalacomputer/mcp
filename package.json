@@ -1,0 +1,57 @@
+{
+  "name": "mandala-computer-mcp",
+  "version": "0.1.0",
+  "description": "MCP server for Mandala Computer — cloud desktops for AI agents",
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "mandala",
+    "computer-use",
+    "cloud-desktop",
+    "ai-agents"
+  ],
+  "license": "MIT",
+  "homepage": "https://mandala.computer",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mboyd1/mandala-computer-mcp.git"
+  },
+  "type": "module",
+  "bin": {
+    "mandala-computer-mcp": "dist/cli.js"
+  },
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "dev": "tsc -p tsconfig.build.json --watch",
+    "test": "vitest run && node scripts/check-surface.mjs",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit",
+    "lint": "biome check .",
+    "format": "biome check --write .",
+    "prepublishOnly": "npm run build",
+    "check:surface": "node scripts/check-surface.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "express": "^5.1.0",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.3.0",
+    "@types/express": "^5.0.0",
+    "@types/node": "^22.10.0",
+    "typescript": "^5.7.0",
+    "vitest": "^3.2.0"
+  }
+}
