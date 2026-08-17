@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # The floor is what package.json declares, and the ceiling is what an
+        # `npx` on a current machine will actually use. A server people install
+        # with npx is one whose Node range has to be true rather than aspirational.
+        node: ['20', '22', '24']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npx vitest run
+      - run: npm run build
+      # The published artifact is dist/, and a server whose bin does not start
+      # is one nobody finds out about until they install it.
+      - run: node dist/cli.js --help
+
+  surface:
+    # Diffs the mirrored allowlist against the platform's real V1_ROUTES. Its own
+    # job because it needs the platform repo, which is private: on a fork, or
+    # without the token, the checkout is skipped and the script says so and
+    # passes rather than failing over something the contributor cannot fix.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Check out the platform
+        id: platform
+        continue-on-error: true
+        uses: actions/checkout@v4
+        with:
+          repository: b-open-io/gorillacloud
+          path: platform
+          token: ${{ secrets.PLATFORM_REPO_TOKEN }}
+      - name: Compare the allowlist
+        env:
+          MANDALA_PLATFORM_REPO: ${{ github.workspace }}/platform
+        run: node scripts/check-surface.mjs
