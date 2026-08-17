@@ -366,7 +366,7 @@ export const registerComputers: Registrar = (server, session, opts) => {
     {
       title: 'Delete a computer',
       description:
-        'Destroy a computer and its disk. Irreversible. Its snapshots are deliberately kept and become orphans, which can still be cloned but not restored.',
+        'Destroy a computer and its disk. Irreversible. Its snapshots are kept by default and become orphans, which can still be cloned but not restored. To destroy those too, read snapshot_holdings first and pass its fingerprint as `expect`.',
       inputSchema: {
         computer_id: z
           .string()
@@ -376,14 +376,57 @@ export const registerComputers: Registrar = (server, session, opts) => {
         confirm: z
           .literal(true)
           .describe('Must be true. This destroys the disk and everything on it.'),
+        delete_snapshots: z
+          .boolean()
+          .default(false)
+          .describe(
+            'Also destroy every snapshot of this computer. Requires `expect`. Opt-in because the wrong answer here is unrecoverable: a snapshot kept by mistake costs storage, one destroyed by mistake costs the disk it was the last copy of.',
+          ),
+        expect: z
+          .string()
+          .optional()
+          .describe(
+            'The fingerprint from snapshot_holdings. The purge is refused unless it still names the same set, so a capture that finished after you looked cannot be swept up in a decision that was never about it.',
+          ),
       },
       annotations: { destructiveHint: true, idempotentHint: true },
     },
-    ({ computer_id }) =>
+    ({ computer_id, delete_snapshots, expect }) =>
       guarded(async () => {
-        await session.api.json('DELETE', P.computer(computer_id));
+        // The platform makes `expect` optional, for callers that cannot read the
+        // holdings and so were never shown a set to be held to. An MCP caller
+        // can read them — snapshot_holdings is right there — so here it is
+        // required, and the refusal names the tool that produces it.
+        //
+        // Not fetched on the caller's behalf, which was the tempting shortcut
+        // and is the wrong one. A fingerprint read a millisecond before the
+        // delete binds the purge to whatever the set is now, not to what anyone
+        // agreed to — and the race checkExpectation exists for is exactly that:
+        // a capture that finishes between the decision and the click, then gets
+        // destroyed by a confirmation that predates it.
+        if (delete_snapshots && !expect) {
+          return said(
+            'Refusing to purge snapshots without a fingerprint. Call snapshot_holdings on this computer, ' +
+              'check that the count and size are what you meant to destroy, and pass its fingerprint as `expect`. ' +
+              'Nothing has been deleted.',
+          );
+        }
+        const res = await session.api.json<{ snapshots_deleted?: number }>(
+          'DELETE',
+          P.computer(computer_id),
+          {
+            query: {
+              snapshots: delete_snapshots ? 'delete' : undefined,
+              expect: delete_snapshots ? expect : undefined,
+            },
+          },
+        );
         session.unbind(computer_id);
-        return said(`Deleted ${computer_id}. Its disk is gone; any snapshots it had remain.`);
+        return said(
+          delete_snapshots
+            ? `Deleted ${computer_id} and ${res?.snapshots_deleted ?? 0} of its snapshot(s).`
+            : `Deleted ${computer_id}. Its disk is gone; any snapshots it had remain, as orphans that can be cloned but not restored.`,
+        );
       }),
   );
 };

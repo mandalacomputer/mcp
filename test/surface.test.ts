@@ -49,6 +49,7 @@ const EXERCISE: Record<string, Record<string, unknown>[]> = {
   read_file: [{ path: '/home/user/a.txt' }],
 
   list_snapshots: [{}],
+  snapshot_holdings: [{}],
   create_snapshot: [{}],
   restore_snapshot: [{ snapshot_id: 'snap-1', confirm: true }],
   clone_snapshot: [{ snapshot_id: 'snap-1' }],

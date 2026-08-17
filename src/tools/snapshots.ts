@@ -27,13 +27,41 @@ export const registerSnapshots: Registrar = (server, session, opts) => {
     },
     ({ computer_id }) =>
       guarded(async () => {
-        // One route and a filter here, rather than the per-computer listing.
-        // `GET computers/:id/snapshots` exists, but only on the dashboard's
-        // surface — on /api/v1 it is a 404, and the failure would read as "this
-        // computer has no snapshots" rather than as a route that is not there.
+        // One route and a filter here, still, now that OPL-3636 has put
+        // `GET computers/:id/snapshots` on this surface. That route is not a
+        // narrower version of this one — it answers a count, a byte total and a
+        // fingerprint, and never the snapshots themselves. Listing one
+        // computer's snapshots is this route and a filter, and always was.
+        // See snapshot_holdings for the other question.
         const all = (await session.api.json<Record<string, unknown>[]>('GET', P.SNAPSHOTS)) ?? [];
         if (!computer_id) return json(all);
         return json(all.filter((s) => s.computer_id === computer_id));
+      }),
+  );
+
+  server.registerTool(
+    'snapshot_holdings',
+    {
+      title: 'What a computer would leave behind',
+      description:
+        'How many snapshots a computer has, what they weigh, and the fingerprint that names that exact set. Read this before purging snapshots with delete_computer: the fingerprint is what binds the purge to the snapshots you were shown, so one that arrived after you looked cannot be swept up in it.',
+      inputSchema: { ...idArg },
+      annotations: { readOnlyHint: true },
+    },
+    ({ computer_id }) =>
+      guarded(async () => {
+        const id = session.resolve(computer_id);
+        const held = await session.api.json<{
+          count?: number;
+          size_bytes?: number;
+          fingerprint?: string;
+        }>('GET', P.computerAction(id, 'snapshots'));
+        const size = ((held.size_bytes ?? 0) / 1e9).toFixed(2);
+        return said(
+          `${id} holds ${held.count ?? 0} snapshot(s), ${size} GB. ` +
+            'To delete them along with the computer, pass this fingerprint to delete_computer as `expect`.',
+          held,
+        );
       }),
   );
 

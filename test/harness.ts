@@ -25,6 +25,8 @@ const COMPUTER = {
 
 const SNAPSHOT = { id: 'snap-1', computer_id: 'vm-1', name: 's', kind: 'disk', state: 'durable' };
 
+const HOLDINGS = { count: 2, size_bytes: 6_100_000_000, fingerprint: 'fp-abc123' };
+
 const AGENT_STREAM =
   'event: step\ndata: {"n":1,"tool":"computer","action":"screenshot","detail":"took a screenshot"}\n\n' +
   'event: done\ndata: {"steps":1,"stop":"end_turn","text":"Done.","usage":{}}\n\n';
@@ -106,8 +108,13 @@ function respond(method: string, path: string): Response {
     return json({ ok: true, window: { id: '0x2600003', x: 305 } });
   if (path.endsWith('/schedule')) return json({ enabled: true, hour: 4, minute: 0, tz: 'UTC' });
   if (path.endsWith('/templates')) return json([{ name: 'base', os: 'linux', cpu: 2 }]);
-  // Collections list on GET and answer with one object on POST.
-  if (path.endsWith('/snapshots')) return json(method === 'GET' ? [SNAPSHOT] : SNAPSHOT);
+  // Three different answers behind one suffix, and they are worth keeping
+  // apart. GET /snapshots is the account's list; GET computers/:id/snapshots is
+  // that computer's HOLDINGS — a count, a total and a fingerprint, never the
+  // snapshots themselves; POST there captures one. A stub that answered all
+  // three alike would let a tool reading the wrong shape pass.
+  if (path === '/snapshots') return json([SNAPSHOT]);
+  if (path.endsWith('/snapshots')) return json(method === 'GET' ? HOLDINGS : SNAPSHOT);
   if (path.endsWith('/computers')) return json(method === 'GET' ? [COMPUTER] : COMPUTER);
   return json(COMPUTER);
 }
