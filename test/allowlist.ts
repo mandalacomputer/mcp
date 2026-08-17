@@ -48,6 +48,11 @@ export const V1_ROUTES: Route[] = [
 
   // Snapshots.
   r('GET', 'snapshots'),
+  // What a computer holds — a count, a byte total, and the fingerprint that
+  // names the set. Not a listing; that is GET /snapshots. Added to this table
+  // in OPL-3636, having been on the dashboard's and the admin's and not this
+  // one, which is the silent 404 the platform's own table warns about.
+  r('GET', 'computers/:id/snapshots'),
   r('POST', 'computers/:id/snapshots'),
   r('POST', 'snapshots/:id/restore'),
   r('POST', 'snapshots/:id/clone'),
