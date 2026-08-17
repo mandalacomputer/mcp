@@ -109,6 +109,27 @@ export function withoutCredentials(c: Computer): Computer {
   return rest;
 }
 
+/**
+ * The warning that belongs on a listing the platform said was short.
+ *
+ * Said in prose and said first, because the reader is a model that will
+ * otherwise diff this array against its own idea of the world. A short list is
+ * not a smaller truth — it reads exactly like the missing things were deleted,
+ * and the obvious next thing to do with something that has disappeared is to
+ * tidy up after it.
+ */
+export function incompleteWarning(noun: string, incomplete: number | null): string {
+  if (incomplete === null) return '';
+  const missing =
+    incomplete > 0
+      ? `${incomplete} of your ${noun} are on a hypervisor that cannot be reached`
+      : `a hypervisor cannot be reached, so an unknown number of ${noun} are missing`;
+  return (
+    `INCOMPLETE: ${missing}. This list is short. Do not treat anything absent from it ` +
+    `as deleted — retry in a moment for a complete answer.\n\n`
+  );
+}
+
 /** The one-line version, for lists and for confirmations. */
 export function describe(c: Computer): string {
   const bits = [c.name ?? '(unnamed)', c.id ?? '(no id)', c.status ?? 'unknown'];

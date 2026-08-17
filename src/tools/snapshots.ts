@@ -1,5 +1,13 @@
 import { z } from 'zod';
-import { describe, guarded, json, said, unwrapComputer, withoutCredentials } from '../format.js';
+import {
+  describe,
+  guarded,
+  incompleteWarning,
+  json,
+  said,
+  unwrapComputer,
+  withoutCredentials,
+} from '../format.js';
 import * as P from '../paths.js';
 import type { Registrar } from './types.js';
 
@@ -22,10 +30,22 @@ export const registerSnapshots: Registrar = (server, session, opts) => {
           .string()
           .optional()
           .describe('Only snapshots of this computer. Omit for the whole account.'),
+        include_unfinished: z
+          .boolean()
+          .default(false)
+          .describe(
+            'Also return deletions that began and did not finish. They are not usable — their state is "deleting" and nothing can be restored or cloned from one — but they still hold objects and are still billed, so this is the flag to set when the question is about storage rather than about what can be restored.',
+          ),
+        allow_partial: z
+          .boolean()
+          .optional()
+          .describe(
+            'Accept a short list when a hypervisor cannot be reached, instead of the 503 the platform answers by default. The answer then says it is short.',
+          ),
       },
       annotations: { readOnlyHint: true },
     },
-    ({ computer_id }) =>
+    ({ computer_id, include_unfinished, allow_partial }) =>
       guarded(async () => {
         // One route and a filter here, still, now that OPL-3636 has put
         // `GET computers/:id/snapshots` on this surface. That route is not a
@@ -33,9 +53,27 @@ export const registerSnapshots: Registrar = (server, session, opts) => {
         // fingerprint, and never the snapshots themselves. Listing one
         // computer's snapshots is this route and a filter, and always was.
         // See snapshot_holdings for the other question.
-        const all = (await session.api.json<Record<string, unknown>[]>('GET', P.SNAPSHOTS)) ?? [];
-        if (!computer_id) return json(all);
-        return json(all.filter((s) => s.computer_id === computer_id));
+        //
+        // `listing` rather than `json`, and that matters more here than it looks.
+        // Without allow_partial the platform answers a short inventory with a
+        // 503, so the filter below can never quietly narrow one — but with it,
+        // a short list arrives as a 200 and the only thing saying so is
+        // X-GC-Incomplete. Filtering that to one computer and reporting the
+        // count would turn "some hosts did not answer" into a confident wrong
+        // number about a single machine.
+        const { items, incomplete } = await session.api.listing<Record<string, unknown>[]>(
+          P.SNAPSHOTS,
+          {
+            query: {
+              include: include_unfinished ? 'unfinished' : undefined,
+              allow_partial: allow_partial ? 1 : undefined,
+            },
+          },
+        );
+        const all = items ?? [];
+        const warning = incompleteWarning('snapshots', incomplete);
+        const rows = computer_id ? all.filter((s) => s.computer_id === computer_id) : all;
+        return said(`${warning}${rows.length} snapshot(s).`, rows);
       }),
   );
 
