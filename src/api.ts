@@ -124,16 +124,30 @@ export class Api {
     return errorForStatus(resp.status, message, body);
   }
 
-  async json<T = unknown>(method: string, path: string, opts: RequestOptions = {}): Promise<T> {
-    const resp = await this.#fetch(method, path, opts);
-    if (resp.status === 204) return undefined as T;
+  /**
+   * A JSON body, or nothing, or a named failure.
+   *
+   * Shared by `json` and `listing` so the two cannot disagree about what a
+   * non-JSON 200 is. That is not hypothetical tidiness: a captive portal or a
+   * misconfigured proxy answers 200 with an HTML page, and the difference
+   * between `expected JSON from GET /computers, got: <!DOCTYPE html…` and a
+   * bare `SyntaxError: Unexpected token '<'` is whether the reader learns which
+   * request went wrong.
+   */
+  async #decode<T>(resp: Response, method: string, path: string): Promise<T | undefined> {
+    if (resp.status === 204) return undefined;
     const text = await resp.text();
-    if (!text) return undefined as T;
+    if (!text) return undefined;
     try {
       return JSON.parse(text) as T;
     } catch {
       throw new MandalaError(`expected JSON from ${method} ${path}, got: ${text.slice(0, 200)}`);
     }
+  }
+
+  async json<T = unknown>(method: string, path: string, opts: RequestOptions = {}): Promise<T> {
+    const resp = await this.#fetch(method, path, opts);
+    return (await this.#decode<T>(resp, method, path)) as T;
   }
 
   /**
@@ -154,12 +168,14 @@ export class Api {
   async listing<T>(
     path: string,
     opts: RequestOptions = {},
-  ): Promise<{ items: T; incomplete: number | null }> {
+  ): Promise<{ items: T | undefined; incomplete: number | null }> {
     const resp = await this.#fetch('GET', path, opts);
     const short = resp.headers.get('X-GC-Incomplete');
-    const text = await resp.text();
     return {
-      items: (text ? JSON.parse(text) : undefined) as T,
+      // `T | undefined` and not `T`, because an empty body is a real answer
+      // here. Typing it as present would let a caller write `items.length`
+      // against a value the compiler had been told could not be missing.
+      items: await this.#decode<T>(resp, 'GET', path),
       incomplete: short === null ? null : Number(short),
     };
   }

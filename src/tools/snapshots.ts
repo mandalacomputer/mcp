@@ -72,8 +72,28 @@ export const registerSnapshots: Registrar = (server, session, opts) => {
         );
         const all = items ?? [];
         const warning = incompleteWarning('snapshots', incomplete);
-        const rows = computer_id ? all.filter((s) => s.computer_id === computer_id) : all;
-        return said(`${warning}${rows.length} snapshot(s).`, rows);
+        // The filter keeps the unreachable placeholders, and that is not a
+        // nicety. A partial listing does not merely omit rows — the platform
+        // APPENDS one `{id, unreachable: true}` stub per snapshot it could not
+        // reach, and publicSnapshot drops `computer_id` from such a row because
+        // there is no daemon to have said what it belongs to. Filtering on
+        // equality therefore deletes precisely the markers that say something
+        // is missing, and then reports a count: the confident wrong number
+        // about one machine that the comment above says this guards against.
+        //
+        // They cannot be attributed to a computer, so keeping them over-reports
+        // for this one. That is the trade the platform itself makes and writes
+        // down in lib/hostroute: an extra unreachable row is visible and is
+        // corrected by the next complete answer, while a withheld one makes a
+        // row vanish mid-outage, which is the failure worth preventing.
+        const rows = computer_id
+          ? all.filter((s) => s.computer_id === computer_id || s.unreachable)
+          : all;
+        const stubs = rows.filter((s) => s.unreachable).length;
+        const note = stubs
+          ? ` ${stubs} of these could not be read and are listed by id alone; they may or may not belong to this computer.`
+          : '';
+        return said(`${warning}${rows.length} snapshot(s).${note}`, rows);
       }),
   );
 
