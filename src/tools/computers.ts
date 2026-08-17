@@ -72,9 +72,24 @@ export const registerComputers: Registrar = (server, session, opts) => {
         const list = items ?? [];
         const warning = incompleteWarning('computers', incomplete);
         if (!list.length) {
+          // Two different empty answers, and telling them apart is the whole
+          // point of reading the header. A workspace-scoped key gets no
+          // unreachable placeholder rows at all — the platform withholds them
+          // rather than name computers in other workspaces — so header-present
+          // with nothing in the array is the ORDINARY shape of an outage for
+          // such a key, not a rare one.
+          //
+          // Saying "no computers yet, create one" there is the duplicate-create
+          // this warning exists to prevent: the model is told in one sentence
+          // that an unknown number are missing and in the next that the account
+          // is empty, and only one of those suggests an action.
+          if (incomplete !== null) {
+            return said(
+              `${warning}No computers came back from the part of the fleet that answered. This is NOT an empty account — do not create a computer on the strength of it. Retry in a moment.`,
+            );
+          }
           return said(
-            warning +
-              'No computers on this account yet. create_computer makes one; list_templates says what from.',
+            'No computers on this account yet. create_computer makes one; list_templates says what from.',
           );
         }
         const lines = list.map((c) => `- ${describe(c as never)}`).join('\n');
