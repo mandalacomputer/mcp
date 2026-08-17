@@ -80,8 +80,8 @@ entirely.
 **Inside the guest** — `exec`, `exec_poll`, `exec_kill`, `open_url`,
 `list_windows`, `window_action`, `read_file`, `write_file`
 
-**Snapshots** — `list_snapshots`, `create_snapshot`, `restore_snapshot`,
-`clone_snapshot`, `snapshot_schedule`, `delete_snapshot`
+**Snapshots** — `list_snapshots`, `snapshot_holdings`, `create_snapshot`,
+`restore_snapshot`, `clone_snapshot`, `snapshot_schedule`, `delete_snapshot`
 
 **Delegating** — `run_agent`, registered only when `MANDALA_MODEL_KEY` is set.
 
@@ -114,6 +114,15 @@ application that failed to start from one that has not painted yet. Match on
 `exec` and file transfers count as use and resume it automatically;
 **screenshots deliberately do not**, so a loop that only watches can see its own
 machine go down under it.
+
+**Purging snapshots is bound to the set you were shown.** Deleting a computer
+keeps its snapshots by default. To destroy them too, read `snapshot_holdings`
+first — a count, a byte total and a fingerprint — and pass that fingerprint to
+`delete_computer` as `expect`. The purge is then refused if the set has changed
+since you looked, so a capture that finished in between cannot be swept up by a
+decision that was never about it. `delete_computer` will not purge without one,
+and the platform makes `expect` optional only for callers that had no way to
+read the holdings.
 
 **A 409 usually clears; a 400 never does.** A guest still booting or a busy
 guest agent answers 409. The platform's own error messages come through
