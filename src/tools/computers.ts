@@ -1,6 +1,14 @@
 import { z } from 'zod';
 import { isTransient } from '../errors.js';
-import { describe, guarded, json, said, unwrapComputer, withoutCredentials } from '../format.js';
+import {
+  describe,
+  guarded,
+  incompleteWarning,
+  json,
+  said,
+  unwrapComputer,
+  withoutCredentials,
+} from '../format.js';
 import * as P from '../paths.js';
 import type { Registrar } from './types.js';
 
@@ -47,25 +55,31 @@ export const registerComputers: Registrar = (server, session, opts) => {
           .boolean()
           .optional()
           .describe(
-            'Accept a short list when a hypervisor cannot be reached. Off by default: a short list reads exactly like the missing computers were deleted.',
+            'Accept a short list when a hypervisor cannot be reached, instead of the 503 the platform answers by default. The answer then says it is short — a short list reads exactly like the missing computers were deleted.',
           ),
       },
       annotations: { readOnlyHint: true },
     },
     ({ allow_partial }) =>
       guarded(async () => {
-        const list =
-          (await session.api.json<unknown[]>('GET', P.COMPUTERS, {
-            query: { allow_partial: allow_partial ? 1 : undefined },
-          })) ?? [];
+        // listing, not json: with allow_partial the platform will hand over an
+        // inventory it knows is short, and says so in X-GC-Incomplete. Reading
+        // the body and dropping the header turns "here is part of the fleet"
+        // into "here is the fleet".
+        const { items, incomplete } = await session.api.listing<unknown[]>(P.COMPUTERS, {
+          query: { allow_partial: allow_partial ? 1 : undefined },
+        });
+        const list = items ?? [];
+        const warning = incompleteWarning('computers', incomplete);
         if (!list.length) {
           return said(
-            'No computers on this account yet. create_computer makes one; list_templates says what from.',
+            warning +
+              'No computers on this account yet. create_computer makes one; list_templates says what from.',
           );
         }
         const lines = list.map((c) => `- ${describe(c as never)}`).join('\n');
         return said(
-          `${list.length} computer(s):\n${lines}`,
+          `${warning}${list.length} computer(s):\n${lines}`,
           list.map((c) => withoutCredentials(c as never)),
         );
       }),

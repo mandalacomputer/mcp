@@ -136,6 +136,34 @@ export class Api {
     }
   }
 
+  /**
+   * A collection read that the platform may have had to answer short.
+   *
+   * `GET /computers` and `GET /snapshots` are fan-outs across the fleet, so a
+   * hypervisor nobody can reach makes the answer incomplete. /api/v1 fails
+   * closed about that — without `allow_partial` a short listing is a 503, not a
+   * short 200 — but a caller that opts in gets the list plus `X-GC-Incomplete`,
+   * and a header is only a warning if something reads it.
+   *
+   * It is the count of what the placement cache could account for, and it is
+   * legitimately `0`: a computer created during the outage was never cached
+   * against the host now holding it. So presence is the signal and the number is
+   * detail, which is why this returns `null` versus a number rather than a
+   * count that means nothing at zero.
+   */
+  async listing<T>(
+    path: string,
+    opts: RequestOptions = {},
+  ): Promise<{ items: T; incomplete: number | null }> {
+    const resp = await this.#fetch('GET', path, opts);
+    const short = resp.headers.get('X-GC-Incomplete');
+    const text = await resp.text();
+    return {
+      items: (text ? JSON.parse(text) : undefined) as T,
+      incomplete: short === null ? null : Number(short),
+    };
+  }
+
   /** For the two routes whose body is not JSON: the screenshot and the download. */
   async bytes(method: string, path: string, opts: RequestOptions = {}): Promise<Bytes> {
     const resp = await this.#fetch(method, path, opts);
