@@ -124,6 +124,19 @@ decision that was never about it. `delete_computer` will not purge without one,
 and the platform makes `expect` optional only for callers that had no way to
 read the holdings.
 
+**A short list is refused, not silently served.** `list_computers` and
+`list_snapshots` fan out across hypervisors, and if one cannot be reached the
+platform answers 503 rather than a list that is quietly missing things.
+`allow_partial: true` accepts the incomplete answer instead — and when it does,
+the result opens with an `INCOMPLETE:` line saying so, because a short list
+reads exactly like the missing things were deleted.
+
+**Snapshots mid-deletion are billed but hidden.** A deletion that began and did
+not finish still holds objects and still counts against storage, and the default
+listing leaves it out — every ordinary caller is asking "what can I restore".
+`list_snapshots(include_unfinished: true)` is the flag for when the question is
+about storage instead.
+
 **A 409 usually clears; a 400 never does.** A guest still booting or a busy
 guest agent answers 409. The platform's own error messages come through
 unedited, because they are written to be acted on.
