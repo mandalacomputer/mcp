@@ -16,6 +16,7 @@ const r = (method: string, pattern: string): Route => ({ method, pattern });
 
 export const V1_ROUTES: Route[] = [
   r('GET', 'templates'),
+  r('GET', 'sizes'),
 
   r('GET', 'computers'),
   r('POST', 'computers'),

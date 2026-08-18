@@ -14,6 +14,7 @@ import { connect, installFakePlatform, type Recorded } from './harness.js';
  */
 const EXERCISE: Record<string, Record<string, unknown>[]> = {
   list_templates: [{}],
+  list_sizes: [{}],
   list_computers: [{}],
   get_computer: [{}],
   use_computer: [{ computer_id: 'vm-1' }],

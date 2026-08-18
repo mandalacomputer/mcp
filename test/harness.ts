@@ -108,6 +108,19 @@ function respond(method: string, path: string): Response {
     return json({ ok: true, window: { id: '0x2600003', x: 305 } });
   if (path.endsWith('/schedule')) return json({ enabled: true, hour: 4, minute: 0, tz: 'UTC' });
   if (path.endsWith('/templates')) return json([{ name: 'base', os: 'linux', cpu: 2 }]);
+  if (path.endsWith('/sizes'))
+    return json([
+      {
+        id: 'small',
+        label: 'Small',
+        template: 'base',
+        cpu: 2,
+        ram_mb: 2048,
+        disk_gb: 20,
+        allowed: true,
+        cheapest_plan: 'solo',
+      },
+    ]);
   // Three different answers behind one suffix, and they are worth keeping
   // apart. GET /snapshots is the account's list; GET computers/:id/snapshots is
   // that computer's HOLDINGS — a count, a total and a fingerprint, never the
