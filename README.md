@@ -67,7 +67,7 @@ entirely.
 
 ## The tools
 
-**Choosing a machine** — `list_templates`, `list_computers`, `get_computer`,
+**Choosing a machine** — `list_templates`, `list_sizes`, `list_computers`, `get_computer`,
 `use_computer`, `wait_for_computer`, `get_desktop_url`
 
 **Lifecycle** — `create_computer`, `start_computer`, `stop_computer`,
