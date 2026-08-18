@@ -9,6 +9,7 @@
  */
 
 export const TEMPLATES = 'templates';
+export const SIZES = 'sizes';
 export const COMPUTERS = 'computers';
 export const SNAPSHOTS = 'snapshots';
 
@@ -48,6 +49,7 @@ export function omitUndefined(body: Json): Json {
 
 export function createBody(args: {
   name?: string;
+  size?: string;
   template?: string;
   cpu?: number;
   ram_mb?: number;
