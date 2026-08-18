@@ -45,6 +45,18 @@ export const registerComputers: Registrar = (server, session, opts) => {
   );
 
   server.registerTool(
+    'list_sizes',
+    {
+      title: 'List sizes',
+      description:
+        'The named sizes a computer can be launched at — each a template plus a CPU/RAM/disk shape. These are the shapes the platform keeps pre-booted, so create_computer with a `size` is typically answered in about a second where a custom shape boots cold. `allowed` says whether this account’s plan admits a row; when false, `cheapest_plan` names the plan that would.',
+      inputSchema: {},
+      annotations: { readOnlyHint: true },
+    },
+    () => guarded(async () => json(await session.api.json('GET', P.SIZES))),
+  );
+
+  server.registerTool(
     'list_computers',
     {
       title: 'List computers',
@@ -328,6 +340,12 @@ export const registerComputers: Registrar = (server, session, opts) => {
         'Build a new cloud desktop and select it for this session. Creating and running a computer costs money on this account.',
       inputSchema: {
         name: z.string().optional().describe('A label. The platform picks one if you do not.'),
+        size: z
+          .string()
+          .optional()
+          .describe(
+            'A named size from list_sizes, e.g. "large" — the fast path, since these are the shapes the platform keeps pre-booted. It sets template, cpu, ram_mb and disk_gb together, so send it alone or the explicit fields alone, never both.',
+          ),
         template: z
           .string()
           .optional()
