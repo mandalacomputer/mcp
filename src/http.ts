@@ -41,6 +41,16 @@ const DEFAULT_TTL_MS = 30 * 60 * 1000;
 const DEFAULT_MAX_SESSIONS = 256;
 
 /**
+ * The addresses that mean "this machine only".
+ *
+ * `0.0.0.0` and `::` are deliberately absent: they bind every interface, which
+ * is an operator saying they want this reachable from elsewhere. Treating that
+ * as loopback would hand them a Host allowlist naming addresses their callers
+ * never send, and the deployment would answer 403 to everything.
+ */
+const LOOPBACK = new Set(['127.0.0.1', 'localhost', '::1', '[::1]']);
+
+/**
  * The hosted install: one URL, and every caller brings their own key.
  *
  * The important property of this server is what it does NOT hold. There is no
@@ -53,9 +63,28 @@ const DEFAULT_MAX_SESSIONS = 256;
  */
 export async function runHttp(cfg: HttpConfig): Promise<Server> {
   const app = express();
-  app.use(express.json({ limit: '80mb' }));
+
+  // Two parsers, chosen by whether the request carried a bearer at all.
+  //
+  // `express.json` buffers and parses the whole body before any route runs, so
+  // mounted globally at 80mb it spent that on a caller who had sent no key —
+  // free to send, expensive to serve, and nothing about it needed a
+  // credential. The large limit is what `write_file` needs and is kept for the
+  // callers who identified themselves; everyone else gets a small one and a
+  // 413. Which status a bearer-less request ends at is unchanged, because the
+  // body is still parsed: a non-initialize with no session is still a 400, not
+  // a 401 about the key it also did not send.
+  const fullBody = express.json({ limit: '80mb' });
+  const smallBody = express.json({ limit: '256kb' });
+  const parseBody = (req: Request, res: Response, next: express.NextFunction) =>
+    (bearer(req) ? fullBody : smallBody)(req, res, next);
 
   const sessions = new Map<string, Live>();
+  // The port sessions are actually reachable on, which is not cfg.port when the
+  // operator asked for 0. Read when a transport is built rather than captured
+  // at construction, because the default Host allowlist below carries it and a
+  // list naming port 0 would match nothing a client could ever send.
+  let boundPort = cfg.port;
   const ttl = cfg.sessionTtlMs ?? DEFAULT_TTL_MS;
   const maxSessions = cfg.maxSessions ?? DEFAULT_MAX_SESSIONS;
   // Initializes that have passed the cap check but have not yet reached
@@ -118,11 +147,30 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
     });
   };
 
+  /**
+   * The Host headers a legitimate client sends, when nobody configured a list.
+   *
+   * A loopback bind is reached as `127.0.0.1:port`, `localhost:port` or
+   * `[::1]:port` depending on what was typed, and all three are this server; a
+   * name resolved to 127.0.0.1 by a page the user is visiting is not, and is
+   * exactly what the check exists to turn away.
+   *
+   * A non-loopback bind gets no default. The operator deliberately exposed this
+   * server and there is no way to guess the names it is legitimately reached
+   * by — inventing a list would break the deployment rather than protect it —
+   * so protection there stays opt-in, and startup says so.
+   */
+  function allowedHosts(portNow: number): string[] | undefined {
+    if (cfg.allowedHosts?.length) return cfg.allowedHosts;
+    if (!LOOPBACK.has(cfg.host)) return undefined;
+    return ['127.0.0.1', 'localhost', '[::1]'].flatMap((h) => [`${h}:${portNow}`, h]);
+  }
+
   app.get('/healthz', (_req, res) => {
     res.json({ ok: true, name: SERVER_NAME, version: SERVER_VERSION, sessions: sessions.size });
   });
 
-  app.post('/mcp', async (req: Request, res: Response) => {
+  app.post('/mcp', parseBody, async (req: Request, res: Response) => {
     const sessionId = req.header('mcp-session-id');
     const key = bearer(req);
 
@@ -173,24 +221,40 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
     // Everything from here to the map write is inside the reservation,
     // constructors included: they are ordinary code that can throw, and Express
     // turning that into a 500 is precisely the path that used to leak.
+    //
+    // `transport` is declared out here so the catch can reach it: the session
+    // is written to the map from inside handleRequest, so a throw after that
+    // point has something to clean up.
+    let transport: StreamableHTTPServerTransport | undefined;
     try {
-      const transport = new StreamableHTTPServerTransport({
+      const hosts = allowedHosts(boundPort);
+      const t = new StreamableHTTPServerTransport({
         sessionIdGenerator: () => randomUUID(),
-        enableDnsRebindingProtection: Boolean(
-          cfg.allowedHosts?.length || cfg.allowedOrigins?.length,
-        ),
-        allowedHosts: cfg.allowedHosts,
+        // On whenever there is a list to check against, which for a loopback
+        // bind is always — see `allowedHosts`. A browser cannot be stopped from
+        // resolving a name it controls to 127.0.0.1, so the Host header is the
+        // only thing separating the operator's own client from a page the user
+        // happened to open, and the MCP spec asks a locally-bound server to
+        // check it.
+        enableDnsRebindingProtection: Boolean(hosts?.length || cfg.allowedOrigins?.length),
+        allowedHosts: hosts,
         allowedOrigins: cfg.allowedOrigins,
         onsessioninitialized: (id) => {
-          sessions.set(id, { transport, keyDigest: digest(key), lastSeen: Date.now(), active: 0 });
+          sessions.set(id, {
+            transport: t,
+            keyDigest: digest(key),
+            lastSeen: Date.now(),
+            active: 0,
+          });
           release();
         },
         onsessionclosed: (id) => {
           sessions.delete(id);
         },
       });
-      transport.onclose = () => {
-        if (transport.sessionId) sessions.delete(transport.sessionId);
+      transport = t;
+      t.onclose = () => {
+        if (t.sessionId) sessions.delete(t.sessionId);
       };
 
       const server = createServer({
@@ -201,9 +265,24 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
         // otherwise be billed for every stranger's run here. Absent means
         // run_agent is simply not offered to this session.
         modelKey: req.header(MODEL_KEY_HEADER),
+        // Dropped for the same reason, one field further on. MANDALA_COMPUTER_ID
+        // is the operator's own machine, and spreading it into a stranger's
+        // session pre-binds their key to a computer on somebody else's account:
+        // every call until they run use_computer 404s, and the id of a machine
+        // that is not theirs is named back to them by way of explanation.
+        computerId: undefined,
       });
-      await server.connect(transport);
-      return await transport.handleRequest(req, res, req.body);
+      await server.connect(t);
+      return await t.handleRequest(req, res, req.body);
+    } catch (err) {
+      // `onsessioninitialized` fires from inside handleRequest, so by the time
+      // anything past it throws the session is already in the map — holding a
+      // maxSessions slot and a key digest, under an id the client never learned
+      // and so can never DELETE. Left alone it sits there until the TTL sweep
+      // half an hour later, and enough of them ratchet the cap to zero.
+      if (transport?.sessionId) sessions.delete(transport.sessionId);
+      if (transport) void transport.close().catch(() => {});
+      throw err;
     } finally {
       release();
     }
@@ -239,9 +318,20 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
       // they were just told was up.
       const addr = http.address();
       const bound = typeof addr === 'object' && addr ? addr.port : cfg.port;
+      boundPort = bound;
       console.error(
         `mandala-computer-mcp on http://${cfg.host}:${bound}/mcp — callers authenticate with their own Mandala API key`,
       );
+      // Said once, at the only moment anybody is reading. A bind that is not
+      // loopback cannot have its legitimate Host values guessed, so the check
+      // is off and the operator is the only one who can turn it on — and an
+      // exposed server with no Host check is reachable by any page that
+      // resolves its own name to this address.
+      if (!allowedHosts(bound)) {
+        console.error(
+          `  no Host allowlist for ${cfg.host} — set MANDALA_ALLOWED_HOSTS to the name(s) this is served under to enable DNS-rebinding protection`,
+        );
+      }
       resolve(http);
     });
     // Without a listener, an 'error' event is rethrown as an uncaught

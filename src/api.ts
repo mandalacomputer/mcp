@@ -22,6 +22,15 @@ export type Bytes = {
   filename?: string;
 };
 
+/**
+ * How much of an event stream will be held while waiting for a boundary.
+ *
+ * Generous for any real event — a run's steps are small — and finite, which is
+ * the point: without it a stream that never sends a blank line is buffered
+ * until the process runs out of memory.
+ */
+const MAX_SSE_BUFFER = 8 * 1024 * 1024;
+
 /** One server-sent event off the agent route. */
 export type SSEEvent = { event: string; data: unknown };
 
@@ -49,6 +58,18 @@ export class Api {
       throw new MandalaError(
         'No API key. Set MANDALA_API_KEY (create one at Settings → API keys), ' +
           'or send it as a bearer token when running over HTTP.',
+      );
+    }
+    // Validated here rather than at the first request. An unusable base URL is
+    // a configuration mistake, and the place to report one is where it is set —
+    // not in the middle of a tool call, and not, as it was, from a startup log
+    // line that threw after the transport had already come up and the client
+    // was waiting on it.
+    try {
+      new URL(baseUrl);
+    } catch {
+      throw new MandalaError(
+        `not a valid base URL: ${baseUrl}. Set MANDALA_BASE_URL to an absolute http(s) URL, e.g. ${DEFAULT_BASE_URL}`,
       );
     }
     this.baseUrl = baseUrl.replace(/\/+$/, '');
@@ -243,7 +264,7 @@ export class Api {
     const buf = new Uint8Array(await resp.arrayBuffer());
     return {
       bytes: buf,
-      contentType: resp.headers.get('content-type') ?? 'application/octet-stream',
+      contentType: mediaType(resp.headers.get('content-type')),
       filename: filenameFrom(resp.headers.get('content-disposition')),
     };
   }
@@ -275,6 +296,15 @@ export class Api {
         // as the blank line that ends an event — so a frame gets cut in half at
         // a boundary that was never in the stream.
         buffer += decoder.decode(value, { stream: true });
+        // A stream that never sends a boundary is buffered forever otherwise:
+        // the trim below only runs when the separator matches, so a malformed
+        // or hostile event stream is an unbounded allocation held by a tool
+        // call nobody can see. Refused with the size, which says what happened.
+        if (buffer.length > MAX_SSE_BUFFER) {
+          throw new MandalaError(
+            `${method} ${path} sent ${buffer.length} characters with no event boundary; giving up rather than buffering the rest of the stream.`,
+          );
+        }
         // Events are separated by a blank line, in whichever of the three
         // terminators the sender chose: the spec allows CRLF, LF and lone CR,
         // and a proxy that reframes the stream is entitled to any of them.
@@ -300,12 +330,32 @@ export class Api {
   }
 }
 
+/**
+ * The bare media type, without the parameters a Content-Type may carry.
+ *
+ * MCP's image content takes a media type, and `image/png; charset=binary` is a
+ * header — a client matching on the former renders nothing for the latter. The
+ * parameters say nothing this server uses, so they are dropped at the one place
+ * the header is read.
+ */
+function mediaType(header: string | null): string {
+  const bare = (header ?? '').split(';')[0].trim().toLowerCase();
+  return bare || 'application/octet-stream';
+}
+
 function parseEvent(chunk: string): SSEEvent | undefined {
   let event = 'message';
   const data: string[] = [];
   for (const line of chunk.split(/\r\n|\n|\r/)) {
     if (line.startsWith('event:')) event = line.slice(6).trim();
-    else if (line.startsWith('data:')) data.push(line.slice(5).trimStart());
+    else if (line.startsWith('data:')) {
+      // Exactly one space, which is what the spec strips. `trimStart()` took
+      // every leading space and tab, and whitespace inside a data field is
+      // payload — significant the moment an event carries text rather than the
+      // JSON every event happens to carry today.
+      const v = line.slice(5);
+      data.push(v.startsWith(' ') ? v.slice(1) : v);
+    }
   }
   if (!data.length) return undefined;
   const joined = data.join('\n');
@@ -319,15 +369,20 @@ function parseEvent(chunk: string): SSEEvent | undefined {
 /** The filename the platform put on a download, if it put one there. */
 export function filenameFrom(disposition: string | null): string | undefined {
   if (!disposition) return undefined;
-  const star = /filename\*=UTF-8''([^;]+)/i.exec(disposition);
+  // Any charset, not only UTF-8. RFC 5987 puts the charset in the header, and
+  // matching one spelling of it meant a `filename*=ISO-8859-1''…` was read by
+  // neither branch — the plain form below cannot match it either, since there
+  // is no `filename=` in it — so a download the platform had named came back
+  // with no name at all.
+  const star = /filename\*=([^']*)''([^;]+)/i.exec(disposition);
   if (star) {
     // A stray `%` in a guest filename is legal on disk and makes this throw.
     // Letting it out would turn a download whose bytes already arrived intact
     // into a failure, over the label on it.
     try {
-      return decodeURIComponent(star[1]);
+      return decodeURIComponent(star[2]);
     } catch {
-      return star[1];
+      return star[2];
     }
   }
   const plain = /filename="?([^";]+)"?/i.exec(disposition);

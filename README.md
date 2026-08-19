@@ -171,17 +171,23 @@ is not enough to drive somebody else's desktop.
 That is also why anyone can run their own: point the same container at the same
 API and it works, with no secret to provision.
 
+Bound to loopback — the default — it answers only to `127.0.0.1`, `localhost`
+and `[::1]`, so a page the user happens to be visiting cannot reach it by
+resolving its own name there. Served under a name, or bound to `0.0.0.0`, that
+default cannot be guessed and `MANDALA_ALLOWED_HOSTS` is what turns the check
+back on.
+
 ### Configuration
 
 | Variable | Meaning |
 | --- | --- |
 | `MANDALA_API_KEY` | `com_…` from Settings → API keys. Required on stdio; over HTTP each caller sends their own. |
 | `MANDALA_BASE_URL` | Defaults to `https://app.mandala.computer/api/v1`. |
-| `MANDALA_COMPUTER_ID` | Bind a computer at startup, so `use_computer` is not needed. |
+| `MANDALA_COMPUTER_ID` | Bind a computer at startup, so `use_computer` is not needed. **stdio only** — under `--http` it is ignored rather than bound into every caller's session, since it names a machine on the operator's account. |
 | `MANDALA_MODEL_KEY` | An Anthropic key. Enables `run_agent`, which runs the platform's own loop on that key. **stdio only** — under `--http` each caller sends their own as `X-Model-Key`, and this variable is ignored. |
 | `MANDALA_NO_LIFECYCLE` | `1` withholds `create_computer`, `clone_computer`, `delete_computer` and `delete_snapshot`. |
 | `PORT`, `HOST` | For `--http`. Default `3000`, `127.0.0.1`. |
-| `MANDALA_ALLOWED_HOSTS`, `MANDALA_ALLOWED_ORIGINS` | Comma-separated. Setting either enables DNS-rebinding protection. |
+| `MANDALA_ALLOWED_HOSTS`, `MANDALA_ALLOWED_ORIGINS` | Comma-separated. Which `Host` and `Origin` values this server answers to. On a loopback bind the host list defaults to the address it was given, so DNS-rebinding protection is on without configuration; set this when serving under a name. |
 
 `run_agent` deserves a note. It hands a task to the platform's own agent loop,
 which drives the computer inside the platform and answers with a sentence. Worth
