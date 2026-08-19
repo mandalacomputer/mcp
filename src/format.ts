@@ -26,6 +26,20 @@ export const refused = (line: string, v?: unknown): CallToolResult => ({
 });
 
 /**
+ * How many bytes of image this server will put into a model's context.
+ *
+ * Larger than the text cap because base64 of a screenshot is the one big thing
+ * worth carrying, and because a picture is the whole point of this server — but
+ * bounded, because an image cannot be truncated and one past this size is not a
+ * large answer, it is the end of the conversation.
+ *
+ * Here rather than in one tool, because every path that produces image content
+ * has to observe it: `read_file` did and `screenshot` did not, which left the
+ * bound sitting on the smaller of the two.
+ */
+export const MAX_INLINE_IMAGE_BYTES = 8 * 1024 * 1024;
+
+/**
  * A screenshot, as image content.
  *
  * This is the whole reason this server is more than a CLI wrapper: the bytes go

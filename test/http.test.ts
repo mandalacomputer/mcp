@@ -1,4 +1,4 @@
-import type { Server } from 'node:http';
+import { request as httpRequest, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { runHttp } from '../src/http.js';
@@ -215,5 +215,255 @@ describe('a session whose client walked away', () => {
       abort.abort();
       await stream.body?.cancel().catch(() => {});
     }
+  });
+});
+
+// --- round three ----------------------------------------------------------
+
+/**
+ * A POST with a Host header of our choosing.
+ *
+ * `fetch` silently drops an attempt to set Host, so a DNS-rebinding test
+ * written with it proves nothing — it sends the real authority every time and
+ * passes whether or not the check exists. node:http sends what it is given.
+ */
+function rawPost(
+  port: number,
+  host: string,
+  headers: Record<string, string>,
+  body: unknown,
+): Promise<{ status: number; body: string }> {
+  const payload = JSON.stringify(body);
+  return new Promise((resolve, reject) => {
+    const req = httpRequest(
+      {
+        host: '127.0.0.1',
+        port,
+        path: '/mcp',
+        method: 'POST',
+        headers: {
+          Host: host,
+          'Content-Type': 'application/json',
+          Accept: 'application/json, text/event-stream',
+          'Content-Length': Buffer.byteLength(payload),
+          ...headers,
+        },
+      },
+      (res) => {
+        let text = '';
+        res.setEncoding('utf8');
+        res.on('data', (c) => {
+          text += c;
+        });
+        res.on('end', () => resolve({ status: res.statusCode ?? 0, body: text }));
+      },
+    );
+    req.on('error', reject);
+    req.end(payload);
+  });
+}
+
+describe('a page that resolved its own name to this server', () => {
+  let server: Server;
+  let port: number;
+  let platform: ReturnType<typeof installFakePlatform>;
+
+  beforeAll(async () => {
+    platform = installFakePlatform();
+    // No allowedHosts configured — the default install, which is the whole
+    // point: protection used to be off unless an operator turned it on.
+    server = await runHttp({ port: 0, host: '127.0.0.1', baseUrl: BASE });
+    port = (server.address() as AddressInfo).port;
+  });
+  afterAll(async () => {
+    platform.restore();
+    await new Promise<void>((r) => server.close(() => r()));
+  });
+
+  it('is turned away by the Host header it had to send', async () => {
+    // DNS rebinding: the attacker's page resolves evil.example to 127.0.0.1,
+    // so the browser makes it same-origin and CORS offers nothing. The Host
+    // header is the only thing left that says which server was meant, and
+    // nothing was checking it on a default install.
+    const res = await rawPost(port, 'evil.example', { Authorization: 'Bearer com_alice' }, INIT);
+    expect(res.status).toBe(403);
+  });
+
+  it('still answers the addresses it is actually reachable at', async () => {
+    for (const host of [`127.0.0.1:${port}`, `localhost:${port}`]) {
+      const res = await rawPost(port, host, { Authorization: 'Bearer com_alice' }, INIT);
+      expect(res.status, `${host} was refused`).toBe(200);
+    }
+  });
+});
+
+describe('a body from a caller who sent no key', () => {
+  let server: Server;
+  let url: string;
+  let platform: ReturnType<typeof installFakePlatform>;
+
+  beforeAll(async () => {
+    platform = installFakePlatform();
+    server = await runHttp({ port: 0, host: '127.0.0.1', baseUrl: BASE });
+    url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  });
+  afterAll(async () => {
+    platform.restore();
+    await new Promise<void>((r) => server.close(() => r()));
+  });
+
+  const post = (body: string, headers: Record<string, string> = {}) =>
+    fetch(`${url}/mcp`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'application/json, text/event-stream',
+        ...headers,
+      },
+      body,
+    });
+
+  it('is not buffered to the limit an authenticated one gets', async () => {
+    // `express.json` parses before any route runs, so mounted globally at 80mb
+    // it spent that on a request carrying no credential — free to send, and
+    // nothing about it needed a key.
+    const big = JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'x', pad: 'x'.repeat(400_000) });
+    expect((await post(big)).status).toBe(413);
+  });
+
+  it('still reaches the routes that answer without one', async () => {
+    // The statuses a bearer-less caller used to get are unchanged: the body is
+    // still parsed, just not at the large limit.
+    expect(
+      (await post(JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/list' }))).status,
+    ).toBe(400);
+    expect((await post(JSON.stringify(INIT))).status).toBe(401);
+  });
+
+  it('is not let through by a bearer this server never checked', async () => {
+    // The header is not the credential. A `com_…` key cannot be verified
+    // without a round trip to the platform, so `Bearer x` says nothing — and
+    // gating the large buffer on the presence of one would have handed it to
+    // anybody willing to type eight characters.
+    const big = JSON.stringify({ ...INIT, pad: 'x'.repeat(400_000) });
+    expect((await post(big, { Authorization: 'Bearer x' })).status).toBe(413);
+  });
+
+  it('is let through on a session whose key this server has matched', async () => {
+    // Not 413 is the whole claim: the same payload refused unread above is
+    // parsed here, which is what keeps write_file working — it always arrives
+    // on an established session. What it parses to is a 400, because a padded
+    // tools/list is still a tools/list; that it got as far as being judged on
+    // its content is the point.
+    const opened = await post(JSON.stringify(INIT), { Authorization: 'Bearer com_alice' });
+    const sessionId = opened.headers.get('mcp-session-id') as string;
+    await opened.text();
+    expect(sessionId).toBeTruthy();
+
+    const big = JSON.stringify({
+      jsonrpc: '2.0',
+      id: 9,
+      method: 'tools/list',
+      pad: 'x'.repeat(400_000),
+    });
+    const res = await post(big, {
+      Authorization: 'Bearer com_alice',
+      'mcp-session-id': sessionId,
+    });
+    expect(res.status).not.toBe(413);
+
+    // And not to the holder of the id alone, who is refused at the same size
+    // the session's own key is served at.
+    const stolen = await post(big, {
+      Authorization: 'Bearer com_mallory',
+      'mcp-session-id': sessionId,
+    });
+    expect(stolen.status).toBe(413);
+  });
+
+  it('is refused in the shape an MCP client can read', async () => {
+    // Past the limit express.json throws before any route runs, and nothing
+    // was catching it: Express's own handler renders the message and, outside
+    // NODE_ENV=production, the whole stack — absolute paths included — into
+    // the body. An MCP client has no way to report an HTML page to its user,
+    // and this one is reachable by anyone who can open a socket.
+    const res = await post(JSON.stringify({ pad: 'x'.repeat(400_000) }));
+    expect(res.status).toBe(413);
+    expect(res.headers.get('content-type')).toContain('application/json');
+    const body = (await res.json()) as { jsonrpc: string; error: { message: string } };
+    expect(body.jsonrpc).toBe('2.0');
+    expect(body.error.message).toContain('too large');
+    expect(JSON.stringify(body)).not.toContain('node_modules');
+  });
+
+  it('says so in the same shape when the body is not JSON at all', async () => {
+    const res = await post('{ not json');
+    expect(res.status).toBe(400);
+    expect(res.headers.get('content-type')).toContain('application/json');
+    const body = (await res.json()) as { jsonrpc: string; error: unknown };
+    expect(body.jsonrpc).toBe('2.0');
+    expect(body.error).toBeTruthy();
+    expect(JSON.stringify(body)).not.toContain('node_modules');
+  });
+});
+
+describe("the operator's own computer", () => {
+  let server: Server;
+  let url: string;
+  let platform: ReturnType<typeof installFakePlatform>;
+
+  beforeAll(async () => {
+    platform = installFakePlatform();
+    // What MANDALA_COMPUTER_ID does on a hosted install.
+    server = await runHttp({
+      port: 0,
+      host: '127.0.0.1',
+      baseUrl: BASE,
+      computerId: 'vm-operator',
+    });
+    url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  });
+  afterAll(async () => {
+    platform.restore();
+    await new Promise<void>((r) => server.close(() => r()));
+  });
+
+  it("is not bound into a stranger's session", async () => {
+    // `{...cfg}` carried computerId into every caller's Session, so a stranger's
+    // key arrived pre-bound to a machine on somebody else's account: every call
+    // until they ran use_computer 404'd, and the id of a computer that was not
+    // theirs was named back to them by way of explanation. modelKey was
+    // overridden one line above for exactly this reason.
+    const opened = await fetch(`${url}/mcp`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'application/json, text/event-stream',
+        Authorization: 'Bearer com_stranger',
+      },
+      body: JSON.stringify(INIT),
+    });
+    const sessionId = opened.headers.get('mcp-session-id') as string;
+    await opened.text();
+    expect(sessionId).toBeTruthy();
+
+    const called = await fetch(`${url}/mcp`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'application/json, text/event-stream',
+        Authorization: 'Bearer com_stranger',
+        'mcp-session-id': sessionId,
+      },
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        id: 9,
+        method: 'tools/call',
+        params: { name: 'screenshot', arguments: {} },
+      }),
+    });
+    const text = await called.text();
+    expect(text).toMatch(/No computer selected/);
+    expect(text).not.toMatch(/vm-operator/);
   });
 });

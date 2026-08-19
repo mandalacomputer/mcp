@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { guarded, image, json, refused, said } from '../format.js';
+import { guarded, image, json, MAX_INLINE_IMAGE_BYTES, refused, said } from '../format.js';
 import * as P from '../paths.js';
 import type { Registrar } from './types.js';
 
@@ -78,6 +78,15 @@ export const registerInput: Registrar = (server, session) => {
           .bytes('GET', P.computerAction(id, 'screenshot'), {
             query: { w: width, fresh: fresh ? 1 : undefined },
           });
+        // The bound `read_file` observes, observed here too. A 3840x2160 capture
+        // of a dense screen is the case it exists for: refused with its size and
+        // the parameter that fixes it, rather than turned into ~85 MB of base64
+        // in a context that then has room for nothing else.
+        if (shot.bytes.length > MAX_INLINE_IMAGE_BYTES) {
+          return refused(
+            `That screenshot is ${shot.bytes.length} bytes, over the ${MAX_INLINE_IMAGE_BYTES}-byte inline limit. An image cannot be truncated, so nothing was returned. Ask again with a width — e.g. width: 1280 — and click using full-size coordinates.`,
+          );
+        }
         const scaled = width
           ? ` (scaled to ${width}px wide — click using full-size coordinates)`
           : '';

@@ -13,7 +13,28 @@ export const SIZES = 'sizes';
 export const COMPUTERS = 'computers';
 export const SNAPSHOTS = 'snapshots';
 
-export const computer = (id: string) => `computers/${encodeURIComponent(id)}`;
+/**
+ * One path segment, checked before it is encoded.
+ *
+ * `encodeURIComponent` leaves `.` alone — it is unreserved, so an id of `..`
+ * survives it byte for byte — and `new URL` then resolves the dot segment away:
+ * `computers/../exec` becomes `/api/v1/exec`, a different route than the tool
+ * asked for, reached with the caller's key and reported as whatever that route
+ * answers. An id is opaque and never legitimately contains a slash or is a bare
+ * run of dots, so those are refused here rather than encoded into something
+ * that normalises later.
+ */
+function segment(kind: string, value: string): string {
+  const v = value.trim();
+  if (!v) throw new Error(`${kind} must not be empty`);
+  if (/^\.+$/.test(v)) throw new Error(`${kind} must not be '${v}'`);
+  if (v.includes('/') || v.includes('\\')) {
+    throw new Error(`${kind} must not contain a slash: ${v}`);
+  }
+  return encodeURIComponent(v);
+}
+
+export const computer = (id: string) => `computers/${segment('computer_id', id)}`;
 
 /**
  * start | stop | suspend | restart | clone | screenshot | input | exec |
@@ -26,9 +47,9 @@ export const execHandle = (id: string, pid: number) => `${computer(id)}/exec/${p
 
 /** One window on the desktop (OPL-3583). The id is `0x2600003`-shaped. */
 export const window_ = (id: string, windowId: string) =>
-  `${computer(id)}/windows/${encodeURIComponent(windowId)}`;
+  `${computer(id)}/windows/${segment('window_id', windowId)}`;
 
-export const snapshot = (id: string) => `snapshots/${encodeURIComponent(id)}`;
+export const snapshot = (id: string) => `snapshots/${segment('snapshot_id', id)}`;
 
 /** restore | clone */
 export const snapshotAction = (id: string, action: string) => `${snapshot(id)}/${action}`;
