@@ -24,6 +24,21 @@ describe('the SSE reader', () => {
       new Response(body, { headers: { 'Content-Type': 'text/event-stream' } })) as typeof fetch;
   };
 
+  /** A stream delivered in the chunks given, rather than in one piece. */
+  const streamingChunks = (chunks: string[]) => {
+    globalThis.fetch = (async () =>
+      new Response(
+        new ReadableStream({
+          start(controller) {
+            const enc = new TextEncoder();
+            for (const c of chunks) controller.enqueue(enc.encode(c));
+            controller.close();
+          },
+        }),
+        { headers: { 'Content-Type': 'text/event-stream' } },
+      )) as typeof fetch;
+  };
+
   const collect = async () => {
     const api = new Api('com_test', BASE);
     const events = [];
@@ -49,6 +64,26 @@ describe('the SSE reader', () => {
     streaming('event: step\ndata: {"n":1}\n\nevent: done\ndata: {"stop":"end_turn"}\n\n');
     const events = await collect();
     expect(events.map((e) => e.event)).toEqual(['step', 'done']);
+  });
+
+  it('does not invent a boundary out of a CRLF split across two reads', async () => {
+    // Rewriting terminators chunk by chunk turns this CR and this LF into two
+    // separate LFs — a blank line, and so an event boundary that was never in
+    // the stream. The `done` frame is cut in half: the header half has no data
+    // and is dropped, and run_agent reports a successful run as one that ended
+    // without a result.
+    streamingChunks(['event: done\r', '\ndata: {"stop":"end_turn"}\r\n\r\n']);
+    const events = await collect();
+    expect(events).toEqual([{ event: 'done', data: { stop: 'end_turn' } }]);
+  });
+
+  it('frames a lone-CR stream, the third terminator the spec allows', async () => {
+    streaming('event: step\rdata: {"n":1}\r\revent: done\rdata: {"stop":"end_turn"}\r\r');
+    const events = await collect();
+    expect(events).toEqual([
+      { event: 'step', data: { n: 1 } },
+      { event: 'done', data: { stop: 'end_turn' } },
+    ]);
   });
 });
 

@@ -300,15 +300,22 @@ export const registerGuest: Registrar = (server, session) => {
 /**
  * Whether a string is base64 the decoder will not silently repair.
  *
- * Whitespace is tolerated — models wrap long payloads, and a newline every
- * 76 characters is what most encoders emit — but nothing else outside the
- * alphabet is, and the length has to work out to whole bytes.
+ * Drawn to match what Node actually decodes correctly, not to a stricter idea
+ * of the format: padding is optional, and the base64url alphabet decodes to the
+ * same bytes as the standard one, so refusing either would reject content that
+ * used to be written byte-perfectly — with a message claiming it was corrupt.
+ * Whitespace is tolerated too; models wrap long payloads, and a newline every
+ * 76 characters is what most encoders emit.
+ *
+ * What is left is the part that genuinely cannot be decoded: a character
+ * outside both alphabets, or a length of 4n+1, which is not a whole number of
+ * bytes in any padding convention.
  */
 function isBase64(s: string): boolean {
   const compact = s.replace(/\s+/g, '');
   if (!compact) return true;
-  if (!/^[A-Za-z0-9+/]*={0,2}$/.test(compact)) return false;
-  return compact.length % 4 === 0;
+  if (!/^[A-Za-z0-9+/\-_]*={0,2}$/.test(compact)) return false;
+  return compact.replace(/=+$/, '').length % 4 !== 1;
 }
 
 /** UTF-8 if it is UTF-8, and undefined if it plainly is not. */

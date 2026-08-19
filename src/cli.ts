@@ -13,7 +13,9 @@ Environment
                        HTTP each caller sends their own as a bearer token.
   MANDALA_BASE_URL     default ${DEFAULT_BASE_URL}
   MANDALA_COMPUTER_ID  bind a computer at startup, so use_computer is not needed
-  MANDALA_MODEL_KEY    an Anthropic key; enables the run_agent tool
+  MANDALA_MODEL_KEY    an Anthropic key; enables the run_agent tool. stdio only
+                       — over HTTP each caller sends their own X-Model-Key, and
+                       this is ignored rather than spent on their runs
   MANDALA_NO_LIFECYCLE set to 1 to withhold create_computer, clone_computer,
                        delete_computer and delete_snapshot
   PORT, HOST           for --http (default 3000, 127.0.0.1)
