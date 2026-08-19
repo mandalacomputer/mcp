@@ -39,9 +39,12 @@ export type SSEEvent = { event: string; data: unknown };
  */
 export class Api {
   readonly baseUrl: string;
+  readonly #apiKey: string;
   readonly #headers: Record<string, string>;
+  /** Applied to every request that does not carry one of its own. See `with`. */
+  readonly #signal?: AbortSignal;
 
-  constructor(apiKey: string, baseUrl: string = DEFAULT_BASE_URL) {
+  constructor(apiKey: string, baseUrl: string = DEFAULT_BASE_URL, signal?: AbortSignal) {
     if (!apiKey) {
       throw new MandalaError(
         'No API key. Set MANDALA_API_KEY (create one at Settings → API keys), ' +
@@ -49,10 +52,29 @@ export class Api {
       );
     }
     this.baseUrl = baseUrl.replace(/\/+$/, '');
+    this.#apiKey = apiKey;
+    this.#signal = signal;
     this.#headers = {
       Authorization: `Bearer ${apiKey}`,
       Accept: 'application/json',
     };
+  }
+
+  /**
+   * This same client, with every request bound to one tool call's cancellation.
+   *
+   * MCP hands a tool handler an `AbortSignal` that fires when the client gives
+   * up on the call, and a request nobody is waiting for is one this server
+   * should stop making — most of all in the tools that poll. A cancelled
+   * `wait_for_computer` would otherwise go on asking the platform about a
+   * computer for the rest of its `timeout_s`, which reaches fifteen minutes.
+   *
+   * Bound per call rather than per session, because a session serves many calls
+   * at once and one of them being abandoned says nothing about the others.
+   */
+  with(signal: AbortSignal | undefined): Api {
+    if (!signal || signal === this.#signal) return this;
+    return new Api(this.#apiKey, this.baseUrl, signal);
   }
 
   #url(path: string, query?: RequestOptions['query']): string {
@@ -86,7 +108,7 @@ export class Api {
         method,
         headers,
         body,
-        signal: opts.signal,
+        signal: opts.signal ?? this.#signal,
       });
     } catch (cause) {
       // Rewritten, because the raw one names the host and the failure a model
@@ -145,9 +167,44 @@ export class Api {
     }
   }
 
+  /**
+   * A JSON body, from a route that is supposed to have one.
+   *
+   * An empty answer here is a failure, not a value, and it has to be said so
+   * rather than cast away. `as T` was a lie the compiler could not catch: a 204
+   * on a route that should have answered handed every caller `undefined` typed
+   * as present, and what a caller does with that is either `text: undefined` —
+   * which is not a valid tool result, so the client rejects the whole call with
+   * a schema error naming nothing useful — or a TypeError reading a field off
+   * it. Both report the platform's silence as this server's own bug.
+   *
+   * Routes where an empty body IS the answer use `send`.
+   */
   async json<T = unknown>(method: string, path: string, opts: RequestOptions = {}): Promise<T> {
     const resp = await this.#fetch(method, path, opts);
-    return (await this.#decode<T>(resp, method, path)) as T;
+    const body = await this.#decode<T>(resp, method, path);
+    if (body === undefined) {
+      throw new MandalaError(
+        `${method} ${path} answered ${resp.status} with an empty body, where a JSON body was expected`,
+      );
+    }
+    return body;
+  }
+
+  /**
+   * A request whose answer may legitimately be nothing.
+   *
+   * The DELETEs and the acknowledgements: /api/v1 answers some of them with a
+   * body worth repeating and some with a 204, and both are correct. Typed as
+   * possibly-absent so a caller has to decide what to say when it is.
+   */
+  async send<T = unknown>(
+    method: string,
+    path: string,
+    opts: RequestOptions = {},
+  ): Promise<T | undefined> {
+    const resp = await this.#fetch(method, path, opts);
+    return this.#decode<T>(resp, method, path);
   }
 
   /**
