@@ -21,7 +21,33 @@ const idArg = {
     .describe('Which computer. Defaults to the one selected with use_computer.'),
 };
 
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+/**
+ * A pause that ends early when the caller gives up.
+ *
+ * The wait loops check the signal at the top of each turn, so a sleep that
+ * ignored it would still hold a cancelled call for its remaining seconds.
+ */
+const sleep = (ms: number, signal?: AbortSignal) =>
+  new Promise<void>((resolve) => {
+    if (signal?.aborted) return resolve();
+    const t = setTimeout(done, ms);
+    function done() {
+      clearTimeout(t);
+      signal?.removeEventListener('abort', done);
+      resolve();
+    }
+    signal?.addEventListener('abort', done, { once: true });
+  });
+
+/**
+ * The answer to a wait the caller ended.
+ *
+ * `refused`, not `said`: the wait never reached what it was told to wait for,
+ * and a caller reading `isError` to decide whether the step worked would
+ * otherwise be unable to tell a cancellation from a computer that came up.
+ */
+const cancelled = (id: string, last: string) =>
+  refused(`Cancelled after waiting for ${id}; it was last seen ${last}. Nothing was changed.`);
 
 const POWER_DESCRIPTIONS: Record<string, string> = {
   start:
@@ -267,11 +293,7 @@ export const registerComputers: Registrar = (server, session, opts) => {
           // iteration from starting one — so a cancelled call would go on
           // polling the platform for the rest of its timeout_s, up to fifteen
           // minutes of traffic on behalf of nobody.
-          if (extra.signal?.aborted) {
-            return said(
-              `Cancelled after waiting for ${id}; it was last seen ${last}. Nothing was changed.`,
-            );
-          }
+          if (extra.signal?.aborted) return cancelled(id, last);
           // The status read is exactly as transient-prone as the guest probe
           // below it — a hypervisor that cannot be reached answers 503, which
           // is the ordinary weather of a machine still coming up. Letting that
@@ -280,9 +302,16 @@ export const registerComputers: Registrar = (server, session, opts) => {
           try {
             c = unwrapComputer(await session.api.with(extra.signal).json('GET', P.computer(id)));
           } catch (err) {
+            // The signal is checked before the error is judged, because an
+            // aborted fetch surfaces from the client as `could not reach
+            // <host>` — not transient, so it would leave the loop reporting a
+            // platform outage for what was the caller hanging up. The MCP
+            // client's own 60s request timeout makes that the common case, not
+            // the rare one, for any wait longer than a minute.
+            if (extra.signal?.aborted) return cancelled(id, last);
             if (!isTransient(err)) throw err;
             blocked = err instanceof Error ? err.message : String(err);
-            await sleep(2000);
+            await sleep(2000, extra.signal);
             continue;
           }
           blocked = undefined;
@@ -319,7 +348,7 @@ export const registerComputers: Registrar = (server, session, opts) => {
               if (!isTransient(err)) throw err;
             }
           }
-          await sleep(2000);
+          await sleep(2000, extra.signal);
         }
         return said(
           blocked

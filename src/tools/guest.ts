@@ -118,9 +118,13 @@ export const registerGuest: Registrar = (server, session) => {
     ({ computer_id, pid }, extra) =>
       guarded(async () => {
         const id = session.resolve(computer_id);
+        // `send`, because a DELETE answering 204 is the ordinary REST shape and
+        // `json` now raises on an empty body. Reported as an error, the kill
+        // that in fact succeeded would send the model back at a pid that no
+        // longer exists.
         const res = await session.api
           .with(extra.signal)
-          .json<Record<string, unknown>>('DELETE', P.execHandle(id, pid));
+          .send<Record<string, unknown>>('DELETE', P.execHandle(id, pid));
         return said(`Killed pid ${pid}.`, res);
       }),
   );

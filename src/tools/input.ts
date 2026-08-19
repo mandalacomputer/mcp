@@ -268,7 +268,21 @@ export const registerInput: Registrar = (server, session) => {
       annotations: { readOnlyHint: true },
     },
     ({ computer_id }, extra) =>
-      guarded(async () => json(await post(computer_id, P.cursorBody(), extra.signal))),
+      guarded(async () =>
+        // `json`, not the shared `post`: every other action here throws away
+        // the answer, but this one IS the answer. `send` may legitimately
+        // resolve to undefined, and `JSON.stringify(undefined)` is undefined
+        // rather than a string — which is `{ type: 'text', text: undefined }`,
+        // an invalid result the client rejects for the whole call while naming
+        // nothing. A route that must answer says so by using `json`.
+        json(
+          await session.api
+            .with(extra.signal)
+            .json('POST', P.computerAction(session.resolve(computer_id), 'input'), {
+              body: P.cursorBody(),
+            }),
+        ),
+      ),
   );
 
   server.registerTool(
