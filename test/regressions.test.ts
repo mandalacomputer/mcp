@@ -1,6 +1,10 @@
+import { mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { Api } from '../src/api.js';
-import { parse } from '../src/cli.js';
+import { isEntrypoint, parse } from '../src/cli.js';
 import { unwrapComputer } from '../src/format.js';
 import { windowBody } from '../src/paths.js';
 import { BASE, connect, installFakePlatform } from './harness.js';
@@ -143,6 +147,78 @@ describe('refusals this server decides on its own', () => {
     const { call, close } = await connect();
     await call('snapshot_schedule', { set: { enabled: true, hour: 3 }, clear: true });
     expect(platform.calls.filter((c) => c.method === 'DELETE')).toHaveLength(0);
+    await close();
+  });
+});
+
+describe('the guard that decides this file is the program', () => {
+  let dir: string;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'mcp-entry-'));
+  });
+  afterEach(() => rmSync(dir, { recursive: true, force: true }));
+
+  it('recognises the module when argv[1] is a symlink to it', () => {
+    // How the published binary is always started: npm writes
+    // node_modules/.bin/mandala-computer-mcp as a symlink to dist/cli.js, Node
+    // resolves the ESM entry through it and leaves argv[1] as the link. The
+    // raw URL comparison never matched, so the installed command exited 0
+    // having started no server and said nothing.
+    const real = join(dir, 'cli.js');
+    const link = join(dir, 'mandala-computer-mcp');
+    writeFileSync(real, '');
+    symlinkSync(real, link);
+
+    // What Node puts in import.meta.url: the module path with every symlink
+    // resolved, which on macOS includes /var itself.
+    const moduleUrl = pathToFileURL(realpathSync(real)).href;
+    expect(isEntrypoint(moduleUrl, link)).toBe(true);
+    expect(isEntrypoint(moduleUrl, real)).toBe(true);
+  });
+
+  it('still says no to an import, and to an argv[1] that is not there', () => {
+    const real = join(dir, 'cli.js');
+    writeFileSync(real, '');
+    const moduleUrl = pathToFileURL(realpathSync(real)).href;
+    expect(isEntrypoint(pathToFileURL(join(realpathSync(dir), 'other.js')).href, real)).toBe(false);
+    expect(isEntrypoint(moduleUrl, undefined)).toBe(false);
+    expect(isEntrypoint(moduleUrl, join(dir, 'gone.js'))).toBe(false);
+  });
+});
+
+describe('a 204 from a route a tool calls', () => {
+  let real: typeof globalThis.fetch;
+  beforeEach(() => {
+    real = globalThis.fetch;
+    globalThis.fetch = (async () => new Response(null, { status: 204 })) as typeof fetch;
+  });
+  afterEach(() => {
+    globalThis.fetch = real;
+  });
+
+  it('never leaves cursor_position emitting text: undefined', async () => {
+    // The shared input `post` was moved to `send`, which may resolve to
+    // undefined — and `JSON.stringify(undefined)` is undefined, not a string,
+    // which is the invalid content the json/send split existed to abolish. A
+    // route that must answer says so, and its silence is reported as a failure
+    // that names the route.
+    const { call, close } = await connect();
+    const res = await call('cursor_position');
+    for (const c of res.content) if (c.type === 'text') expect(typeof c.text).toBe('string');
+    expect(res.isError).toBe(true);
+    expect(res.content.map((c) => ('text' in c ? c.text : '')).join('\n')).toMatch(/empty body/);
+    await close();
+  });
+
+  it('is how a DELETE ordinarily answers, so exec_kill reports the kill', async () => {
+    // `json` on the DELETE turned a kill that had in fact worked into an
+    // error, sending the model back at a pid that no longer existed.
+    const { call, close } = await connect();
+    const res = await call('exec_kill', { pid: 4242 });
+    expect(res.isError).toBeFalsy();
+    expect(res.content.map((c) => ('text' in c ? c.text : '')).join('\n')).toContain(
+      'Killed pid 4242',
+    );
     await close();
   });
 });

@@ -68,6 +68,11 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
   // Abandoned sessions are closed rather than left holding a transport. A
   // client that goes away without a DELETE is the ordinary case, not the odd
   // one — laptops sleep and tabs close.
+  //
+  // Inspected once a minute, or as often as the TTL if that is shorter — a
+  // sessionTtlMs of ten seconds that was only looked at every sixty is not the
+  // TTL the operator asked for.
+  const sweepMs = Math.min(60_000, Math.max(1_000, ttl));
   const sweeper = setInterval(() => {
     const cutoff = Date.now() - ttl;
     for (const [id, live] of sessions) {
@@ -82,15 +87,33 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
         void live.transport.close().catch(() => {});
       }
     }
-  }, 60_000);
+  }, sweepMs);
   sweeper.unref();
 
-  /** Hold a session open for as long as one request is being served on it. */
+  /**
+   * Hold a session open for as long as one request is being served on it.
+   *
+   * Only for request/response traffic. The standing server-to-client stream is
+   * deliberately not counted: a conforming client opens `GET /mcp` once and
+   * holds it for the whole session, so counting it would make `active` never
+   * reach zero and no session would ever be swept — and the case the sweeper
+   * exists for, a laptop that slept and left the socket half-open, is exactly
+   * the one where `close` never fires to undo the count. The transport and its
+   * fully-registered server would sit on a `maxSessions` slot forever.
+   */
   const serving = (live: Live, res: Response) => {
     live.active++;
     live.lastSeen = Date.now();
     res.on('close', () => {
       live.active--;
+      live.lastSeen = Date.now();
+    });
+  };
+
+  /** Stamp a session as heard from, without claiming anything is in flight. */
+  const touch = (live: Live, res: Response) => {
+    live.lastSeen = Date.now();
+    res.on('close', () => {
       live.lastSeen = Date.now();
     });
   };
@@ -136,7 +159,9 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
     pending++;
     // Released exactly once, whether the initialize lands in the map or throws
     // on the way there. A reservation that leaked on the failure path would
-    // ratchet the cap down until the process restarted.
+    // ratchet the cap down until the process restarted — every later initialize
+    // refused with 503 for the life of the process, which is the denial of
+    // service the counter was added to prevent, self-inflicted.
     let reserved = true;
     const release = () => {
       if (reserved) {
@@ -145,33 +170,38 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
       }
     };
 
-    const transport = new StreamableHTTPServerTransport({
-      sessionIdGenerator: () => randomUUID(),
-      enableDnsRebindingProtection: Boolean(cfg.allowedHosts?.length || cfg.allowedOrigins?.length),
-      allowedHosts: cfg.allowedHosts,
-      allowedOrigins: cfg.allowedOrigins,
-      onsessioninitialized: (id) => {
-        sessions.set(id, { transport, keyDigest: digest(key), lastSeen: Date.now(), active: 0 });
-        release();
-      },
-      onsessionclosed: (id) => {
-        sessions.delete(id);
-      },
-    });
-    transport.onclose = () => {
-      if (transport.sessionId) sessions.delete(transport.sessionId);
-    };
-
-    const server = createServer({
-      ...cfg,
-      apiKey: key,
-      // Per-caller, and deliberately with no fallback to cfg.modelKey: an
-      // operator who set MANDALA_MODEL_KEY for their own stdio use would
-      // otherwise be billed for every stranger's run here. Absent means
-      // run_agent is simply not offered to this session.
-      modelKey: req.header(MODEL_KEY_HEADER),
-    });
+    // Everything from here to the map write is inside the reservation,
+    // constructors included: they are ordinary code that can throw, and Express
+    // turning that into a 500 is precisely the path that used to leak.
     try {
+      const transport = new StreamableHTTPServerTransport({
+        sessionIdGenerator: () => randomUUID(),
+        enableDnsRebindingProtection: Boolean(
+          cfg.allowedHosts?.length || cfg.allowedOrigins?.length,
+        ),
+        allowedHosts: cfg.allowedHosts,
+        allowedOrigins: cfg.allowedOrigins,
+        onsessioninitialized: (id) => {
+          sessions.set(id, { transport, keyDigest: digest(key), lastSeen: Date.now(), active: 0 });
+          release();
+        },
+        onsessionclosed: (id) => {
+          sessions.delete(id);
+        },
+      });
+      transport.onclose = () => {
+        if (transport.sessionId) sessions.delete(transport.sessionId);
+      };
+
+      const server = createServer({
+        ...cfg,
+        apiKey: key,
+        // Per-caller, and deliberately with no fallback to cfg.modelKey: an
+        // operator who set MANDALA_MODEL_KEY for their own stdio use would
+        // otherwise be billed for every stranger's run here. Absent means
+        // run_agent is simply not offered to this session.
+        modelKey: req.header(MODEL_KEY_HEADER),
+      });
       await server.connect(transport);
       return await transport.handleRequest(req, res, req.body);
     } finally {
@@ -190,7 +220,10 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
     if (!key || !sameKey(live.keyDigest, key)) {
       return unauthorized(res, 'This session belongs to a different API key.');
     }
-    serving(live, res);
+    // The DELETE is a request and is held for; the GET is the notification
+    // stream and is only noted. See `serving`.
+    if (req.method === 'GET') touch(live, res);
+    else serving(live, res);
     return live.transport.handleRequest(req, res);
   };
   app.get('/mcp', bySession);
