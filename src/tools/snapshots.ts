@@ -70,7 +70,20 @@ export const registerSnapshots: Registrar = (server, session, opts) => {
               allow_partial: allow_partial ? 1 : undefined,
             },
           });
-        const all = items ?? [];
+        // The same check list_computers makes, for the same reason and one
+        // consequence milder: an object body sends `.filter` below into a
+        // TypeError, and an absent one — a 204, or a gateway answering 200 with
+        // nothing — becomes a confident "0 snapshot(s)" about a machine whose
+        // inventory never arrived.
+        if (!Array.isArray(items)) {
+          const got =
+            items === undefined ? 'no body at all' : items === null ? 'null' : typeof items;
+          return refused(
+            `GET /snapshots answered with ${got}, not a list of snapshots. This is not an empty list — do not conclude anything about what exists from it.`,
+            items,
+          );
+        }
+        const all = items;
         const warning = incompleteWarning('snapshots', incomplete);
         // The filter keeps the unreachable placeholders, and that is not a
         // nicety. A partial listing does not merely omit rows — the platform
