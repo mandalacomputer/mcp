@@ -167,9 +167,11 @@ export const registerSnapshots: Registrar = (server, session, opts) => {
     },
     ({ snapshot_id }, extra) =>
       guarded(async () => {
+        // An acknowledgement, which /api/v1 is free to send as a 204 — and
+        // `said` already omits the body when there is none to repeat.
         const res = await session.api
           .with(extra.signal)
-          .json('POST', P.snapshotAction(snapshot_id, 'restore'));
+          .send('POST', P.snapshotAction(snapshot_id, 'restore'));
         return said(`Restored ${snapshot_id}.`, res);
       }),
   );
@@ -248,7 +250,7 @@ export const registerSnapshots: Registrar = (server, session, opts) => {
         if (set) {
           return said(
             `Snapshot scheduled for ${String(set.hour).padStart(2, '0')}:${String(set.minute).padStart(2, '0')} ${set.tz}.`,
-            await session.api.with(extra.signal).json('PUT', path, { body: P.scheduleBody(set) }),
+            await session.api.with(extra.signal).send('PUT', path, { body: P.scheduleBody(set) }),
           );
         }
         return json(await session.api.with(extra.signal).json('GET', path));
