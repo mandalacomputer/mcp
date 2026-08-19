@@ -340,14 +340,70 @@ describe('a body from a caller who sent no key', () => {
     expect((await post(JSON.stringify(INIT))).status).toBe(401);
   });
 
-  it('lets a caller who sent one through with a body that size', async () => {
-    // Not 413 is the whole claim: the same payload that is refused unread
-    // above is parsed here, which is what keeps write_file working. What it
-    // parses to is a 400, because padding an initialize stops it being one —
-    // and that it got as far as being judged on its content is the point.
+  it('is not let through by a bearer this server never checked', async () => {
+    // The header is not the credential. A `com_…` key cannot be verified
+    // without a round trip to the platform, so `Bearer x` says nothing — and
+    // gating the large buffer on the presence of one would have handed it to
+    // anybody willing to type eight characters.
     const big = JSON.stringify({ ...INIT, pad: 'x'.repeat(400_000) });
-    const res = await post(big, { Authorization: 'Bearer com_alice' });
+    expect((await post(big, { Authorization: 'Bearer x' })).status).toBe(413);
+  });
+
+  it('is let through on a session whose key this server has matched', async () => {
+    // Not 413 is the whole claim: the same payload refused unread above is
+    // parsed here, which is what keeps write_file working — it always arrives
+    // on an established session. What it parses to is a 400, because a padded
+    // tools/list is still a tools/list; that it got as far as being judged on
+    // its content is the point.
+    const opened = await post(JSON.stringify(INIT), { Authorization: 'Bearer com_alice' });
+    const sessionId = opened.headers.get('mcp-session-id') as string;
+    await opened.text();
+    expect(sessionId).toBeTruthy();
+
+    const big = JSON.stringify({
+      jsonrpc: '2.0',
+      id: 9,
+      method: 'tools/list',
+      pad: 'x'.repeat(400_000),
+    });
+    const res = await post(big, {
+      Authorization: 'Bearer com_alice',
+      'mcp-session-id': sessionId,
+    });
     expect(res.status).not.toBe(413);
+
+    // And not to the holder of the id alone, who is refused at the same size
+    // the session's own key is served at.
+    const stolen = await post(big, {
+      Authorization: 'Bearer com_mallory',
+      'mcp-session-id': sessionId,
+    });
+    expect(stolen.status).toBe(413);
+  });
+
+  it('is refused in the shape an MCP client can read', async () => {
+    // Past the limit express.json throws before any route runs, and nothing
+    // was catching it: Express's own handler renders the message and, outside
+    // NODE_ENV=production, the whole stack — absolute paths included — into
+    // the body. An MCP client has no way to report an HTML page to its user,
+    // and this one is reachable by anyone who can open a socket.
+    const res = await post(JSON.stringify({ pad: 'x'.repeat(400_000) }));
+    expect(res.status).toBe(413);
+    expect(res.headers.get('content-type')).toContain('application/json');
+    const body = (await res.json()) as { jsonrpc: string; error: { message: string } };
+    expect(body.jsonrpc).toBe('2.0');
+    expect(body.error.message).toContain('too large');
+    expect(JSON.stringify(body)).not.toContain('node_modules');
+  });
+
+  it('says so in the same shape when the body is not JSON at all', async () => {
+    const res = await post('{ not json');
+    expect(res.status).toBe(400);
+    expect(res.headers.get('content-type')).toContain('application/json');
+    const body = (await res.json()) as { jsonrpc: string; error: unknown };
+    expect(body.jsonrpc).toBe('2.0');
+    expect(body.error).toBeTruthy();
+    expect(JSON.stringify(body)).not.toContain('node_modules');
   });
 });
 
