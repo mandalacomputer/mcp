@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { guarded, image, json, said } from '../format.js';
+import { guarded, image, json, refused, said } from '../format.js';
 import * as P from '../paths.js';
 import type { Registrar } from './types.js';
 
@@ -35,8 +35,14 @@ const point = {
 };
 
 export const registerInput: Registrar = (server, session) => {
-  const post = (computerId: string | undefined, body: Record<string, unknown>) =>
-    session.api.json('POST', P.computerAction(session.resolve(computerId), 'input'), { body });
+  const post = (
+    computerId: string | undefined,
+    body: Record<string, unknown>,
+    signal: AbortSignal | undefined,
+  ) =>
+    session.api
+      .with(signal)
+      .send('POST', P.computerAction(session.resolve(computerId), 'input'), { body });
 
   server.registerTool(
     'screenshot',
@@ -64,12 +70,14 @@ export const registerInput: Registrar = (server, session) => {
       },
       annotations: { readOnlyHint: true },
     },
-    ({ computer_id, width, fresh }) =>
+    ({ computer_id, width, fresh }, extra) =>
       guarded(async () => {
         const id = session.resolve(computer_id);
-        const shot = await session.api.bytes('GET', P.computerAction(id, 'screenshot'), {
-          query: { w: width, fresh: fresh ? 1 : undefined },
-        });
+        const shot = await session.api
+          .with(extra.signal)
+          .bytes('GET', P.computerAction(id, 'screenshot'), {
+            query: { w: width, fresh: fresh ? 1 : undefined },
+          });
         const scaled = width
           ? ` (scaled to ${width}px wide — click using full-size coordinates)`
           : '';
@@ -104,15 +112,15 @@ export const registerInput: Registrar = (server, session) => {
         modifiers,
       },
     },
-    ({ computer_id, x, y, button, count, modifiers: mods }) =>
+    ({ computer_id, x, y, button, count, modifiers: mods }, extra) =>
       guarded(async () => {
         const action = clickAction(button, count);
         if (!action) {
-          return said(
+          return refused(
             `A ${count}-times ${button} click is not a thing the desktop can be asked for; only the left button doubles and triples.`,
           );
         }
-        await post(computer_id, P.clickBody(action, x, y, mods ?? []));
+        await post(computer_id, P.clickBody(action, x, y, mods ?? []), extra.signal);
         const where = x === undefined ? 'where the pointer was' : `at ${x},${y}`;
         return said(`${action} ${where}. Screenshot to see the result.`);
       }),
@@ -126,9 +134,9 @@ export const registerInput: Registrar = (server, session) => {
         'Type a string into whatever has keyboard focus. This is literal text — for Enter, Tab, or a shortcut, use press_key.',
       inputSchema: { ...idArg, text: z.string().describe('The characters to type.') },
     },
-    ({ computer_id, text }) =>
+    ({ computer_id, text }, extra) =>
       guarded(async () => {
-        await post(computer_id, P.typeBody(text));
+        await post(computer_id, P.typeBody(text), extra.signal);
         return said(`Typed ${text.length} character(s).`);
       }),
   );
@@ -153,9 +161,9 @@ export const registerInput: Registrar = (server, session) => {
           .describe('Hold the keys down this long instead of tapping them. Capped at 30s.'),
       },
     },
-    ({ computer_id, keys, hold_seconds }) =>
+    ({ computer_id, keys, hold_seconds }, extra) =>
       guarded(async () => {
-        await post(computer_id, P.keyBody(keys, hold_seconds));
+        await post(computer_id, P.keyBody(keys, hold_seconds), extra.signal);
         return said(
           hold_seconds
             ? `Held ${keys.join('+')} for ${hold_seconds}s.`
@@ -178,9 +186,13 @@ export const registerInput: Registrar = (server, session) => {
         modifiers,
       },
     },
-    ({ computer_id, direction, amount, x, y, modifiers: mods }) =>
+    ({ computer_id, direction, amount, x, y, modifiers: mods }, extra) =>
       guarded(async () => {
-        await post(computer_id, P.scrollBody({ direction, amount, x, y, modifiers: mods }));
+        await post(
+          computer_id,
+          P.scrollBody({ direction, amount, x, y, modifiers: mods }),
+          extra.signal,
+        );
         return said(`Scrolled ${direction} by ${amount}.`);
       }),
   );
@@ -205,9 +217,9 @@ export const registerInput: Registrar = (server, session) => {
         from_y: z.number().int().optional(),
       },
     },
-    ({ computer_id, to_x, to_y, from_x, from_y }) =>
+    ({ computer_id, to_x, to_y, from_x, from_y }, extra) =>
       guarded(async () => {
-        await post(computer_id, P.dragBody(to_x, to_y, from_x, from_y));
+        await post(computer_id, P.dragBody(to_x, to_y, from_x, from_y), extra.signal);
         const from = from_x === undefined ? 'the pointer' : `${from_x},${from_y}`;
         return said(`Dragged from ${from} to ${to_x},${to_y}.`);
       }),
@@ -220,9 +232,9 @@ export const registerInput: Registrar = (server, session) => {
       description: 'Move the pointer without clicking — for hovering over a menu or a tooltip.',
       inputSchema: { ...idArg, x: z.number().int(), y: z.number().int() },
     },
-    ({ computer_id, x, y }) =>
+    ({ computer_id, x, y }, extra) =>
       guarded(async () => {
-        await post(computer_id, P.pointerBody('mouse_move', x, y));
+        await post(computer_id, P.pointerBody('mouse_move', x, y), extra.signal);
         return said(`Pointer at ${x},${y}.`);
       }),
   );
@@ -239,9 +251,9 @@ export const registerInput: Registrar = (server, session) => {
         ...point,
       },
     },
-    ({ computer_id, state, x, y }) =>
+    ({ computer_id, state, x, y }, extra) =>
       guarded(async () => {
-        await post(computer_id, P.buttonBody(`left_mouse_${state}`, x, y));
+        await post(computer_id, P.buttonBody(`left_mouse_${state}`, x, y), extra.signal);
         return said(`Left button ${state}${x === undefined ? '' : ` at ${x},${y}`}.`);
       }),
   );
@@ -255,7 +267,22 @@ export const registerInput: Registrar = (server, session) => {
       inputSchema: { ...idArg },
       annotations: { readOnlyHint: true },
     },
-    ({ computer_id }) => guarded(async () => json(await post(computer_id, P.cursorBody()))),
+    ({ computer_id }, extra) =>
+      guarded(async () =>
+        // `json`, not the shared `post`: every other action here throws away
+        // the answer, but this one IS the answer. `send` may legitimately
+        // resolve to undefined, and `JSON.stringify(undefined)` is undefined
+        // rather than a string — which is `{ type: 'text', text: undefined }`,
+        // an invalid result the client rejects for the whole call while naming
+        // nothing. A route that must answer says so by using `json`.
+        json(
+          await session.api
+            .with(extra.signal)
+            .json('POST', P.computerAction(session.resolve(computer_id), 'input'), {
+              body: P.cursorBody(),
+            }),
+        ),
+      ),
   );
 
   server.registerTool(
@@ -269,9 +296,9 @@ export const registerInput: Registrar = (server, session) => {
         seconds: z.number().positive().max(30).default(2),
       },
     },
-    ({ computer_id, seconds }) =>
+    ({ computer_id, seconds }, extra) =>
       guarded(async () => {
-        await post(computer_id, P.waitBody(seconds));
+        await post(computer_id, P.waitBody(seconds), extra.signal);
         return said(`Waited ${seconds}s.`);
       }),
   );
