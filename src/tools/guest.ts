@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { guarded, image, json, said, text } from '../format.js';
+import { guarded, image, json, refused, said, text } from '../format.js';
 import * as P from '../paths.js';
 import type { Registrar } from './types.js';
 
@@ -63,14 +63,14 @@ export const registerGuest: Registrar = (server, session) => {
         cwd: z.string().optional().describe('Absolute path to run in.'),
       },
     },
-    ({ computer_id, command, timeout_s, desktop, background, cwd }) =>
+    ({ computer_id, command, timeout_s, desktop, background, cwd }, extra) =>
       guarded(async () => {
         const id = session.resolve(computer_id);
-        const res = await session.api.json<Record<string, unknown>>(
-          'POST',
-          P.computerAction(id, 'exec'),
-          { body: P.execBody({ command, timeout_s, desktop, background, cwd }) },
-        );
+        const res = await session.api
+          .with(extra.signal)
+          .json<Record<string, unknown>>('POST', P.computerAction(id, 'exec'), {
+            body: P.execBody({ command, timeout_s, desktop, background, cwd }),
+          });
         if (background) {
           return said(
             `Started as pid ${res.pid}. Read its output with exec_poll, stop it with exec_kill.`,
@@ -93,10 +93,12 @@ export const registerGuest: Registrar = (server, session) => {
       },
       annotations: { readOnlyHint: true },
     },
-    ({ computer_id, pid }) =>
+    ({ computer_id, pid }, extra) =>
       guarded(async () => {
         const id = session.resolve(computer_id);
-        const res = await session.api.json<Record<string, unknown>>('GET', P.execHandle(id, pid));
+        const res = await session.api
+          .with(extra.signal)
+          .json<Record<string, unknown>>('GET', P.execHandle(id, pid));
         const more = res.more
           ? '\n\n`more` is set — there is further output waiting; poll again straight away.'
           : '';
@@ -113,13 +115,16 @@ export const registerGuest: Registrar = (server, session) => {
       inputSchema: { ...idArg, pid: z.number().int() },
       annotations: { destructiveHint: true },
     },
-    ({ computer_id, pid }) =>
+    ({ computer_id, pid }, extra) =>
       guarded(async () => {
         const id = session.resolve(computer_id);
-        const res = await session.api.json<Record<string, unknown>>(
-          'DELETE',
-          P.execHandle(id, pid),
-        );
+        // `send`, because a DELETE answering 204 is the ordinary REST shape and
+        // `json` now raises on an empty body. Reported as an error, the kill
+        // that in fact succeeded would send the model back at a pid that no
+        // longer exists.
+        const res = await session.api
+          .with(extra.signal)
+          .send<Record<string, unknown>>('DELETE', P.execHandle(id, pid));
         return said(`Killed pid ${pid}.`, res);
       }),
   );
@@ -132,14 +137,14 @@ export const registerGuest: Registrar = (server, session) => {
         "Put a web page on the screen in the guest's browser. The command returns before the window draws — on a cold browser that gap has been as long as ten seconds — so screenshot until the screen changes rather than concluding from one frame that nothing launched.",
       inputSchema: { ...idArg, url: z.string().url() },
     },
-    ({ computer_id, url }) =>
+    ({ computer_id, url }, extra) =>
       guarded(async () => {
         const id = session.resolve(computer_id);
-        const res = await session.api.json<Record<string, unknown>>(
-          'POST',
-          P.computerAction(id, 'exec'),
-          { body: P.execBody({ command: P.openUrlCommand(url), timeout_s: 30, desktop: true }) },
-        );
+        const res = await session.api
+          .with(extra.signal)
+          .json<Record<string, unknown>>('POST', P.computerAction(id, 'exec'), {
+            body: P.execBody({ command: P.openUrlCommand(url), timeout_s: 30, desktop: true }),
+          });
         return said(
           `Asked the desktop to open ${url}. Give it a few seconds, then screenshot — the browser draws after the command returns.`,
           res,
@@ -164,12 +169,14 @@ export const registerGuest: Registrar = (server, session) => {
       },
       annotations: { readOnlyHint: true },
     },
-    ({ computer_id, include_all }) =>
+    ({ computer_id, include_all }, extra) =>
       guarded(async () => {
         const id = session.resolve(computer_id);
-        const res = await session.api.json('GET', P.computerAction(id, 'windows'), {
-          query: { include: include_all ? 'all' : undefined },
-        });
+        const res = await session.api
+          .with(extra.signal)
+          .json('GET', P.computerAction(id, 'windows'), {
+            query: { include: include_all ? 'all' : undefined },
+          });
         return json(res);
       }),
   );
@@ -190,10 +197,10 @@ export const registerGuest: Registrar = (server, session) => {
         height: z.number().int().optional().describe('For resize.'),
       },
     },
-    ({ computer_id, window_id, action, x, y, width, height }) =>
+    ({ computer_id, window_id, action, x, y, width, height }, extra) =>
       guarded(async () => {
         const id = session.resolve(computer_id);
-        const res = await session.api.json('POST', P.window_(id, window_id), {
+        const res = await session.api.with(extra.signal).json('POST', P.window_(id, window_id), {
           body: P.windowBody({ action, x, y, width, height }),
         });
         return said(`${action} on ${window_id}. This is the window as it now is:`, res);
@@ -218,7 +225,7 @@ export const registerGuest: Registrar = (server, session) => {
           .describe('base64 for anything that is not text.'),
       },
     },
-    ({ computer_id, path, content, encoding }) =>
+    ({ computer_id, path, content, encoding }, extra) =>
       guarded(async () => {
         const id = session.resolve(computer_id);
         // Node's base64 decoder is lenient: it drops characters outside the
@@ -227,14 +234,14 @@ export const registerGuest: Registrar = (server, session) => {
         // reported as a success — the file is there, it is wrong, and nothing
         // says so. Checked here so the answer is a refusal instead.
         if (encoding === 'base64' && !isBase64(content)) {
-          return said(
+          return refused(
             `That is not valid base64, and decoding it would have written a corrupt ${path} while reporting success. Nothing was written. Re-encode the content, or send it with encoding: "utf8" if it is text.`,
           );
         }
         const bytes = new Uint8Array(
           Buffer.from(content, encoding === 'base64' ? 'base64' : 'utf8'),
         );
-        const res = await session.api.json<{ path?: string; bytes?: number }>(
+        const res = await session.api.with(extra.signal).json<{ path?: string; bytes?: number }>(
           'PUT',
           P.computerAction(id, 'files'),
           // The path is a query parameter, and the URL builder encodes it. Doing
@@ -260,12 +267,14 @@ export const registerGuest: Registrar = (server, session) => {
       },
       annotations: { readOnlyHint: true },
     },
-    ({ computer_id, path }) =>
+    ({ computer_id, path }, extra) =>
       guarded(async () => {
         const id = session.resolve(computer_id);
-        const file = await session.api.bytes('GET', P.computerAction(id, 'files'), {
-          query: { path },
-        });
+        const file = await session.api
+          .with(extra.signal)
+          .bytes('GET', P.computerAction(id, 'files'), {
+            query: { path },
+          });
         if (file.contentType.startsWith('image/')) {
           // The cap applies here too. Clipping is not an option — half a PNG is
           // not a picture — so an oversized image is refused with its size,

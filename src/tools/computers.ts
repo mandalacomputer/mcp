@@ -6,6 +6,7 @@ import {
   guarded,
   incompleteWarning,
   json,
+  refused,
   said,
   unwrapComputer,
   withoutCredentials,
@@ -20,7 +21,33 @@ const idArg = {
     .describe('Which computer. Defaults to the one selected with use_computer.'),
 };
 
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+/**
+ * A pause that ends early when the caller gives up.
+ *
+ * The wait loops check the signal at the top of each turn, so a sleep that
+ * ignored it would still hold a cancelled call for its remaining seconds.
+ */
+const sleep = (ms: number, signal?: AbortSignal) =>
+  new Promise<void>((resolve) => {
+    if (signal?.aborted) return resolve();
+    const t = setTimeout(done, ms);
+    function done() {
+      clearTimeout(t);
+      signal?.removeEventListener('abort', done);
+      resolve();
+    }
+    signal?.addEventListener('abort', done, { once: true });
+  });
+
+/**
+ * The answer to a wait the caller ended.
+ *
+ * `refused`, not `said`: the wait never reached what it was told to wait for,
+ * and a caller reading `isError` to decide whether the step worked would
+ * otherwise be unable to tell a cancellation from a computer that came up.
+ */
+const cancelled = (id: string, last: string) =>
+  refused(`Cancelled after waiting for ${id}; it was last seen ${last}. Nothing was changed.`);
 
 const POWER_DESCRIPTIONS: Record<string, string> = {
   start:
@@ -42,7 +69,8 @@ export const registerComputers: Registrar = (server, session, opts) => {
       inputSchema: {},
       annotations: { readOnlyHint: true },
     },
-    () => guarded(async () => json(await session.api.json('GET', P.TEMPLATES))),
+    (_args, extra) =>
+      guarded(async () => json(await session.api.with(extra.signal).json('GET', P.TEMPLATES))),
   );
 
   server.registerTool(
@@ -54,7 +82,8 @@ export const registerComputers: Registrar = (server, session, opts) => {
       inputSchema: {},
       annotations: { readOnlyHint: true },
     },
-    () => guarded(async () => json(await session.api.json('GET', P.SIZES))),
+    (_args, extra) =>
+      guarded(async () => json(await session.api.with(extra.signal).json('GET', P.SIZES))),
   );
 
   server.registerTool(
@@ -73,15 +102,17 @@ export const registerComputers: Registrar = (server, session, opts) => {
       },
       annotations: { readOnlyHint: true },
     },
-    ({ allow_partial }) =>
+    ({ allow_partial }, extra) =>
       guarded(async () => {
         // listing, not json: with allow_partial the platform will hand over an
         // inventory it knows is short, and says so in X-GC-Incomplete. Reading
         // the body and dropping the header turns "here is part of the fleet"
         // into "here is the fleet".
-        const { items, incomplete } = await session.api.listing<unknown[]>(P.COMPUTERS, {
-          query: { allow_partial: allow_partial ? 1 : undefined },
-        });
+        const { items, incomplete } = await session.api
+          .with(extra.signal)
+          .listing<unknown[]>(P.COMPUTERS, {
+            query: { allow_partial: allow_partial ? 1 : undefined },
+          });
         const list = items ?? [];
         const warning = incompleteWarning('computers', incomplete);
         if (!list.length) {
@@ -122,10 +153,10 @@ export const registerComputers: Registrar = (server, session, opts) => {
       inputSchema: { ...idArg },
       annotations: { readOnlyHint: true },
     },
-    ({ computer_id }) =>
+    ({ computer_id }, extra) =>
       guarded(async () => {
         const id = session.resolve(computer_id);
-        const c = unwrapComputer(await session.api.json('GET', P.computer(id)));
+        const c = unwrapComputer(await session.api.with(extra.signal).json('GET', P.computer(id)));
         session.noteResolution(id, c.resolution);
         return said(describe(c), withoutCredentials(c));
       }),
@@ -141,12 +172,14 @@ export const registerComputers: Registrar = (server, session, opts) => {
         computer_id: z.string().describe('The id from list_computers.'),
       },
     },
-    ({ computer_id }) =>
+    ({ computer_id }, extra) =>
       guarded(async () => {
         // Read it before binding. Binding an id the platform does not recognise
         // would send every subsequent call to a 404 with no clue why, and the
         // read costs one round trip against a session that will make hundreds.
-        const c = unwrapComputer(await session.api.json('GET', P.computer(computer_id)));
+        const c = unwrapComputer(
+          await session.api.with(extra.signal).json('GET', P.computer(computer_id)),
+        );
         session.bind(computer_id, c.resolution);
         return said(
           `Selected ${describe(c)}. Later calls need no computer_id.` +
@@ -169,10 +202,12 @@ export const registerComputers: Registrar = (server, session, opts) => {
         description: POWER_DESCRIPTIONS[action],
         inputSchema: { ...idArg },
       },
-      ({ computer_id }) =>
+      ({ computer_id }, extra) =>
         guarded(async () => {
           const id = session.resolve(computer_id);
-          const c = unwrapComputer(await session.api.json('POST', P.computerAction(id, action)));
+          const c = unwrapComputer(
+            await session.api.with(extra.signal).json('POST', P.computerAction(id, action)),
+          );
           session.noteResolution(id, c.resolution);
           return said(`${action}: ${describe(c)}`, withoutCredentials(c));
         }),
@@ -206,18 +241,20 @@ export const registerComputers: Registrar = (server, session, opts) => {
           ),
       },
     },
-    ({ computer_id, ...fields }) =>
+    ({ computer_id, ...fields }, extra) =>
       guarded(async () => {
         const id = session.resolve(computer_id);
         // `null` is meaningful for idle_suspend_min and must survive the filter;
         // every other absent field is dropped so the platform leaves it alone.
         const body = Object.fromEntries(Object.entries(fields).filter(([, v]) => v !== undefined));
         if (!Object.keys(body).length) {
-          return said(
+          return refused(
             'Nothing to change — give at least one of name, cpu, ram_mb, disk_gb, idle_suspend_min.',
           );
         }
-        const c = unwrapComputer(await session.api.json('PATCH', P.computer(id), { body }));
+        const c = unwrapComputer(
+          await session.api.with(extra.signal).json('PATCH', P.computer(id), { body }),
+        );
         session.noteResolution(id, c.resolution);
         return said(describe(c), withoutCredentials(c));
       }),
@@ -240,7 +277,7 @@ export const registerComputers: Registrar = (server, session, opts) => {
         timeout_s: z.number().int().min(5).max(900).default(180),
       },
     },
-    ({ computer_id, until, timeout_s }) =>
+    ({ computer_id, until, timeout_s }, extra) =>
       guarded(async () => {
         const id = session.resolve(computer_id);
         const deadline = Date.now() + timeout_s * 1000;
@@ -251,17 +288,30 @@ export const registerComputers: Registrar = (server, session, opts) => {
         // that the status was never seen.
         let blocked: string | undefined;
         while (Date.now() < deadline) {
+          // The caller giving up ends the wait. The signal aborts the request
+          // in flight, but nothing about an aborted request stops the next
+          // iteration from starting one — so a cancelled call would go on
+          // polling the platform for the rest of its timeout_s, up to fifteen
+          // minutes of traffic on behalf of nobody.
+          if (extra.signal?.aborted) return cancelled(id, last);
           // The status read is exactly as transient-prone as the guest probe
           // below it — a hypervisor that cannot be reached answers 503, which
           // is the ordinary weather of a machine still coming up. Letting that
           // out would abort the one tool whose entire job is to keep asking.
           let c: Computer;
           try {
-            c = unwrapComputer(await session.api.json('GET', P.computer(id)));
+            c = unwrapComputer(await session.api.with(extra.signal).json('GET', P.computer(id)));
           } catch (err) {
+            // The signal is checked before the error is judged, because an
+            // aborted fetch surfaces from the client as `could not reach
+            // <host>` — not transient, so it would leave the loop reporting a
+            // platform outage for what was the caller hanging up. The MCP
+            // client's own 60s request timeout makes that the common case, not
+            // the rare one, for any wait longer than a minute.
+            if (extra.signal?.aborted) return cancelled(id, last);
             if (!isTransient(err)) throw err;
             blocked = err instanceof Error ? err.message : String(err);
-            await sleep(2000);
+            await sleep(2000, extra.signal);
             continue;
           }
           blocked = undefined;
@@ -290,7 +340,7 @@ export const registerComputers: Registrar = (server, session, opts) => {
             // asked rather than waited for: a trivial exec either answers, or
             // refuses with the 409 that says the agent is not up yet.
             try {
-              await session.api.json('POST', P.computerAction(id, 'exec'), {
+              await session.api.with(extra.signal).send('POST', P.computerAction(id, 'exec'), {
                 body: P.execBody({ command: 'true', timeout_s: 5 }),
               });
               return said(`Guest is answering: ${describe(c)}`, withoutCredentials(c));
@@ -298,7 +348,7 @@ export const registerComputers: Registrar = (server, session, opts) => {
               if (!isTransient(err)) throw err;
             }
           }
-          await sleep(2000);
+          await sleep(2000, extra.signal);
         }
         return said(
           blocked
@@ -325,24 +375,38 @@ export const registerComputers: Registrar = (server, session, opts) => {
       },
       annotations: { readOnlyHint: true },
     },
-    ({ computer_id, control }) =>
+    ({ computer_id, control }, extra) =>
       guarded(async () => {
         const id = session.resolve(computer_id);
-        const c = unwrapComputer(await session.api.json('GET', P.computer(id)));
+        const c = unwrapComputer(await session.api.with(extra.signal).json('GET', P.computer(id)));
         const vnc = c.vnc as Record<string, string> | undefined;
         if (!vnc) {
           return said(
             `No desktop credentials on ${id} right now. The platform omits them when the computer is not running, or when its hypervisor could not be reached — a URL built over nothing looks exactly like a working one until it is used.`,
           );
         }
+        // A `vnc` object that is missing the requested key is the same answer as
+        // no `vnc` at all, and has to read like it. `JSON.stringify` drops an
+        // undefined value rather than recording it, so handing the object
+        // straight over would print `{}` underneath a sentence promising full
+        // control of the machine — the reader is told a link was given and
+        // shown nothing to reconcile that against.
+        const links = control
+          ? { url: vnc.url }
+          : { view_url: vnc.view_url, embed_url: vnc.embed_url };
+        if (!Object.values(links).some(Boolean)) {
+          return said(
+            `The platform is holding desktop credentials for ${id} but sent no ${control ? 'control' : 'watch-only'} URL among them. ${control ? 'Ask without control: true for the watch-only link.' : 'Try again in a moment, or ask with control: true.'}`,
+          );
+        }
         return control
           ? said(
               'Full control — keyboard, pointer and clipboard. Treat this link as a password for that desktop; it ends when the computer restarts.',
-              { url: vnc.url },
+              links,
             )
           : said(
               'Watch-only. The platform drops input on this socket, so it is safe to hand to somebody.',
-              { view_url: vnc.view_url, embed_url: vnc.embed_url },
+              links,
             );
       }),
   );
@@ -386,10 +450,12 @@ export const registerComputers: Registrar = (server, session, opts) => {
       },
       annotations: { destructiveHint: false, openWorldHint: true },
     },
-    (args) =>
+    (args, extra) =>
       guarded(async () => {
         const c = unwrapComputer(
-          await session.api.json('POST', P.COMPUTERS, { body: P.createBody(args) }),
+          await session.api
+            .with(extra.signal)
+            .json('POST', P.COMPUTERS, { body: P.createBody(args) }),
         );
         if (c.id) session.bind(c.id, c.resolution);
         // A create whose guest was made and then would not boot is not an
@@ -414,11 +480,11 @@ export const registerComputers: Registrar = (server, session, opts) => {
         name: z.string().optional().describe('A name for the copy.'),
       },
     },
-    ({ computer_id, name }) =>
+    ({ computer_id, name }, extra) =>
       guarded(async () => {
         const id = session.resolve(computer_id);
         const c = unwrapComputer(
-          await session.api.json('POST', P.computerAction(id, 'clone'), {
+          await session.api.with(extra.signal).json('POST', P.computerAction(id, 'clone'), {
             body: name === undefined ? {} : { name },
           }),
         );
@@ -459,7 +525,7 @@ export const registerComputers: Registrar = (server, session, opts) => {
       },
       annotations: { destructiveHint: true, idempotentHint: true },
     },
-    ({ computer_id, delete_snapshots, expect }) =>
+    ({ computer_id, delete_snapshots, expect }, extra) =>
       guarded(async () => {
         // The platform makes `expect` optional, for callers that cannot read the
         // holdings and so were never shown a set to be held to. An MCP caller
@@ -473,22 +539,20 @@ export const registerComputers: Registrar = (server, session, opts) => {
         // a capture that finishes between the decision and the click, then gets
         // destroyed by a confirmation that predates it.
         if (delete_snapshots && !expect) {
-          return said(
+          return refused(
             'Refusing to purge snapshots without a fingerprint. Call snapshot_holdings on this computer, ' +
               'check that the count and size are what you meant to destroy, and pass its fingerprint as `expect`. ' +
               'Nothing has been deleted.',
           );
         }
-        const res = await session.api.json<{ snapshots_deleted?: number }>(
-          'DELETE',
-          P.computer(computer_id),
-          {
+        const res = await session.api
+          .with(extra.signal)
+          .send<{ snapshots_deleted?: number }>('DELETE', P.computer(computer_id), {
             query: {
               snapshots: delete_snapshots ? 'delete' : undefined,
               expect: delete_snapshots ? expect : undefined,
             },
-          },
-        );
+          });
         session.unbind(computer_id);
         // A count only when the platform sent one. `?? 0` here would turn "it
         // did not say" into the affirmative claim that nothing was destroyed —

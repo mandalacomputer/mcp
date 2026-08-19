@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { MODEL_KEY_HEADER } from '../api.js';
-import { guarded, said } from '../format.js';
+import { guarded, refused, said } from '../format.js';
 import * as P from '../paths.js';
 import type { Registrar } from './types.js';
 
@@ -68,12 +68,17 @@ export const registerAgent: Registrar = (server, session) => {
           } else if (ev.event === 'done') {
             done = ev.data as Record<string, unknown>;
           } else if (ev.event === 'error') {
-            return said(`The run failed after ${steps.length} step(s).`, ev.data);
+            // A run that errored is a failure, and has to carry `isError` to
+            // say so. Prose alone leaves it indistinguishable at the protocol
+            // level from a run that worked — a caller checking whether the step
+            // succeeded would read this one as a success that happened to have
+            // a discouraging sentence in it.
+            return refused(`The run failed after ${steps.length} step(s).`, ev.data);
           }
         }
 
         if (!done) {
-          return said(
+          return refused(
             `The stream ended without a result after ${steps.length} step(s). What it did:\n${steps.join('\n')}`,
           );
         }

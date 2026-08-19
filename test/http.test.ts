@@ -90,11 +90,130 @@ describe('the hosted transport', () => {
     expect(mine.status).toBe(200);
   });
 
+  it('takes the auth scheme in any case, as RFC 7235 requires', async () => {
+    // Matching only 'Bearer ' answered a well-formed credential with a 401
+    // whose message told the client to send the thing it had just sent.
+    const res = await post(INIT, { Authorization: 'bearer com_alice' });
+    expect(res.status).toBe(200);
+    expect(res.headers.get('mcp-session-id')).toBeTruthy();
+  });
+
   it('rejects a session id it never issued', async () => {
     const res = await post(
       { jsonrpc: '2.0', id: 4, method: 'tools/list' },
       { Authorization: 'Bearer com_alice', 'mcp-session-id': 'not-a-session' },
     );
     expect(res.status).toBe(404);
+  });
+});
+
+describe('the session cap', () => {
+  let server: Server;
+  let url: string;
+  let platform: ReturnType<typeof installFakePlatform>;
+
+  beforeAll(async () => {
+    platform = installFakePlatform();
+    server = await runHttp({ port: 0, host: '127.0.0.1', baseUrl: BASE, maxSessions: 2 });
+    const { port } = server.address() as AddressInfo;
+    url = `http://127.0.0.1:${port}`;
+  });
+
+  afterAll(async () => {
+    platform.restore();
+    await new Promise<void>((r) => server.close(() => r()));
+  });
+
+  it('holds under a burst of simultaneous initializes', async () => {
+    // The cap is checked two awaits before the session is recorded, so what it
+    // bounds depends on nothing yielding in between. That holds today — this
+    // burst is admitted exactly twice with or without the reservation the code
+    // now takes — and it holds for a reason no one here controls: it is a
+    // property of the SDK's initialize path, not of this file. The reservation
+    // is what makes the cap survive that changing; this test is what would
+    // notice if it stopped being enough.
+    const burst = await Promise.all(
+      Array.from({ length: 16 }, (_, i) =>
+        fetch(`${url}/mcp`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Accept: 'application/json, text/event-stream',
+            Authorization: `Bearer com_caller_${i}`,
+          },
+          body: JSON.stringify(INIT),
+        }),
+      ),
+    );
+    await Promise.all(burst.map((r) => r.text()));
+    expect(burst.filter((r) => r.status === 200)).toHaveLength(2);
+    expect(burst.filter((r) => r.status === 503)).toHaveLength(14);
+  });
+});
+
+describe('a session whose client walked away', () => {
+  let server: Server;
+  let url: string;
+  let platform: ReturnType<typeof installFakePlatform>;
+
+  beforeAll(async () => {
+    platform = installFakePlatform();
+    // Short enough that the sweep is observable; the sweep period follows the
+    // TTL down to a floor of a second.
+    server = await runHttp({
+      port: 0,
+      host: '127.0.0.1',
+      baseUrl: BASE,
+      sessionTtlMs: 50,
+    });
+    const { port } = server.address() as AddressInfo;
+    url = `http://127.0.0.1:${port}`;
+  });
+
+  afterAll(async () => {
+    platform.restore();
+    await new Promise<void>((r) => server.close(() => r()));
+  });
+
+  it('is swept even while its notification stream is still open', async () => {
+    // The standing GET /mcp stream is what a conforming client opens once and
+    // holds for the whole session. Counting it as work in flight meant
+    // `active` never fell to zero, so no such session was ever swept — and the
+    // case the sweeper exists for, a laptop that slept and left the socket
+    // half-open, is exactly the one where the stream's `close` never fires.
+    // The transport and its registered server sat on a maxSessions slot for
+    // the life of the process.
+    const opened = await fetch(`${url}/mcp`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'application/json, text/event-stream',
+        Authorization: 'Bearer com_alice',
+      },
+      body: JSON.stringify(INIT),
+    });
+    const sessionId = opened.headers.get('mcp-session-id') as string;
+    await opened.text();
+    expect(sessionId).toBeTruthy();
+
+    const abort = new AbortController();
+    const stream = await fetch(`${url}/mcp`, {
+      headers: {
+        Accept: 'text/event-stream',
+        Authorization: 'Bearer com_alice',
+        'mcp-session-id': sessionId,
+      },
+      signal: abort.signal,
+    });
+    expect(stream.status).toBe(200);
+
+    try {
+      await new Promise((r) => setTimeout(r, 1500));
+      const health = (await (await fetch(`${url}/healthz`)).json()) as { sessions: number };
+      expect(health.sessions).toBe(0);
+    } finally {
+      abort.abort();
+      await stream.body?.cancel().catch(() => {});
+    }
   });
 });
