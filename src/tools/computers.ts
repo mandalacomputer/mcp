@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { isTransient } from '../errors.js';
 import {
+  type Computer,
   describe,
   guarded,
   incompleteWarning,
@@ -243,15 +244,33 @@ export const registerComputers: Registrar = (server, session, opts) => {
       guarded(async () => {
         const id = session.resolve(computer_id);
         const deadline = Date.now() + timeout_s * 1000;
-        let last = '';
+        let last = 'unknown';
+        // Kept so the give-up message can name it. A hypervisor that was
+        // unreachable for the whole window is the single most useful thing to
+        // report, and swallowing every transient would end the wait saying only
+        // that the status was never seen.
+        let blocked: string | undefined;
         while (Date.now() < deadline) {
-          const c = unwrapComputer(await session.api.json('GET', P.computer(id)));
+          // The status read is exactly as transient-prone as the guest probe
+          // below it — a hypervisor that cannot be reached answers 503, which
+          // is the ordinary weather of a machine still coming up. Letting that
+          // out would abort the one tool whose entire job is to keep asking.
+          let c: Computer;
+          try {
+            c = unwrapComputer(await session.api.json('GET', P.computer(id)));
+          } catch (err) {
+            if (!isTransient(err)) throw err;
+            blocked = err instanceof Error ? err.message : String(err);
+            await sleep(2000);
+            continue;
+          }
+          blocked = undefined;
           session.noteResolution(id, c.resolution);
           last = c.status ?? 'unknown';
           if (last === 'build-failed') {
             return said(
               `Build failed: ${c.build?.source ?? 'no detail given'}. This does not resolve on its own.`,
-              c,
+              withoutCredentials(c),
             );
           }
           // Neither of the next two resolves on its own, so spinning on either
@@ -259,14 +278,14 @@ export const registerComputers: Registrar = (server, session, opts) => {
           if (last === 'suspended') {
             return said(
               `${id} is suspended, and that state does not clear by itself. start_computer resumes the saved session in about a second.`,
-              c,
+              withoutCredentials(c),
             );
           }
           if (last === 'stopped') {
-            return said(`${id} is stopped. start_computer boots it.`, c);
+            return said(`${id} is stopped. start_computer boots it.`, withoutCredentials(c));
           }
           if (last === 'running') {
-            if (until === 'running') return said(`Running: ${describe(c)}`, c);
+            if (until === 'running') return said(`Running: ${describe(c)}`, withoutCredentials(c));
             // "The guest is up" is not a status the platform reports, so it is
             // asked rather than waited for: a trivial exec either answers, or
             // refuses with the 409 that says the agent is not up yet.
@@ -274,7 +293,7 @@ export const registerComputers: Registrar = (server, session, opts) => {
               await session.api.json('POST', P.computerAction(id, 'exec'), {
                 body: P.execBody({ command: 'true', timeout_s: 5 }),
               });
-              return said(`Guest is answering: ${describe(c)}`, c);
+              return said(`Guest is answering: ${describe(c)}`, withoutCredentials(c));
             } catch (err) {
               if (!isTransient(err)) throw err;
             }
@@ -282,7 +301,9 @@ export const registerComputers: Registrar = (server, session, opts) => {
           await sleep(2000);
         }
         return said(
-          `Gave up after ${timeout_s}s; ${id} was last seen ${last}. Nothing was changed — call again to keep waiting.`,
+          blocked
+            ? `Gave up after ${timeout_s}s; the platform could not be asked about ${id} for the whole wait — the last attempt said: ${blocked}. Nothing was changed — call again to keep waiting.`
+            : `Gave up after ${timeout_s}s; ${id} was last seen ${last}. Nothing was changed — call again to keep waiting.`,
         );
       }),
   );
@@ -469,9 +490,17 @@ export const registerComputers: Registrar = (server, session, opts) => {
           },
         );
         session.unbind(computer_id);
+        // A count only when the platform sent one. `?? 0` here would turn "it
+        // did not say" into the affirmative claim that nothing was destroyed —
+        // a false statement about an irreversible act, in the tool that goes to
+        // the most trouble of any here not to misrepresent one.
+        const purged =
+          res?.snapshots_deleted === undefined
+            ? 'its snapshots'
+            : `${res.snapshots_deleted} of its snapshot(s)`;
         return said(
           delete_snapshots
-            ? `Deleted ${computer_id} and ${res?.snapshots_deleted ?? 0} of its snapshot(s).`
+            ? `Deleted ${computer_id} and ${purged}.`
             : `Deleted ${computer_id}. Its disk is gone; any snapshots it had remain, as orphans that can be cloned but not restored.`,
         );
       }),
