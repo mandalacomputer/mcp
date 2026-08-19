@@ -119,13 +119,23 @@ export const registerComputers: Registrar = (server, session, opts) => {
         // `undefined`, which reads as an empty account: the duplicate-create the
         // rest of this handler goes to some length to prevent, arrived at from
         // the other side.
-        if (items !== undefined && !Array.isArray(items)) {
+        //
+        // An absent body is the same mistake in its quietest form. `listing`
+        // returns `undefined` for a 204 or a zero-length 200 — a gateway
+        // answering with nothing at all — and `items ?? []` would turn that
+        // silence into the very sentence below about an account with no
+        // computers in it. The platform sending no inventory is not the
+        // platform sending an empty one, and only one of the two is an
+        // invitation to create.
+        if (!Array.isArray(items)) {
+          const got =
+            items === undefined ? 'no body at all' : items === null ? 'null' : typeof items;
           return refused(
-            `GET /computers answered with ${items === null ? 'null' : typeof items}, not a list of computers. This is not an empty account — do not create a computer on the strength of it.`,
+            `GET /computers answered with ${got}, not a list of computers. This is not an empty account — do not create a computer on the strength of it.`,
             items,
           );
         }
-        const list = items ?? [];
+        const list = items;
         const warning = incompleteWarning('computers', incomplete);
         if (!list.length) {
           // Two different empty answers, and telling them apart is the whole

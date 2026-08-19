@@ -177,6 +177,14 @@ resolving its own name there. Served under a name, or bound to `0.0.0.0`, that
 default cannot be guessed and `MANDALA_ALLOWED_HOSTS` is what turns the check
 back on.
 
+Which matters most in the arrangement that looks like neither: bound to
+`127.0.0.1:3000` **behind a proxy** — nginx, Caddy, cloudflared, ngrok. The
+proxy forwards the original `Host: mcp.example.com`, the loopback default does
+not list it, and every request is refused with a 403. Set
+`MANDALA_ALLOWED_HOSTS` to the name it is served under. Startup says which list
+is in force, so a `403` on a deployment that worked before has a line above it
+naming the fix.
+
 ### Configuration
 
 | Variable | Meaning |
