@@ -157,17 +157,26 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
   app.delete('/mcp', bySession);
 
   return new Promise((resolve, reject) => {
+    let listening = false;
     const http = app.listen(cfg.port, cfg.host, () => {
+      listening = true;
       console.error(
         `mandala-computer-mcp on http://${cfg.host}:${cfg.port}/mcp — callers authenticate with their own Mandala API key`,
       );
       resolve(http);
     });
-    // Without this, an 'error' event on a server nobody is listening to is
-    // rethrown as an uncaught exception — a stack trace for EADDRINUSE, the
-    // most ordinary operational failure there is, and a promise that never
-    // settles. Rejecting instead lets main()'s catch print the one sentence.
+    // Without a listener, an 'error' event is rethrown as an uncaught
+    // exception — a stack trace for EADDRINUSE, the most ordinary operational
+    // failure there is, and a promise that never settles. Rejecting instead
+    // lets main()'s catch print the one sentence.
+    //
+    // Only while the bind is still pending, though. A server that is already
+    // up emits 'error' for things it goes on serving through, and tearing down
+    // the sweeper there would leave the session cap with nothing to reap
+    // against — every later caller refused, for a connection error minutes
+    // earlier that the reject could no longer report anyway.
     http.on('error', (err) => {
+      if (listening) return;
       clearInterval(sweeper);
       reject(err);
     });
