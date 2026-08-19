@@ -242,6 +242,23 @@ describe('files', () => {
     expect(textOf(res)).toContain('Nothing was written');
     expect(platform.calls.some((c) => c.method === 'PUT')).toBe(false);
   });
+
+  it('accepts the base64 Node decodes correctly, padded or not', async () => {
+    const { call, close } = await connect();
+    // The guard has to match the decoder, not a stricter idea of the format.
+    // Node reads unpadded base64 and the base64url alphabet byte-perfectly, so
+    // refusing either would reject content that used to be written correctly —
+    // while telling the caller it was corrupt.
+    for (const content of ['YWJjZA==', 'YWJjZA', 'aGVsbG8', '--__']) {
+      const res = await call('write_file', {
+        path: '/home/user/a.bin',
+        content,
+        encoding: 'base64',
+      });
+      expect(textOf(res), `refused decodable base64: ${content}`).toContain('Wrote');
+    }
+    await close();
+  });
 });
 
 describe('failures', () => {

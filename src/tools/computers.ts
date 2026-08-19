@@ -244,7 +244,12 @@ export const registerComputers: Registrar = (server, session, opts) => {
       guarded(async () => {
         const id = session.resolve(computer_id);
         const deadline = Date.now() + timeout_s * 1000;
-        let last = '';
+        let last = 'unknown';
+        // Kept so the give-up message can name it. A hypervisor that was
+        // unreachable for the whole window is the single most useful thing to
+        // report, and swallowing every transient would end the wait saying only
+        // that the status was never seen.
+        let blocked: string | undefined;
         while (Date.now() < deadline) {
           // The status read is exactly as transient-prone as the guest probe
           // below it — a hypervisor that cannot be reached answers 503, which
@@ -255,9 +260,11 @@ export const registerComputers: Registrar = (server, session, opts) => {
             c = unwrapComputer(await session.api.json('GET', P.computer(id)));
           } catch (err) {
             if (!isTransient(err)) throw err;
+            blocked = err instanceof Error ? err.message : String(err);
             await sleep(2000);
             continue;
           }
+          blocked = undefined;
           session.noteResolution(id, c.resolution);
           last = c.status ?? 'unknown';
           if (last === 'build-failed') {
@@ -294,7 +301,9 @@ export const registerComputers: Registrar = (server, session, opts) => {
           await sleep(2000);
         }
         return said(
-          `Gave up after ${timeout_s}s; ${id} was last seen ${last}. Nothing was changed — call again to keep waiting.`,
+          blocked
+            ? `Gave up after ${timeout_s}s; the platform could not be asked about ${id} for the whole wait — the last attempt said: ${blocked}. Nothing was changed — call again to keep waiting.`
+            : `Gave up after ${timeout_s}s; ${id} was last seen ${last}. Nothing was changed — call again to keep waiting.`,
         );
       }),
   );
