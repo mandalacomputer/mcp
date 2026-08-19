@@ -12,6 +12,20 @@ export const said = (line: string, v?: unknown): CallToolResult =>
   text(v === undefined ? line : `${line}\n\n${JSON.stringify(v, null, 2)}`);
 
 /**
+ * A refusal this server decided on its own, rather than one the platform sent.
+ *
+ * The same thing as `failed`, for the cases that never reach the platform: an
+ * argument combination that cannot mean anything, a payload that would write
+ * corruption, a purge without the fingerprint that authorises it. Those are
+ * failures too, and a caller that reads `isError` to decide whether a step
+ * worked would otherwise see a refusal and a success as the same answer.
+ */
+export const refused = (line: string, v?: unknown): CallToolResult => ({
+  ...said(line, v),
+  isError: true,
+});
+
+/**
  * A screenshot, as image content.
  *
  * This is the whole reason this server is more than a CLI wrapper: the bytes go
@@ -89,7 +103,15 @@ export function unwrapComputer(body: unknown): Computer {
   const v = body as Record<string, unknown>;
   const inner = v.computer;
   if (inner && typeof inner === 'object') {
-    return { ...(inner as Computer), start_error: v.start_error as string | undefined };
+    // The outer value wins, but only when there is one. Writing it
+    // unconditionally would take a `start_error` the platform had nested with
+    // the computer and replace it with nothing — discarding the reason a
+    // billable machine did not boot, in the function that exists to surface it.
+    const nested = inner as Computer;
+    return {
+      ...nested,
+      start_error: (v.start_error as string | undefined) ?? nested.start_error,
+    };
   }
   return v as Computer;
 }
