@@ -3,6 +3,7 @@ import { realpathSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import { DEFAULT_BASE_URL } from './api.js';
 import { runHttp } from './http.js';
+import { SERVER_VERSION } from './server.js';
 import { runStdio } from './stdio.js';
 
 const USAGE = `mandala-computer-mcp — drive a Mandala Computer desktop over MCP
@@ -14,7 +15,9 @@ Environment
   MANDALA_API_KEY      com_… from Settings → API keys. Required on stdio; over
                        HTTP each caller sends their own as a bearer token.
   MANDALA_BASE_URL     default ${DEFAULT_BASE_URL}
-  MANDALA_COMPUTER_ID  bind a computer at startup, so use_computer is not needed
+  MANDALA_COMPUTER_ID  bind a computer at startup, so use_computer is not needed.
+                       stdio only — over HTTP it is ignored rather than bound
+                       into every caller's session
   MANDALA_MODEL_KEY    an Anthropic key; enables the run_agent tool. stdio only
                        — over HTTP each caller sends their own X-Model-Key, and
                        this is ignored rather than spent on their runs
@@ -22,7 +25,9 @@ Environment
                        delete_computer and delete_snapshot
   PORT, HOST           for --http (default 3000, 127.0.0.1)
   MANDALA_ALLOWED_HOSTS, MANDALA_ALLOWED_ORIGINS
-                       comma-separated; enables DNS-rebinding protection
+                       comma-separated; which Host and Origin values to answer
+                       to. A loopback bind defaults to the address it was given,
+                       so rebinding protection is on without configuration
 
 Flags override the environment.`;
 
@@ -63,14 +68,36 @@ export function parse(argv: string[]): Flags {
  * environment variable on the way past, since `??` sees a value. Better to say
  * so than to fail later with EACCES on a number the user never typed.
  */
-function port(flag: string | boolean | undefined): number {
+export function port(flag: string | boolean | undefined): number {
   if (flag === true) throw new Error('--port needs a number, e.g. --port 3000');
-  const raw = flag ?? process.env.PORT ?? '3000';
+  // `??` is not enough here: PORT='' is a set-but-empty variable, which is the
+  // ordinary shape of an unset value in shell and compose files, and it passes
+  // `??` intact. `Number('')` is 0, which passes every check below and means
+  // "any free port" — so a server asked for 3000 bound something random and
+  // said so only in a line nobody reads.
+  const given = typeof flag === 'string' ? flag.trim() : '';
+  const fromEnv = process.env.PORT?.trim() ?? '';
+  const raw = given || fromEnv || '3000';
   const n = Number(raw);
   if (!Number.isInteger(n) || n < 0 || n > 65535) {
     throw new Error(`not a port number: ${raw}`);
   }
   return n;
+}
+
+/**
+ * A flag's value as a string, or a refusal naming the flag.
+ *
+ * `--key` with nothing after it parses as the boolean `true`, and every one of
+ * these values is then used as a string. Cast rather than checked, that ends as
+ * `Authorization: Bearer true` — a 401 from the platform that names nothing a
+ * reader could act on — or, for `--base-url`, a TypeError thrown from inside
+ * `String.prototype.replace` that mentions neither the flag nor the mistake.
+ * `port()` has always said so for its own flag; this says it for the rest.
+ */
+export function str(flag: string | boolean | undefined, name: string): string | undefined {
+  if (flag === true) throw new Error(`--${name} needs a value, e.g. --${name} <value>`);
+  return flag || undefined;
 }
 
 const list = (v: string | undefined) =>
@@ -88,13 +115,16 @@ async function main(): Promise<void> {
     return;
   }
   if (flags.version) {
-    console.log('0.1.0');
+    // The same constant the server reports over the protocol. Printed from two
+    // places, a `--version` and an initialize response drift apart silently,
+    // and the number people quote in a bug report is the one that lies.
+    console.log(SERVER_VERSION);
     return;
   }
 
   const base = {
-    baseUrl: (flags['base-url'] as string) || process.env.MANDALA_BASE_URL || DEFAULT_BASE_URL,
-    computerId: (flags.computer as string) || process.env.MANDALA_COMPUTER_ID || undefined,
+    baseUrl: str(flags['base-url'], 'base-url') || process.env.MANDALA_BASE_URL || DEFAULT_BASE_URL,
+    computerId: str(flags.computer, 'computer') || process.env.MANDALA_COMPUTER_ID || undefined,
     modelKey: process.env.MANDALA_MODEL_KEY || undefined,
     lifecycle: !(flags['no-lifecycle'] || process.env.MANDALA_NO_LIFECYCLE === '1'),
   };
@@ -103,16 +133,18 @@ async function main(): Promise<void> {
     await runHttp({
       ...base,
       port: port(flags.port),
-      host: (flags.host as string) || process.env.HOST || '127.0.0.1',
-      allowedHosts: list((flags['allowed-hosts'] as string) || process.env.MANDALA_ALLOWED_HOSTS),
+      host: str(flags.host, 'host') || process.env.HOST || '127.0.0.1',
+      allowedHosts: list(
+        str(flags['allowed-hosts'], 'allowed-hosts') || process.env.MANDALA_ALLOWED_HOSTS,
+      ),
       allowedOrigins: list(
-        (flags['allowed-origins'] as string) || process.env.MANDALA_ALLOWED_ORIGINS,
+        str(flags['allowed-origins'], 'allowed-origins') || process.env.MANDALA_ALLOWED_ORIGINS,
       ),
     });
     return;
   }
 
-  const apiKey = (flags.key as string) || process.env.MANDALA_API_KEY || '';
+  const apiKey = str(flags.key, 'key') || process.env.MANDALA_API_KEY || '';
   if (!apiKey) {
     // stderr and a non-zero exit, not a thrown stack. On stdio the client sees
     // a process that died; the person reading the log needs the one sentence

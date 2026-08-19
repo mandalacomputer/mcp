@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { guarded, image, json, refused, said, text } from '../format.js';
+import { guarded, image, json, MAX_INLINE_IMAGE_BYTES, refused, said, text } from '../format.js';
 import * as P from '../paths.js';
 import type { Registrar } from './types.js';
 
@@ -19,15 +19,6 @@ const idArg = {
  * is bounded here and says how much it kept.
  */
 const MAX_INLINE_BYTES = 256 * 1024;
-
-/**
- * The same bound for an image, which cannot be truncated.
- *
- * Larger than the text cap because base64 of a screenshot is the one big thing
- * worth carrying, and because a picture is the whole point of this server — but
- * bounded, because the alternative is not a large answer either.
- */
-const MAX_INLINE_IMAGE_BYTES = 8 * 1024 * 1024;
 
 export const registerGuest: Registrar = (server, session) => {
   server.registerTool(
@@ -72,6 +63,16 @@ export const registerGuest: Registrar = (server, session) => {
             body: P.execBody({ command, timeout_s, desktop, background, cwd }),
           });
         if (background) {
+          // A pid is the whole product of a background exec: without one there
+          // is nothing to poll and nothing to kill. Reported as a success, "pid
+          // undefined" sends the model to exec_poll with a handle that cannot
+          // exist, and the command goes on running in the guest unattended.
+          if (typeof res.pid !== 'number') {
+            return refused(
+              `The command was accepted but the guest reported no pid, so there is no handle to poll or kill it with. It may still be running inside the computer — check with exec "ps aux".`,
+              res,
+            );
+          }
           return said(
             `Started as pid ${res.pid}. Read its output with exec_poll, stop it with exec_kill.`,
             res,
@@ -346,7 +347,10 @@ function decodeUtf8(bytes: Uint8Array): string | undefined {
 function execSummary(res: Record<string, unknown>): string {
   const bits: string[] = [];
   if (res.running) bits.push('still running');
-  else if (res.exit_code !== undefined) bits.push(`exit ${res.exit_code}`);
+  // `!= null` and not `!== undefined`: null is the natural JSON encoding of "no
+  // exit code yet" for a command that was killed or timed out, and it printed
+  // straight through as the line "exit null".
+  else if (res.exit_code != null) bits.push(`exit ${res.exit_code}`);
   if (res.timed_out) {
     bits.push(
       'TIMED OUT — the command is still running inside the guest; nothing killed it. Re-run with background: true if you need its output',

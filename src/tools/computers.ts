@@ -113,6 +113,18 @@ export const registerComputers: Registrar = (server, session, opts) => {
           .listing<unknown[]>(P.COMPUTERS, {
             query: { allow_partial: allow_partial ? 1 : undefined },
           });
+        // Checked rather than asserted. `listing<unknown[]>` is a claim about
+        // what the platform sends, not a guarantee — a proxy or a future
+        // paginated envelope answers with an object, and `.length` on that is
+        // `undefined`, which reads as an empty account: the duplicate-create the
+        // rest of this handler goes to some length to prevent, arrived at from
+        // the other side.
+        if (items !== undefined && !Array.isArray(items)) {
+          return refused(
+            `GET /computers answered with ${items === null ? 'null' : typeof items}, not a list of computers. This is not an empty account — do not create a computer on the strength of it.`,
+            items,
+          );
+        }
         const list = items ?? [];
         const warning = incompleteWarning('computers', incomplete);
         if (!list.length) {
@@ -318,7 +330,11 @@ export const registerComputers: Registrar = (server, session, opts) => {
           session.noteResolution(id, c.resolution);
           last = c.status ?? 'unknown';
           if (last === 'build-failed') {
-            return said(
+            // `refused`, for the reason `cancelled` is: the wait never reached
+            // what it was told to wait for, and this one never will. A caller
+            // reading `isError` to decide whether to go on would otherwise see
+            // a build that failed and a guest that answered as the same result.
+            return refused(
               `Build failed: ${c.build?.source ?? 'no detail given'}. This does not resolve on its own.`,
               withoutCredentials(c),
             );
@@ -350,7 +366,11 @@ export const registerComputers: Registrar = (server, session, opts) => {
           }
           await sleep(2000, extra.signal);
         }
-        return said(
+        // Also a refusal: the deadline passed without the condition being met,
+        // which is the same shape of answer as a cancellation and not the same
+        // as success. The message still says to call again, because the state
+        // it was waiting on may yet arrive.
+        return refused(
           blocked
             ? `Gave up after ${timeout_s}s; the platform could not be asked about ${id} for the whole wait — the last attempt said: ${blocked}. Nothing was changed — call again to keep waiting.`
             : `Gave up after ${timeout_s}s; ${id} was last seen ${last}. Nothing was changed — call again to keep waiting.`,
@@ -381,7 +401,11 @@ export const registerComputers: Registrar = (server, session, opts) => {
         const c = unwrapComputer(await session.api.with(extra.signal).json('GET', P.computer(id)));
         const vnc = c.vnc as Record<string, string> | undefined;
         if (!vnc) {
-          return said(
+          // `refused`: the caller asked for a URL and there is none. Said as a
+          // success, an orchestrator reading `isError` cannot tell a link from
+          // the absence of one, and hands the next step a sentence where it
+          // expected an address.
+          return refused(
             `No desktop credentials on ${id} right now. The platform omits them when the computer is not running, or when its hypervisor could not be reached — a URL built over nothing looks exactly like a working one until it is used.`,
           );
         }
@@ -395,7 +419,7 @@ export const registerComputers: Registrar = (server, session, opts) => {
           ? { url: vnc.url }
           : { view_url: vnc.view_url, embed_url: vnc.embed_url };
         if (!Object.values(links).some(Boolean)) {
-          return said(
+          return refused(
             `The platform is holding desktop credentials for ${id} but sent no ${control ? 'control' : 'watch-only'} URL among them. ${control ? 'Ask without control: true for the watch-only link.' : 'Try again in a moment, or ask with control: true.'}`,
           );
         }
@@ -457,7 +481,18 @@ export const registerComputers: Registrar = (server, session, opts) => {
             .with(extra.signal)
             .json('POST', P.COMPUTERS, { body: P.createBody(args) }),
         );
-        if (c.id) session.bind(c.id, c.resolution);
+        // Selection and the sentence claiming it are the same decision. Bound
+        // conditionally and reported unconditionally, a create that came back
+        // without an id left this session pointing at whatever it held before
+        // while telling the model the new machine was selected — so the next
+        // call drove the old computer, or none.
+        if (!c.id) {
+          return refused(
+            `Created ${describe(c)}, but the platform sent no id back, so nothing was selected and this session is still bound to whatever it was before. The machine may exist and be billable — list_computers will say.`,
+            withoutCredentials(c),
+          );
+        }
+        session.bind(c.id, c.resolution);
         // A create whose guest was made and then would not boot is not an
         // error: the machine exists and is billable, so it comes back stopped
         // with the reason on it. Saying so plainly is the difference between a
