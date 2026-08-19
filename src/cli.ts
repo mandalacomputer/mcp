@@ -13,7 +13,9 @@ Environment
                        HTTP each caller sends their own as a bearer token.
   MANDALA_BASE_URL     default ${DEFAULT_BASE_URL}
   MANDALA_COMPUTER_ID  bind a computer at startup, so use_computer is not needed
-  MANDALA_MODEL_KEY    an Anthropic key; enables the run_agent tool
+  MANDALA_MODEL_KEY    an Anthropic key; enables the run_agent tool. stdio only
+                       — over HTTP each caller sends their own X-Model-Key, and
+                       this is ignored rather than spent on their runs
   MANDALA_NO_LIFECYCLE set to 1 to withhold create_computer, clone_computer,
                        delete_computer and delete_snapshot
   PORT, HOST           for --http (default 3000, 127.0.0.1)
@@ -35,6 +37,24 @@ function parse(argv: string[]): Flags {
     else flags[name] = true;
   }
   return flags;
+}
+
+/**
+ * The port to listen on, or a refusal naming what was wrong with it.
+ *
+ * `--port` with nothing after it parses as the boolean true, and `Number(true)`
+ * is 1 — a privileged port nobody asked for, which also swallows the PORT
+ * environment variable on the way past, since `??` sees a value. Better to say
+ * so than to fail later with EACCES on a number the user never typed.
+ */
+function port(flag: string | boolean | undefined): number {
+  if (flag === true) throw new Error('--port needs a number, e.g. --port 3000');
+  const raw = flag ?? process.env.PORT ?? '3000';
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n < 0 || n > 65535) {
+    throw new Error(`not a port number: ${raw}`);
+  }
+  return n;
 }
 
 const list = (v: string | undefined) =>
@@ -66,7 +86,7 @@ async function main(): Promise<void> {
   if (flags.http) {
     await runHttp({
       ...base,
-      port: Number(flags.port ?? process.env.PORT ?? 3000),
+      port: port(flags.port),
       host: (flags.host as string) || process.env.HOST || '127.0.0.1',
       allowedHosts: list((flags['allowed-hosts'] as string) || process.env.MANDALA_ALLOWED_HOSTS),
       allowedOrigins: list(

@@ -80,6 +80,27 @@ describe('deleting a computer', () => {
     expect(lastDelete()?.query.get('expect')).toBeNull();
   });
 
+  it('does not claim zero snapshots when the platform sent no count', async () => {
+    const real = globalThis.fetch;
+    globalThis.fetch = (async () => new Response(null, { status: 204 })) as typeof fetch;
+
+    const { call, close } = await connect();
+    const res = await call('delete_computer', {
+      computer_id: 'vm-1',
+      confirm: true,
+      delete_snapshots: true,
+      expect: 'fp-abc123',
+    });
+    await close();
+    globalThis.fetch = real;
+
+    // "and 0 of its snapshot(s)" is an affirmative claim that nothing was
+    // destroyed, about the one call here that cannot be undone. Silence from
+    // the platform is not that claim.
+    expect(textOf(res)).not.toContain('0 of its snapshot');
+    expect(textOf(res)).toContain('its snapshots');
+  });
+
   it("passes on the platform's refusal when the set moved underneath it", async () => {
     const real = globalThis.fetch;
     globalThis.fetch = (async () =>

@@ -14,6 +14,8 @@ export type HttpConfig = Omit<ServerConfig, 'apiKey'> & {
   allowedOrigins?: string[];
   /** How long an idle session survives before it is swept, in ms. */
   sessionTtlMs?: number;
+  /** How many live sessions this server will hold at once. */
+  maxSessions?: number;
 };
 
 type Live = {
@@ -24,6 +26,17 @@ type Live = {
 };
 
 const DEFAULT_TTL_MS = 30 * 60 * 1000;
+
+/**
+ * A ceiling on live sessions.
+ *
+ * An initialize is cheap to send and expensive to serve — it builds a whole
+ * McpServer with every tool registered, plus a transport that then survives the
+ * TTL. The bearer cannot be checked without a round trip to the platform, so
+ * any string gets that far; without a cap, a loop of initializes is a memory
+ * exhaustion that costs the sender nothing.
+ */
+const DEFAULT_MAX_SESSIONS = 256;
 
 /**
  * The hosted install: one URL, and every caller brings their own key.
@@ -42,6 +55,7 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
 
   const sessions = new Map<string, Live>();
   const ttl = cfg.sessionTtlMs ?? DEFAULT_TTL_MS;
+  const maxSessions = cfg.maxSessions ?? DEFAULT_MAX_SESSIONS;
 
   // Abandoned sessions are closed rather than left holding a transport. A
   // client that goes away without a DELETE is the ordinary case, not the odd
@@ -87,6 +101,14 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
         'Send your Mandala API key as a bearer token: Authorization: Bearer com_…',
       );
     }
+    // Swept sessions free their slot on the timer; this is the backstop for the
+    // case the timer cannot help with, which is arrivals faster than the TTL.
+    if (sessions.size >= maxSessions) {
+      return unavailable(
+        res,
+        `This server is holding its maximum of ${maxSessions} sessions. Retry shortly.`,
+      );
+    }
 
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: () => randomUUID(),
@@ -107,10 +129,11 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
     const server = createServer({
       ...cfg,
       apiKey: key,
-      // Per-caller, so a hosted deployment never spends an operator's model
-      // budget on a stranger's run. Absent means run_agent is simply not
-      // offered to this session.
-      modelKey: req.header(MODEL_KEY_HEADER) ?? cfg.modelKey,
+      // Per-caller, and deliberately with no fallback to cfg.modelKey: an
+      // operator who set MANDALA_MODEL_KEY for their own stdio use would
+      // otherwise be billed for every stranger's run here. Absent means
+      // run_agent is simply not offered to this session.
+      modelKey: req.header(MODEL_KEY_HEADER),
     });
     await server.connect(transport);
     return transport.handleRequest(req, res, req.body);
@@ -133,12 +156,29 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
   app.get('/mcp', bySession);
   app.delete('/mcp', bySession);
 
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
+    let listening = false;
     const http = app.listen(cfg.port, cfg.host, () => {
+      listening = true;
       console.error(
         `mandala-computer-mcp on http://${cfg.host}:${cfg.port}/mcp — callers authenticate with their own Mandala API key`,
       );
       resolve(http);
+    });
+    // Without a listener, an 'error' event is rethrown as an uncaught
+    // exception — a stack trace for EADDRINUSE, the most ordinary operational
+    // failure there is, and a promise that never settles. Rejecting instead
+    // lets main()'s catch print the one sentence.
+    //
+    // Only while the bind is still pending, though. A server that is already
+    // up emits 'error' for things it goes on serving through, and tearing down
+    // the sweeper there would leave the session cap with nothing to reap
+    // against — every later caller refused, for a connection error minutes
+    // earlier that the reject could no longer report anyway.
+    http.on('error', (err) => {
+      if (listening) return;
+      clearInterval(sweeper);
+      reject(err);
     });
     http.on('close', () => clearInterval(sweeper));
   });
@@ -165,3 +205,4 @@ const rpcError = (res: Response, status: number, code: number, message: string) 
 const badRequest = (res: Response, m: string) => rpcError(res, 400, -32000, m);
 const unauthorized = (res: Response, m: string) => rpcError(res, 401, -32001, m);
 const notFound = (res: Response, m: string) => rpcError(res, 404, -32001, m);
+const unavailable = (res: Response, m: string) => rpcError(res, 503, -32002, m);

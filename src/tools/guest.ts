@@ -20,6 +20,15 @@ const idArg = {
  */
 const MAX_INLINE_BYTES = 256 * 1024;
 
+/**
+ * The same bound for an image, which cannot be truncated.
+ *
+ * Larger than the text cap because base64 of a screenshot is the one big thing
+ * worth carrying, and because a picture is the whole point of this server — but
+ * bounded, because the alternative is not a large answer either.
+ */
+const MAX_INLINE_IMAGE_BYTES = 8 * 1024 * 1024;
+
 export const registerGuest: Registrar = (server, session) => {
   server.registerTool(
     'exec',
@@ -212,6 +221,16 @@ export const registerGuest: Registrar = (server, session) => {
     ({ computer_id, path, content, encoding }) =>
       guarded(async () => {
         const id = session.resolve(computer_id);
+        // Node's base64 decoder is lenient: it drops characters outside the
+        // alphabet and stops early on bad padding, without ever throwing. A
+        // truncated or garbled payload would then write a short file and be
+        // reported as a success — the file is there, it is wrong, and nothing
+        // says so. Checked here so the answer is a refusal instead.
+        if (encoding === 'base64' && !isBase64(content)) {
+          return said(
+            `That is not valid base64, and decoding it would have written a corrupt ${path} while reporting success. Nothing was written. Re-encode the content, or send it with encoding: "utf8" if it is text.`,
+          );
+        }
         const bytes = new Uint8Array(
           Buffer.from(content, encoding === 'base64' ? 'base64' : 'utf8'),
         );
@@ -248,6 +267,16 @@ export const registerGuest: Registrar = (server, session) => {
           query: { path },
         });
         if (file.contentType.startsWith('image/')) {
+          // The cap applies here too. Clipping is not an option — half a PNG is
+          // not a picture — so an oversized image is refused with its size,
+          // which is something a model can act on. Without this the image path
+          // walked straight past the bound the rest of this tool observes, and
+          // 64 MiB of screenshot became ~85 MB of base64 in the context.
+          if (file.bytes.length > MAX_INLINE_IMAGE_BYTES) {
+            return text(
+              `${path} is a ${file.contentType} of ${file.bytes.length} bytes, over the ${MAX_INLINE_IMAGE_BYTES}-byte inline limit. It was not read into the conversation, because an image cannot be truncated and one this size would end it. Shrink it in the guest first — e.g. exec "convert ${path} -resize 1280x ${path}.small.png" — and read that.`,
+            );
+          }
           return image(file.bytes, file.contentType, `${path} (${file.bytes.length} bytes)`);
         }
         const kept = file.bytes.subarray(0, MAX_INLINE_BYTES);
@@ -267,6 +296,27 @@ export const registerGuest: Registrar = (server, session) => {
       }),
   );
 };
+
+/**
+ * Whether a string is base64 the decoder will not silently repair.
+ *
+ * Drawn to match what Node actually decodes correctly, not to a stricter idea
+ * of the format: padding is optional, and the base64url alphabet decodes to the
+ * same bytes as the standard one, so refusing either would reject content that
+ * used to be written byte-perfectly — with a message claiming it was corrupt.
+ * Whitespace is tolerated too; models wrap long payloads, and a newline every
+ * 76 characters is what most encoders emit.
+ *
+ * What is left is the part that genuinely cannot be decoded: a character
+ * outside both alphabets, or a length of 4n+1, which is not a whole number of
+ * bytes in any padding convention.
+ */
+function isBase64(s: string): boolean {
+  const compact = s.replace(/\s+/g, '');
+  if (!compact) return true;
+  if (!/^[A-Za-z0-9+/\-_]*={0,2}$/.test(compact)) return false;
+  return compact.replace(/=+$/, '').length % 4 !== 1;
+}
 
 /** UTF-8 if it is UTF-8, and undefined if it plainly is not. */
 function decodeUtf8(bytes: Uint8Array): string | undefined {

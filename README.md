@@ -83,7 +83,8 @@ entirely.
 **Snapshots** — `list_snapshots`, `snapshot_holdings`, `create_snapshot`,
 `restore_snapshot`, `clone_snapshot`, `snapshot_schedule`, `delete_snapshot`
 
-**Delegating** — `run_agent`, registered only when `MANDALA_MODEL_KEY` is set.
+**Delegating** — `run_agent`, registered only when a model key is present:
+`MANDALA_MODEL_KEY` on stdio, or the caller's own `X-Model-Key` header over HTTP.
 
 ## Things worth knowing
 
@@ -177,7 +178,7 @@ API and it works, with no secret to provision.
 | `MANDALA_API_KEY` | `com_…` from Settings → API keys. Required on stdio; over HTTP each caller sends their own. |
 | `MANDALA_BASE_URL` | Defaults to `https://app.mandala.computer/api/v1`. |
 | `MANDALA_COMPUTER_ID` | Bind a computer at startup, so `use_computer` is not needed. |
-| `MANDALA_MODEL_KEY` | An Anthropic key. Enables `run_agent`, which runs the platform's own loop on that key. |
+| `MANDALA_MODEL_KEY` | An Anthropic key. Enables `run_agent`, which runs the platform's own loop on that key. **stdio only** — under `--http` each caller sends their own as `X-Model-Key`, and this variable is ignored. |
 | `MANDALA_NO_LIFECYCLE` | `1` withholds `create_computer`, `clone_computer`, `delete_computer` and `delete_snapshot`. |
 | `PORT`, `HOST` | For `--http`. Default `3000`, `127.0.0.1`. |
 | `MANDALA_ALLOWED_HOSTS`, `MANDALA_ALLOWED_ORIGINS` | Comma-separated. Setting either enables DNS-rebinding protection. |

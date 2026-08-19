@@ -212,14 +212,25 @@ export class Api {
       for (;;) {
         const { done, value } = await reader.read();
         if (done) break;
+        // Buffered exactly as it arrived. Rewriting terminators per chunk was
+        // the tempting shortcut and is wrong: a CRLF split across two reads
+        // becomes CR-then-LF, each rewritten to its own LF, and the pair reads
+        // as the blank line that ends an event — so a frame gets cut in half at
+        // a boundary that was never in the stream.
         buffer += decoder.decode(value, { stream: true });
-        // Events are separated by a blank line. Split on the separator and keep
-        // the tail, which may be half an event.
+        // Events are separated by a blank line, in whichever of the three
+        // terminators the sender chose: the spec allows CRLF, LF and lone CR,
+        // and a proxy that reframes the stream is entitled to any of them.
+        // Matching only "\n\n" found no boundary at all in a CRLF stream, which
+        // collapsed a whole run into one unparseable event and lost the result
+        // of a run that had in fact succeeded.
         for (;;) {
-          const sep = buffer.indexOf('\n\n');
-          if (sep === -1) break;
-          const chunk = buffer.slice(0, sep);
-          buffer = buffer.slice(sep + 2);
+          const sep = /\r?\n\r?\n|\r\r/.exec(buffer);
+          // A tail of "\r\n\r" is deliberately not a boundary yet — the LF that
+          // would complete it may be in the next read.
+          if (!sep) break;
+          const chunk = buffer.slice(0, sep.index);
+          buffer = buffer.slice(sep.index + sep[0].length);
           const parsed = parseEvent(chunk);
           if (parsed) yield parsed;
         }
@@ -235,7 +246,7 @@ export class Api {
 function parseEvent(chunk: string): SSEEvent | undefined {
   let event = 'message';
   const data: string[] = [];
-  for (const line of chunk.split('\n')) {
+  for (const line of chunk.split(/\r\n|\n|\r/)) {
     if (line.startsWith('event:')) event = line.slice(6).trim();
     else if (line.startsWith('data:')) data.push(line.slice(5).trimStart());
   }
@@ -252,7 +263,16 @@ function parseEvent(chunk: string): SSEEvent | undefined {
 export function filenameFrom(disposition: string | null): string | undefined {
   if (!disposition) return undefined;
   const star = /filename\*=UTF-8''([^;]+)/i.exec(disposition);
-  if (star) return decodeURIComponent(star[1]);
+  if (star) {
+    // A stray `%` in a guest filename is legal on disk and makes this throw.
+    // Letting it out would turn a download whose bytes already arrived intact
+    // into a failure, over the label on it.
+    try {
+      return decodeURIComponent(star[1]);
+    } catch {
+      return star[1];
+    }
+  }
   const plain = /filename="?([^";]+)"?/i.exec(disposition);
   return plain ? plain[1] : undefined;
 }
