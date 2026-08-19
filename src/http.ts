@@ -23,6 +23,8 @@ type Live = {
   /** Not the key. Enough to prove a later request came from the same holder. */
   keyDigest: Buffer;
   lastSeen: number;
+  /** Requests currently being served on this session. */
+  active: number;
 };
 
 const DEFAULT_TTL_MS = 30 * 60 * 1000;
@@ -56,6 +58,12 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
   const sessions = new Map<string, Live>();
   const ttl = cfg.sessionTtlMs ?? DEFAULT_TTL_MS;
   const maxSessions = cfg.maxSessions ?? DEFAULT_MAX_SESSIONS;
+  // Initializes that have passed the cap check but have not yet reached
+  // `onsessioninitialized`. Counted, because the check and the map write are
+  // two awaits apart: without a reservation every concurrent initialize reads
+  // the same `sessions.size`, all of them pass, and the cap bounds nothing —
+  // which is the exact memory exhaustion it was put here to stop.
+  let pending = 0;
 
   // Abandoned sessions are closed rather than left holding a transport. A
   // client that goes away without a DELETE is the ordinary case, not the odd
@@ -63,13 +71,29 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
   const sweeper = setInterval(() => {
     const cutoff = Date.now() - ttl;
     for (const [id, live] of sessions) {
-      if (live.lastSeen < cutoff) {
+      // Idle means nothing arriving AND nothing in flight. `lastSeen` is
+      // stamped when a request begins and again when it ends, so a single call
+      // that outlives the TTL — run_agent is minutes of clicking, and
+      // wait_for_computer takes a timeout_s of up to 900 — would otherwise be
+      // swept while it was still being served, closing the transport under an
+      // answer the caller had not received yet.
+      if (live.active === 0 && live.lastSeen < cutoff) {
         sessions.delete(id);
         void live.transport.close().catch(() => {});
       }
     }
   }, 60_000);
   sweeper.unref();
+
+  /** Hold a session open for as long as one request is being served on it. */
+  const serving = (live: Live, res: Response) => {
+    live.active++;
+    live.lastSeen = Date.now();
+    res.on('close', () => {
+      live.active--;
+      live.lastSeen = Date.now();
+    });
+  };
 
   app.get('/healthz', (_req, res) => {
     res.json({ ok: true, name: SERVER_NAME, version: SERVER_VERSION, sessions: sessions.size });
@@ -88,7 +112,7 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
       if (!key || !sameKey(live.keyDigest, key)) {
         return unauthorized(res, 'This session belongs to a different API key.');
       }
-      live.lastSeen = Date.now();
+      serving(live, res);
       return live.transport.handleRequest(req, res, req.body);
     }
 
@@ -103,12 +127,23 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
     }
     // Swept sessions free their slot on the timer; this is the backstop for the
     // case the timer cannot help with, which is arrivals faster than the TTL.
-    if (sessions.size >= maxSessions) {
+    if (sessions.size + pending >= maxSessions) {
       return unavailable(
         res,
         `This server is holding its maximum of ${maxSessions} sessions. Retry shortly.`,
       );
     }
+    pending++;
+    // Released exactly once, whether the initialize lands in the map or throws
+    // on the way there. A reservation that leaked on the failure path would
+    // ratchet the cap down until the process restarted.
+    let reserved = true;
+    const release = () => {
+      if (reserved) {
+        reserved = false;
+        pending--;
+      }
+    };
 
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: () => randomUUID(),
@@ -116,7 +151,8 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
       allowedHosts: cfg.allowedHosts,
       allowedOrigins: cfg.allowedOrigins,
       onsessioninitialized: (id) => {
-        sessions.set(id, { transport, keyDigest: digest(key), lastSeen: Date.now() });
+        sessions.set(id, { transport, keyDigest: digest(key), lastSeen: Date.now(), active: 0 });
+        release();
       },
       onsessionclosed: (id) => {
         sessions.delete(id);
@@ -135,8 +171,12 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
       // run_agent is simply not offered to this session.
       modelKey: req.header(MODEL_KEY_HEADER),
     });
-    await server.connect(transport);
-    return transport.handleRequest(req, res, req.body);
+    try {
+      await server.connect(transport);
+      return await transport.handleRequest(req, res, req.body);
+    } finally {
+      release();
+    }
   });
 
   // The server-to-client stream, and session teardown. Both are addressed by
@@ -150,7 +190,7 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
     if (!key || !sameKey(live.keyDigest, key)) {
       return unauthorized(res, 'This session belongs to a different API key.');
     }
-    live.lastSeen = Date.now();
+    serving(live, res);
     return live.transport.handleRequest(req, res);
   };
   app.get('/mcp', bySession);
@@ -160,8 +200,14 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
     let listening = false;
     const http = app.listen(cfg.port, cfg.host, () => {
       listening = true;
+      // The bound port, not the requested one. `port()` deliberately accepts 0,
+      // which means "any free port" — and printing it back gives the operator
+      // http://127.0.0.1:0/mcp, a URL that cannot be used to reach the server
+      // they were just told was up.
+      const addr = http.address();
+      const bound = typeof addr === 'object' && addr ? addr.port : cfg.port;
       console.error(
-        `mandala-computer-mcp on http://${cfg.host}:${cfg.port}/mcp — callers authenticate with their own Mandala API key`,
+        `mandala-computer-mcp on http://${cfg.host}:${bound}/mcp — callers authenticate with their own Mandala API key`,
       );
       resolve(http);
     });
@@ -180,13 +226,35 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
       clearInterval(sweeper);
       reject(err);
     });
-    http.on('close', () => clearInterval(sweeper));
+    // Closing the server has to take the sessions with it, and has to do it on
+    // the way in. `close()` stops new connections and then waits for the ones
+    // already in flight, so a session holding an open server-to-client stream
+    // keeps it from ever completing — an embedding host that shuts this down
+    // would hang rather than exit. Doing this in the 'close' event instead
+    // would be too late by definition: that event cannot fire until the
+    // streams this needs to end are already gone.
+    const teardown = () => {
+      clearInterval(sweeper);
+      for (const live of sessions.values()) void live.transport.close().catch(() => {});
+      sessions.clear();
+    };
+    const closeServer = http.close.bind(http);
+    http.close = ((cb?: (err?: Error) => void) => {
+      teardown();
+      return closeServer(cb);
+    }) as typeof http.close;
+    http.on('close', teardown);
   });
 }
 
 function bearer(req: Request): string | undefined {
   const auth = req.header('authorization') ?? '';
-  return auth.startsWith('Bearer ') ? auth.slice(7).trim() || undefined : undefined;
+  // RFC 7235 §2.1 makes the scheme case-insensitive, and a client that sends
+  // `bearer com_…` is sending a well-formed credential. Matching only the
+  // capitalised spelling answers it with a 401 whose message tells it to do
+  // the thing it just did.
+  const m = /^bearer[ \t]+/i.exec(auth);
+  return m ? auth.slice(m[0].length).trim() || undefined : undefined;
 }
 
 const digest = (key: string) => createHash('sha256').update(key).digest();

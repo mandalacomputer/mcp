@@ -4,6 +4,7 @@ import {
   guarded,
   incompleteWarning,
   json,
+  refused,
   said,
   unwrapComputer,
   withoutCredentials,
@@ -45,7 +46,7 @@ export const registerSnapshots: Registrar = (server, session, opts) => {
       },
       annotations: { readOnlyHint: true },
     },
-    ({ computer_id, include_unfinished, allow_partial }) =>
+    ({ computer_id, include_unfinished, allow_partial }, extra) =>
       guarded(async () => {
         // One route and a filter here, still, now that OPL-3636 has put
         // `GET computers/:id/snapshots` on this surface. That route is not a
@@ -61,15 +62,14 @@ export const registerSnapshots: Registrar = (server, session, opts) => {
         // X-GC-Incomplete. Filtering that to one computer and reporting the
         // count would turn "some hosts did not answer" into a confident wrong
         // number about a single machine.
-        const { items, incomplete } = await session.api.listing<Record<string, unknown>[]>(
-          P.SNAPSHOTS,
-          {
+        const { items, incomplete } = await session.api
+          .with(extra.signal)
+          .listing<Record<string, unknown>[]>(P.SNAPSHOTS, {
             query: {
               include: include_unfinished ? 'unfinished' : undefined,
               allow_partial: allow_partial ? 1 : undefined,
             },
-          },
-        );
+          });
         const all = items ?? [];
         const warning = incompleteWarning('snapshots', incomplete);
         // The filter keeps the unreachable placeholders, and that is not a
@@ -106,10 +106,10 @@ export const registerSnapshots: Registrar = (server, session, opts) => {
       inputSchema: { ...idArg },
       annotations: { readOnlyHint: true },
     },
-    ({ computer_id }) =>
+    ({ computer_id }, extra) =>
       guarded(async () => {
         const id = session.resolve(computer_id);
-        const held = await session.api.json<{
+        const held = await session.api.with(extra.signal).json<{
           count?: number;
           size_bytes?: number;
           fingerprint?: string;
@@ -139,12 +139,14 @@ export const registerSnapshots: Registrar = (server, session, opts) => {
           ),
       },
     },
-    ({ computer_id, memory }) =>
+    ({ computer_id, memory }, extra) =>
       guarded(async () => {
         const id = session.resolve(computer_id);
-        const res = await session.api.json('POST', P.computerAction(id, 'snapshots'), {
-          body: P.snapshotBody(memory),
-        });
+        const res = await session.api
+          .with(extra.signal)
+          .json('POST', P.computerAction(id, 'snapshots'), {
+            body: P.snapshotBody(memory),
+          });
         return said(`Snapshotted ${id}${memory ? ' with its memory' : ''}.`, res);
       }),
   );
@@ -163,9 +165,11 @@ export const registerSnapshots: Registrar = (server, session, opts) => {
       },
       annotations: { destructiveHint: true },
     },
-    ({ snapshot_id }) =>
+    ({ snapshot_id }, extra) =>
       guarded(async () => {
-        const res = await session.api.json('POST', P.snapshotAction(snapshot_id, 'restore'));
+        const res = await session.api
+          .with(extra.signal)
+          .json('POST', P.snapshotAction(snapshot_id, 'restore'));
         return said(`Restored ${snapshot_id}.`, res);
       }),
   );
@@ -185,12 +189,14 @@ export const registerSnapshots: Registrar = (server, session, opts) => {
           .describe("Make the new computer this session's selected one."),
       },
     },
-    ({ snapshot_id, name, select }) =>
+    ({ snapshot_id, name, select }, extra) =>
       guarded(async () => {
         const c = unwrapComputer(
-          await session.api.json('POST', P.snapshotAction(snapshot_id, 'clone'), {
-            body: name === undefined ? {} : { name },
-          }),
+          await session.api
+            .with(extra.signal)
+            .json('POST', P.snapshotAction(snapshot_id, 'clone'), {
+              body: name === undefined ? {} : { name },
+            }),
         );
         if (select && c.id) session.bind(c.id, c.resolution);
         return said(
@@ -220,18 +226,32 @@ export const registerSnapshots: Registrar = (server, session, opts) => {
         clear: z.boolean().default(false).describe('Remove the schedule entirely.'),
       },
     },
-    ({ computer_id, set, clear }) =>
+    ({ computer_id, set, clear }, extra) =>
       guarded(async () => {
         const id = session.resolve(computer_id);
         const path = P.computerAction(id, 'schedule');
-        if (clear) return said('Schedule cleared.', await session.api.json('DELETE', path));
+        // Acting on half a contradictory request is worse than refusing it: the
+        // schedule the caller sent would be dropped without mention, and the
+        // answer would say "Schedule cleared" — true, and not what was asked
+        // for. The platform makes the same call one tier down, refusing a
+        // rename and a resize in one request rather than picking one.
+        if (set && clear) {
+          return refused(
+            'Send `set` or `clear`, not both — they ask for opposite things and nothing was changed.',
+          );
+        }
+        if (clear)
+          return said(
+            'Schedule cleared.',
+            await session.api.with(extra.signal).send('DELETE', path),
+          );
         if (set) {
           return said(
             `Snapshot scheduled for ${String(set.hour).padStart(2, '0')}:${String(set.minute).padStart(2, '0')} ${set.tz}.`,
-            await session.api.json('PUT', path, { body: P.scheduleBody(set) }),
+            await session.api.with(extra.signal).json('PUT', path, { body: P.scheduleBody(set) }),
           );
         }
-        return json(await session.api.json('GET', path));
+        return json(await session.api.with(extra.signal).json('GET', path));
       }),
   );
 
@@ -251,9 +271,9 @@ export const registerSnapshots: Registrar = (server, session, opts) => {
       },
       annotations: { destructiveHint: true, idempotentHint: true },
     },
-    ({ snapshot_id }) =>
+    ({ snapshot_id }, extra) =>
       guarded(async () => {
-        await session.api.json('DELETE', P.snapshot(snapshot_id));
+        await session.api.with(extra.signal).send('DELETE', P.snapshot(snapshot_id));
         return said(`Deleted snapshot ${snapshot_id}.`);
       }),
   );

@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { pathToFileURL } from 'node:url';
 import { DEFAULT_BASE_URL } from './api.js';
 import { runHttp } from './http.js';
 import { runStdio } from './stdio.js';
@@ -26,12 +27,26 @@ Flags override the environment.`;
 
 type Flags = Record<string, string | boolean>;
 
-function parse(argv: string[]): Flags {
+/**
+ * argv into flags.
+ *
+ * Exported for the tests, which is worth one line of surface: this is the one
+ * place a mistyped value becomes a credential or a URL that is subtly not what
+ * was typed, and the failure it produces surfaces somewhere else entirely.
+ */
+export function parse(argv: string[]): Flags {
   const flags: Flags = {};
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
     if (!arg.startsWith('--')) continue;
-    const [name, inline] = arg.slice(2).split('=', 2);
+    // Split at the first `=`, not with `split('=', 2)` — the limit argument
+    // discards the remainder rather than keeping it, so `--key=com_a=b` would
+    // silently yield `com_a`. Values with an `=` in them are the ordinary case
+    // here: API keys, base URLs with a query, and allowed-origin lists.
+    const body = arg.slice(2);
+    const eq = body.indexOf('=');
+    const name = eq < 0 ? body : body.slice(0, eq);
+    const inline = eq < 0 ? undefined : body.slice(eq + 1);
     if (inline !== undefined) flags[name] = inline;
     else if (argv[i + 1] && !argv[i + 1].startsWith('--')) flags[name] = argv[++i];
     else flags[name] = true;
@@ -110,7 +125,13 @@ async function main(): Promise<void> {
   await runStdio({ ...base, apiKey });
 }
 
-main().catch((err) => {
-  console.error(err instanceof Error ? err.message : String(err));
-  process.exit(1);
-});
+// Only when this file IS the program. `bin` points at dist/cli.js and that is
+// how it is always started, so the guard costs nothing there — but it is what
+// lets a test import `parse` without standing a whole server up as a side
+// effect of the import.
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main().catch((err) => {
+    console.error(err instanceof Error ? err.message : String(err));
+    process.exit(1);
+  });
+}
