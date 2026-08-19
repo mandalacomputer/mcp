@@ -212,7 +212,12 @@ export class Api {
       for (;;) {
         const { done, value } = await reader.read();
         if (done) break;
-        buffer += decoder.decode(value, { stream: true });
+        // Normalised to LF before framing. The spec allows CRLF and lone CR as
+        // line terminators, and a proxy that reframes the stream is entitled to
+        // use them; splitting on "\n\n" alone would then never find a boundary,
+        // collapse the whole run into one unparseable event, and lose the
+        // result of a run that had in fact succeeded.
+        buffer += decoder.decode(value, { stream: true }).replace(/\r\n?/g, '\n');
         // Events are separated by a blank line. Split on the separator and keep
         // the tail, which may be half an event.
         for (;;) {
@@ -252,7 +257,16 @@ function parseEvent(chunk: string): SSEEvent | undefined {
 export function filenameFrom(disposition: string | null): string | undefined {
   if (!disposition) return undefined;
   const star = /filename\*=UTF-8''([^;]+)/i.exec(disposition);
-  if (star) return decodeURIComponent(star[1]);
+  if (star) {
+    // A stray `%` in a guest filename is legal on disk and makes this throw.
+    // Letting it out would turn a download whose bytes already arrived intact
+    // into a failure, over the label on it.
+    try {
+      return decodeURIComponent(star[1]);
+    } catch {
+      return star[1];
+    }
+  }
   const plain = /filename="?([^";]+)"?/i.exec(disposition);
   return plain ? plain[1] : undefined;
 }
