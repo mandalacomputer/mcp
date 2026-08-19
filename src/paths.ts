@@ -259,6 +259,16 @@ export const WINDOW_ACTIONS = [
 ] as const;
 export type WindowAction = (typeof WINDOW_ACTIONS)[number];
 
+/**
+ * The body for a window action, with the arguments that action needs.
+ *
+ * Checked here for the reason `wholePoint` is: the window manager places the
+ * frame where it likes and applications snap to their own grid, so a move that
+ * arrived with half a coordinate does not come back looking wrong — it comes
+ * back looking like the window manager's usual approximation. A `resize` with
+ * neither dimension is the same shape of failure, one the platform would have
+ * to guess its way out of.
+ */
 export function windowBody(args: {
   action: WindowAction;
   x?: number;
@@ -266,6 +276,12 @@ export function windowBody(args: {
   width?: number;
   height?: number;
 }): Json {
+  if (args.action === 'move' && (args.x === undefined || args.y === undefined)) {
+    throw new Error('move needs both x and y — half a coordinate is not a place');
+  }
+  if (args.action === 'resize' && args.width === undefined && args.height === undefined) {
+    throw new Error('resize needs width, height, or both');
+  }
   return omitUndefined({ ...args });
 }
 

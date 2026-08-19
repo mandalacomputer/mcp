@@ -32,13 +32,16 @@ describe('desktop credentials', () => {
       'wait_for_computer',
       'create_computer',
       'clone_computer',
+      'clone_snapshot',
     ]) {
       const args =
         tool === 'use_computer'
           ? { computer_id: 'vm-1' }
           : tool === 'update_computer'
             ? { name: 'renamed' }
-            : {};
+            : tool === 'clone_snapshot'
+              ? { snapshot_id: 'snap-1' }
+              : {};
       const res = await call(tool, args);
       expect(textOf(res), `${tool} leaked a desktop credential`).not.toContain('SECRET-CONTROL');
     }
