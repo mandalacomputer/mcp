@@ -369,20 +369,23 @@ function parseEvent(chunk: string): SSEEvent | undefined {
 /** The filename the platform put on a download, if it put one there. */
 export function filenameFrom(disposition: string | null): string | undefined {
   if (!disposition) return undefined;
-  // Any charset, not only UTF-8. RFC 5987 puts the charset in the header, and
-  // matching one spelling of it meant a `filename*=ISO-8859-1''…` was read by
-  // neither branch — the plain form below cannot match it either, since there
-  // is no `filename=` in it — so a download the platform had named came back
-  // with no name at all.
-  const star = /filename\*=([^']*)''([^;]+)/i.exec(disposition);
+  // Any charset and any language, not only `UTF-8''`. RFC 5987 writes this
+  // value as charset, language, then the text, with the language ordinarily
+  // empty — and matching only the empty spelling meant that both
+  // `filename*=ISO-8859-1''…` and `filename*=UTF-8'en'…` were read by neither
+  // branch — the plain form below cannot match either, since there is no
+  // `filename=` in them — so a download the platform had named came back with
+  // no name at all. Three groups, not two: the middle one is the language tag,
+  // present or empty.
+  const star = /filename\*=([^']*)'([^']*)'([^;]+)/i.exec(disposition);
   if (star) {
     // A stray `%` in a guest filename is legal on disk and makes this throw.
     // Letting it out would turn a download whose bytes already arrived intact
     // into a failure, over the label on it.
     try {
-      return decodeURIComponent(star[2]);
+      return decodeURIComponent(star[3]);
     } catch {
-      return star[2];
+      return star[3];
     }
   }
   const plain = /filename="?([^";]+)"?/i.exec(disposition);

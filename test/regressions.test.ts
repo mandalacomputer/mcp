@@ -531,3 +531,61 @@ describe('an event stream with no boundary in it', () => {
     expect(seen).toEqual([{ event: 'step', data: '  two spaces kept' }]);
   });
 });
+
+// --- round four -----------------------------------------------------------
+
+describe('a Content-Disposition with a language tag', () => {
+  it('reads the filename out of one', () => {
+    // RFC 5987 writes the value as charset, language, then text, and the
+    // language is ordinarily empty — so a regex demanding the two apostrophes
+    // be adjacent matched only that ordinary case. `UTF-8'en'report.pdf` is as
+    // legal as `UTF-8''report.pdf` and was read by neither branch, which is
+    // the same unnamed download the last round set out to fix.
+    expect(filenameFrom("attachment; filename*=UTF-8'en'report.pdf")).toBe('report.pdf');
+    expect(filenameFrom("attachment; filename*=ISO-8859-1'de'a%20b.txt")).toBe('a b.txt');
+    // And the empty-language form still works, since that is what the platform
+    // actually sends.
+    expect(filenameFrom("attachment; filename*=UTF-8''hello%20world.txt")).toBe('hello world.txt');
+  });
+});
+
+describe('a listing the platform answered with no body at all', () => {
+  let real: typeof globalThis.fetch;
+  beforeEach(() => {
+    real = globalThis.fetch;
+  });
+  afterEach(() => {
+    globalThis.fetch = real;
+  });
+
+  /** A 200 with nothing in it — what a gateway answers when it has nothing. */
+  const empty = () => {
+    globalThis.fetch = (async () => new Response('', { status: 200 })) as typeof fetch;
+  };
+
+  it('does not read it as an empty account', async () => {
+    // `items ?? []` covered the null and object shapes and left this one: an
+    // absent body decodes to undefined, skips a guard written as
+    // `items !== undefined && !Array.isArray(items)`, and comes out as "No
+    // computers on this account yet" — the duplicate-create that guard exists
+    // to prevent, reached through the one door it did not close.
+    empty();
+    const { call, close } = await connect();
+    const res = await call('list_computers');
+    expect(res.isError).toBe(true);
+    expect(said(res)).not.toMatch(/No computers on this account yet/);
+    await close();
+  });
+
+  it('does not read it as a computer with no snapshots', async () => {
+    // Same decode, one file over, and one consequence milder: nothing is
+    // created off it, but "0 snapshot(s)" is still a confident statement about
+    // an inventory that never arrived.
+    empty();
+    const { call, close } = await connect();
+    const res = await call('list_snapshots', { computer_id: 'vm-1' });
+    expect(res.isError).toBe(true);
+    expect(said(res)).not.toMatch(/^0 snapshot/m);
+    await close();
+  });
+});
