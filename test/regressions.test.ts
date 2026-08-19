@@ -1,13 +1,27 @@
-import { mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import {
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { Api } from '../src/api.js';
-import { isEntrypoint, parse } from '../src/cli.js';
-import { unwrapComputer } from '../src/format.js';
+import { Api, filenameFrom } from '../src/api.js';
+import { isEntrypoint, parse, port, str } from '../src/cli.js';
+import { MAX_INLINE_IMAGE_BYTES, unwrapComputer } from '../src/format.js';
+import * as P from '../src/paths.js';
 import { windowBody } from '../src/paths.js';
+import { SERVER_VERSION } from '../src/server.js';
 import { BASE, connect, installFakePlatform } from './harness.js';
+
+/** Everything a tool said, as one string. */
+const said = (res: CallToolResult) =>
+  res.content.map((c) => ('text' in c ? c.text : '')).join('\n');
 
 /**
  * One test per bug an adversarial review found and this repo then fixed.
@@ -220,5 +234,300 @@ describe('a 204 from a route a tool calls', () => {
       'Killed pid 4242',
     );
     await close();
+  });
+});
+
+// --- round three ----------------------------------------------------------
+//
+// The same rule as everything above: one test per bug that passed review,
+// shipped, and was wrong anyway. The comment says what the code used to do.
+
+describe('an id that is not an id', () => {
+  it('refuses a dot segment instead of encoding it into a different route', () => {
+    // `encodeURIComponent` leaves `.` alone, so `..` survived it byte for byte
+    // and `new URL` then resolved the segment away: `computers/../exec` became
+    // `/api/v1/exec` — a route the tool never asked for, reached with the
+    // caller's key.
+    expect(() => P.computer('..')).toThrow(/must not be/);
+    expect(() => P.computer('.')).toThrow(/must not be/);
+    expect(() => P.computer('  ')).toThrow(/must not be empty/);
+    expect(() => P.computer('a/b')).toThrow(/slash/);
+    expect(() => P.snapshot('..')).toThrow(/must not be/);
+    expect(() => P.window_('vm-1', '..')).toThrow(/must not be/);
+  });
+
+  it('normalises to nothing once the refusal is in place', () => {
+    // The property that made it a bug, pinned: this path, resolved against the
+    // base URL, is not the path it looks like.
+    expect(new URL(`${BASE}/computers/../exec`).pathname).toBe('/api/v1/exec');
+  });
+
+  it('leaves an ordinary id alone', () => {
+    expect(P.computer('vm-1')).toBe('computers/vm-1');
+    expect(P.computerAction('vm-1', 'exec')).toBe('computers/vm-1/exec');
+    expect(P.snapshot('snap-1')).toBe('snapshots/snap-1');
+    // Still encoded, just checked first.
+    expect(P.computer('a b')).toBe('computers/a%20b');
+  });
+});
+
+describe('a flag given without a value', () => {
+  it('is refused by name rather than cast to a string', () => {
+    // `parse` yields the boolean `true` for a valueless flag, and every one of
+    // these was `as string`. `--key` bare reached the platform as
+    // `Authorization: Bearer true`; `--base-url` bare threw a TypeError from
+    // inside String.prototype.replace naming neither the flag nor the mistake.
+    expect(() => str(true, 'key')).toThrow(/--key needs a value/);
+    expect(() => str(true, 'base-url')).toThrow(/--base-url needs a value/);
+    expect(str('com_abc', 'key')).toBe('com_abc');
+    expect(str(undefined, 'key')).toBeUndefined();
+  });
+});
+
+describe('PORT set to an empty string', () => {
+  const saved = process.env.PORT;
+  afterEach(() => {
+    if (saved === undefined) delete process.env.PORT;
+    else process.env.PORT = saved;
+  });
+
+  it('falls through to the default instead of binding a random port', () => {
+    // `??` only skips null and undefined, so a set-but-empty PORT passed it
+    // intact — and `Number('')` is 0, which passes every range check and means
+    // "any free port". A server asked for 3000 bound something random.
+    process.env.PORT = '';
+    expect(port(undefined)).toBe(3000);
+    process.env.PORT = '  ';
+    expect(port(undefined)).toBe(3000);
+    process.env.PORT = '8080';
+    expect(port(undefined)).toBe(8080);
+    // 0 still means "any free port" when it is asked for on purpose.
+    expect(port('0')).toBe(0);
+  });
+});
+
+describe('the version a user quotes in a bug report', () => {
+  it('is the one the server reports over the protocol', () => {
+    // Printed from a literal in cli.ts, a second in server.ts and a third in
+    // package.json. Three copies drift silently, and --version is the one that
+    // must never lie.
+    const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as {
+      version: string;
+    };
+    expect(SERVER_VERSION).toBe(pkg.version);
+  });
+});
+
+describe('a Content-Disposition this server did not expect', () => {
+  it('reads a filename* in any charset, not only UTF-8', () => {
+    // Matching only the UTF-8 spelling meant an ISO-8859-1 filename was read
+    // by neither branch — the plain form cannot match it, since there is no
+    // `filename=` in it — so a download the platform had named arrived unnamed.
+    expect(filenameFrom("attachment; filename*=ISO-8859-1''report.txt")).toBe('report.txt');
+    expect(filenameFrom("attachment; filename*=ISO-8859-1''a%20b.txt")).toBe('a b.txt');
+    // A byte that is not valid UTF-8 keeps its raw spelling rather than
+    // throwing — a download whose bytes arrived intact is not a failure over
+    // the label on it. What matters is that it is no longer `undefined`.
+    expect(filenameFrom("attachment; filename*=ISO-8859-1''caf%E9.txt")).toBe('caf%E9.txt');
+    expect(filenameFrom("attachment; filename*=UTF-8''a%20b.txt")).toBe('a b.txt');
+    expect(filenameFrom('attachment; filename="plain.txt"')).toBe('plain.txt');
+    expect(filenameFrom(null)).toBeUndefined();
+  });
+});
+
+describe('bodies the platform is not supposed to send', () => {
+  let real: typeof globalThis.fetch;
+  beforeEach(() => {
+    real = globalThis.fetch;
+  });
+  afterEach(() => {
+    globalThis.fetch = real;
+  });
+
+  const answer = (v: unknown, headers: Record<string, string> = {}) => {
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify(v), {
+        headers: { 'Content-Type': 'application/json', ...headers },
+      })) as typeof fetch;
+  };
+
+  it('does not read a listing that is not a list as an empty account', async () => {
+    // `listing<unknown[]>` is a claim, not a guarantee. An object body made
+    // `list.length` undefined, which read as "no computers on this account
+    // yet, create one" — the duplicate-create the partial-listing logic exists
+    // to prevent, arrived at from the other side.
+    answer({ items: [], next: null });
+    const { call, close } = await connect();
+    const res = await call('list_computers');
+    expect(res.isError).toBe(true);
+    expect(said(res)).not.toMatch(/No computers on this account yet/);
+    await close();
+  });
+
+  it('does not report a create with no id as selected', async () => {
+    // The bind was conditional on `c.id` and the sentence was not, so a
+    // response without one left the session pointing at whatever it held
+    // before while claiming the new machine was selected.
+    answer({ name: 'desk', status: 'running' });
+    const { call, close } = await connect();
+    const res = await call('create_computer', { name: 'desk' });
+    expect(res.isError).toBe(true);
+    expect(said(res)).toMatch(/no id/i);
+    await close();
+  });
+
+  it('does not tell the model to poll a pid it was never given', async () => {
+    // "Started as pid undefined. Read its output with exec_poll" — an
+    // instruction that cannot be followed, reported as a success, over a
+    // command that is still running in the guest.
+    answer({ started: true });
+    const { call, close } = await connect();
+    const res = await call('exec', { command: 'sleep 60', background: true });
+    expect(res.isError).toBe(true);
+    expect(said(res)).toMatch(/no pid/i);
+    await close();
+  });
+
+  it('does not render a null exit code as the word null', async () => {
+    // `!== undefined` admits null, which is the natural JSON encoding of "no
+    // exit code yet" for a command that was killed or timed out.
+    answer({ running: false, exit_code: null, timed_out: true });
+    const { call, close } = await connect();
+    const res = await call('exec', { command: 'true' });
+    expect(said(res)).not.toMatch(/exit null/);
+    await close();
+  });
+
+  it('keeps the parameters off an image mimeType', async () => {
+    // The raw Content-Type went through as MCP image content's mimeType, which
+    // takes a media type — a client matching on `image/png` renders nothing
+    // for `image/png; charset=binary`.
+    globalThis.fetch = (async () =>
+      new Response(new Uint8Array([1, 2, 3]), {
+        headers: { 'Content-Type': 'image/png; charset=binary' },
+      })) as typeof fetch;
+    const { call, close } = await connect();
+    const res = await call('screenshot');
+    const img = res.content.find((c) => c.type === 'image');
+    expect(img && 'mimeType' in img ? img.mimeType : undefined).toBe('image/png');
+    await close();
+  });
+
+  it('refuses a screenshot too large to put in a context', async () => {
+    // read_file enforced this bound and screenshot walked straight past it, so
+    // the cap sat on the smaller of the two paths that produce an image.
+    globalThis.fetch = (async () =>
+      new Response(new Uint8Array(MAX_INLINE_IMAGE_BYTES + 1), {
+        headers: { 'Content-Type': 'image/png' },
+      })) as typeof fetch;
+    const { call, close } = await connect();
+    const res = await call('screenshot');
+    expect(res.isError).toBe(true);
+    expect(res.content.some((c) => c.type === 'image')).toBe(false);
+    expect(said(res)).toMatch(/width/);
+    await close();
+  });
+});
+
+describe('a wait that never reached what it waited for', () => {
+  let real: typeof globalThis.fetch;
+  beforeEach(() => {
+    real = globalThis.fetch;
+  });
+  afterEach(() => {
+    globalThis.fetch = real;
+  });
+
+  it('says isError on a build that failed', async () => {
+    // Reported with `said`, so a caller reading isError could not tell a build
+    // that will never resolve from a guest that answered. The file's own
+    // `cancelled` helper had said why that was wrong since the beginning.
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify({ id: 'vm-1', status: 'build-failed', build: { source: 'x' } }), {
+        headers: { 'Content-Type': 'application/json' },
+      })) as typeof fetch;
+    const { call, close } = await connect();
+    const res = await call('wait_for_computer', { until: 'running', timeout_s: 5 });
+    expect(res.isError).toBe(true);
+    await close();
+  });
+
+  it('says isError when the deadline passes', async () => {
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify({ id: 'vm-1', status: 'starting' }), {
+        headers: { 'Content-Type': 'application/json' },
+      })) as typeof fetch;
+    const { call, close } = await connect();
+    const res = await call('wait_for_computer', { until: 'running', timeout_s: 5 });
+    expect(res.isError).toBe(true);
+    expect(said(res)).toMatch(/Gave up/);
+    await close();
+    // The floor on timeout_s is 5s and the loop sleeps 2s between polls, so
+    // this one genuinely takes longer than the default per-test budget.
+  }, 15_000);
+});
+
+describe('a desktop link request that produced no link', () => {
+  let real: typeof globalThis.fetch;
+  beforeEach(() => {
+    real = globalThis.fetch;
+  });
+  afterEach(() => {
+    globalThis.fetch = real;
+  });
+
+  it('says isError rather than reporting the absence as a success', async () => {
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify({ id: 'vm-1', status: 'stopped' }), {
+        headers: { 'Content-Type': 'application/json' },
+      })) as typeof fetch;
+    const { call, close } = await connect();
+    const res = await call('get_desktop_url');
+    expect(res.isError).toBe(true);
+    await close();
+  });
+});
+
+describe('an event stream with no boundary in it', () => {
+  let real: typeof globalThis.fetch;
+  beforeEach(() => {
+    real = globalThis.fetch;
+  });
+  afterEach(() => {
+    globalThis.fetch = real;
+  });
+
+  it('is given up on rather than buffered forever', async () => {
+    // The trim only runs when the separator matches, so a stream that never
+    // sends a blank line was appended to until the process ran out of memory.
+    const chunk = new TextEncoder().encode('data: '.concat('x'.repeat(1024 * 1024)));
+    globalThis.fetch = (async () =>
+      new Response(
+        new ReadableStream({
+          pull(controller) {
+            controller.enqueue(chunk);
+          },
+        }),
+        { headers: { 'Content-Type': 'text/event-stream' } },
+      )) as typeof fetch;
+    const api = new Api('com_test', BASE);
+    await expect(async () => {
+      for await (const _ of api.sse('POST', 'computers/vm-1/agent')) {
+        // The stream never yields an event; the bound is what ends this.
+      }
+    }).rejects.toThrow(/no event boundary/);
+  });
+
+  it('still strips exactly the one leading space the spec strips', async () => {
+    // `trimStart()` took every leading space and tab. Whitespace inside a data
+    // field is payload the moment an event carries text rather than JSON.
+    globalThis.fetch = (async () =>
+      new Response('event: step\ndata:   two spaces kept\n\n', {
+        headers: { 'Content-Type': 'text/event-stream' },
+      })) as typeof fetch;
+    const api = new Api('com_test', BASE);
+    const seen = [];
+    for await (const ev of api.sse('POST', 'computers/vm-1/agent')) seen.push(ev);
+    expect(seen).toEqual([{ event: 'step', data: '  two spaces kept' }]);
   });
 });

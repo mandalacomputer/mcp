@@ -1,4 +1,5 @@
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import { DEFAULT_BASE_URL } from './api.js';
 import { createServer, type ServerConfig } from './server.js';
 
 /**
@@ -14,6 +15,6 @@ export async function runStdio(cfg: ServerConfig): Promise<void> {
   const transport = new StdioServerTransport();
   await server.connect(transport);
   console.error(
-    `mandala-computer-mcp on stdio → ${new URL(cfg.baseUrl ?? 'https://app.mandala.computer/api/v1').origin}`,
+    `mandala-computer-mcp on stdio → ${new URL(cfg.baseUrl ?? DEFAULT_BASE_URL).origin}`,
   );
 }
