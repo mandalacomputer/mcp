@@ -120,6 +120,21 @@ export function pointerBody(action: string, x: number, y: number): Json {
 }
 
 /**
+ * Half a coordinate, refused rather than completed with a zero.
+ *
+ * Same reasoning as `dragBody` below, which has always refused half an origin:
+ * a caller naming only `y` meant to name a point, and quietly filling `x` with
+ * 0 sends the pointer to the edge of the screen while the tool reports acting
+ * "where the pointer was". The action succeeds, at the wrong place, and nothing
+ * says so.
+ */
+function wholePoint(x?: number, y?: number): void {
+  if ((x === undefined) !== (y === undefined)) {
+    throw new Error('give both x and y, or neither — half a coordinate is not a point');
+  }
+}
+
+/**
  * A click, optionally at a point and optionally with keys held down.
  *
  * No coordinate means "where the pointer already is", which is a real and
@@ -133,10 +148,11 @@ export function clickBody(
   y: number | undefined,
   modifiers: string[] = [],
 ): Json {
+  wholePoint(x, y);
   const body: Json = { action };
-  if (x !== undefined || y !== undefined) {
-    body.x = x ?? 0;
-    body.y = y ?? 0;
+  if (x !== undefined && y !== undefined) {
+    body.x = x;
+    body.y = y;
   }
   if (modifiers.length) body.text = modifiers.join(MODIFIER_JOIN);
   return body;
@@ -161,10 +177,11 @@ export function dragBody(toX: number, toY: number, fromX?: number, fromY?: numbe
 }
 
 export function buttonBody(action: string, x?: number, y?: number): Json {
+  wholePoint(x, y);
   const body: Json = { action };
-  if (x !== undefined || y !== undefined) {
-    body.x = x ?? 0;
-    body.y = y ?? 0;
+  if (x !== undefined && y !== undefined) {
+    body.x = x;
+    body.y = y;
   }
   return body;
 }
@@ -193,8 +210,9 @@ export function scrollBody(args: {
     scroll_direction: args.direction,
     amount: args.amount,
   };
-  if (args.x !== undefined || args.y !== undefined) {
-    body.coordinate = [args.x ?? 0, args.y ?? 0];
+  wholePoint(args.x, args.y);
+  if (args.x !== undefined && args.y !== undefined) {
+    body.coordinate = [args.x, args.y];
   }
   if (args.modifiers?.length) body.text = args.modifiers.join(MODIFIER_JOIN);
   return body;

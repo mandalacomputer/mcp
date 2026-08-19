@@ -37,6 +37,24 @@ function parse(argv: string[]): Flags {
   return flags;
 }
 
+/**
+ * The port to listen on, or a refusal naming what was wrong with it.
+ *
+ * `--port` with nothing after it parses as the boolean true, and `Number(true)`
+ * is 1 — a privileged port nobody asked for, which also swallows the PORT
+ * environment variable on the way past, since `??` sees a value. Better to say
+ * so than to fail later with EACCES on a number the user never typed.
+ */
+function port(flag: string | boolean | undefined): number {
+  if (flag === true) throw new Error('--port needs a number, e.g. --port 3000');
+  const raw = flag ?? process.env.PORT ?? '3000';
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n < 0 || n > 65535) {
+    throw new Error(`not a port number: ${raw}`);
+  }
+  return n;
+}
+
 const list = (v: string | undefined) =>
   v
     ? v
@@ -66,7 +84,7 @@ async function main(): Promise<void> {
   if (flags.http) {
     await runHttp({
       ...base,
-      port: Number(flags.port ?? process.env.PORT ?? 3000),
+      port: port(flags.port),
       host: (flags.host as string) || process.env.HOST || '127.0.0.1',
       allowedHosts: list((flags['allowed-hosts'] as string) || process.env.MANDALA_ALLOWED_HOSTS),
       allowedOrigins: list(

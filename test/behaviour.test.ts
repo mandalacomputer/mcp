@@ -17,8 +17,29 @@ describe('desktop credentials', () => {
 
   it('never puts the control token in an ordinary result', async () => {
     const { call, close } = await connect();
-    for (const tool of ['list_computers', 'get_computer', 'use_computer', 'start_computer']) {
-      const res = await call(tool, tool === 'use_computer' ? { computer_id: 'vm-1' } : {});
+    // Every tool that returns a computer, not a sample of them: the one left
+    // out of this list is the one that leaks, which is exactly how
+    // wait_for_computer came to hand the control token to the model.
+    for (const tool of [
+      'list_computers',
+      'get_computer',
+      'use_computer',
+      'start_computer',
+      'stop_computer',
+      'suspend_computer',
+      'restart_computer',
+      'update_computer',
+      'wait_for_computer',
+      'create_computer',
+      'clone_computer',
+    ]) {
+      const args =
+        tool === 'use_computer'
+          ? { computer_id: 'vm-1' }
+          : tool === 'update_computer'
+            ? { name: 'renamed' }
+            : {};
+      const res = await call(tool, args);
       expect(textOf(res), `${tool} leaked a desktop credential`).not.toContain('SECRET-CONTROL');
     }
     await close();
@@ -95,6 +116,20 @@ describe('screenshots', () => {
     expect((img as { mimeType: string }).mimeType).toBe('image/png');
   });
 
+  it('does not label a screenshot with another computer’s resolution', async () => {
+    const { call, close } = await connect({ computerId: 'vm-1' });
+    // Bind vm-1 and learn its geometry, then shoot a different machine.
+    await call('get_computer', {});
+    const own = await call('screenshot', {});
+    const other = await call('screenshot', { computer_id: 'vm-9' });
+    await close();
+    // session.screen is the BOUND computer's resolution — noteResolution
+    // refuses to update it for any other id — so printing it beside a picture
+    // of vm-9 states the wrong coordinate space to click in.
+    expect(textOf(own)).toContain('1280x800x24');
+    expect(textOf(other)).not.toContain('1280x800x24');
+  });
+
   it('skip the frame cache by default', async () => {
     const { call, close } = await connect();
     await call('screenshot', {});
@@ -158,6 +193,23 @@ describe('input bodies', () => {
     await close();
     expect(res.isError).toBe(true);
   });
+
+  it('refuses half a coordinate rather than completing it with a zero', async () => {
+    const { call, close } = await connect();
+    // A y with no x used to send x:0 — the edge of the screen — while the reply
+    // said the action happened "where the pointer was". Right for the drag,
+    // right for these.
+    for (const [tool, args] of [
+      ['click', { y: 400 }],
+      ['mouse_button', { state: 'down', y: 400 }],
+      ['scroll', { direction: 'up', y: 400 }],
+    ] as const) {
+      const res = await call(tool, args);
+      expect(res.isError, `${tool} accepted half a coordinate`).toBe(true);
+      expect(textOf(res)).toContain('both x and y');
+    }
+    await close();
+  });
 });
 
 describe('files', () => {
@@ -176,11 +228,36 @@ describe('files', () => {
     // the platform would write a different file and nothing would report it.
     expect(put?.query.get('path')).toBe('/home/user/Q3 profit & loss.txt');
   });
+
+  it('refuses malformed base64 instead of writing a silently corrupt file', async () => {
+    const { call, close } = await connect();
+    const res = await call('write_file', {
+      path: '/home/user/a.bin',
+      content: 'not base64!!!',
+      encoding: 'base64',
+    });
+    await close();
+    // Buffer.from(…, 'base64') drops what it does not recognise and never
+    // throws, so this used to write six bytes and report success.
+    expect(textOf(res)).toContain('Nothing was written');
+    expect(platform.calls.some((c) => c.method === 'PUT')).toBe(false);
+  });
 });
 
 describe('failures', () => {
+  // The restore is unconditional, not a statement after the assertions. A throw
+  // anywhere in the body — connect, close, or an expect — would otherwise leave
+  // one of these stubs installed as the process-wide fetch, and every later
+  // test in the file would fail somewhere far from the cause.
+  let real: typeof globalThis.fetch;
+  beforeEach(() => {
+    real = globalThis.fetch;
+  });
+  afterEach(() => {
+    globalThis.fetch = real;
+  });
+
   it("hand back the platform's own sentence, as something the model can read", async () => {
-    const real = globalThis.fetch;
     globalThis.fetch = (async () =>
       new Response(
         JSON.stringify({
@@ -192,7 +269,6 @@ describe('failures', () => {
     const { call, close } = await connect();
     const res = await call('exec', { command: 'true' });
     await close();
-    globalThis.fetch = real;
 
     expect(res.isError).toBe(true);
     // Not a status line: this sentence is the one that tells a model to wait and
@@ -202,7 +278,6 @@ describe('failures', () => {
   });
 
   it('says plainly when a command timed out but is still running', async () => {
-    const real = globalThis.fetch;
     globalThis.fetch = (async () =>
       new Response(JSON.stringify({ exit_code: -1, timed_out: true, stdout: '' }), {
         headers: { 'Content-Type': 'application/json' },
@@ -211,7 +286,6 @@ describe('failures', () => {
     const { call, close } = await connect();
     const res = await call('exec', { command: 'sleep 600' });
     await close();
-    globalThis.fetch = real;
 
     expect(textOf(res)).toContain('TIMED OUT');
     expect(textOf(res)).toContain('background');

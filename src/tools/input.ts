@@ -24,7 +24,13 @@ const modifiers = z
  * `x?: number` will otherwise fill it with a zero to be helpful.
  */
 const point = {
-  x: z.number().int().optional().describe('Leave x and y out to act where the pointer already is.'),
+  x: z
+    .number()
+    .int()
+    .optional()
+    .describe(
+      'Leave x and y out to act where the pointer already is. Both or neither — half a coordinate is refused rather than completed with a zero.',
+    ),
   y: z.number().int().optional(),
 };
 
@@ -67,7 +73,13 @@ export const registerInput: Registrar = (server, session) => {
         const scaled = width
           ? ` (scaled to ${width}px wide — click using full-size coordinates)`
           : '';
-        const screen = session.screen ? `Screen is ${session.screen}.` : '';
+        // Only for the bound computer. session.screen is definitionally the
+        // bound machine's geometry — noteResolution refuses to update it for
+        // any other id — so printing it beside a screenshot of a computer named
+        // explicitly would state the wrong coordinate space, in the one tool
+        // whose whole job is to establish that space.
+        const screen =
+          id === session.current && session.screen ? `Screen is ${session.screen}.` : '';
         return image(shot.bytes, shot.contentType, `${screen}${scaled}`.trim() || undefined);
       }),
   );
