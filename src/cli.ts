@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { realpathSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import { DEFAULT_BASE_URL } from './api.js';
 import { runHttp } from './http.js';
@@ -125,11 +126,26 @@ async function main(): Promise<void> {
   await runStdio({ ...base, apiKey });
 }
 
-// Only when this file IS the program. `bin` points at dist/cli.js and that is
-// how it is always started, so the guard costs nothing there — but it is what
-// lets a test import `parse` without standing a whole server up as a side
-// effect of the import.
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+/**
+ * Is this module the program, rather than something a test imported?
+ *
+ * argv[1] is resolved through symlinks first, and that is the point rather
+ * than a nicety: npm installs `bin` as a symlink under node_modules/.bin, Node
+ * resolves the ESM entry through it but leaves argv[1] as the symlink path, so
+ * the raw comparison never matched. `npx mandala-computer-mcp` — every client
+ * spawning the installed binary — exited 0 with no server and no message.
+ */
+export function isEntrypoint(moduleUrl: string, arg: string | undefined): boolean {
+  if (!arg) return false;
+  try {
+    return moduleUrl === pathToFileURL(realpathSync(arg)).href;
+  } catch {
+    // argv[1] naming something unreadable is not this file being run.
+    return false;
+  }
+}
+
+if (isEntrypoint(import.meta.url, process.argv[1])) {
   main().catch((err) => {
     console.error(err instanceof Error ? err.message : String(err));
     process.exit(1);

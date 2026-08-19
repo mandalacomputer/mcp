@@ -150,3 +150,70 @@ describe('the session cap', () => {
     expect(burst.filter((r) => r.status === 503)).toHaveLength(14);
   });
 });
+
+describe('a session whose client walked away', () => {
+  let server: Server;
+  let url: string;
+  let platform: ReturnType<typeof installFakePlatform>;
+
+  beforeAll(async () => {
+    platform = installFakePlatform();
+    // Short enough that the sweep is observable; the sweep period follows the
+    // TTL down to a floor of a second.
+    server = await runHttp({
+      port: 0,
+      host: '127.0.0.1',
+      baseUrl: BASE,
+      sessionTtlMs: 50,
+    });
+    const { port } = server.address() as AddressInfo;
+    url = `http://127.0.0.1:${port}`;
+  });
+
+  afterAll(async () => {
+    platform.restore();
+    await new Promise<void>((r) => server.close(() => r()));
+  });
+
+  it('is swept even while its notification stream is still open', async () => {
+    // The standing GET /mcp stream is what a conforming client opens once and
+    // holds for the whole session. Counting it as work in flight meant
+    // `active` never fell to zero, so no such session was ever swept — and the
+    // case the sweeper exists for, a laptop that slept and left the socket
+    // half-open, is exactly the one where the stream's `close` never fires.
+    // The transport and its registered server sat on a maxSessions slot for
+    // the life of the process.
+    const opened = await fetch(`${url}/mcp`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'application/json, text/event-stream',
+        Authorization: 'Bearer com_alice',
+      },
+      body: JSON.stringify(INIT),
+    });
+    const sessionId = opened.headers.get('mcp-session-id') as string;
+    await opened.text();
+    expect(sessionId).toBeTruthy();
+
+    const abort = new AbortController();
+    const stream = await fetch(`${url}/mcp`, {
+      headers: {
+        Accept: 'text/event-stream',
+        Authorization: 'Bearer com_alice',
+        'mcp-session-id': sessionId,
+      },
+      signal: abort.signal,
+    });
+    expect(stream.status).toBe(200);
+
+    try {
+      await new Promise((r) => setTimeout(r, 1500));
+      const health = (await (await fetch(`${url}/healthz`)).json()) as { sessions: number };
+      expect(health.sessions).toBe(0);
+    } finally {
+      abort.abort();
+      await stream.body?.cancel().catch(() => {});
+    }
+  });
+});
