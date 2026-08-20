@@ -267,7 +267,7 @@ export const registerGuest: Registrar = (server, session) => {
     {
       title: 'Get a file out of the guest',
       description:
-        'Read a file from inside the computer. Text comes back as text and images come back as images; anything else comes back base64. Large files are truncated here rather than filling the conversation.',
+        'Read a file from inside the computer. Text comes back as text and images come back as images; anything else comes back base64. Large files are truncated rather than filling the conversation, and this tool cannot page — it always starts at the beginning. The truncation note gives the exec command that reads on from where it stopped, and says how to move a file off the computer altogether.',
       inputSchema: {
         ...idArg,
         path: z.string().describe('Absolute path inside the guest.'),
@@ -297,8 +297,28 @@ export const registerGuest: Registrar = (server, session) => {
         }
         const kept = file.bytes.subarray(0, MAX_INLINE_BYTES);
         const truncated = file.bytes.length > MAX_INLINE_BYTES;
+        // The note names the way past itself, which the size alone did not.
+        // This tool cannot page — there is no offset argument and the platform
+        // serves the whole file or nothing — so a reader who stopped here had
+        // been told what they were missing and nothing about how to reach it.
+        // Both routes out run in the guest: `exec` reads from an offset and is
+        // bounded by the agent's 16 MiB cap rather than this 256 KiB one, and a
+        // file that wants to leave the computer entirely should be pushed from
+        // inside it rather than carried through a context window, which is a
+        // bad transport for bytes at any size.
+        //
+        // `tail -c +N` counts from one, so the resume offset is one past what
+        // was kept — computed here rather than left as an exercise, since the
+        // off-by-one silently drops or repeats a byte and neither shows up in
+        // anything the reader can see.
         const note = truncated
-          ? `\n\n[truncated: showed ${kept.length} of ${file.bytes.length} bytes]`
+          ? `\n\n[truncated: showed ${kept.length} of ${file.bytes.length} bytes. ` +
+            `read_file has no offset and always starts at the beginning — to read on from here, ` +
+            `exec "tail -c +${kept.length + 1} ${path} | head -c ${MAX_INLINE_BYTES}". ` +
+            `To get the whole file off the computer, push it from inside the guest to storage you ` +
+            `control, e.g. exec "curl -T ${path} <your-upload-url>" — do not try to read it in ${Math.ceil(
+              file.bytes.length / MAX_INLINE_BYTES,
+            )} pieces.]`
           : '';
         const decoded = decodeUtf8(kept);
         if (decoded === undefined) {
