@@ -135,9 +135,25 @@ export const registerComputers: Registrar = (server, session, opts) => {
             items,
           );
         }
-        const list = items;
-        const warning = incompleteWarning('computers', incomplete);
+        const malformed = items.filter(
+          (item) => item === null || typeof item !== 'object' || Array.isArray(item),
+        ).length;
+        const list = items.filter(
+          (item): item is Computer =>
+            item !== null && typeof item === 'object' && !Array.isArray(item),
+        );
+        const warning =
+          incompleteWarning('computers', incomplete) +
+          (malformed
+            ? `WARNING: ignored ${malformed} malformed computer entr${malformed === 1 ? 'y' : 'ies'} from the platform.\n\n`
+            : '');
         if (!list.length) {
+          if (malformed) {
+            return refused(
+              `${warning}No valid computers remained. This is not an empty account — do not create a computer on the strength of a malformed listing.`,
+              items,
+            );
+          }
           // Two different empty answers, and telling them apart is the whole
           // point of reading the header. A workspace-scoped key gets no
           // unreachable placeholder rows at all — the platform withholds them
@@ -262,6 +278,7 @@ export const registerComputers: Registrar = (server, session, opts) => {
         idle_suspend_min: z
           .number()
           .int()
+          .min(0)
           .nullable()
           .optional()
           .describe(
@@ -389,13 +406,13 @@ export const registerComputers: Registrar = (server, session, opts) => {
           // Neither of the next two resolves on its own, so spinning on either
           // burns the whole timeout waiting for something nobody is going to do.
           if (last === 'suspended') {
-            return said(
+            return refused(
               `${id} is suspended, and that state does not clear by itself. start_computer resumes the saved session in about a second.`,
               withoutCredentials(c),
             );
           }
           if (last === 'stopped') {
-            return said(`${id} is stopped. start_computer boots it.`, withoutCredentials(c));
+            return refused(`${id} is stopped. start_computer boots it.`, withoutCredentials(c));
           }
           if (last === 'running') {
             if (until === 'running') return said(`Running: ${describe(c)}`, withoutCredentials(c));
