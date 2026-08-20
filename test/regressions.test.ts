@@ -11,8 +11,16 @@ import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { Api, filenameFrom } from '../src/api.js';
-import { isEntrypoint, parse, port, str, wantsHelp, wantsVersion } from '../src/cli.js';
+import { Api, filenameFrom, PLATFORM_HEADERS_TIMEOUT_MS } from '../src/api.js';
+import {
+  isEntrypoint,
+  lifecycleEnabled,
+  parse,
+  port,
+  str,
+  wantsHelp,
+  wantsVersion,
+} from '../src/cli.js';
 import { CancelledError, ConnectivityError, errorForStatus, isTransient } from '../src/errors.js';
 import { failed, MAX_INLINE_IMAGE_BYTES, unwrapComputer } from '../src/format.js';
 import {
@@ -27,6 +35,142 @@ import { BASE, connect, installFakePlatform } from './harness.js';
 /** Everything a tool said, as one string. */
 const said = (res: CallToolResult) =>
   res.content.map((c) => ('text' in c ? c.text : '')).join('\n');
+
+// --- latest adversarial review -------------------------------------------
+
+describe('platform response deadlines', () => {
+  it("gives a 300-second exec slack beyond undici's old 300-second header race", async () => {
+    const real = globalThis.fetch;
+    let dispatcher: unknown;
+    globalThis.fetch = (async (_input: unknown, init?: RequestInit) => {
+      dispatcher = (init as RequestInit & { dispatcher?: unknown })?.dispatcher;
+      return new Response('{}', { headers: { 'Content-Type': 'application/json' } });
+    }) as typeof fetch;
+    try {
+      await new Api('com_test', BASE).json('GET', 'computers');
+      expect(PLATFORM_HEADERS_TIMEOUT_MS).toBeGreaterThan(300_000);
+      expect(dispatcher).toBeTruthy();
+    } finally {
+      globalThis.fetch = real;
+    }
+  });
+});
+
+describe('capped download truthfulness', () => {
+  it('does not call a short EOF truncated merely because Content-Length claimed more', async () => {
+    const real = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      new Response(new Uint8Array([1, 2, 3]), {
+        headers: { 'Content-Type': 'text/plain', 'Content-Length': '100' },
+      })) as typeof fetch;
+    try {
+      const file = await new Api('com_test', BASE).bytes('GET', 'files', {}, 5);
+      expect([...file.bytes]).toEqual([1, 2, 3]);
+      expect(file.truncated).toBe(false);
+      expect(file.totalBytes).toBe(3);
+    } finally {
+      globalThis.fetch = real;
+    }
+  });
+});
+
+describe('agent stream media types and payloads', () => {
+  it('names a successful non-SSE response as a content-type mismatch', async () => {
+    const real = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      new Response('<html>sign in</html>', {
+        headers: { 'Content-Type': 'text/html; charset=utf-8' },
+      })) as typeof fetch;
+    try {
+      const consume = async () => {
+        for await (const _event of new Api('com_test', BASE).sse('POST', 'agent')) {
+          // The content type is rejected before any event can be read.
+        }
+      };
+      await expect(consume()).rejects.toThrow(/expected text\/event-stream.*text\/html/i);
+    } finally {
+      globalThis.fetch = real;
+    }
+  });
+
+  it('skips null step and done events without aborting a later valid result', async () => {
+    const real = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      new Response(
+        'event: step\ndata: null\n\n' +
+          'event: done\ndata: null\n\n' +
+          'event: step\ndata: {"n":1,"detail":"clicked"}\n\n' +
+          'event: done\ndata: {"stop":"end_turn","text":"Done"}\n\n',
+        { headers: { 'Content-Type': 'text/event-stream' } },
+      )) as typeof fetch;
+    try {
+      const { call, close } = await connect({ modelKey: 'sk-test' });
+      const res = await call('run_agent', { prompt: 'finish' });
+      expect(res.isError).toBeFalsy();
+      expect(said(res)).toMatch(/finished/);
+      expect(said(res)).toMatch(/clicked/);
+      await close();
+    } finally {
+      globalThis.fetch = real;
+    }
+  });
+});
+
+describe('explicit lifecycle flags', () => {
+  it('lets --no-lifecycle=false override a disabling environment value', () => {
+    expect(lifecycleEnabled(parse(['--no-lifecycle=false']), '1')).toBe(true);
+    expect(lifecycleEnabled(parse([]), '1')).toBe(false);
+    expect(lifecycleEnabled(parse(['--no-lifecycle']), undefined)).toBe(false);
+  });
+});
+
+describe('empty image files', () => {
+  it('refuses zero bytes instead of emitting invalid MCP image content', async () => {
+    const real = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      new Response(new Uint8Array(), {
+        headers: { 'Content-Type': 'image/png' },
+      })) as typeof fetch;
+    try {
+      const { call, close } = await connect();
+      const res = await call('read_file', { path: '/tmp/empty.png' });
+      expect(res.isError).toBe(true);
+      expect(res.content.some((item) => item.type === 'image')).toBe(false);
+      expect(said(res)).toMatch(/empty image\/png/i);
+      await close();
+    } finally {
+      globalThis.fetch = real;
+    }
+  });
+});
+
+describe('wait deadlines under wall-clock changes', () => {
+  it('stops on its monotonic timeout even when Date.now moves backward', async () => {
+    const realFetch = globalThis.fetch;
+    const realNow = Date.now;
+    globalThis.fetch = ((_input: unknown, init?: RequestInit) =>
+      new Promise((_resolve, reject) => {
+        const fail = () => {
+          const err = new Error('This operation was aborted');
+          err.name = 'AbortError';
+          reject(err);
+        };
+        if (init?.signal?.aborted) fail();
+        else init?.signal?.addEventListener('abort', fail, { once: true });
+      })) as typeof fetch;
+    Date.now = () => 1;
+    try {
+      const { call, close } = await connect();
+      const res = await call('wait_for_computer', { timeout_s: 5 });
+      expect(res.isError).toBe(true);
+      expect(said(res)).toMatch(/Gave up after 5s/);
+      await close();
+    } finally {
+      Date.now = realNow;
+      globalThis.fetch = realFetch;
+    }
+  }, 15_000);
+});
 
 /**
  * One test per bug an adversarial review found and this repo then fixed.

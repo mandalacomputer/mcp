@@ -57,6 +57,7 @@ export const registerAgent: Registrar = (server, session) => {
           signal: extra.signal,
         })) {
           if (ev.event === 'step') {
+            if (!isRecord(ev.data)) continue;
             const s = ev.data as { n?: number; action?: string; detail?: string };
             steps.push(`${s.n ?? steps.length + 1}. ${s.detail ?? s.action ?? 'step'}`);
             // Told, not just collected. A run is minutes of clicking, and a tool
@@ -66,7 +67,7 @@ export const registerAgent: Registrar = (server, session) => {
               .sendLoggingMessage({ level: 'info', data: steps[steps.length - 1] })
               .catch(() => {});
           } else if (ev.event === 'done') {
-            done = ev.data as Record<string, unknown>;
+            if (isRecord(ev.data)) done = ev.data;
           } else if (ev.event === 'error') {
             // A run that errored is a failure, and has to carry `isError` to
             // say so. Prose alone leaves it indistinguishable at the protocol
@@ -99,3 +100,6 @@ export const registerAgent: Registrar = (server, session) => {
       }),
   );
 };
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  value !== null && typeof value === 'object' && !Array.isArray(value);
