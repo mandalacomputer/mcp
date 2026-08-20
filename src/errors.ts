@@ -61,6 +61,24 @@ export class UnavailableError extends APIError {
   override name = 'UnavailableError';
 }
 
+/**
+ * The request was given up on before the platform answered.
+ *
+ * Not an API failure and not a connectivity failure, which is the whole reason
+ * it has a type: an aborted fetch surfaces from the client as a bare
+ * `TypeError: This operation was aborted`, and wrapping that as "could not
+ * reach <host>" told every reader the platform was down when in fact the caller
+ * had hung up. A cancellation is also the one failure here where the request
+ * may well have been received and acted on, so the message says so rather than
+ * claiming nothing happened.
+ *
+ * Deliberately not transient: retrying something nobody is waiting for is the
+ * behaviour `with(signal)` exists to stop.
+ */
+export class CancelledError extends MandalaError {
+  override name = 'CancelledError';
+}
+
 const BY_STATUS: Record<number, typeof APIError> = {
   401: AuthenticationError,
   402: PlanLimitError,
