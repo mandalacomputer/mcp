@@ -10,6 +10,13 @@ const idArg = {
     .describe('Which computer. Defaults to the one selected with use_computer.'),
 };
 
+const pidSchema = z
+  .number()
+  .int()
+  .positive()
+  .max(Number.MAX_SAFE_INTEGER)
+  .describe('The positive, safe-integer pid exec returned.');
+
 /**
  * How much of a file this server will put into a model's context.
  *
@@ -73,9 +80,9 @@ export const registerGuest: Registrar = (server, session) => {
           // is nothing to poll and nothing to kill. Reported as a success, "pid
           // undefined" sends the model to exec_poll with a handle that cannot
           // exist, and the command goes on running in the guest unattended.
-          if (typeof res.pid !== 'number') {
+          if (!Number.isSafeInteger(res.pid) || (res.pid as number) <= 0) {
             return refused(
-              `The command was accepted but the guest reported no pid, so there is no handle to poll or kill it with. It may still be running inside the computer — check with exec "ps aux".`,
+              `The command was accepted but the guest reported no pid that is a usable positive safe integer, so there is no safe handle to poll or kill it with. It may still be running inside the computer — check with exec "ps aux".`,
               res,
             );
           }
@@ -96,7 +103,7 @@ export const registerGuest: Registrar = (server, session) => {
         'What a backgrounded command has printed since the last time you asked, and whether it has finished. The output is a cursor, not a buffer: each poll gives you only the new bytes, so two readers on one pid split the output between them rather than each seeing all of it.',
       inputSchema: {
         ...idArg,
-        pid: z.number().int().describe('The pid exec returned.'),
+        pid: pidSchema,
       },
       // Deliberately not readOnlyHint. It read as one — nothing is created and
       // nothing is destroyed — but the annotation is the sentence directly
@@ -125,7 +132,7 @@ export const registerGuest: Registrar = (server, session) => {
       title: 'Stop a background command',
       description:
         'Kill a backgrounded command and everything it started. Answers with its final state, including whatever it printed that you had not read.',
-      inputSchema: { ...idArg, pid: z.number().int() },
+      inputSchema: { ...idArg, pid: pidSchema },
       annotations: { destructiveHint: true },
     },
     ({ computer_id, pid }, extra) =>
