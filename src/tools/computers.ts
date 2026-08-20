@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { isTransient } from '../errors.js';
+import { CancelledError, isTransient } from '../errors.js';
 import {
   type Computer,
   describe,
@@ -309,6 +309,21 @@ export const registerComputers: Registrar = (server, session, opts) => {
       guarded(async () => {
         const id = session.resolve(computer_id);
         const deadline = Date.now() + timeout_s * 1000;
+        // timeout_s used to gate only the top of the loop, which bounds how
+        // often this asks and not how long any one ask may take. Node's fetch
+        // has no response deadline of its own beyond undici's five-minute
+        // header timeout, so a single stalled poll could hold a wait told to
+        // give up in thirty seconds for minutes past its word — and the tool's
+        // whole contract is that it comes back when it said it would.
+        //
+        // One signal for the whole wait rather than one per poll: the deadline
+        // is a property of the wait, and arming a fresh timer on every turn
+        // would leave hundreds of them live across a fifteen-minute window.
+        const untilDeadline = AbortSignal.timeout(timeout_s * 1000);
+        const signal = extra.signal
+          ? AbortSignal.any([extra.signal, untilDeadline])
+          : untilDeadline;
+        const api = session.api.with(signal);
         let last = 'unknown';
         // Kept so the give-up message can name it. A hypervisor that was
         // unreachable for the whole window is the single most useful thing to
@@ -328,15 +343,20 @@ export const registerComputers: Registrar = (server, session, opts) => {
           // out would abort the one tool whose entire job is to keep asking.
           let c: Computer;
           try {
-            c = unwrapComputer(await session.api.with(extra.signal).json('GET', P.computer(id)));
+            c = unwrapComputer(await api.json('GET', P.computer(id)));
           } catch (err) {
-            // The signal is checked before the error is judged, because an
-            // aborted fetch surfaces from the client as `could not reach
-            // <host>` — not transient, so it would leave the loop reporting a
-            // platform outage for what was the caller hanging up. The MCP
-            // client's own 60s request timeout makes that the common case, not
-            // the rare one, for any wait longer than a minute.
+            // The caller's own signal is checked first, and by identity rather
+            // than by reading the error: the request is now bound to two
+            // deadlines, and only one of them means anybody stopped caring.
             if (extra.signal?.aborted) return cancelled(id, last);
+            // The other one is this wait's own deadline arriving mid-request.
+            // Not an outage and not a reason to throw — it is the answer the
+            // give-up message below is for, so record what was in flight and
+            // let the loop condition end it.
+            if (err instanceof CancelledError) {
+              blocked = `the status read was still in flight when the ${timeout_s}s deadline arrived`;
+              continue;
+            }
             if (!isTransient(err)) throw err;
             blocked = err instanceof Error ? err.message : String(err);
             await sleep(2000, extra.signal);
@@ -383,11 +403,22 @@ export const registerComputers: Registrar = (server, session, opts) => {
             // asked rather than waited for: a trivial exec either answers, or
             // refuses with the 409 that says the agent is not up yet.
             try {
-              await session.api.with(extra.signal).send('POST', P.computerAction(id, 'exec'), {
+              await api.send('POST', P.computerAction(id, 'exec'), {
                 body: P.execBody({ command: 'true', timeout_s: 5 }),
               });
               return said(`Guest is answering: ${describe(c)}`, withoutCredentials(c));
             } catch (err) {
+              // The same two deadlines as the status read above, and for the
+              // same reason: this catch used to judge the error alone, so a
+              // cancellation during the guest probe left the wait throwing what
+              // read as a platform outage instead of saying the caller had
+              // hung up. Half the loop knew to check the signal and half did
+              // not, which is the worse of the two ways to be inconsistent.
+              if (extra.signal?.aborted) return cancelled(id, last);
+              if (err instanceof CancelledError) {
+                blocked = `the guest probe was still in flight when the ${timeout_s}s deadline arrived`;
+                continue;
+              }
               if (!isTransient(err)) throw err;
             }
           }

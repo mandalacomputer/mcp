@@ -92,7 +92,13 @@ export const registerGuest: Registrar = (server, session) => {
         ...idArg,
         pid: z.number().int().describe('The pid exec returned.'),
       },
-      annotations: { readOnlyHint: true },
+      // Deliberately not readOnlyHint. It read as one — nothing is created and
+      // nothing is destroyed — but the annotation is the sentence directly
+      // above it, negated: a poll advances a cursor in the guest, so the bytes
+      // it returns are bytes no later poll can return. Clients treat the hint
+      // as licence to call without asking and to retry a call that timed out,
+      // and a retried "read-only" poll silently drops whatever the first
+      // attempt had already consumed.
     },
     ({ computer_id, pid }, extra) =>
       guarded(async () => {

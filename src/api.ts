@@ -1,4 +1,4 @@
-import { type APIError, errorForStatus, MandalaError } from './errors.js';
+import { type APIError, CancelledError, errorForStatus, MandalaError } from './errors.js';
 
 export const DEFAULT_BASE_URL = 'https://app.mandala.computer/api/v1';
 
@@ -48,6 +48,8 @@ export type SSEEvent = { event: string; data: unknown };
  */
 export class Api {
   readonly baseUrl: string;
+  /** The same thing parsed, so a path is joined onto the path and nothing else. */
+  readonly #base: URL;
   readonly #apiKey: string;
   readonly #headers: Record<string, string>;
   /** Applied to every request that does not carry one of its own. See `with`. */
@@ -65,13 +67,38 @@ export class Api {
     // not in the middle of a tool call, and not, as it was, from a startup log
     // line that threw after the transport had already come up and the client
     // was waiting on it.
+    let parsed: URL;
     try {
-      new URL(baseUrl);
+      parsed = new URL(baseUrl);
     } catch {
       throw new MandalaError(
         `not a valid base URL: ${baseUrl}. Set MANDALA_BASE_URL to an absolute http(s) URL, e.g. ${DEFAULT_BASE_URL}`,
       );
     }
+    // The scheme the message already promised. `new URL` alone accepts
+    // `file:`, `ftp:` and anything else with a colon in it, so a typo that
+    // parsed was carried all the way to a fetch that fails with something about
+    // the protocol — a message about the request, in a place that was supposed
+    // to be about the setting.
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+      throw new MandalaError(
+        `not an http(s) base URL: ${baseUrl}. Set MANDALA_BASE_URL to an absolute http(s) URL, e.g. ${DEFAULT_BASE_URL}`,
+      );
+    }
+    // Normalised as a URL rather than as a string. `${base}/${path}` looked
+    // equivalent and is not, because a base may carry a query — a tenant or an
+    // API version — and string concatenation appends the path *into* the search
+    // string: `https://h/api/v1?t=x` + `computers` is
+    // `https://h/api/v1?t=x/computers`, a request to /api/v1 with a nonsense
+    // parameter rather than to the route the tool asked for. The trailing-slash
+    // strip had the same blind spot, since the slash is no longer last.
+    parsed.hash = '';
+    parsed.pathname = parsed.pathname.replace(/\/+$/, '');
+    this.#base = parsed;
+    // Still the string that was given, minus the trailing slashes it was always
+    // stripped of — this is what error messages name and what `with` re-parses,
+    // and changing its spelling would change what a reader is told they
+    // configured.
     this.baseUrl = baseUrl.replace(/\/+$/, '');
     this.#apiKey = apiKey;
     this.#signal = signal;
@@ -99,7 +126,12 @@ export class Api {
   }
 
   #url(path: string, query?: RequestOptions['query']): string {
-    const url = new URL(`${this.baseUrl}/${path.replace(/^\/+/, '')}`);
+    const url = new URL(this.#base);
+    // Onto the path component, keeping whatever the base carried in its query.
+    // A base's own parameters are part of how it was addressed — a tenant, a
+    // version — and dropping them would send the request somewhere else just as
+    // surely as appending the path to them did.
+    url.pathname = `${url.pathname}/${path.replace(/^\/+/, '')}`;
     for (const [k, v] of Object.entries(query ?? {})) {
       if (v !== undefined) url.searchParams.set(k, String(v));
     }
@@ -123,15 +155,25 @@ export class Api {
       body = JSON.stringify(opts.body);
     }
 
+    const signal = opts.signal ?? this.#signal;
     let resp: Response;
     try {
-      resp = await fetch(this.#url(path, opts.query), {
-        method,
-        headers,
-        body,
-        signal: opts.signal ?? this.#signal,
-      });
+      resp = await fetch(this.#url(path, opts.query), { method, headers, body, signal });
     } catch (cause) {
+      // Cancellation first, because it is not a connectivity failure and the
+      // wrap below cannot tell the difference. An aborted fetch rejects with a
+      // bare `This operation was aborted`, so every cancelled tool call — and
+      // an MCP client's own 60s request timeout makes those routine — reported
+      // the platform as unreachable. Two readers were misled by that: the model,
+      // which retries a connectivity failure and does not retry a cancellation,
+      // and the wait loops, which had to test the signal themselves precisely
+      // because the message arriving here said nothing true about the cause.
+      if (isCancellation(cause, signal)) {
+        throw new CancelledError(
+          `${method} /${path.replace(/^\/+/, '')} was cancelled before the platform answered. ` +
+            'It may still have been received, so treat anything it would have changed as unknown rather than undone.',
+        );
+      }
       // Rewritten, because the raw one names the host and the failure a model
       // can act on is "the platform is not reachable", not a DNS error string.
       throw new MandalaError(
@@ -336,6 +378,22 @@ export class Api {
       await reader.cancel().catch(() => {});
     }
   }
+}
+
+/**
+ * Was this rejection the caller hanging up, rather than the network?
+ *
+ * The signal is the reliable half: `AbortSignal.abort(reason)` rejects the
+ * fetch with whatever reason was given, which may be any value at all, so the
+ * error alone cannot be relied on to say what happened. The name check is for
+ * the rest — `AbortSignal.timeout` raises `TimeoutError`, and a stream torn
+ * down mid-read raises `AbortError` without the signal this call was watching
+ * ever having fired.
+ */
+function isCancellation(cause: unknown, signal?: AbortSignal): boolean {
+  if (signal?.aborted) return true;
+  const name = (cause as { name?: string })?.name;
+  return name === 'AbortError' || name === 'TimeoutError';
 }
 
 /**
