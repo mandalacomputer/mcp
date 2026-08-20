@@ -139,6 +139,35 @@ export class OriginUnreachableError extends APIError {
   override name = 'OriginUnreachableError';
 }
 
+/**
+ * 520 — the platform answered a proxy with something it could not read.
+ *
+ * Sits between the other two and must not be filed with either, because the
+ * question a caller is really asking is whether their work happened, and this is
+ * the one status whose honest answer is "unknown".
+ *
+ * A 524 means the request arrived and is still being worked on. 521-523 mean it
+ * never arrived, so nothing was started. A 520 means it **did** arrive — the
+ * platform received it and then returned an empty, unknown or oversized
+ * response, so it may have been carried out in full, in part, or not at all, and
+ * the answer was lost rather than never produced.
+ *
+ * Which makes a blind retry the thing to be careful about, and a model the
+ * likeliest caller to attempt one. Re-sending a read costs nothing; re-sending a
+ * create can leave two computers where one was meant, both billable, on the
+ * strength of a failure that said the first never happened.
+ *
+ * It was filed with {@link OriginUnreachableError} at first, on the reading that
+ * the whole 52x range is the edge failing to reach the platform. It is not, and
+ * the message that came with it — "the request never arrived, so nothing was
+ * started" — was exactly the confident falsehood this work exists to remove,
+ * pointed the other way. Caught by a review of the Python SDK, which had
+ * inherited the same grouping from this file.
+ */
+export class OriginResponseError extends APIError {
+  override name = 'OriginResponseError';
+}
+
 const BY_STATUS: Record<number, typeof APIError> = {
   401: AuthenticationError,
   402: PlanLimitError,
@@ -147,7 +176,9 @@ const BY_STATUS: Record<number, typeof APIError> = {
   409: ConflictError,
   503: UnavailableError,
   504: GatewayTimeoutError,
-  520: OriginUnreachableError,
+  // NOT OriginUnreachableError, which is the trap in this range: 520 means the
+  // platform WAS reached and answered unreadably. See OriginResponseError.
+  520: OriginResponseError,
   521: OriginUnreachableError,
   522: OriginUnreachableError,
   523: OriginUnreachableError,
@@ -195,6 +226,15 @@ const GATEWAY_TIMEOUT_MESSAGE =
   'time and background: true with exec_poll is the way to run something slower. After ' +
   'one of those, the next call on that computer may report the guest agent as busy ' +
   'with the command that outlived the request';
+
+/** What a caller is told when the platform's own answer arrived unreadable. */
+const ORIGIN_RESPONSE_MESSAGE =
+  'the platform answered a proxy in front of it with something the proxy could not read — ' +
+  'an empty, unknown or oversized response. Unlike an unreachable origin, the request did ' +
+  'arrive: it may have been carried out in full, in part, or not at all, and it is the ' +
+  'answer that was lost rather than never produced. Retrying a read costs nothing; before ' +
+  'retrying anything that creates something — a computer, a snapshot — check whether the ' +
+  'first attempt took effect, or you may end up with two of it';
 
 /** What a caller is told when a proxy could not reach the platform at all. */
 const ORIGIN_UNREACHABLE_MESSAGE =
@@ -245,6 +285,13 @@ export function errorForStatus(status: number, message: string, body?: unknown):
   // own, and every one of them means the request never reached the platform —
   // so there is no reading on which a body carries the platform's account of
   // what happened, and nothing to defer to.
+  // Guarded, where the unreachable statuses below are not, and the difference is
+  // which of them the platform could have spoken through. A 520 is its own
+  // answer arriving mangled, so a body that parsed as this surface's JSON
+  // plausibly IS its account. On 521-526 it provably cannot be.
+  if (Cls === OriginResponseError && !platformNamed(body)) {
+    return new OriginResponseError(ORIGIN_RESPONSE_MESSAGE, status, body);
+  }
   if (Cls === OriginUnreachableError) {
     const said = TLS_STATUSES.has(status) ? ORIGIN_TLS_MESSAGE : ORIGIN_UNREACHABLE_MESSAGE;
     return new OriginUnreachableError(said, status, body);
@@ -265,6 +312,13 @@ export function isTransient(err: unknown): boolean {
     err instanceof ConflictError ||
     err instanceof UnavailableError ||
     err instanceof ConnectivityError ||
+    // 520 stays, and the reason is worth stating because the class next to it
+    // says a blind retry is the thing to be careful about. Both are true. A 520
+    // is unsafe to replay when the call CHANGED something; this list is read
+    // only by the wait tools, which poll `GET /computers/:id` and an `exec
+    // 'true'` probe, and replaying either costs nothing. The caution belongs to
+    // whoever retries a create — which is what OriginResponseError's message is
+    // for — not to a loop that only ever asks questions.
     (err instanceof APIError && [429, 502, 504, 520, 521, 522, 523].includes(err.status))
   );
 }
