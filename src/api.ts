@@ -1,3 +1,4 @@
+import { Agent, type Dispatcher } from 'undici';
 import {
   type APIError,
   CancelledError,
@@ -40,6 +41,15 @@ export type Bytes = {
  * until the process runs out of memory.
  */
 const MAX_SSE_BUFFER = 8 * 1024 * 1024;
+
+/**
+ * The longest guest exec waits 300 seconds before it answers. Node's bundled
+ * fetch also gives response headers 300 seconds by default, so the client can
+ * lose that race while the command is still finishing in the guest. Keep the
+ * public exec limit and give the platform enough time to report its timeout.
+ */
+export const PLATFORM_HEADERS_TIMEOUT_MS = 330_000;
+const PLATFORM_DISPATCHER = new Agent({ headersTimeout: PLATFORM_HEADERS_TIMEOUT_MS });
 
 /** One server-sent event off the agent route. */
 export type SSEEvent = { event: string; data: unknown };
@@ -168,7 +178,16 @@ export class Api {
     const signal = opts.signal ?? this.#signal;
     let resp: Response;
     try {
-      resp = await fetch(this.#url(path, opts.query), { method, headers, body, signal });
+      // `dispatcher` is Node/undici's extension to RequestInit. It is kept on
+      // a typed variable so the standard fetch signature can still be used.
+      const init: RequestInit & { dispatcher: Dispatcher } = {
+        method,
+        headers,
+        body,
+        signal,
+        dispatcher: PLATFORM_DISPATCHER,
+      };
+      resp = await fetch(this.#url(path, opts.query), init);
     } catch (cause) {
       // Cancellation first, because it is not a connectivity failure and the
       // wrap below cannot tell the difference. An aborted fetch rejects with a
@@ -343,7 +362,7 @@ export class Api {
       async () =>
         limit === undefined
           ? { bytes: new Uint8Array(await resp.arrayBuffer()), truncated: false }
-          : await readAtMost(resp, limit, declared),
+          : await readAtMost(resp, limit),
     );
     return {
       bytes,
@@ -371,6 +390,12 @@ export class Api {
       ...opts,
       headers: { ...opts.headers, Accept: 'text/event-stream' },
     });
+    const contentType = mediaType(resp.headers.get('content-type'));
+    if (contentType !== 'text/event-stream') {
+      throw new MandalaError(
+        `${method} ${path} expected text/event-stream, but the platform answered ${contentType}`,
+      );
+    }
     if (!resp.body) throw new MandalaError(`${method} ${path} answered with no body`);
 
     const reader = resp.body.getReader();
@@ -498,13 +523,14 @@ function contentLength(resp: Response): number | undefined {
  *
  * The files route may send 64 MiB while read_file can put only 256 KiB into a
  * conversation. `arrayBuffer()` paid for and retained the other 63.75 MiB just
- * to throw it away. A one-chunk lookahead is needed when Content-Length is
- * absent so a response of exactly `limit` bytes is not falsely called short.
+ * to throw it away. A one-chunk lookahead says whether a response of exactly
+ * `limit` bytes was clipped. It also verifies a declared oversize body really
+ * had more bytes: Content-Length is useful metadata, not proof that data was
+ * discarded.
  */
 async function readAtMost(
   resp: Response,
   limit: number,
-  declared: number | undefined,
 ): Promise<{ bytes: Uint8Array; truncated: boolean }> {
   if (!Number.isSafeInteger(limit) || limit < 0) {
     throw new MandalaError(`byte limit must be a non-negative integer, got ${limit}`);
@@ -514,7 +540,7 @@ async function readAtMost(
   const reader = resp.body.getReader();
   const chunks: Uint8Array[] = [];
   let length = 0;
-  let truncated = declared !== undefined && declared > limit;
+  let truncated = false;
   try {
     while (length < limit) {
       const { done, value } = await reader.read();
@@ -531,12 +557,8 @@ async function readAtMost(
     }
 
     if (length === limit && !truncated) {
-      if (declared !== undefined) {
-        truncated = declared > limit;
-      } else {
-        const next = await reader.read();
-        truncated = !next.done;
-      }
+      const next = await reader.read();
+      truncated = !next.done;
     }
   } finally {
     // Release the response on every exit, including a rejected read. On a

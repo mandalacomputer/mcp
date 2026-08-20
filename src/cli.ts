@@ -117,6 +117,16 @@ export function parse(argv: string[]): Flags {
 export const wantsHelp = (flags: Flags): boolean => Boolean(flags.help || flags.h);
 export const wantsVersion = (flags: Flags): boolean => Boolean(flags.version || flags.v);
 
+/** Whether lifecycle tools survive the flag/environment precedence rules. */
+export function lifecycleEnabled(flags: Flags, configured = env('MANDALA_NO_LIFECYCLE')): boolean {
+  // Presence is what establishes precedence. `--no-lifecycle=false` carries a
+  // false value deliberately and must not fall through to a true environment.
+  const disabled = Object.hasOwn(flags, 'no-lifecycle')
+    ? Boolean(flags['no-lifecycle'])
+    : configured === '1';
+  return !disabled;
+}
+
 /**
  * The port to listen on, or a refusal naming what was wrong with it.
  *
@@ -211,7 +221,7 @@ async function main(): Promise<void> {
     baseUrl: (str(flags['base-url'], 'base-url') ?? env('MANDALA_BASE_URL')) || DEFAULT_BASE_URL,
     computerId: str(flags.computer, 'computer') ?? env('MANDALA_COMPUTER_ID'),
     modelKey: env('MANDALA_MODEL_KEY'),
-    lifecycle: !(flags['no-lifecycle'] || env('MANDALA_NO_LIFECYCLE') === '1'),
+    lifecycle: lifecycleEnabled(flags),
   };
 
   if (flags.http) {
