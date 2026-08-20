@@ -22,12 +22,13 @@ import {
   wantsVersion,
 } from '../src/cli.js';
 import {
-  APIError,
+  type APIError,
   CancelledError,
   ConnectivityError,
   errorForStatus,
   GatewayTimeoutError,
   isTransient,
+  isTransientForPoll,
   OriginResponseError,
   OriginTLSError,
   OriginUnreachableError,
@@ -1648,10 +1649,13 @@ describe('a proxy giving up is not reported as a bare status', () => {
     expect(errorForStatus(520, 'HTTP 520', undefined).message).toMatch(/did arrive/);
   });
 
-  it('still lets a wait loop ride out a 520', () => {
-    // Unsafe to replay a create, safe to replay a poll — and this list is read
-    // only by the wait tools, which do nothing but poll.
-    expect(isTransient(errorForStatus(520, 'HTTP 520'))).toBe(true);
+  it('still lets a wait loop ride out a 520, and does not tell an embedder to', () => {
+    // Unsafe to replay a create, safe to replay a poll — so the two questions
+    // are two predicates. The wait tools ask the one that knows it only ever
+    // reads; isTransient is exported, so it answers for a caller who may be
+    // retrying a create and would get two billable computers for the trouble.
+    expect(isTransientForPoll(errorForStatus(520, 'HTTP 520'))).toBe(true);
+    expect(isTransient(errorForStatus(520, 'HTTP 520'))).toBe(false);
   });
 
   it('keeps the proxy error page on the error even though it never shows it', () => {
@@ -1712,25 +1716,35 @@ describe('a proxy giving up is not reported as a bare status', () => {
     expect(isTransient(errorForStatus(524, 'HTTP 524'))).toBe(false);
   });
 
-  it('hedges the exec advice, because a 504 reaches tools that have no background', () => {
-    // 504 is the retryable half, so a wait loop polls into it and replays the
-    // message verbatim in its give-up text. Told flatly to "re-run it with
-    // background: true and read the output with exec_poll", the caller of a
-    // wait_for_computer goes looking for a parameter that tool does not have
-    // and a pid there is none of.
-    const said = errorForStatus(504, 'HTTP 504').message;
-    expect(said).toMatch(/Most often that is a foreground exec/);
-    expect(said).not.toMatch(/Re-run it with/);
-    // The hedge has to reach the advice itself, not just the attribution in
-    // front of it. Every clause naming something only an exec has — timeout_s,
-    // background: true, exec_poll, the busy guest agent afterwards — sits
-    // downstream of "if this one was", so a wait_for_computer caller reads the
-    // condition, sees it does not hold, and stops. Asserted by position: the
-    // conditional opens before any of them.
-    const hedge = said.indexOf('if this one was');
+  it('keeps the ceiling on the status that has one, not on the class', () => {
+    // 504 and 524 share a class and cannot share this wording. The two-minute
+    // ceiling, "a larger timeout_s buys no time" and "background: true is what
+    // runs something slower" are facts about a 524. A 504 comes from any hop at
+    // no fixed deadline — an exec with timeout_s: 30 can take one after three
+    // seconds — so every one of those sentences is false there. Hedging on "if
+    // this was an exec" was the first attempt and did not fix it: the wrong
+    // half was the status, not the route.
+    const timedOut = errorForStatus(504, 'HTTP 504').message;
+    for (const ceiling of ['two minutes', 'timeout_s', 'background: true', 'exec_poll']) {
+      expect(timedOut).not.toMatch(ceiling);
+    }
+    // And it must not contradict the retry policy the same file publishes.
+    expect(isTransient(errorForStatus(504, 'HTTP 504'))).toBe(true);
+    expect(timedOut).toMatch(/the same call again is the move/);
+
+    // 524 keeps all of it, still hedged on the route, because a screenshot or a
+    // listing can meet the same ceiling and neither takes a timeout_s.
+    const ceiling = errorForStatus(524, 'HTTP 524').message;
+    expect(ceiling).toMatch(/about two minutes/);
+    expect(ceiling).not.toMatch(/Re-run it with/);
+    const hedge = ceiling.indexOf('if this one was');
     expect(hedge).toBeGreaterThan(-1);
     for (const advice of ['timeout_s', 'background: true', 'exec_poll', 'guest agent as busy']) {
-      expect(said.indexOf(advice)).toBeGreaterThan(hedge);
+      expect(ceiling.indexOf(advice)).toBeGreaterThan(hedge);
+    }
+    // Both halves still say the thing the whole class exists to say.
+    for (const said of [timedOut, ceiling]) {
+      expect(said).toMatch(/Nothing was cancelled/);
     }
   });
 });
@@ -1772,11 +1786,62 @@ describe('an edge that never reached the platform is not reported as a bare stat
     // certificate fails identically for the whole of one, so polling it just
     // spends the window to arrive at the same place.
     for (const status of [520, 521, 522, 523]) {
-      expect(isTransient(errorForStatus(status, `HTTP ${status}`))).toBe(true);
+      expect(isTransientForPoll(errorForStatus(status, `HTTP ${status}`))).toBe(true);
     }
     for (const status of [525, 526]) {
-      expect(isTransient(errorForStatus(status, `HTTP ${status}`))).toBe(false);
+      expect(isTransientForPoll(errorForStatus(status, `HTTP ${status}`))).toBe(false);
       expect(errorForStatus(status, `HTTP ${status}`).message).toMatch(/misconfigured/);
+    }
+  });
+
+  it('does not discard a message an operator’s own gateway wrote', () => {
+    // platformNamed does not ask whether the PLATFORM spoke — it asks whether
+    // anything did, because a hop in front of a self-hosted MANDALA_BASE_URL is
+    // one this server has never seen and cannot outrank. 521-526 substituted
+    // unconditionally on the reading that a 522 provably is not the platform:
+    // true, and the wrong test. A gateway that names its own fault knows more
+    // about that deployment than the generic outage prose here does.
+    const said = 'backend pool empty; scale the worker group';
+    for (const status of [521, 522, 523, 525, 526]) {
+      expect(errorForStatus(status, said, { error: said }).message).toBe(said);
+      // Still substituted when nothing structured came back, which is the case
+      // the substitution was written for.
+      expect(errorForStatus(status, `HTTP ${status}`).message).not.toBe(`HTTP ${status}`);
+    }
+  });
+
+  it('writes a message for a 502, the other status a proxy invents', () => {
+    // Left out of the mapping while its neighbours were added, so it fell
+    // through to a bare APIError — the model read `HTTP 502` or 500 characters
+    // of nginx's HTML, which is the failure this whole range exists to remove.
+    // It is in isTransient, so the wait tools reach it and replay whichever of
+    // those two it was into their give-up text.
+    const err = errorForStatus(502, 'HTTP 502');
+    expect(err).toBeInstanceOf(OriginResponseError);
+    expect(err.message).not.toBe('HTTP 502');
+    // And it must claim neither of the two things it cannot know. A 520 knows
+    // the request arrived; a 502 is that failure and the unreachable one at
+    // once, indistinguishable from here.
+    expect(err.message).not.toMatch(/did arrive/);
+    expect(err.message).not.toMatch(/nothing was started/);
+    expect(err.message).toMatch(/unknown/);
+    expect(err.message).toMatch(/check/);
+    expect(isTransient(err)).toBe(true);
+  });
+
+  it('keeps the exported retry policy off the statuses whose outcome is unknown', () => {
+    // The published contract, which an embedder wraps around calls this server
+    // knows nothing about. Widening it to the 52x range was safe for the wait
+    // loop and not for them: every one of these means the request may or may
+    // not have been carried out, so `if (isTransient(err)) retry()` around a
+    // create is how one computer becomes two.
+    for (const status of [520, 521, 522, 523, 525, 526]) {
+      expect(isTransient(errorForStatus(status, `HTTP ${status}`))).toBe(false);
+    }
+    // And the statuses it did cover before are still covered, so nothing that
+    // was retryable for an embedder quietly stopped being so.
+    for (const status of [409, 429, 502, 503, 504]) {
+      expect(isTransient(errorForStatus(status, `HTTP ${status}`))).toBe(true);
     }
   });
 

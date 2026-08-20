@@ -116,7 +116,12 @@ export class GatewayTimeoutError extends APIError {
 }
 
 /**
- * 520-523, 525, 526 — a proxy in front of the platform could not reach it.
+ * 521-523 — a proxy in front of the platform could not reach it.
+ *
+ * The range this once claimed — 520-523, 525, 526 — is the range before the two
+ * statuses that needed their own answers were split out of it: 520 to
+ * {@link OriginResponseError}, because the platform WAS reached, and 525-526 to
+ * {@link OriginTLSError}, because waiting does not fix a certificate.
  *
  * The rest of what an edge generates on its own, and the same bug as
  * {@link GatewayTimeoutError} a few statuses along: with no class and no written
@@ -140,11 +145,17 @@ export class OriginUnreachableError extends APIError {
 }
 
 /**
- * 520 — the platform answered a proxy with something it could not read.
+ * 502, 520 — a proxy had no usable answer from the platform.
  *
  * Sits between the other two and must not be filed with either, because the
- * question a caller is really asking is whether their work happened, and this is
- * the one status whose honest answer is "unknown".
+ * question a caller is really asking is whether their work happened, and these
+ * are the statuses whose honest answer is "unknown".
+ *
+ * One class, two messages, because the two do not know the same amount. A 520 is
+ * Cloudflare naming its origin's reply unreadable, so arrival is established. A
+ * 502 is any proxy saying it has nothing it can use, which covers both an
+ * invalid reply and no reply at all — indistinguishable from here, so it claims
+ * neither. See BAD_GATEWAY_MESSAGE.
  *
  * A 524 means the request arrived and is still being worked on. 521-523 mean it
  * never arrived, so nothing was started. A 520 means it **did** arrive — the
@@ -193,6 +204,14 @@ const BY_STATUS: Record<number, typeof APIError> = {
   403: PermissionDeniedError,
   404: NotFoundError,
   409: ConflictError,
+  // The other status a proxy writes on its own, and it was the one gap left in
+  // this range: with no entry it fell through to a bare APIError, so a model
+  // read `HTTP 502` or 500 characters of nginx's HTML — the exact failure the
+  // statuses below exist to remove. It is also in isTransient, which means the
+  // wait tools reach it and replay whichever of those two it was into their
+  // give-up text. Filed with 520 because the honest answer is the same one:
+  // unknown. See BAD_GATEWAY_MESSAGE for why it is not filed with 521-523.
+  502: OriginResponseError,
   503: UnavailableError,
   504: GatewayTimeoutError,
   // NOT OriginUnreachableError, which is the trap in this range: 520 means the
@@ -220,24 +239,55 @@ const BY_STATUS: Record<number, typeof APIError> = {
  * culprit and no way out, and whose obvious next move is a retry that fails
  * identically.
  *
- * Worded for any route, and the exec sentence hedged, because any of them can
- * end here. A 504 in particular is the retryable half of this pair, so the wait
- * tools reach it while polling and replay it in their give-up text — telling the
- * caller of a `wait_for_computer` to re-run with `background: true` and read the
- * output with `exec_poll` would send them after a parameter that tool does not
- * have. Same for a screenshot or a listing that meets the ceiling.
+ * Two statuses share this class and must NOT share all of this wording, which is
+ * why the text is built per status rather than written once. The ceiling — about
+ * two minutes, a larger `timeout_s` buying no time, `background: true` as the
+ * shape that survives it — is a fact about a 524 specifically. A 504 comes from
+ * any hop that gave up early, at no fixed deadline, and {@link isTransient} says
+ * it is worth retrying unchanged; telling its caller that retrying buys no time
+ * contradicts that and is false besides. Hedging on "if this was an exec" does
+ * not fix it, because the wrong half is the status, not the route.
  */
-const GATEWAY_TIMEOUT_MESSAGE =
+const GATEWAY_TIMEOUT_SHARED =
   'a proxy in front of the platform gave up waiting for it to answer. Nothing was ' +
   'cancelled: the platform never saw this deadline, so anything this request had already ' +
-  'set going carries on without it — usually it has the request and is still working, ' +
-  'though a 504 can come from a hop that never reached it. Most often that is a ' +
-  'foreground exec, and if this one was, it ended ' +
-  'this way after about two minutes however large a timeout_s it was given — the ' +
-  'ceiling belongs to the proxy, not to the platform, so on that route a larger ' +
-  'timeout_s buys no time, background: true with exec_poll is what runs something ' +
-  'slower, and the next call on that computer may report the guest agent as busy ' +
-  'with the command that outlived the request';
+  'set going carries on without it';
+
+/**
+ * The 524 tail: the ceiling, and what it means for the route that meets it most.
+ *
+ * Still hedged on the route, because a screenshot or a listing can meet the same
+ * ceiling and neither takes a `timeout_s` — the wait tools do not reach a 524 at
+ * all, which is the other half of why this is safe to say here and was not safe
+ * to say for a 504.
+ */
+const GATEWAY_TIMEOUT_CEILING =
+  ' — usually it has the request and is still working. Most often that is a foreground ' +
+  'exec, and if this one was, it ended this way after about two minutes however large a ' +
+  'timeout_s it was given: the ceiling belongs to the proxy, not to the platform, so on ' +
+  'that route a larger timeout_s buys no time, background: true with exec_poll is what ' +
+  'runs something slower, and the next call on that computer may report the guest agent ' +
+  'as busy with the command that outlived the request';
+
+/**
+ * The 504 tail: no ceiling, no route-specific advice, and retrying is the move.
+ *
+ * A 504 can be raised by any hop, including one that never reached the platform,
+ * so it cannot promise the work is running the way a 524 can.
+ */
+const GATEWAY_TIMEOUT_TRANSIENT =
+  ', though a 504 can also come from a hop that never reached it, so whether the work is ' +
+  'running is not knowable from here. No fixed deadline was hit and nothing about the ' +
+  'request needs changing: this usually clears, and the same call again is the move — ' +
+  'check before repeating anything that creates something, since the first attempt may ' +
+  'yet have landed';
+
+/** The message for a gateway timeout, with only the half its status can support. */
+function gatewayTimeoutMessage(status: number): string {
+  return (
+    GATEWAY_TIMEOUT_SHARED + (status === 524 ? GATEWAY_TIMEOUT_CEILING : GATEWAY_TIMEOUT_TRANSIENT)
+  );
+}
 
 /** What a caller is told when the platform's own answer arrived unreadable. */
 const ORIGIN_RESPONSE_MESSAGE =
@@ -247,6 +297,25 @@ const ORIGIN_RESPONSE_MESSAGE =
   'been carried out in full, in part, or not at all. Retrying a read costs nothing; before ' +
   'retrying anything that creates something — a computer, a snapshot — check whether the ' +
   'first attempt took effect, or you may end up with two of it';
+
+/**
+ * What a caller is told for a 502, which is the two failures either side of it.
+ *
+ * Not ORIGIN_RESPONSE_MESSAGE, though it shares that class. A 520 is Cloudflare
+ * saying the origin answered unreadably, so "the request did arrive" is known.
+ * A 502 is any proxy saying it has no usable answer, and the two reasons —
+ * upstream replied with something invalid, upstream could not be reached — are
+ * indistinguishable from the outside. Asserting arrival would be the same shape
+ * of confident falsehood as the "nothing was started" this branch removed from
+ * 520, pointed the other way, so this says the one true thing instead.
+ */
+const BAD_GATEWAY_MESSAGE =
+  'a proxy in front of the platform had no usable answer from it — either the platform ' +
+  'replied with something the proxy could not read, or it could not be reached at all, ' +
+  'and which of those happened is not visible from here. So whether the request arrived ' +
+  'is unknown, and with it whether the work was done: retrying a read costs nothing, but ' +
+  'before retrying anything that creates something — a computer, a snapshot — check ' +
+  'whether the first attempt took effect. Usually this is a passing outage that clears';
 
 /** What a caller is told when a proxy could not reach the platform at all. */
 const ORIGIN_UNREACHABLE_MESSAGE =
@@ -293,20 +362,30 @@ export function errorForStatus(status: number, message: string, body?: unknown):
   // Substituted for an empty body, which says nothing, and for a proxy's HTML
   // page, which says 500 characters of nothing. NOT for a structured message:
   // that is the one case where the response knows more than this file does.
+  //
+  // The same guard on every branch below, because platformNamed already settles
+  // the question they were once split over. Two of these used to substitute
+  // unconditionally, on the reading that a 521-526 cannot carry the platform's
+  // account of itself — true, and beside the point. platformNamed does not ask
+  // whether the PLATFORM spoke; it asks whether anything did, precisely because
+  // a hop in front of a self-hosted MANDALA_BASE_URL is a hop this server has
+  // never seen and cannot outrank. An operator's own gateway answering 522 with
+  // `{"error":"backend pool empty; scale the worker group"}` knows more about
+  // that deployment than the generic outage prose here does, and discarding it
+  // was the very thing the 504 and 520 guards exist to prevent.
   if (Cls === GatewayTimeoutError && !platformNamed(body)) {
-    return new GatewayTimeoutError(GATEWAY_TIMEOUT_MESSAGE, status, body);
+    return new GatewayTimeoutError(gatewayTimeoutMessage(status), status, body);
   }
-  // Guarded, where the unreachable statuses below are not, and the difference is
-  // which of them the platform could have spoken through. A 520 is its own
-  // answer arriving mangled, so a body that parsed as this surface's JSON
-  // plausibly IS its account. On 521-526 it provably cannot be.
   if (Cls === OriginResponseError && !platformNamed(body)) {
-    return new OriginResponseError(ORIGIN_RESPONSE_MESSAGE, status, body);
+    // 502 and 520 share a class and not a message: one knows the request
+    // arrived, the other cannot tell. See BAD_GATEWAY_MESSAGE.
+    const said = status === 502 ? BAD_GATEWAY_MESSAGE : ORIGIN_RESPONSE_MESSAGE;
+    return new OriginResponseError(said, status, body);
   }
-  if (Cls === OriginTLSError) {
+  if (Cls === OriginTLSError && !platformNamed(body)) {
     return new OriginTLSError(ORIGIN_TLS_MESSAGE, status, body);
   }
-  if (Cls === OriginUnreachableError) {
+  if (Cls === OriginUnreachableError && !platformNamed(body)) {
     return new OriginUnreachableError(ORIGIN_UNREACHABLE_MESSAGE, status, body);
   }
   return new Cls(message, status, body);
@@ -319,19 +398,43 @@ export function errorForStatus(status: number, message: string, body?: unknown):
  * on a caller's behalf. Everything else surfaces the refusal, because a model
  * that can read "the guest agent is not answering yet (the computer may still be
  * booting)" is better placed to decide than a fixed policy is.
+ *
+ * Exported, and therefore a contract with embedders rather than a private note
+ * to this file — which is the whole reason it is narrower than
+ * {@link isTransientForPoll}. A host application wrapping `create_computer` in
+ * `if (isTransient(err)) retry()` is the caller this list has to be safe for,
+ * and the 52x statuses are not safe for it: 520-523 mean the outcome is unknown,
+ * so replaying a create can leave two billable computers behind a failure that
+ * looked like nothing happened.
+ *
+ * "Worth trying again" is not "the call definitely did not happen", and no
+ * predicate taking only an error can tell you the second. Even here, a 502 or a
+ * 504 can arrive after the platform has already acted — so retry reads freely,
+ * and check before repeating anything that creates something.
  */
 export function isTransient(err: unknown): boolean {
   return (
     err instanceof ConflictError ||
     err instanceof UnavailableError ||
     err instanceof ConnectivityError ||
-    // 520 stays, and the reason is worth stating because the class next to it
-    // says a blind retry is the thing to be careful about. Both are true. A 520
-    // is unsafe to replay when the call CHANGED something; this list is read
-    // only by the wait tools, which poll `GET /computers/:id` and an `exec
-    // 'true'` probe, and replaying either costs nothing. The caution belongs to
-    // whoever retries a create — which is what OriginResponseError's message is
-    // for — not to a loop that only ever asks questions.
-    (err instanceof APIError && [429, 502, 504, 520, 521, 522, 523].includes(err.status))
+    (err instanceof APIError && [429, 502, 504].includes(err.status))
   );
+}
+
+/**
+ * The same question, asked by a loop that only ever reads.
+ *
+ * Deliberately not exported from the package. The wait tools poll
+ * `GET /computers/:id` and an `exec 'true'` probe, and replaying either costs
+ * nothing, so they can ride out the statuses whose outcome is unknown — a 52x
+ * during a boot wait is an outage to sit through, not a reason to fail a caller
+ * who asked to wait. That reasoning is a property of what those two calls DO,
+ * not of the error, which is exactly why it cannot be published as one: the same
+ * `true` handed to an embedder retrying a create means something else entirely.
+ *
+ * 525 and 526 stay out. A TLS handshake that fails once fails identically on
+ * every retry, so waiting on one only spends the caller's deadline.
+ */
+export function isTransientForPoll(err: unknown): boolean {
+  return isTransient(err) || (err instanceof APIError && [520, 521, 522, 523].includes(err.status));
 }
