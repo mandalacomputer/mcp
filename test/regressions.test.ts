@@ -21,11 +21,26 @@ import {
   wantsHelp,
   wantsVersion,
 } from '../src/cli.js';
-import { CancelledError, ConnectivityError, errorForStatus, isTransient } from '../src/errors.js';
+import {
+  type APIError,
+  CancelledError,
+  ConnectivityError,
+  errorForStatus,
+  GatewayTimeoutError,
+  isTransient,
+  isTransientForPoll,
+  OriginResponseError,
+  OriginTLSError,
+  OriginUnreachableError,
+} from '../src/errors.js';
 import { failed, MAX_INLINE_IMAGE_BYTES, unwrapComputer } from '../src/format.js';
 import {
   CancelledError as PublicCancelledError,
   ConnectivityError as PublicConnectivityError,
+  GatewayTimeoutError as PublicGatewayTimeoutError,
+  OriginResponseError as PublicOriginResponseError,
+  OriginTLSError as PublicOriginTLSError,
+  OriginUnreachableError as PublicOriginUnreachableError,
 } from '../src/index.js';
 import * as P from '../src/paths.js';
 import { windowBody } from '../src/paths.js';
@@ -1580,10 +1595,279 @@ describe('background process handles', () => {
   });
 });
 
+describe('a proxy giving up is not reported as a bare status', () => {
+  it('names the ceiling, the survivor, and the way out', () => {
+    // Cloudflare content-negotiates its error page, and every request from this
+    // server asks for JSON, so the 524 arrives with an EMPTY body — which left
+    // Api's fallback message as the bare string 'HTTP 524'.
+    const err = errorForStatus(524, 'HTTP 524');
+    expect(err).toBeInstanceOf(GatewayTimeoutError);
+    expect(err.status).toBe(524);
+    expect(err.message).toMatch(/proxy/);
+    expect(err.message).toMatch(/outlived the request/);
+    expect(err.message).toMatch(/background: true/);
+  });
+
+  it('keeps a structured message rather than overwriting it', () => {
+    // The substitution is for a body that said nothing, not for every 504. A
+    // gateway status can be raised by any proxy in the chain, and one that
+    // speaks JSON has said something more specific than this file can.
+    const err = errorForStatus(504, 'upstream unavailable before dispatch', {
+      error: 'upstream unavailable before dispatch',
+    });
+    expect(err).toBeInstanceOf(GatewayTimeoutError);
+    expect(err.message).toBe('upstream unavailable before dispatch');
+  });
+
+  it('still substitutes when the body is empty or is a proxy page', () => {
+    expect(errorForStatus(524, 'HTTP 524').message).toMatch(/proxy/);
+    expect(errorForStatus(524, 'HTTP 524', {}).message).toMatch(/proxy/);
+    expect(errorForStatus(524, 'HTTP 524', { error: '' }).message).toMatch(/proxy/);
+    expect(errorForStatus(524, 'HTTP 524', { error: 42 }).message).toMatch(/proxy/);
+    expect(errorForStatus(524, '<!DOCTYPE html>', '<!DOCTYPE html>').message).toMatch(/proxy/);
+  });
+
+  it('does not tell a 520 that its work never happened', () => {
+    // Cloudflare returns 520 when the origin DID receive the request and
+    // answered unreadably. Filed with the unreachable statuses it inherited
+    // "the request never arrived, so nothing was started" — said to a create
+    // that may have just made a billable computer.
+    const err = errorForStatus(520, 'HTTP 520');
+    expect(err).toBeInstanceOf(OriginResponseError);
+    expect(err).not.toBeInstanceOf(OriginUnreachableError);
+    expect(err.message).not.toMatch(/never arrived/);
+    expect(err.message).toMatch(/did arrive/);
+    expect(err.message).toMatch(/creates something/);
+  });
+
+  it('keeps a 520 body the platform may itself have written', () => {
+    // As Api calls it: the message is already lifted from the body's `error`,
+    // and the question is only whether this file then replaces it.
+    const said = 'the hypervisor closed the connection';
+    expect(errorForStatus(520, said, { error: said }).message).toBe(said);
+    // And still substitutes when nothing structured came back.
+    expect(errorForStatus(520, 'HTTP 520', undefined).message).toMatch(/did arrive/);
+  });
+
+  it('still lets a wait loop ride out a 520, and does not tell an embedder to', () => {
+    // Unsafe to replay a create, safe to replay a poll — so the two questions
+    // are two predicates. The wait tools ask the one that knows it only ever
+    // reads; isTransient is exported, so it answers for a caller who may be
+    // retrying a create and would get two billable computers for the trouble.
+    expect(isTransientForPoll(errorForStatus(520, 'HTTP 520'))).toBe(true);
+    expect(isTransient(errorForStatus(520, 'HTTP 520'))).toBe(false);
+  });
+
+  it('keeps the proxy error page on the error even though it never shows it', () => {
+    // The page is the wrong thing to put in front of a model and the right
+    // thing to still have: the Ray ID support asks for is in that HTML and
+    // nowhere else, and substituting the message was dropping it.
+    const page = '<html><body>error code: 522 Ray ID: 8f2a1c</body></html>';
+    const err = errorForStatus(522, page, page);
+    expect(err.message).not.toMatch(/Ray ID/);
+    expect(String(err.body)).toMatch(/8f2a1c/);
+  });
+
+  it('keeps the whole page, not the 500 characters the message was cut to', async () => {
+    // The test above calls errorForStatus directly with a page short enough to
+    // survive any truncation, so it cannot see this: Api slices the page to 500
+    // for the message, and stashing that slice instead of the text kept only
+    // the opening tags. A real Cloudflare 52x page runs to several KB with the
+    // Ray ID in the footer, which is to say past the cut, which is to say the
+    // one field the stash exists for was the one field it dropped.
+    const page =
+      `<!DOCTYPE html><html><head><title>522: Connection timed out</title></head><body>` +
+      `<!-- ${'padding '.repeat(200)} -->` +
+      `<div class="footer">Ray ID: 8f2a1c9d4e7b0000</div></body></html>`;
+    expect(page.indexOf('8f2a1c9d4e7b0000')).toBeGreaterThan(500);
+    const real = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      new Response(page, {
+        status: 522,
+        headers: { 'Content-Type': 'text/html' },
+      })) as typeof fetch;
+    try {
+      const err = await new Api('com_test', BASE).json('GET', 'computers').then(
+        () => null,
+        (e: unknown) => e as APIError,
+      );
+      expect(err).toBeInstanceOf(OriginUnreachableError);
+      expect(err?.message).not.toMatch(/Ray ID/);
+      expect(String(err?.body)).toMatch(/8f2a1c9d4e7b0000/);
+    } finally {
+      globalThis.fetch = real;
+    }
+  });
+
+  it('discards the proxy error page rather than truncating it into the message', () => {
+    const html = '<!DOCTYPE html><html><body>error code: 524</body></html>';
+    expect(errorForStatus(524, html).message).not.toMatch(/DOCTYPE/);
+  });
+
+  it('reaches the model as a readable failure, not a status line', () => {
+    expect(said(failed(errorForStatus(524, 'HTTP 524')))).toMatch(/proxy.*\(HTTP 524\)/s);
+  });
+
+  it('keeps 504 retryable and 524 not', () => {
+    // Same class, different answer, and the split is by where each is reachable
+    // from: the wait tools poll with short requests, where a 504 is a blip. A
+    // 524 is only reached past the ceiling, where retrying reproduces it.
+    expect(isTransient(errorForStatus(504, 'HTTP 504'))).toBe(true);
+    expect(isTransient(errorForStatus(524, 'HTTP 524'))).toBe(false);
+  });
+
+  it('keeps the ceiling on the status that has one, not on the class', () => {
+    // 504 and 524 share a class and cannot share this wording. The two-minute
+    // ceiling, "a larger timeout_s buys no time" and "background: true is what
+    // runs something slower" are facts about a 524. A 504 comes from any hop at
+    // no fixed deadline — an exec with timeout_s: 30 can take one after three
+    // seconds — so every one of those sentences is false there. Hedging on "if
+    // this was an exec" was the first attempt and did not fix it: the wrong
+    // half was the status, not the route.
+    const timedOut = errorForStatus(504, 'HTTP 504').message;
+    for (const ceiling of ['two minutes', 'timeout_s', 'background: true', 'exec_poll']) {
+      expect(timedOut).not.toMatch(ceiling);
+    }
+    // And it must not contradict the retry policy the same file publishes.
+    expect(isTransient(errorForStatus(504, 'HTTP 504'))).toBe(true);
+    expect(timedOut).toMatch(/the same call again is the move/);
+
+    // 524 keeps all of it, still hedged on the route, because a screenshot or a
+    // listing can meet the same ceiling and neither takes a timeout_s.
+    const ceiling = errorForStatus(524, 'HTTP 524').message;
+    expect(ceiling).toMatch(/about two minutes/);
+    expect(ceiling).not.toMatch(/Re-run it with/);
+    const hedge = ceiling.indexOf('if this one was');
+    expect(hedge).toBeGreaterThan(-1);
+    for (const advice of ['timeout_s', 'background: true', 'exec_poll', 'guest agent as busy']) {
+      expect(ceiling.indexOf(advice)).toBeGreaterThan(hedge);
+    }
+    // Both halves still say the thing the whole class exists to say.
+    for (const said of [timedOut, ceiling]) {
+      expect(said).toMatch(/Nothing was cancelled/);
+    }
+  });
+});
+
+describe('an edge that never reached the platform is not reported as a bare status', () => {
+  // 520 is deliberately absent: it means the platform WAS reached and answered
+  // unreadably, so it is neither this nor a gateway timeout. See its own tests.
+  it.each([521, 522, 523])('writes a message for HTTP %s', (status) => {
+    // The same bug as the 524 above, a few statuses along: these fell through
+    // to Api's fallback and left the model reading `HTTP 522`.
+    const err = errorForStatus(status, `HTTP ${status}`);
+    expect(err).toBeInstanceOf(OriginUnreachableError);
+    expect(err.status).toBe(status);
+    expect(err.message).not.toMatch(/^HTTP /);
+    expect(err.message).toMatch(/could not reach it/);
+  });
+
+  it.each([525, 526])('gives HTTP %s its own class, not the unreachable one', (status) => {
+    // Same retry answer isTransient already gave by number, now visible in the
+    // type: an unreachable origin is a passing outage, a certificate is not.
+    const err = errorForStatus(status, `HTTP ${status}`);
+    expect(err).toBeInstanceOf(OriginTLSError);
+    expect(err).not.toBeInstanceOf(OriginUnreachableError);
+    expect(err.message).toMatch(/TLS handshake/);
+    expect(isTransient(err)).toBe(false);
+  });
+
+  it('says nothing survived, which is the opposite of what a 524 says', () => {
+    // Worth pinning as a pair. A 524 means the request arrived and its work
+    // carries on; these mean it never arrived. A caller reading either to
+    // decide whether to expect a busy guest agent next must get opposite
+    // answers, so the two messages must not converge.
+    expect(errorForStatus(522, 'HTTP 522').message).toMatch(/nothing was started/);
+    expect(errorForStatus(524, 'HTTP 524').message).toMatch(/carries on without it/);
+  });
+
+  it('retries an origin that is down but not a handshake that will not agree', () => {
+    // An origin restart clears within a wait window. An expired or mismatched
+    // certificate fails identically for the whole of one, so polling it just
+    // spends the window to arrive at the same place.
+    for (const status of [520, 521, 522, 523]) {
+      expect(isTransientForPoll(errorForStatus(status, `HTTP ${status}`))).toBe(true);
+    }
+    for (const status of [525, 526]) {
+      expect(isTransientForPoll(errorForStatus(status, `HTTP ${status}`))).toBe(false);
+      expect(errorForStatus(status, `HTTP ${status}`).message).toMatch(/misconfigured/);
+    }
+  });
+
+  it('does not discard a message an operator’s own gateway wrote', () => {
+    // platformNamed does not ask whether the PLATFORM spoke — it asks whether
+    // anything did, because a hop in front of a self-hosted MANDALA_BASE_URL is
+    // one this server has never seen and cannot outrank. 521-526 substituted
+    // unconditionally on the reading that a 522 provably is not the platform:
+    // true, and the wrong test. A gateway that names its own fault knows more
+    // about that deployment than the generic outage prose here does.
+    const said = 'backend pool empty; scale the worker group';
+    for (const status of [521, 522, 523, 525, 526]) {
+      expect(errorForStatus(status, said, { error: said }).message).toBe(said);
+      // Still substituted when nothing structured came back, which is the case
+      // the substitution was written for.
+      expect(errorForStatus(status, `HTTP ${status}`).message).not.toBe(`HTTP ${status}`);
+    }
+  });
+
+  it('writes a message for a 502, the other status a proxy invents', () => {
+    // Left out of the mapping while its neighbours were added, so it fell
+    // through to a bare APIError — the model read `HTTP 502` or 500 characters
+    // of nginx's HTML, which is the failure this whole range exists to remove.
+    // It is in isTransient, so the wait tools reach it and replay whichever of
+    // those two it was into their give-up text.
+    const err = errorForStatus(502, 'HTTP 502');
+    expect(err).toBeInstanceOf(OriginResponseError);
+    expect(err.message).not.toBe('HTTP 502');
+    // And it must claim neither of the two things it cannot know. A 520 knows
+    // the request arrived; a 502 is that failure and the unreachable one at
+    // once, indistinguishable from here.
+    expect(err.message).not.toMatch(/did arrive/);
+    expect(err.message).not.toMatch(/nothing was started/);
+    expect(err.message).toMatch(/unknown/);
+    expect(err.message).toMatch(/check/);
+    expect(isTransient(err)).toBe(true);
+  });
+
+  it('keeps the exported retry policy off the statuses whose outcome is unknown', () => {
+    // The published contract, which an embedder wraps around calls this server
+    // knows nothing about. Widening it to the 52x range was safe for the wait
+    // loop and not for them: every one of these means the request may or may
+    // not have been carried out, so `if (isTransient(err)) retry()` around a
+    // create is how one computer becomes two.
+    for (const status of [520, 521, 522, 523, 525, 526]) {
+      expect(isTransient(errorForStatus(status, `HTTP ${status}`))).toBe(false);
+    }
+    // And the statuses it did cover before are still covered, so nothing that
+    // was retryable for an embedder quietly stopped being so.
+    for (const status of [409, 429, 502, 503, 504]) {
+      expect(isTransient(errorForStatus(status, `HTTP ${status}`))).toBe(true);
+    }
+  });
+
+  it('discards the proxy error page rather than truncating it into the message', () => {
+    const html = '<!DOCTYPE html><html><body>error code: 522</body></html>';
+    expect(errorForStatus(522, html).message).not.toMatch(/DOCTYPE/);
+  });
+});
+
 describe('the public error surface', () => {
   it('exports both non-HTTP errors thrown by Api', () => {
     expect(PublicCancelledError).toBe(CancelledError);
     expect(PublicConnectivityError).toBe(ConnectivityError);
+  });
+
+  it('exports the edge errors an embedder would want to branch on', () => {
+    // A host application embedding this server catches by class, and these are
+    // the ones whose handling differs most: a gateway timeout leaves work
+    // running behind it, an unreachable origin leaves none, and the other two
+    // say where the exchange broke. Every class this branch adds to the public
+    // surface is pinned, so dropping any one export line fails here rather
+    // than silently narrowing what an embedder can catch.
+    expect(PublicGatewayTimeoutError).toBe(GatewayTimeoutError);
+    expect(PublicOriginResponseError).toBe(OriginResponseError);
+    expect(PublicOriginTLSError).toBe(OriginTLSError);
+    expect(PublicOriginUnreachableError).toBe(OriginUnreachableError);
   });
 
   it('does not repeat an empty HTTP error status', () => {
