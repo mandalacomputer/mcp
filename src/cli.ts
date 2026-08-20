@@ -34,6 +34,20 @@ Flags override the environment.`;
 type Flags = Record<string, string | boolean>;
 
 /**
+ * The flags that are a yes-or-no and never take a value.
+ *
+ * Without this list every flag eats the next token, so `--http false` sets
+ * `http` to the string "false" — which is truthy, and starts the HTTP server
+ * the user just said they did not want. `--no-lifecycle false` withheld the
+ * lifecycle tools for the same reason. A flag that means "on" is on by being
+ * present, and anything following it is the next argument, not its value.
+ */
+const BOOLEAN = new Set(['help', 'h', 'version', 'v', 'http', 'no-lifecycle']);
+
+/** What `--http=…` may say to mean no. */
+const FALSEY = new Set(['false', '0', 'no', 'off']);
+
+/**
  * argv into flags.
  *
  * Exported for the tests, which is worth one line of surface: this is the one
@@ -44,6 +58,16 @@ export function parse(argv: string[]): Flags {
   const flags: Flags = {};
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
+    // Single-dash short forms, for the two that every CLI is expected to
+    // answer. Skipping anything without a `--` meant `-h` fell through to a
+    // normal startup and exited 2 with "No API key" — the one message least
+    // like the help that was asked for. Only these two: a general short-flag
+    // grammar would have to guess which take values, and none of the rest here
+    // has a short form to guess about.
+    if (arg === '-h' || arg === '-v') {
+      flags[arg === '-h' ? 'help' : 'version'] = true;
+      continue;
+    }
     if (!arg.startsWith('--')) continue;
     // Split at the first `=`, not with `split('=', 2)` — the limit argument
     // discards the remainder rather than keeping it, so `--key=com_a=b` would
@@ -53,7 +77,12 @@ export function parse(argv: string[]): Flags {
     const eq = body.indexOf('=');
     const name = eq < 0 ? body : body.slice(0, eq);
     const inline = eq < 0 ? undefined : body.slice(eq + 1);
-    if (inline !== undefined) flags[name] = inline;
+    // `--http=false` has to mean false. It is the one spelling that carries an
+    // explicit answer, and reading it as the truthy string "false" would turn
+    // the clearest way to say no into a yes.
+    if (BOOLEAN.has(name))
+      flags[name] = inline === undefined ? true : !FALSEY.has(inline.toLowerCase());
+    else if (inline !== undefined) flags[name] = inline;
     else if (argv[i + 1] && !argv[i + 1].startsWith('--')) flags[name] = argv[++i];
     else flags[name] = true;
   }

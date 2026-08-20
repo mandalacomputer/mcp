@@ -296,15 +296,6 @@ export class Api {
         // as the blank line that ends an event — so a frame gets cut in half at
         // a boundary that was never in the stream.
         buffer += decoder.decode(value, { stream: true });
-        // A stream that never sends a boundary is buffered forever otherwise:
-        // the trim below only runs when the separator matches, so a malformed
-        // or hostile event stream is an unbounded allocation held by a tool
-        // call nobody can see. Refused with the size, which says what happened.
-        if (buffer.length > MAX_SSE_BUFFER) {
-          throw new MandalaError(
-            `${method} ${path} sent ${buffer.length} characters with no event boundary; giving up rather than buffering the rest of the stream.`,
-          );
-        }
         // Events are separated by a blank line, in whichever of the three
         // terminators the sender chose: the spec allows CRLF, LF and lone CR,
         // and a proxy that reframes the stream is entitled to any of them.
@@ -321,7 +312,24 @@ export class Api {
           const parsed = parseEvent(chunk);
           if (parsed) yield parsed;
         }
+        // Checked on what the drain could not consume, not on what arrived. A
+        // stream that never sends a boundary is buffered forever otherwise:
+        // this only bounds the unparseable remainder, so a single read that
+        // happens to carry more than the limit in well-formed, boundary-
+        // separated events is no longer mistaken for one giant event and the
+        // message stays true to what it says — no boundary was found in this.
+        if (buffer.length > MAX_SSE_BUFFER) {
+          throw new MandalaError(
+            `${method} ${path} sent ${buffer.length} characters with no event boundary; giving up rather than buffering the rest of the stream.`,
+          );
+        }
       }
+      // Flushed before the tail is parsed. Every chunk decodes with
+      // `{stream: true}`, which holds an incomplete multi-byte sequence back
+      // for the next read; on a stream that ends mid-character those bytes are
+      // simply dropped without this, rather than surfacing as the replacement
+      // character that says something was lost.
+      buffer += decoder.decode();
       const tail = parseEvent(buffer);
       if (tail) yield tail;
     } finally {
