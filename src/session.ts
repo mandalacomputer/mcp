@@ -34,7 +34,7 @@ export class Session {
   constructor(cfg: SessionConfig) {
     this.api = new Api(cfg.apiKey, cfg.baseUrl ?? DEFAULT_BASE_URL);
     this.modelKey = cfg.modelKey;
-    this.#current = cfg.computerId;
+    this.#current = id(cfg.computerId);
   }
 
   get current(): string | undefined {
@@ -45,22 +45,22 @@ export class Session {
     return this.#screen;
   }
 
-  bind(id: string, resolution?: string): void {
-    this.#current = id;
+  bind(computerId: string, resolution?: string): void {
+    this.#current = id(computerId);
     this.#screen = resolution;
   }
 
   /** Forget the binding — after a delete, so the next call does not drive a ghost. */
-  unbind(id: string): void {
-    if (this.#current === id) {
+  unbind(computerId: string): void {
+    if (this.#current !== undefined && this.#current === id(computerId)) {
       this.#current = undefined;
       this.#screen = undefined;
     }
   }
 
   /** Remember the screen without changing which computer is bound. */
-  noteResolution(id: string, resolution?: string): void {
-    if (id === this.#current && resolution) this.#screen = resolution;
+  noteResolution(computerId: string, resolution?: string): void {
+    if (id(computerId) === this.#current && resolution) this.#screen = resolution;
   }
 
   /**
@@ -73,13 +73,39 @@ export class Session {
    * "missing computer_id" sends it hunting through the tool list.
    */
   resolve(explicit?: string): string {
-    const id = explicit ?? this.#current;
-    if (!id) {
+    const chosen = id(explicit) ?? this.#current;
+    if (!chosen) {
       throw new MandalaError(
         'No computer selected. Call list_computers to see what is on this account, ' +
           'then use_computer to pick one — or pass computer_id on this call.',
       );
     }
-    return id;
+    return chosen;
   }
+}
+
+/**
+ * A computer id as this session compares it: trimmed, and absent when that
+ * leaves nothing.
+ *
+ * Every id here ends up in a URL through `paths.segment`, which trims before it
+ * encodes — so `" vm-1"` and `"vm-1"` have always named the same machine to the
+ * platform while being two different strings to `===`. Every consequence of
+ * that gap was silent and pointed the wrong way:
+ *
+ * - `delete_computer(" vm-1")` destroyed vm-1 and then failed to unbind it,
+ *   leaving the session driving a machine that no longer exists — the exact
+ *   ghost `unbind` was written to prevent.
+ * - `noteResolution(" vm-1", …)` dropped the screen size, so the next click was
+ *   scaled against a resolution from some other computer, or none.
+ * - A `MANDALA_COMPUTER_ID` with the trailing newline a `.env` file or a
+ *   `docker run --env-file` leaves on it was stored as-is, so a session started
+ *   that way could never be unbound by any id a model could type.
+ *
+ * Normalising at this boundary rather than at each call site is the point: the
+ * comparisons are the thing that was wrong, and there are four of them.
+ */
+function id(value: string | undefined): string | undefined {
+  const v = value?.trim();
+  return v ? v : undefined;
 }

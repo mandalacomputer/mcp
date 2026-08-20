@@ -58,11 +58,27 @@ function table(name) {
   }
   const body = source.slice(from + 1, i);
   const routes = [];
-  // Entries are object literals; take the method and pattern out of each.
-  for (const entry of body.matchAll(/\{[^{}]*\}/g)) {
-    const method = /method:\s*'([^']+)'/.exec(entry[0])?.[1];
-    const pattern = /pattern:\s*'([^']+)'/.exec(entry[0])?.[1];
-    if (method && pattern) routes.push(`${method} ${pattern}`);
+  // Entries are object literals, split by brace depth rather than by
+  // `/\{[^{}]*\}/g`. That grammar cannot express nesting: give an entry a nested
+  // literal — a `handler: {}`, an options bag — and the regex matches the INNER
+  // braces, which carry no method and no pattern, while the entry that does
+  // carry them is never seen as a whole. The route then goes missing from
+  // `upstream`, and a missing route is not a failure here: it shows up as a `-`
+  // line telling the reader the platform has dropped a route it still serves,
+  // or, if the mirror is missing it too, as silence. A checker whose failure
+  // mode is a false all-clear is worse than no checker.
+  //
+  // The `!routes.length` guard below only catches a parse that found nothing at
+  // all, which is exactly the case a partial parse is not.
+  for (let j = 0, depth = 0, from = 0; j < body.length; j++) {
+    if (body[j] === '{') {
+      if (depth++ === 0) from = j;
+    } else if (body[j] === '}' && --depth === 0) {
+      const entry = body.slice(from, j + 1);
+      const method = /method:\s*'([^']+)'/.exec(entry)?.[1];
+      const pattern = /pattern:\s*'([^']+)'/.exec(entry)?.[1];
+      if (method && pattern) routes.push(`${method} ${pattern}`);
+    }
   }
   if (!routes.length)
     throw new Error(`parsed ${name} but found no routes — has its shape changed?`);
