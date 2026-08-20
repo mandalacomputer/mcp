@@ -43,7 +43,12 @@ export const computer = (id: string) => `computers/${segment('computer_id', id)}
 export const computerAction = (id: string, action: string) => `${computer(id)}/${action}`;
 
 /** A background command's guest pid (OPL-3584). */
-export const execHandle = (id: string, pid: number) => `${computer(id)}/exec/${pid}`;
+export const execHandle = (id: string, pid: number) => {
+  if (!Number.isSafeInteger(pid) || pid <= 0) {
+    throw new Error(`pid must be a positive safe integer: ${pid}`);
+  }
+  return `${computer(id)}/exec/${pid}`;
+};
 
 /** One window on the desktop (OPL-3583). The id is `0x2600003`-shaped. */
 export const window_ = (id: string, windowId: string) =>
