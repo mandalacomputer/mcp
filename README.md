@@ -193,7 +193,7 @@ naming the fix.
 | `MANDALA_BASE_URL` | Defaults to `https://app.mandala.computer/api/v1`. |
 | `MANDALA_COMPUTER_ID` | Bind a computer at startup, so `use_computer` is not needed. **stdio only** — under `--http` it is ignored rather than bound into every caller's session, since it names a machine on the operator's account. |
 | `MANDALA_MODEL_KEY` | An Anthropic key. Enables `run_agent`, which runs the platform's own loop on that key. **stdio only** — under `--http` each caller sends their own as `X-Model-Key`, and this variable is ignored. |
-| `MANDALA_NO_LIFECYCLE` | `1` withholds `create_computer`, `clone_computer`, `delete_computer` and `delete_snapshot`. |
+| `MANDALA_NO_LIFECYCLE` | `1` withholds `create_computer`, `clone_computer`, `clone_snapshot`, `delete_computer` and `delete_snapshot` — every tool that makes a computer or destroys one. |
 | `PORT`, `HOST` | For `--http`. Default `3000`, `127.0.0.1`. |
 | `MANDALA_ALLOWED_HOSTS`, `MANDALA_ALLOWED_ORIGINS` | Comma-separated. Which `Host` and `Origin` values this server answers to. On a loopback bind the host list defaults to the address it was given, so DNS-rebinding protection is on without configuration; set this when serving under a name. |
 

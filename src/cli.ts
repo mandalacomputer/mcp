@@ -22,7 +22,7 @@ Environment
                        — over HTTP each caller sends their own X-Model-Key, and
                        this is ignored rather than spent on their runs
   MANDALA_NO_LIFECYCLE set to 1 to withhold create_computer, clone_computer,
-                       delete_computer and delete_snapshot
+                       clone_snapshot, delete_computer and delete_snapshot
   PORT, HOST           for --http (default 3000, 127.0.0.1)
   MANDALA_ALLOWED_HOSTS, MANDALA_ALLOWED_ORIGINS
                        comma-separated; which Host and Origin values to answer
@@ -90,6 +90,18 @@ export function parse(argv: string[]): Flags {
 }
 
 /**
+ * Did these flags ask for the help, or for the version?
+ *
+ * Both spellings of each, and exported for the same reason `parse` is: `--v`
+ * parses to a `v` flag that nothing then read, so it started a server instead
+ * of printing a number, while `--h` had always been handled. The asymmetry was
+ * invisible in `parse`'s own output — the flag was there, and the failure was
+ * the one line further down that did not look for it.
+ */
+export const wantsHelp = (flags: Flags): boolean => Boolean(flags.help || flags.h);
+export const wantsVersion = (flags: Flags): boolean => Boolean(flags.version || flags.v);
+
+/**
  * The port to listen on, or a refusal naming what was wrong with it.
  *
  * `--port` with nothing after it parses as the boolean true, and `Number(true)`
@@ -126,7 +138,32 @@ export function port(flag: string | boolean | undefined): number {
  */
 export function str(flag: string | boolean | undefined, name: string): string | undefined {
   if (flag === true) throw new Error(`--${name} needs a value, e.g. --${name} <value>`);
-  return flag || undefined;
+  if (flag === false || flag === undefined) return undefined;
+  // `--key=` is a value, and an empty one. `flag || undefined` folded it back
+  // into "not given", so the environment answered instead and the flag the
+  // usage text promises would override it did the opposite of nothing — it
+  // silently deferred. Trimmed for the reason `env` below is: an id or a key
+  // that arrived through a shell with a newline on it is not a different id.
+  return flag.trim();
+}
+
+/**
+ * An environment variable, trimmed, and absent when that leaves nothing.
+ *
+ * `port()` has always done this and the rest did not, which is a strange place
+ * to draw the line: the values that arrive with whitespace on them are the ones
+ * read out of a `.env` file, a Kubernetes secret or a `docker run --env-file`,
+ * and those carry keys, base URLs and computer ids far more often than they
+ * carry ports. Each failed differently and none of them named the cause — a
+ * trailing newline on an API key is rejected by Node's own header validation
+ * before the request is made, one on a base URL parses into a hostname nothing
+ * resolves, and one on a computer id reaches the platform trimmed while staying
+ * untrimmed in this process. An empty variable is treated as unset, which is
+ * what an unquoted assignment in a compose file usually means.
+ */
+function env(name: string): string | undefined {
+  const v = process.env[name]?.trim();
+  return v ? v : undefined;
 }
 
 const list = (v: string | undefined) =>
@@ -139,11 +176,11 @@ const list = (v: string | undefined) =>
 
 async function main(): Promise<void> {
   const flags = parse(process.argv.slice(2));
-  if (flags.help || flags.h) {
+  if (wantsHelp(flags)) {
     console.log(USAGE);
     return;
   }
-  if (flags.version) {
+  if (wantsVersion(flags)) {
     // The same constant the server reports over the protocol. Printed from two
     // places, a `--version` and an initialize response drift apart silently,
     // and the number people quote in a bug report is the one that lies.
@@ -151,29 +188,32 @@ async function main(): Promise<void> {
     return;
   }
 
+  // `??` rather than `||` throughout, now that `str` distinguishes "not given"
+  // from "given as empty". `--base-url=` means the default, not the
+  // environment; a flag that is present says what it says.
   const base = {
-    baseUrl: str(flags['base-url'], 'base-url') || process.env.MANDALA_BASE_URL || DEFAULT_BASE_URL,
-    computerId: str(flags.computer, 'computer') || process.env.MANDALA_COMPUTER_ID || undefined,
-    modelKey: process.env.MANDALA_MODEL_KEY || undefined,
-    lifecycle: !(flags['no-lifecycle'] || process.env.MANDALA_NO_LIFECYCLE === '1'),
+    baseUrl: (str(flags['base-url'], 'base-url') ?? env('MANDALA_BASE_URL')) || DEFAULT_BASE_URL,
+    computerId: str(flags.computer, 'computer') ?? env('MANDALA_COMPUTER_ID'),
+    modelKey: env('MANDALA_MODEL_KEY'),
+    lifecycle: !(flags['no-lifecycle'] || env('MANDALA_NO_LIFECYCLE') === '1'),
   };
 
   if (flags.http) {
     await runHttp({
       ...base,
       port: port(flags.port),
-      host: str(flags.host, 'host') || process.env.HOST || '127.0.0.1',
+      host: (str(flags.host, 'host') ?? env('HOST')) || '127.0.0.1',
       allowedHosts: list(
-        str(flags['allowed-hosts'], 'allowed-hosts') || process.env.MANDALA_ALLOWED_HOSTS,
+        str(flags['allowed-hosts'], 'allowed-hosts') ?? env('MANDALA_ALLOWED_HOSTS'),
       ),
       allowedOrigins: list(
-        str(flags['allowed-origins'], 'allowed-origins') || process.env.MANDALA_ALLOWED_ORIGINS,
+        str(flags['allowed-origins'], 'allowed-origins') ?? env('MANDALA_ALLOWED_ORIGINS'),
       ),
     });
     return;
   }
 
-  const apiKey = str(flags.key, 'key') || process.env.MANDALA_API_KEY || '';
+  const apiKey = str(flags.key, 'key') ?? env('MANDALA_API_KEY') ?? '';
   if (!apiKey) {
     // stderr and a non-zero exit, not a thrown stack. On stdio the client sees
     // a process that died; the person reading the log needs the one sentence

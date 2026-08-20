@@ -12,7 +12,7 @@ import { pathToFileURL } from 'node:url';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { Api, filenameFrom } from '../src/api.js';
-import { isEntrypoint, parse, port, str } from '../src/cli.js';
+import { isEntrypoint, parse, port, str, wantsHelp, wantsVersion } from '../src/cli.js';
 import { MAX_INLINE_IMAGE_BYTES, unwrapComputer } from '../src/format.js';
 import * as P from '../src/paths.js';
 import { windowBody } from '../src/paths.js';
@@ -700,5 +700,267 @@ describe('flags that are a yes-or-no', () => {
     // help that was asked for.
     expect(parse(['-h'])).toEqual({ help: true });
     expect(parse(['-v'])).toEqual({ version: true });
+  });
+});
+
+describe('a call nobody is waiting for any more', () => {
+  it('does not report a cancellation as the platform being unreachable', async () => {
+    // Every fetch failure was wrapped as `could not reach <base>`, including an
+    // abort. So a client that hung up — which its own 60s request timeout makes
+    // routine — was told the platform was down, a failure it retries, about a
+    // call it had itself stopped caring about.
+    const real = globalThis.fetch;
+    globalThis.fetch = (async (_input: unknown, init?: RequestInit) => {
+      // What undici raises for an aborted request: no mention of the signal, no
+      // status, nothing the old wrap could have told apart from a DNS failure.
+      const err = new Error('This operation was aborted');
+      err.name = 'AbortError';
+      void init;
+      throw err;
+    }) as typeof fetch;
+    const controller = new AbortController();
+    controller.abort();
+    const api = new Api('com_test', BASE, controller.signal);
+    await expect(api.json('GET', 'computers')).rejects.toMatchObject({
+      name: 'CancelledError',
+    });
+    await expect(api.json('GET', 'computers')).rejects.toThrow(/cancelled/i);
+    await expect(api.json('GET', 'computers')).rejects.not.toThrow(/could not reach/);
+    globalThis.fetch = real;
+  });
+
+  it('still calls a real connectivity failure what it is', async () => {
+    const real = globalThis.fetch;
+    globalThis.fetch = (async () => {
+      throw new TypeError('fetch failed');
+    }) as typeof fetch;
+    const api = new Api('com_test', BASE);
+    await expect(api.json('GET', 'computers')).rejects.toThrow(/could not reach/);
+    globalThis.fetch = real;
+  });
+
+  it('does not report a stalled guest probe as a platform outage', async () => {
+    // The status read checked the signal before judging the error and the guest
+    // probe below it did not — it asked `isTransient` alone, and a cancelled
+    // fetch is not transient, so it threw. Half the loop knew and half did not.
+    // Here the status read answers `running` and the probe never comes back, so
+    // the probe is what the wait's own deadline lands on.
+    const real = globalThis.fetch;
+    globalThis.fetch = ((input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(typeof input === 'string' ? input : input.toString());
+      if (url.pathname.endsWith('/exec')) {
+        return new Promise((_resolve, reject) => {
+          const fail = () => {
+            const err = new Error('This operation was aborted');
+            err.name = 'AbortError';
+            reject(err);
+          };
+          if (init?.signal?.aborted) return fail();
+          init?.signal?.addEventListener('abort', fail, { once: true });
+        });
+      }
+      return Promise.resolve(
+        new Response(JSON.stringify({ id: 'vm-1', status: 'running' }), {
+          headers: { 'Content-Type': 'application/json' },
+        }),
+      );
+    }) as typeof fetch;
+    const { call, close } = await connect();
+    const res = await call('wait_for_computer', {
+      computer_id: 'vm-1',
+      until: 'guest',
+      timeout_s: 5,
+    });
+    expect(res.isError).toBe(true);
+    // The give-up message, naming what was in flight — not the connectivity
+    // failure the old catch turned this into.
+    expect(said(res)).toMatch(/Gave up after 5s/);
+    expect(said(res)).not.toMatch(/could not reach/);
+    await close();
+    globalThis.fetch = real;
+  }, 30_000);
+});
+
+describe('a wait that means the deadline it was given', () => {
+  it('bounds the request in flight, not only the next one', async () => {
+    // timeout_s gated the top of the loop and nothing else, so a single poll
+    // that never answered held a wait told to give up in five seconds for as
+    // long as the connection stayed open — up to undici's own five-minute
+    // header timeout, on a tool whose entire contract is coming back when it
+    // said it would.
+    const real = globalThis.fetch;
+    globalThis.fetch = ((input: string | URL | Request, init?: RequestInit) => {
+      void input;
+      // Never answers, and resolves only when the request is aborted.
+      return new Promise((_resolve, reject) => {
+        const signal = init?.signal;
+        const fail = () => {
+          const err = new Error('This operation was aborted');
+          err.name = 'AbortError';
+          reject(err);
+        };
+        if (signal?.aborted) return fail();
+        signal?.addEventListener('abort', fail, { once: true });
+      });
+    }) as typeof fetch;
+    const { call, close } = await connect();
+    const started = Date.now();
+    const res = await call('wait_for_computer', { computer_id: 'vm-1', timeout_s: 5 });
+    const elapsed = Date.now() - started;
+    expect(res.isError).toBe(true);
+    expect(said(res)).toMatch(/Gave up after 5s/);
+    // Comfortably inside undici's 300s header timeout, which is what bounded
+    // this before.
+    expect(elapsed).toBeLessThan(20_000);
+    await close();
+    globalThis.fetch = real;
+  }, 30_000);
+});
+
+describe('a base URL that carries a query', () => {
+  it('joins the path onto the path, not into the search string', async () => {
+    // `${base}/${path}` put the route inside the query: a base of
+    // `https://h/api/v1?tenant=x` produced `https://h/api/v1?tenant=x/computers`
+    // — a request to /api/v1 carrying a nonsense parameter, not to /computers.
+    const real = globalThis.fetch;
+    let seen = '';
+    globalThis.fetch = ((input: string | URL | Request) => {
+      seen = typeof input === 'string' ? input : input.toString();
+      return Promise.resolve(
+        new Response('{}', { headers: { 'Content-Type': 'application/json' } }),
+      );
+    }) as typeof fetch;
+    await new Api('com_test', 'https://h/api/v1?tenant=x').json('GET', 'computers');
+    globalThis.fetch = real;
+    const url = new URL(seen);
+    expect(url.pathname).toBe('/api/v1/computers');
+    // The base's own parameters are part of how it was addressed, so they stay.
+    expect(url.searchParams.get('tenant')).toBe('x');
+  });
+
+  it('refuses a base URL whose scheme is not the one the message promises', () => {
+    expect(() => new Api('com_test', 'file:///etc/passwd')).toThrow(/http\(s\)/);
+    expect(() => new Api('com_test', 'ftp://h/api')).toThrow(/http\(s\)/);
+    expect(() => new Api('com_test', 'https://h/api')).not.toThrow();
+  });
+});
+
+describe('ids that differ only in whitespace', () => {
+  it('unbinds a startup computer that a model names without the padding', async () => {
+    // MANDALA_COMPUTER_ID was stored exactly as the environment gave it, and a
+    // .env file or a --env-file leaves a newline on it. `P.segment` trims before
+    // the call, so the padded id drove the right machine; `unbind` compares with
+    // `===`, so no id a model could type ever cleared it, and the session went
+    // on driving a computer that had been deleted.
+    const platform = installFakePlatform();
+    const { call, close } = await connect({ computerId: ' vm-1\n' });
+    const gone = await call('delete_computer', { computer_id: 'vm-1', confirm: true });
+    expect(gone.isError, 'the delete itself failed').toBeFalsy();
+    const res = await call('screenshot');
+    expect(res.isError).toBe(true);
+    expect(said(res)).toMatch(/use_computer|no computer/i);
+    await close();
+    platform.restore();
+  });
+
+  it('treats a startup id that is only whitespace as no id at all', async () => {
+    const platform = installFakePlatform();
+    const { call, close } = await connect({ computerId: '  ' });
+    const res = await call('screenshot');
+    expect(res.isError).toBe(true);
+    expect(said(res)).toMatch(/use_computer|no computer/i);
+    await close();
+    platform.restore();
+  });
+
+  it('keeps the screen size when a call names the bound computer with padding', async () => {
+    // noteResolution compared the same way, so naming the bound machine with a
+    // space around it dropped the resolution instead of recording it — and the
+    // resolution is the coordinate space every click is measured in.
+    const platform = installFakePlatform();
+    const { call, close } = await connect({ computerId: 'vm-1' });
+    await call('get_computer', { computer_id: ' vm-1 ' });
+    // The screenshot prints the bound machine's geometry, and only ever the
+    // bound machine's — so this is where a dropped resolution shows.
+    const shot = await call('screenshot');
+    expect(shot.isError).toBeFalsy();
+    expect(JSON.stringify(shot.content)).toMatch(/Screen is 1280x800x24/);
+    await close();
+    platform.restore();
+  });
+});
+
+describe('the tools an operator turned off', () => {
+  it('withholds clone_snapshot with the rest of the lifecycle', async () => {
+    // clone_snapshot mints a billable computer and binds it, exactly as
+    // create_computer and clone_computer do — but it was registered above the
+    // gate, so MANDALA_NO_LIFECYCLE withheld every way of making a computer
+    // except this one.
+    const { client, close } = await connect({ lifecycle: false });
+    const names = (await client.listTools()).tools.map((t) => t.name);
+    expect(names).not.toContain('clone_snapshot');
+    expect(names).not.toContain('create_computer');
+    expect(names).not.toContain('clone_computer');
+    expect(names).not.toContain('delete_computer');
+    expect(names).not.toContain('delete_snapshot');
+    // The reads either side of it are untouched.
+    expect(names).toContain('list_snapshots');
+    expect(names).toContain('restore_snapshot');
+    await close();
+  });
+
+  it('offers it when the lifecycle is on', async () => {
+    const { client, close } = await connect();
+    expect((await client.listTools()).tools.map((t) => t.name)).toContain('clone_snapshot');
+    await close();
+  });
+});
+
+describe('annotations a client acts on', () => {
+  it('does not call a consuming cursor read-only', async () => {
+    // exec_poll advances a cursor in the guest: the bytes it returns are bytes
+    // no later poll can return. readOnlyHint invites a client to call it without
+    // asking and to retry one that timed out, and a retried poll silently drops
+    // whatever the first attempt had already consumed.
+    const { client, close } = await connect();
+    const tools = (await client.listTools()).tools;
+    const poll = tools.find((t) => t.name === 'exec_poll');
+    expect(poll?.annotations?.readOnlyHint).toBeFalsy();
+    // The genuinely read-only neighbours keep the hint.
+    expect(tools.find((t) => t.name === 'list_computers')?.annotations?.readOnlyHint).toBe(true);
+    await close();
+  });
+});
+
+describe('flags and the environment they override', () => {
+  const saved = { ...process.env };
+  afterEach(() => {
+    process.env = { ...saved };
+  });
+
+  it('reads --flag= as an empty value rather than as not given', () => {
+    // `flag || undefined` folded an explicit empty back into "not given", so the
+    // environment answered — the opposite of the usage text's promise that flags
+    // override it.
+    expect(str('', 'key')).toBe('');
+    expect(str(undefined, 'key')).toBeUndefined();
+    expect(str('com_a', 'key')).toBe('com_a');
+  });
+
+  it('trims a value that came through a shell with a newline on it', () => {
+    expect(str(' com_a\n', 'key')).toBe('com_a');
+  });
+
+  it('prints the version for --v as well as -v and --version', () => {
+    // `v` is in BOOLEAN, so `--v` set a flag nothing read and the server started
+    // instead of printing a number. `--h` was already handled and `--v` was not,
+    // which made the pair inconsistent in the direction nobody checks.
+    expect(parse(['--v'])).toEqual({ v: true });
+    expect(wantsVersion(parse(['--v']))).toBe(true);
+    expect(wantsVersion(parse(['-v']))).toBe(true);
+    expect(wantsVersion(parse(['--version']))).toBe(true);
+    expect(wantsVersion(parse(['--http']))).toBe(false);
+    expect(wantsHelp(parse(['--h']))).toBe(true);
+    expect(wantsHelp(parse(['-h']))).toBe(true);
   });
 });
