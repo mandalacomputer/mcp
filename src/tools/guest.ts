@@ -283,7 +283,7 @@ export const registerGuest: Registrar = (server, session) => {
           // walked straight past the bound the rest of this tool observes, and
           // 64 MiB of screenshot became ~85 MB of base64 in the context.
           if (file.bytes.length > MAX_INLINE_IMAGE_BYTES) {
-            return text(
+            return refused(
               `${path} is a ${file.contentType} of ${file.bytes.length} bytes, over the ${MAX_INLINE_IMAGE_BYTES}-byte inline limit. It was not read into the conversation, because an image cannot be truncated and one this size would end it. Shrink it in the guest first — e.g. exec "convert ${path} -resize 1280x ${path}.small.png" — and read that.`,
             );
           }
