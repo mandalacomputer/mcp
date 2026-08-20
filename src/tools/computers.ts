@@ -202,7 +202,13 @@ export const registerComputers: Registrar = (server, session, opts) => {
         const c = unwrapComputer(
           await session.api.with(extra.signal).json('GET', P.computer(computer_id)),
         );
-        session.bind(computer_id, c.resolution);
+        // The id the platform echoed back, not the one that was typed. They can
+        // differ — `P.segment` trims before the call, so " vm-1 " reaches the
+        // API as vm-1 — and `unbind` and `noteResolution` compare with `===`,
+        // so binding the untrimmed form leaves a later delete_computer("vm-1")
+        // unable to clear the selection it just destroyed. The other two bind
+        // sites already use `c.id`.
+        session.bind(c.id ?? computer_id, c.resolution);
         return said(
           `Selected ${describe(c)}. Later calls need no computer_id.` +
             (c.status === 'running'
@@ -344,8 +350,19 @@ export const registerComputers: Registrar = (server, session, opts) => {
             // what it was told to wait for, and this one never will. A caller
             // reading `isError` to decide whether to go on would otherwise see
             // a build that failed and a guest that answered as the same result.
+            //
+            // `build.source` is what the machine was built *from*, not why the
+            // build failed — printed bare after "Build failed:" it reads as the
+            // reason and names an image instead of a cause. `start_error` is
+            // the field that carries a diagnostic, so prefer it and label the
+            // source as the source when that is all there is.
+            const why = c.start_error
+              ? `: ${c.start_error}`
+              : c.build?.source
+                ? ` (built from ${c.build.source}) — the platform gave no reason`
+                : ' — the platform gave no reason';
             return refused(
-              `Build failed: ${c.build?.source ?? 'no detail given'}. This does not resolve on its own.`,
+              `Build failed${why}. This does not resolve on its own.`,
               withoutCredentials(c),
             );
           }

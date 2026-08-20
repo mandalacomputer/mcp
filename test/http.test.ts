@@ -295,6 +295,22 @@ describe('a page that resolved its own name to this server', () => {
       expect(res.status, `${host} was refused`).toBe(200);
     }
   });
+
+  it('answers them in any casing, since host names are case-insensitive', async () => {
+    // The SDK compares the Host header to the allowlist with a plain
+    // `includes`, so `LOCALHOST:3000` missed a list holding `localhost:3000`
+    // and a conformant client was answered 403 by the rebinding protection.
+    // The header is folded before it gets there now.
+    for (const host of [`LOCALHOST:${port}`, `LocalHost:${port}`]) {
+      const res = await rawPost(port, host, { Authorization: 'Bearer com_alice' }, INIT);
+      expect(res.status, `${host} was refused`).toBe(200);
+    }
+  });
+
+  it('still turns away a name it was never reachable at, whatever its casing', async () => {
+    const res = await rawPost(port, 'EVIL.example', { Authorization: 'Bearer com_alice' }, INIT);
+    expect(res.status).toBe(403);
+  });
 });
 
 describe('a body from a caller who sent no key', () => {
