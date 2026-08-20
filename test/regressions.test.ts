@@ -22,6 +22,7 @@ import {
   wantsVersion,
 } from '../src/cli.js';
 import {
+  APIError,
   CancelledError,
   ConnectivityError,
   errorForStatus,
@@ -35,6 +36,9 @@ import { failed, MAX_INLINE_IMAGE_BYTES, unwrapComputer } from '../src/format.js
 import {
   CancelledError as PublicCancelledError,
   ConnectivityError as PublicConnectivityError,
+  GatewayTimeoutError as PublicGatewayTimeoutError,
+  OriginResponseError as PublicOriginResponseError,
+  OriginTLSError as PublicOriginTLSError,
   OriginUnreachableError as PublicOriginUnreachableError,
 } from '../src/index.js';
 import * as P from '../src/paths.js';
@@ -1660,6 +1664,37 @@ describe('a proxy giving up is not reported as a bare status', () => {
     expect(String(err.body)).toMatch(/8f2a1c/);
   });
 
+  it('keeps the whole page, not the 500 characters the message was cut to', async () => {
+    // The test above calls errorForStatus directly with a page short enough to
+    // survive any truncation, so it cannot see this: Api slices the page to 500
+    // for the message, and stashing that slice instead of the text kept only
+    // the opening tags. A real Cloudflare 52x page runs to several KB with the
+    // Ray ID in the footer, which is to say past the cut, which is to say the
+    // one field the stash exists for was the one field it dropped.
+    const page =
+      `<!DOCTYPE html><html><head><title>522: Connection timed out</title></head><body>` +
+      `<!-- ${'padding '.repeat(200)} -->` +
+      `<div class="footer">Ray ID: 8f2a1c9d4e7b0000</div></body></html>`;
+    expect(page.indexOf('8f2a1c9d4e7b0000')).toBeGreaterThan(500);
+    const real = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      new Response(page, {
+        status: 522,
+        headers: { 'Content-Type': 'text/html' },
+      })) as typeof fetch;
+    try {
+      const err = await new Api('com_test', BASE).json('GET', 'computers').then(
+        () => null,
+        (e: unknown) => e as APIError,
+      );
+      expect(err).toBeInstanceOf(OriginUnreachableError);
+      expect(err?.message).not.toMatch(/Ray ID/);
+      expect(String(err?.body)).toMatch(/8f2a1c9d4e7b0000/);
+    } finally {
+      globalThis.fetch = real;
+    }
+  });
+
   it('discards the proxy error page rather than truncating it into the message', () => {
     const html = '<!DOCTYPE html><html><body>error code: 524</body></html>';
     expect(errorForStatus(524, html).message).not.toMatch(/DOCTYPE/);
@@ -1686,6 +1721,17 @@ describe('a proxy giving up is not reported as a bare status', () => {
     const said = errorForStatus(504, 'HTTP 504').message;
     expect(said).toMatch(/Most often that is a foreground exec/);
     expect(said).not.toMatch(/Re-run it with/);
+    // The hedge has to reach the advice itself, not just the attribution in
+    // front of it. Every clause naming something only an exec has — timeout_s,
+    // background: true, exec_poll, the busy guest agent afterwards — sits
+    // downstream of "if this one was", so a wait_for_computer caller reads the
+    // condition, sees it does not hold, and stops. Asserted by position: the
+    // conditional opens before any of them.
+    const hedge = said.indexOf('if this one was');
+    expect(hedge).toBeGreaterThan(-1);
+    for (const advice of ['timeout_s', 'background: true', 'exec_poll', 'guest agent as busy']) {
+      expect(said.indexOf(advice)).toBeGreaterThan(hedge);
+    }
   });
 });
 
@@ -1747,9 +1793,15 @@ describe('the public error surface', () => {
   });
 
   it('exports the edge errors an embedder would want to branch on', () => {
-    // A host application embedding this server catches by class, and the two
-    // added last are the ones whose handling differs most: one leaves work
-    // running behind it and the other leaves none.
+    // A host application embedding this server catches by class, and these are
+    // the ones whose handling differs most: a gateway timeout leaves work
+    // running behind it, an unreachable origin leaves none, and the other two
+    // say where the exchange broke. Every class this branch adds to the public
+    // surface is pinned, so dropping any one export line fails here rather
+    // than silently narrowing what an embedder can catch.
+    expect(PublicGatewayTimeoutError).toBe(GatewayTimeoutError);
+    expect(PublicOriginResponseError).toBe(OriginResponseError);
+    expect(PublicOriginTLSError).toBe(OriginTLSError);
     expect(PublicOriginUnreachableError).toBe(OriginUnreachableError);
   });
 
