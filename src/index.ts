@@ -15,6 +15,7 @@ export {
   MandalaError,
   NotFoundError,
   OriginResponseError,
+  OriginTLSError,
   OriginUnreachableError,
   PermissionDeniedError,
   PlanLimitError,
