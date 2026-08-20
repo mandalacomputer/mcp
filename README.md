@@ -107,6 +107,20 @@ foreground comes back as a timeout, with the work still going inside the guest
 and its output unreadable. With a handle you get the exit code and the output,
 and `exec_kill` stops it.
 
+Past about **two minutes** it does not even come back as a timeout. A proxy in
+front of the platform abandons a request that has produced no response for
+roughly that long and answers 524, which arrives as `GatewayTimeoutError` —
+whatever `timeout_s` said, because the hop that gives up never saw it. Measured
+against `app.mandala.computer`: `sleep 130` failed at 125.2s with
+`timeout_s: 300` and at 125.3s with `timeout_s: 3600`. Raising `timeout_s` buys
+nothing; `background: true` is the only thing that works. The abandoned command
+keeps running, so the call after one of these often reports the guest agent as
+busy — that is the first failure continuing, not a second one.
+
+The ceiling belongs to that proxy rather than to the platform, which is why
+`timeout_s` still accepts up to 300: a `MANDALA_BASE_URL` pointed at an origin
+reached without the proxy in front of it does not have one.
+
 **`list_windows` sees what a screenshot cannot.** It is how you tell an
 application that failed to start from one that has not painted yet. Match on
 `class` (the application), not `title` (whatever page it is showing).
