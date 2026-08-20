@@ -1,4 +1,10 @@
-import { type APIError, CancelledError, errorForStatus, MandalaError } from './errors.js';
+import {
+  type APIError,
+  CancelledError,
+  ConnectivityError,
+  errorForStatus,
+  MandalaError,
+} from './errors.js';
 
 export const DEFAULT_BASE_URL = 'https://app.mandala.computer/api/v1';
 
@@ -20,6 +26,10 @@ export type Bytes = {
   contentType: string;
   /** From Content-Disposition, when the platform named the file. */
   filename?: string;
+  /** True when the response was deliberately stopped at the caller's cap. */
+  truncated: boolean;
+  /** Exact size when the response declared one, or when it fitted in full. */
+  totalBytes?: number;
 };
 
 /**
@@ -176,8 +186,8 @@ export class Api {
       }
       // Rewritten, because the raw one names the host and the failure a model
       // can act on is "the platform is not reachable", not a DNS error string.
-      throw new MandalaError(
-        `could not reach ${this.baseUrl}: ${cause instanceof Error ? cause.message : String(cause)}`,
+      throw new ConnectivityError(
+        `could not reach ${this.#base.origin}: ${cause instanceof Error ? cause.message : String(cause)}`,
       );
     }
     if (!resp.ok) throw await this.#error(resp);
@@ -301,13 +311,31 @@ export class Api {
   }
 
   /** For the two routes whose body is not JSON: the screenshot and the download. */
-  async bytes(method: string, path: string, opts: RequestOptions = {}): Promise<Bytes> {
+  async bytes(
+    method: string,
+    path: string,
+    opts: RequestOptions = {},
+    maxBytes?: number | ((contentType: string) => number),
+  ): Promise<Bytes> {
     const resp = await this.#fetch(method, path, opts);
-    const buf = new Uint8Array(await resp.arrayBuffer());
+    const contentType = mediaType(resp.headers.get('content-type'));
+    const limit = typeof maxBytes === 'function' ? maxBytes(contentType) : maxBytes;
+    const declared = contentLength(resp);
+    const { bytes, truncated } =
+      limit === undefined
+        ? { bytes: new Uint8Array(await resp.arrayBuffer()), truncated: false }
+        : await readAtMost(resp, limit, declared);
     return {
-      bytes: buf,
-      contentType: mediaType(resp.headers.get('content-type')),
+      bytes,
+      contentType,
       filename: filenameFrom(resp.headers.get('content-disposition')),
+      truncated,
+      totalBytes:
+        truncated && declared !== undefined && declared > bytes.length
+          ? declared
+          : truncated
+            ? undefined
+            : bytes.length,
     };
   }
 
@@ -407,6 +435,74 @@ function isCancellation(cause: unknown, signal?: AbortSignal): boolean {
 function mediaType(header: string | null): string {
   const bare = (header ?? '').split(';')[0].trim().toLowerCase();
   return bare || 'application/octet-stream';
+}
+
+/** A trustworthy response length, when fetch has not transparently decoded it. */
+function contentLength(resp: Response): number | undefined {
+  const encoding = resp.headers.get('content-encoding');
+  if (encoding && encoding.toLowerCase() !== 'identity') return undefined;
+  const raw = resp.headers.get('content-length');
+  if (raw === null || !/^\d+$/.test(raw)) return undefined;
+  const n = Number(raw);
+  return Number.isSafeInteger(n) ? n : undefined;
+}
+
+/**
+ * Read no more than a tool can return, then cancel the rest of the download.
+ *
+ * The files route may send 64 MiB while read_file can put only 256 KiB into a
+ * conversation. `arrayBuffer()` paid for and retained the other 63.75 MiB just
+ * to throw it away. A one-chunk lookahead is needed when Content-Length is
+ * absent so a response of exactly `limit` bytes is not falsely called short.
+ */
+async function readAtMost(
+  resp: Response,
+  limit: number,
+  declared: number | undefined,
+): Promise<{ bytes: Uint8Array; truncated: boolean }> {
+  if (!Number.isSafeInteger(limit) || limit < 0) {
+    throw new MandalaError(`byte limit must be a non-negative integer, got ${limit}`);
+  }
+  if (!resp.body) return { bytes: new Uint8Array(), truncated: false };
+
+  const reader = resp.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let length = 0;
+  let truncated = declared !== undefined && declared > limit;
+  try {
+    while (length < limit) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const take = Math.min(value.length, limit - length);
+      if (take) {
+        chunks.push(value.subarray(0, take));
+        length += take;
+      }
+      if (take < value.length) {
+        truncated = true;
+        break;
+      }
+    }
+
+    if (length === limit && !truncated) {
+      if (declared !== undefined) {
+        truncated = declared > limit;
+      } else {
+        const next = await reader.read();
+        truncated = !next.done;
+      }
+    }
+  } finally {
+    if (truncated) await reader.cancel().catch(() => {});
+  }
+
+  const bytes = new Uint8Array(length);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.length;
+  }
+  return { bytes, truncated };
 }
 
 function parseEvent(chunk: string): SSEEvent | undefined {

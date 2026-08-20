@@ -79,6 +79,11 @@ export class CancelledError extends MandalaError {
   override name = 'CancelledError';
 }
 
+/** The platform could not be reached at all. Safe for a wait loop to retry. */
+export class ConnectivityError extends MandalaError {
+  override name = 'ConnectivityError';
+}
+
 const BY_STATUS: Record<number, typeof APIError> = {
   401: AuthenticationError,
   402: PlanLimitError,
@@ -103,5 +108,10 @@ export function errorForStatus(status: number, message: string, body?: unknown):
  * booting)" is better placed to decide than a fixed policy is.
  */
 export function isTransient(err: unknown): boolean {
-  return err instanceof ConflictError || err instanceof UnavailableError;
+  return (
+    err instanceof ConflictError ||
+    err instanceof UnavailableError ||
+    err instanceof ConnectivityError ||
+    (err instanceof APIError && [429, 502, 504].includes(err.status))
+  );
 }

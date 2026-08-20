@@ -20,6 +20,12 @@ const idArg = {
  */
 const MAX_INLINE_BYTES = 256 * 1024;
 
+const absolutePath = (what: string) =>
+  z
+    .string()
+    .startsWith('/', `${what} must be an absolute path starting with /`)
+    .describe(`Absolute path ${what === 'cwd' ? 'to run in' : 'inside the guest'}.`);
+
 export const registerGuest: Registrar = (server, session) => {
   server.registerTool(
     'exec',
@@ -51,7 +57,7 @@ export const registerGuest: Registrar = (server, session) => {
           .describe(
             'Return a handle immediately instead of waiting. Use for builds, installs, test suites and servers, then read output with exec_poll. Strictly better than backgrounding with "&", which throws away the exit code and the output.',
           ),
-        cwd: z.string().optional().describe('Absolute path to run in.'),
+        cwd: absolutePath('cwd').optional(),
       },
     },
     ({ computer_id, command, timeout_s, desktop, background, cwd }, extra) =>
@@ -222,9 +228,9 @@ export const registerGuest: Registrar = (server, session) => {
         'Write a file inside the computer. Paths must be absolute — the guest agent inherits whatever working directory it was started in, so a relative path resolves somewhere you did not name.',
       inputSchema: {
         ...idArg,
-        path: z
-          .string()
-          .describe('Absolute path inside the guest, e.g. /home/user/Desktop/notes.txt.'),
+        path: absolutePath('path').describe(
+          'Absolute path inside the guest, e.g. /home/user/Desktop/notes.txt.',
+        ),
         content: z.string().describe('The file contents.'),
         encoding: z
           .enum(['utf8', 'base64'])
@@ -270,7 +276,7 @@ export const registerGuest: Registrar = (server, session) => {
         'Read a file from inside the computer. Text comes back as text and images come back as images; anything else comes back base64. Large files are truncated rather than filling the conversation, and this tool cannot page — it always starts at the beginning. The truncation note gives the exec command that reads on from where it stopped, and says how to move a file off the computer altogether.',
       inputSchema: {
         ...idArg,
-        path: z.string().describe('Absolute path inside the guest.'),
+        path: absolutePath('path'),
       },
       annotations: { readOnlyHint: true },
     },
@@ -279,24 +285,29 @@ export const registerGuest: Registrar = (server, session) => {
         const id = session.resolve(computer_id);
         const file = await session.api
           .with(extra.signal)
-          .bytes('GET', P.computerAction(id, 'files'), {
-            query: { path },
-          });
+          .bytes('GET', P.computerAction(id, 'files'), { query: { path } }, (contentType) =>
+            contentType.startsWith('image/') ? MAX_INLINE_IMAGE_BYTES : MAX_INLINE_BYTES,
+          );
+        const total = file.totalBytes;
+        const size = total === undefined ? `more than ${file.bytes.length}` : String(total);
         if (file.contentType.startsWith('image/')) {
           // The cap applies here too. Clipping is not an option — half a PNG is
           // not a picture — so an oversized image is refused with its size,
           // which is something a model can act on. Without this the image path
           // walked straight past the bound the rest of this tool observes, and
           // 64 MiB of screenshot became ~85 MB of base64 in the context.
-          if (file.bytes.length > MAX_INLINE_IMAGE_BYTES) {
+          if (file.truncated) {
             return refused(
-              `${path} is a ${file.contentType} of ${file.bytes.length} bytes, over the ${MAX_INLINE_IMAGE_BYTES}-byte inline limit. It was not read into the conversation, because an image cannot be truncated and one this size would end it. Shrink it in the guest first — e.g. exec "convert ${path} -resize 1280x ${path}.small.png" — and read that.`,
+              `${path} is a ${file.contentType} of ${size} bytes, over the ${MAX_INLINE_IMAGE_BYTES}-byte inline limit. It was not read into the conversation, because an image cannot be truncated and one this size would end it. Shrink it in the guest first — e.g. exec "convert ${path} -resize 1280x ${path}.small.png" — and read that.`,
             );
           }
-          return image(file.bytes, file.contentType, `${path} (${file.bytes.length} bytes)`);
+          return image(file.bytes, file.contentType, `${path} (${size} bytes)`);
         }
-        const kept = file.bytes.subarray(0, MAX_INLINE_BYTES);
-        const truncated = file.bytes.length > MAX_INLINE_BYTES;
+        const kept = file.bytes;
+        const truncated = file.truncated;
+        const pieces = file.totalBytes
+          ? String(Math.ceil(file.totalBytes / MAX_INLINE_BYTES))
+          : 'multiple';
         // The note names the way past itself, which the size alone did not.
         // This tool cannot page — there is no offset argument and the platform
         // serves the whole file or nothing — so a reader who stopped here had
@@ -312,23 +323,21 @@ export const registerGuest: Registrar = (server, session) => {
         // off-by-one silently drops or repeats a byte and neither shows up in
         // anything the reader can see.
         const note = truncated
-          ? `\n\n[truncated: showed ${kept.length} of ${file.bytes.length} bytes. ` +
+          ? `\n\n[truncated: showed ${kept.length} of ${size} bytes. ` +
             `read_file has no offset and always starts at the beginning — to read on from here, ` +
             `exec "tail -c +${kept.length + 1} ${path} | head -c ${MAX_INLINE_BYTES}". ` +
             `To get the whole file off the computer, push it from inside the guest to storage you ` +
-            `control, e.g. exec "curl -T ${path} <your-upload-url>" — do not try to read it in ${Math.ceil(
-              file.bytes.length / MAX_INLINE_BYTES,
-            )} pieces.]`
+            `control, e.g. exec "curl -T ${path} <your-upload-url>" — do not try to read it in ${pieces} pieces.]`
           : '';
         const decoded = decodeUtf8(kept);
         if (decoded === undefined) {
           return text(
-            `${path} is not text (${file.bytes.length} bytes, ${file.contentType}). Base64:\n\n` +
+            `${path} is not text (${size} bytes, ${file.contentType}). Base64:\n\n` +
               Buffer.from(kept).toString('base64') +
               note,
           );
         }
-        return text(`${path} (${file.bytes.length} bytes):\n\n${decoded}${note}`);
+        return text(`${path} (${size} bytes):\n\n${decoded}${note}`);
       }),
   );
 };
