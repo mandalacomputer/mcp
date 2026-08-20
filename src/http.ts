@@ -179,10 +179,34 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
    * so protection there stays opt-in, and startup says so.
    */
   function allowedHosts(portNow: number): string[] | undefined {
-    if (cfg.allowedHosts?.length) return cfg.allowedHosts;
+    // Lowercased to match the folded header — an operator who writes
+    // `Example.COM` means the same host the client sends as `example.com`.
+    if (cfg.allowedHosts?.length) return cfg.allowedHosts.map((h) => h.toLowerCase());
     if (!LOOPBACK.has(cfg.host)) return undefined;
     return ['127.0.0.1', 'localhost', '[::1]'].flatMap((h) => [`${h}:${portNow}`, h]);
   }
+
+  // Host names are case-insensitive, and the SDK's rebinding check is not: it
+  // is a plain `allowedHosts.includes(hostHeader)` against the header as sent,
+  // so a conformant client that says `Host: LOCALHOST:3000` is answered 403 by
+  // a list that contains `localhost:3000`. Nothing above can fix that from
+  // outside the SDK, but the header can be normalised to the one spelling the
+  // list is written in before it gets there. Safe to fold: RFC 3986 says the
+  // host is case-insensitive, and `new URL()` already lowercases it, which is
+  // why browsers and fetch never trip this and a hand-set header does.
+  //
+  // Folded in `rawHeaders`, not just `req.headers`. The transport is a wrapper
+  // over @hono/node-server, which rebuilds the web Request from
+  // `incoming.rawHeaders` and never looks at the parsed object Express hands
+  // around — so normalising only the latter changes nothing the check can see.
+  app.use((req, _res, next) => {
+    const raw = req.rawHeaders;
+    for (let i = 0; i < raw.length; i += 2) {
+      if (raw[i].toLowerCase() === 'host') raw[i + 1] = raw[i + 1].toLowerCase();
+    }
+    if (req.headers.host) req.headers.host = req.headers.host.toLowerCase();
+    next();
+  });
 
   app.get('/healthz', (_req, res) => {
     res.json({ ok: true, name: SERVER_NAME, version: SERVER_VERSION, sessions: sessions.size });
@@ -415,7 +439,15 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
     // against — every later caller refused, for a connection error minutes
     // earlier that the reject could no longer report anyway.
     http.on('error', (err) => {
-      if (listening) return;
+      if (listening) {
+        // Not rejected and not torn down, for the reasons above — but not
+        // discarded either. EMFILE on accept leaves a server that refuses every
+        // connection with nothing anywhere saying why, and the operator's only
+        // other clue is silence. Logged where the unhandled-error path already
+        // logs, so there is one place to look.
+        console.error('mandala-computer-mcp: server error after bind —', err);
+        return;
+      }
       clearInterval(sweeper);
       reject(err);
     });
