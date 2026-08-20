@@ -52,16 +52,18 @@ describe('the hosted transport', () => {
   it('refuses to initialize without one', async () => {
     const res = await post(INIT);
     expect(res.status).toBe(401);
-    const body = (await res.json()) as { jsonrpc: string; error: { message: string } };
+    const body = (await res.json()) as { jsonrpc: string; error: { message: string }; id: unknown };
     // JSON-RPC shaped, because the thing on the other end is an MCP client and
     // has no way to report an HTML error page to its user.
     expect(body.jsonrpc).toBe('2.0');
     expect(body.error.message).toContain('Bearer');
+    expect(body.id).toBe(INIT.id);
   });
 
   it('refuses a non-initialize request that carries no session', async () => {
     const res = await post({ jsonrpc: '2.0', id: 2, method: 'tools/list' });
     expect(res.status).toBe(400);
+    expect(((await res.json()) as { id: unknown }).id).toBe(2);
   });
 
   it('gives each caller a session of their own', async () => {
@@ -420,6 +422,98 @@ describe('a body from a caller who sent no key', () => {
     expect(body.jsonrpc).toBe('2.0');
     expect(body.error).toBeTruthy();
     expect(JSON.stringify(body)).not.toContain('node_modules');
+  });
+});
+
+describe('concurrent large request bodies', () => {
+  let server: Server;
+  let url: string;
+  let platform: ReturnType<typeof installFakePlatform>;
+
+  beforeAll(async () => {
+    platform = installFakePlatform();
+    server = await runHttp({
+      port: 0,
+      host: '127.0.0.1',
+      baseUrl: BASE,
+      maxLargeBodyParses: 1,
+    });
+    url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  });
+
+  afterAll(async () => {
+    platform.restore();
+    await new Promise<void>((r) => server.close(() => r()));
+  });
+
+  it('caps parses even when arbitrary bearers initialized the sessions', async () => {
+    const opened = await fetch(`${url}/mcp`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'application/json, text/event-stream',
+        Authorization: 'Bearer not-a-platform-key',
+      },
+      body: JSON.stringify(INIT),
+    });
+    const sessionId = opened.headers.get('mcp-session-id') as string;
+    await opened.text();
+    expect(sessionId).toBeTruthy();
+
+    const body = JSON.stringify({
+      jsonrpc: '2.0',
+      id: 9,
+      method: 'tools/list',
+      pad: 'x'.repeat(400_000),
+    });
+    const target = new URL(url);
+    const first = httpRequest({
+      hostname: target.hostname,
+      port: target.port,
+      path: '/mcp',
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'application/json, text/event-stream',
+        Authorization: 'Bearer not-a-platform-key',
+        'mcp-session-id': sessionId,
+        'Content-Length': Buffer.byteLength(body),
+      },
+    });
+    const firstDone = new Promise<number>((resolve, reject) => {
+      first.on('response', (res) => {
+        res.resume();
+        res.on('end', () => resolve(res.statusCode ?? 0));
+      });
+      first.on('error', reject);
+    });
+    first.write(body.slice(0, 100));
+
+    for (let tries = 0; tries < 100; tries++) {
+      const health = (await (await fetch(`${url}/healthz`)).json()) as {
+        largeBodyParses: number;
+      };
+      if (health.largeBodyParses === 1) break;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+
+    const second = await fetch(`${url}/mcp`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'application/json, text/event-stream',
+        Authorization: 'Bearer not-a-platform-key',
+        'mcp-session-id': sessionId,
+      },
+      body,
+    });
+    expect(second.status).toBe(503);
+    expect(((await second.json()) as { error: { message: string } }).error.message).toMatch(
+      /maximum.*large request bodies/i,
+    );
+
+    first.end(body.slice(100));
+    await firstDone;
   });
 });
 
