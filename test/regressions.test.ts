@@ -1601,6 +1601,25 @@ describe('a proxy giving up is not reported as a bare status', () => {
     expect(err.message).toMatch(/background: true/);
   });
 
+  it('keeps a structured message rather than overwriting it', () => {
+    // The substitution is for a body that said nothing, not for every 504. A
+    // gateway status can be raised by any proxy in the chain, and one that
+    // speaks JSON has said something more specific than this file can.
+    const err = errorForStatus(504, 'upstream unavailable before dispatch', {
+      error: 'upstream unavailable before dispatch',
+    });
+    expect(err).toBeInstanceOf(GatewayTimeoutError);
+    expect(err.message).toBe('upstream unavailable before dispatch');
+  });
+
+  it('still substitutes when the body is empty or is a proxy page', () => {
+    expect(errorForStatus(524, 'HTTP 524').message).toMatch(/proxy/);
+    expect(errorForStatus(524, 'HTTP 524', {}).message).toMatch(/proxy/);
+    expect(errorForStatus(524, 'HTTP 524', { error: '' }).message).toMatch(/proxy/);
+    expect(errorForStatus(524, 'HTTP 524', { error: 42 }).message).toMatch(/proxy/);
+    expect(errorForStatus(524, '<!DOCTYPE html>', '<!DOCTYPE html>').message).toMatch(/proxy/);
+  });
+
   it('discards the proxy error page rather than truncating it into the message', () => {
     const html = '<!DOCTYPE html><html><body>error code: 524</body></html>';
     expect(errorForStatus(524, html).message).not.toMatch(/DOCTYPE/);

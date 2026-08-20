@@ -168,12 +168,13 @@ const BY_STATUS: Record<number, typeof APIError> = {
 const TLS_STATUSES = new Set([525, 526]);
 
 /**
- * What a caller is told when a proxy abandoned the request.
+ * What a caller is told when a proxy abandoned the request and named nothing.
  *
- * Written here rather than taken from the response, which is the one case where
- * the body is worth discarding. A 524 is generated at the edge, so it carries a
- * proxy's HTML error page or — when the request asked for JSON, as every request
- * from this server does — nothing at all. The empty case is the dangerous one:
+ * Used only where the response carried no structured message of its own — see
+ * {@link platformNamed}. A 524 is generated at the edge, so that is the usual
+ * case: it carries a proxy's HTML error page or — when the request asked for
+ * JSON, as every request from this server does — nothing at all. The empty
+ * case is the dangerous one:
  * it left the model reading the bare string `HTTP 524`, which names no cause, no
  * culprit and no way out, and whose obvious next move is a retry that fails
  * identically.
@@ -210,15 +211,40 @@ const ORIGIN_TLS_MESSAGE =
   'misconfigured deployment rather than a passing outage — an expired or mismatched ' +
   'certificate fails the same way on every retry, so report it rather than waiting it out';
 
+/**
+ * Whether the response named this failure in the shape this surface uses.
+ *
+ * Only a JSON body with a non-empty `error` string counts. An HTML page and an
+ * empty body are an intermediary's, and both are worth discarding for the
+ * wording below; a structured message is not. "upstream unavailable before
+ * dispatch" is a more specific true thing than anything written here, and
+ * replacing it would be this server overwriting a hop that knew more than it
+ * does with a guess.
+ *
+ * Which hop wrote it is not knowable from here, and does not need to be. The
+ * test is whether SOMETHING said something specific, not whether it was the
+ * platform — a 504 can be raised by any proxy in the chain, including one in
+ * front of a MANDALA_BASE_URL this server has never seen.
+ */
+function platformNamed(body: unknown): boolean {
+  if (!body || typeof body !== 'object') return false;
+  const err = (body as { error?: unknown }).error;
+  return typeof err === 'string' && err.length > 0;
+}
+
 /** Build the error for a status, with the platform's own message when it sent one. */
 export function errorForStatus(status: number, message: string, body?: unknown): APIError {
   const Cls = BY_STATUS[status] ?? APIError;
-  // Unconditionally, rather than only when the body was empty: a proxy's error
-  // page is not this platform's error, so there is no status where relaying it
-  // beats saying what happened.
-  if (Cls === GatewayTimeoutError) {
+  // Substituted for an empty body, which says nothing, and for a proxy's HTML
+  // page, which says 500 characters of nothing. NOT for a structured message:
+  // that is the one case where the response knows more than this file does.
+  if (Cls === GatewayTimeoutError && !platformNamed(body)) {
     return new GatewayTimeoutError(GATEWAY_TIMEOUT_MESSAGE, status, body);
   }
+  // No such guard here, and the asymmetry is the point. 520-526 are Cloudflare's
+  // own, and every one of them means the request never reached the platform —
+  // so there is no reading on which a body carries the platform's account of
+  // what happened, and nothing to defer to.
   if (Cls === OriginUnreachableError) {
     const said = TLS_STATUSES.has(status) ? ORIGIN_TLS_MESSAGE : ORIGIN_UNREACHABLE_MESSAGE;
     return new OriginUnreachableError(said, status, body);
