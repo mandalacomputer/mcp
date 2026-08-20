@@ -298,7 +298,7 @@ export const registerGuest: Registrar = (server, session) => {
           // 64 MiB of screenshot became ~85 MB of base64 in the context.
           if (file.truncated) {
             return refused(
-              `${path} is a ${file.contentType} of ${size} bytes, over the ${MAX_INLINE_IMAGE_BYTES}-byte inline limit. It was not read into the conversation, because an image cannot be truncated and one this size would end it. Shrink it in the guest first — e.g. exec "convert ${path} -resize 1280x ${path}.small.png" — and read that.`,
+              `${path} is a ${file.contentType} of ${size} bytes, over the ${MAX_INLINE_IMAGE_BYTES}-byte inline limit. It was not read into the conversation, because an image cannot be truncated and one this size would end it. Shrink it in the guest first — e.g. exec "convert ${shellQuote(path)} -resize 1280x ${shellQuote(`${path}.small.png`)}" — and read that.`,
             );
           }
           return image(file.bytes, file.contentType, `${path} (${size} bytes)`);
@@ -325,9 +325,9 @@ export const registerGuest: Registrar = (server, session) => {
         const note = truncated
           ? `\n\n[truncated: showed ${kept.length} of ${size} bytes. ` +
             `read_file has no offset and always starts at the beginning — to read on from here, ` +
-            `exec "tail -c +${kept.length + 1} ${path} | head -c ${MAX_INLINE_BYTES}". ` +
+            `exec "tail -c +${kept.length + 1} ${shellQuote(path)} | head -c ${MAX_INLINE_BYTES}". ` +
             `To get the whole file off the computer, push it from inside the guest to storage you ` +
-            `control, e.g. exec "curl -T ${path} <your-upload-url>" — do not try to read it in ${pieces} pieces.]`
+            `control, e.g. exec "curl -T ${shellQuote(path)} <your-upload-url>" — do not try to read it in ${pieces} pieces.]`
           : '';
         const decoded = decodeUtf8(kept);
         if (decoded === undefined) {
@@ -361,6 +361,11 @@ function isBase64(s: string): boolean {
   if (!compact) return true;
   if (!/^[A-Za-z0-9+/\-_]*={0,2}$/.test(compact)) return false;
   return compact.replace(/=+$/, '').length % 4 !== 1;
+}
+
+/** Quote one guest path as a single POSIX-shell argument. */
+function shellQuote(value: string): string {
+  return `'${value.replaceAll("'", `'"'"'`)}'`;
 }
 
 /** UTF-8 if it is UTF-8, and undefined if it plainly is not. */
