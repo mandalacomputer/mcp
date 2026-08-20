@@ -27,11 +27,13 @@ import {
   errorForStatus,
   GatewayTimeoutError,
   isTransient,
+  OriginUnreachableError,
 } from '../src/errors.js';
 import { failed, MAX_INLINE_IMAGE_BYTES, unwrapComputer } from '../src/format.js';
 import {
   CancelledError as PublicCancelledError,
   ConnectivityError as PublicConnectivityError,
+  OriginUnreachableError as PublicOriginUnreachableError,
 } from '../src/index.js';
 import * as P from '../src/paths.js';
 import { windowBody } from '../src/paths.js';
@@ -1615,12 +1617,69 @@ describe('a proxy giving up is not reported as a bare status', () => {
     expect(isTransient(errorForStatus(504, 'HTTP 504'))).toBe(true);
     expect(isTransient(errorForStatus(524, 'HTTP 524'))).toBe(false);
   });
+
+  it('hedges the exec advice, because a 504 reaches tools that have no background', () => {
+    // 504 is the retryable half, so a wait loop polls into it and replays the
+    // message verbatim in its give-up text. Told flatly to "re-run it with
+    // background: true and read the output with exec_poll", the caller of a
+    // wait_for_computer goes looking for a parameter that tool does not have
+    // and a pid there is none of.
+    const said = errorForStatus(504, 'HTTP 504').message;
+    expect(said).toMatch(/Most often that is a foreground exec/);
+    expect(said).not.toMatch(/Re-run it with/);
+  });
+});
+
+describe('an edge that never reached the platform is not reported as a bare status', () => {
+  it.each([520, 521, 522, 523, 525, 526])('writes a message for HTTP %s', (status) => {
+    // The same bug as the 524 above, a few statuses along: these fell through
+    // to Api's fallback and left the model reading `HTTP 522`.
+    const err = errorForStatus(status, `HTTP ${status}`);
+    expect(err).toBeInstanceOf(OriginUnreachableError);
+    expect(err.status).toBe(status);
+    expect(err.message).not.toMatch(/^HTTP /);
+    expect(err.message).toMatch(/could not reach it|TLS handshake/);
+  });
+
+  it('says nothing survived, which is the opposite of what a 524 says', () => {
+    // Worth pinning as a pair. A 524 means the request arrived and its work
+    // carries on; these mean it never arrived. A caller reading either to
+    // decide whether to expect a busy guest agent next must get opposite
+    // answers, so the two messages must not converge.
+    expect(errorForStatus(522, 'HTTP 522').message).toMatch(/nothing is running/);
+    expect(errorForStatus(524, 'HTTP 524').message).toMatch(/still running/);
+  });
+
+  it('retries an origin that is down but not a handshake that will not agree', () => {
+    // An origin restart clears within a wait window. An expired or mismatched
+    // certificate fails identically for the whole of one, so polling it just
+    // spends the window to arrive at the same place.
+    for (const status of [520, 521, 522, 523]) {
+      expect(isTransient(errorForStatus(status, `HTTP ${status}`))).toBe(true);
+    }
+    for (const status of [525, 526]) {
+      expect(isTransient(errorForStatus(status, `HTTP ${status}`))).toBe(false);
+      expect(errorForStatus(status, `HTTP ${status}`).message).toMatch(/misconfigured/);
+    }
+  });
+
+  it('discards the proxy error page rather than truncating it into the message', () => {
+    const html = '<!DOCTYPE html><html><body>error code: 522</body></html>';
+    expect(errorForStatus(522, html).message).not.toMatch(/DOCTYPE/);
+  });
 });
 
 describe('the public error surface', () => {
   it('exports both non-HTTP errors thrown by Api', () => {
     expect(PublicCancelledError).toBe(CancelledError);
     expect(PublicConnectivityError).toBe(ConnectivityError);
+  });
+
+  it('exports the edge errors an embedder would want to branch on', () => {
+    // A host application embedding this server catches by class, and the two
+    // added last are the ones whose handling differs most: one leaves work
+    // running behind it and the other leaves none.
+    expect(PublicOriginUnreachableError).toBe(OriginUnreachableError);
   });
 
   it('does not repeat an empty HTTP error status', () => {
