@@ -1,5 +1,6 @@
 import { request as httpRequest, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
+import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { runHttp } from '../src/http.js';
 import { BASE, installFakePlatform } from './harness.js';
@@ -550,18 +551,39 @@ describe('concurrent large request bodies', () => {
       await new Promise((resolve) => setTimeout(resolve, 10));
     }
 
-    const second = await fetch(`${url}/mcp`, {
+    const second = httpRequest({
+      hostname: target.hostname,
+      port: target.port,
+      path: '/mcp',
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         Accept: 'application/json, text/event-stream',
         Authorization: 'Bearer not-a-platform-key',
         'mcp-session-id': sessionId,
+        'Content-Length': Buffer.byteLength(body),
       },
-      body,
     });
-    expect(second.status).toBe(503);
-    expect(((await second.json()) as { error: { message: string } }).error.message).toMatch(
+    let secondResponded = false;
+    const secondDone = new Promise<{ status: number; body: string }>((resolve, reject) => {
+      second.on('response', (res) => {
+        secondResponded = true;
+        let responseBody = '';
+        res.setEncoding('utf8');
+        res.on('data', (chunk) => {
+          responseBody += chunk;
+        });
+        res.on('end', () => resolve({ status: res.statusCode ?? 0, body: responseBody }));
+      });
+      second.on('error', reject);
+    });
+    second.write(body.slice(0, 100));
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(secondResponded).toBe(false);
+    second.end(body.slice(100));
+    const rejected = await secondDone;
+    expect(rejected.status).toBe(503);
+    expect((JSON.parse(rejected.body) as { error: { message: string } }).error.message).toMatch(
       /maximum.*large request bodies/i,
     );
 
@@ -626,6 +648,11 @@ describe('concurrent large request bodies', () => {
         body: largeCall,
       });
       await handlerStarted;
+      const accepted = await first;
+      expect(accepted.status).toBe(200);
+      // Closing the response lets transport.handleRequest settle before the
+      // tool callback. The parsed body's lease must transfer to that callback.
+      await accepted.body?.cancel();
 
       const health = (await (await fetch(`${url}/healthz`)).json()) as {
         largeBodyParses: number;
@@ -646,9 +673,7 @@ describe('concurrent large request bodies', () => {
       await second.text();
 
       release();
-      const completed = await first;
-      expect(completed.status).toBe(200);
-      await completed.text();
+      await new Promise((resolve) => setTimeout(resolve, 20));
       const after = (await (await fetch(`${url}/healthz`)).json()) as {
         largeBodyParses: number;
       };
@@ -656,6 +681,64 @@ describe('concurrent large request bodies', () => {
     } finally {
       release();
       globalThis.fetch = fake;
+    }
+  }, 10_000);
+});
+
+describe('an initialize still in flight', () => {
+  it('cannot be swept during the gap after its session becomes visible', async () => {
+    const original = StreamableHTTPServerTransport.prototype.handleRequest;
+    let release!: () => void;
+    let initialized!: () => void;
+    const hold = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const visible = new Promise<void>((resolve) => {
+      initialized = resolve;
+    });
+    StreamableHTTPServerTransport.prototype.handleRequest = async function (...args) {
+      const result = await original.apply(this, args);
+      if (!this.sessionId) return result;
+      initialized();
+      await hold;
+      return result;
+    };
+
+    const platform = installFakePlatform();
+    let server: Server | undefined;
+    try {
+      server = await runHttp({
+        port: 0,
+        host: '127.0.0.1',
+        baseUrl: BASE,
+        sessionTtlMs: 50,
+      });
+      const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+      const opened = fetch(`${url}/mcp`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Accept: 'application/json, text/event-stream',
+          Authorization: 'Bearer com_alice',
+        },
+        body: JSON.stringify(INIT),
+      });
+      await visible;
+      await new Promise((resolve) => setTimeout(resolve, 1_200));
+      const during = (await (await fetch(`${url}/healthz`)).json()) as { sessions: number };
+      expect(during.sessions).toBe(1);
+
+      release();
+      const response = await opened;
+      await response.text();
+      await new Promise((resolve) => setTimeout(resolve, 1_200));
+      const after = (await (await fetch(`${url}/healthz`)).json()) as { sessions: number };
+      expect(after.sessions).toBe(0);
+    } finally {
+      release();
+      StreamableHTTPServerTransport.prototype.handleRequest = original;
+      platform.restore();
+      if (server) await new Promise<void>((resolve) => server?.close(() => resolve()));
     }
   }, 10_000);
 });

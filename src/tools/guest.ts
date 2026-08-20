@@ -308,6 +308,11 @@ export const registerGuest: Registrar = (server, session) => {
               `${path} is a ${file.contentType} of ${size} bytes, over the ${MAX_INLINE_IMAGE_BYTES}-byte inline limit. It was not read into the conversation, because an image cannot be truncated and one this size would end it. Shrink it in the guest first — e.g. exec "convert ${shellQuote(path)} -resize 1280x ${shellQuote(`${path}.small.png`)}" — and read that.`,
             );
           }
+          if (file.bytes.length === 0) {
+            return refused(
+              `${path} came back as an empty ${file.contentType} file. Nothing was returned as an image because zero bytes cannot be decoded as one.`,
+            );
+          }
           return image(file.bytes, file.contentType, `${path} (${size} bytes)`);
         }
         const kept = file.bytes;
