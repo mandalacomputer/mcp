@@ -87,6 +87,17 @@ export const registerInput: Registrar = (server, session) => {
             `That screenshot is ${shot.bytes.length} bytes, over the ${MAX_INLINE_IMAGE_BYTES}-byte inline limit. An image cannot be truncated, so nothing was returned. Ask again with a width — e.g. width: 1280 — and click using full-size coordinates.`,
           );
         }
+        // What came back has to actually be an image. A captive portal or a
+        // misconfigured proxy answering 200 with an HTML page is the case this
+        // exists for: without it that page is handed over as image content
+        // typed `text/html`, and the model is left staring at a picture that
+        // will not decode with nothing saying why. `read_file` guards the same
+        // shape; this is the other path that emits an image.
+        if (!shot.contentType.startsWith('image/')) {
+          return refused(
+            `That screenshot came back as ${shot.contentType}, not an image (${shot.bytes.length} bytes). Something between here and the guest answered in place of the capture; nothing was returned rather than passing it off as a picture.`,
+          );
+        }
         const scaled = width
           ? ` (scaled to ${width}px wide — click using full-size coordinates)`
           : '';
