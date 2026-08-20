@@ -303,7 +303,11 @@ export function windowBody(args: {
   if (args.action === 'resize' && args.width === undefined && args.height === undefined) {
     throw new Error('resize needs width, height, or both');
   }
-  return omitUndefined({ ...args });
+  if (args.action === 'move') return { action: args.action, x: args.x, y: args.y };
+  if (args.action === 'resize') {
+    return omitUndefined({ action: args.action, width: args.width, height: args.height });
+  }
+  return { action: args.action };
 }
 
 export const snapshotBody = (memory: boolean): Json => ({ memory });
