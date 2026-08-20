@@ -118,6 +118,17 @@ describe('the hosted transport', () => {
   });
 });
 
+describe('HTTP startup configuration', () => {
+  it('rejects an invalid base URL before binding a server', async () => {
+    await expect(
+      runHttp({ port: 0, host: '127.0.0.1', baseUrl: 'not an absolute URL' }),
+    ).rejects.toThrow(/valid base URL/i);
+    await expect(
+      runHttp({ port: 0, host: '127.0.0.1', baseUrl: 'file:///etc/passwd' }),
+    ).rejects.toThrow(/http\(s\)/i);
+  });
+});
+
 describe('the session cap', () => {
   let server: Server;
   let url: string;
@@ -324,6 +335,39 @@ describe('a page that resolved its own name to this server', () => {
   });
 });
 
+describe('an Origin allowlist', () => {
+  let server: Server;
+  let port: number;
+  let platform: ReturnType<typeof installFakePlatform>;
+
+  beforeAll(async () => {
+    platform = installFakePlatform();
+    server = await runHttp({
+      port: 0,
+      host: '127.0.0.1',
+      baseUrl: BASE,
+      allowedOrigins: ['HTTPS://Client.Example'],
+    });
+    port = (server.address() as AddressInfo).port;
+  });
+  afterAll(async () => {
+    platform.restore();
+    await new Promise<void>((r) => server.close(() => r()));
+  });
+
+  it('matches configured and incoming origins without case sensitivity', async () => {
+    for (const origin of ['https://client.example', 'HTTPS://CLIENT.EXAMPLE']) {
+      const res = await rawPost(
+        port,
+        `localhost:${port}`,
+        { Authorization: 'Bearer com_alice', Origin: origin },
+        INIT,
+      );
+      expect(res.status, `${origin} was refused`).toBe(200);
+    }
+  });
+});
+
 describe('a body from a caller who sent no key', () => {
   let server: Server;
   let url: string;
@@ -524,6 +568,191 @@ describe('concurrent large request bodies', () => {
     first.end(body.slice(100));
     await firstDone;
   });
+
+  it('holds the cap while a parsed large body remains retained by its handler', async () => {
+    const opened = await fetch(`${url}/mcp`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'application/json, text/event-stream',
+        Authorization: 'Bearer not-a-platform-key',
+      },
+      body: JSON.stringify(INIT),
+    });
+    const sessionId = opened.headers.get('mcp-session-id') as string;
+    await opened.text();
+
+    const fake = globalThis.fetch;
+    let release!: () => void;
+    let started!: () => void;
+    const handlerStarted = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    const handlerReleased = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    globalThis.fetch = ((input: string | URL | Request, init?: RequestInit) => {
+      const target = new URL(typeof input === 'string' ? input : input.toString());
+      if (target.host === new URL(BASE).host && target.pathname.endsWith('/screenshot')) {
+        started();
+        return handlerReleased.then(
+          () =>
+            new Response(new Uint8Array([1]), {
+              headers: { 'Content-Type': 'image/png' },
+            }),
+        );
+      }
+      return fake(input as never, init);
+    }) as typeof fetch;
+
+    try {
+      const largeCall = JSON.stringify({
+        jsonrpc: '2.0',
+        id: 10,
+        method: 'tools/call',
+        params: {
+          name: 'screenshot',
+          arguments: { computer_id: 'vm-1', pad: 'x'.repeat(400_000) },
+        },
+      });
+      const first = fetch(`${url}/mcp`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Accept: 'application/json, text/event-stream',
+          Authorization: 'Bearer not-a-platform-key',
+          'mcp-session-id': sessionId,
+        },
+        body: largeCall,
+      });
+      await handlerStarted;
+
+      const health = (await (await fetch(`${url}/healthz`)).json()) as {
+        largeBodyParses: number;
+      };
+      expect(health.largeBodyParses).toBe(1);
+
+      const second = await fetch(`${url}/mcp`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Accept: 'application/json, text/event-stream',
+          Authorization: 'Bearer not-a-platform-key',
+          'mcp-session-id': sessionId,
+        },
+        body: largeCall,
+      });
+      expect(second.status).toBe(503);
+      await second.text();
+
+      release();
+      const completed = await first;
+      expect(completed.status).toBe(200);
+      await completed.text();
+      const after = (await (await fetch(`${url}/healthz`)).json()) as {
+        largeBodyParses: number;
+      };
+      expect(after.largeBodyParses).toBe(0);
+    } finally {
+      release();
+      globalThis.fetch = fake;
+    }
+  }, 10_000);
+});
+
+describe('an abandoned request whose tool is still running', () => {
+  let server: Server;
+  let url: string;
+  let platform: ReturnType<typeof installFakePlatform>;
+
+  beforeAll(async () => {
+    platform = installFakePlatform();
+    server = await runHttp({
+      port: 0,
+      host: '127.0.0.1',
+      baseUrl: BASE,
+      sessionTtlMs: 50,
+    });
+    url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  });
+  afterAll(async () => {
+    platform.restore();
+    await new Promise<void>((r) => server.close(() => r()));
+  });
+
+  it('does not sweep the session while a tool outlives its closed response', async () => {
+    const opened = await fetch(`${url}/mcp`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'application/json, text/event-stream',
+        Authorization: 'Bearer com_alice',
+      },
+      body: JSON.stringify(INIT),
+    });
+    const sessionId = opened.headers.get('mcp-session-id') as string;
+    await opened.text();
+
+    const fake = globalThis.fetch;
+    let release!: () => void;
+    let started!: () => void;
+    const handlerStarted = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    const handlerReleased = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    globalThis.fetch = ((input: string | URL | Request, init?: RequestInit) => {
+      const target = new URL(typeof input === 'string' ? input : input.toString());
+      if (target.host === new URL(BASE).host && target.pathname.endsWith('/screenshot')) {
+        started();
+        return handlerReleased.then(
+          () =>
+            new Response(new Uint8Array([1]), {
+              headers: { 'Content-Type': 'image/png' },
+            }),
+        );
+      }
+      return fake(input as never, init);
+    }) as typeof fetch;
+
+    try {
+      const abandoned = fetch(`${url}/mcp`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Accept: 'application/json, text/event-stream',
+          Authorization: 'Bearer com_alice',
+          'mcp-session-id': sessionId,
+        },
+        body: JSON.stringify({
+          jsonrpc: '2.0',
+          id: 11,
+          method: 'tools/call',
+          params: { name: 'screenshot', arguments: { computer_id: 'vm-1' } },
+        }),
+      });
+      await handlerStarted;
+      // The MCP transport starts an SSE response before the tool result is
+      // ready. Cancel only that response body after the request was accepted;
+      // unlike aborting fetch itself, this does not cancel the incoming tool
+      // call and exactly models a client closing its response socket.
+      const response = await abandoned;
+      await response.body?.cancel();
+
+      await new Promise((resolve) => setTimeout(resolve, 1_200));
+      const during = (await (await fetch(`${url}/healthz`)).json()) as { sessions: number };
+      expect(during.sessions).toBe(1);
+
+      release();
+      await new Promise((resolve) => setTimeout(resolve, 1_200));
+      const after = (await (await fetch(`${url}/healthz`)).json()) as { sessions: number };
+      expect(after.sessions).toBe(0);
+    } finally {
+      release();
+      globalThis.fetch = fake;
+    }
+  }, 10_000);
 });
 
 describe("the operator's own computer", () => {
