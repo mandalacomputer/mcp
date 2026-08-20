@@ -168,6 +168,25 @@ export class OriginResponseError extends APIError {
   override name = 'OriginResponseError';
 }
 
+/**
+ * 525, 526 — a proxy and the platform could not agree on TLS.
+ *
+ * Split from {@link OriginUnreachableError}, which it used to share, because the
+ * two need opposite answers to "should I try again". An unreachable origin is a
+ * passing outage; an expired or mismatched certificate fails identically on
+ * every retry, and is a deployment somebody has to go and fix.
+ *
+ * {@link isTransient} already drew that line by status number, so the retry
+ * behaviour here is unchanged — but a caller reading the TYPE was told the two
+ * were the same thing, while the list beside it said they were not. The
+ * mandala-computer-python SDK had the same pairing and a worse consequence: its
+ * fatal-error set names classes, so a wait helper could not tell 526 from 522
+ * and spent its whole timeout retrying a certificate.
+ */
+export class OriginTLSError extends APIError {
+  override name = 'OriginTLSError';
+}
+
 const BY_STATUS: Record<number, typeof APIError> = {
   401: AuthenticationError,
   402: PlanLimitError,
@@ -183,20 +202,11 @@ const BY_STATUS: Record<number, typeof APIError> = {
   522: OriginUnreachableError,
   523: OriginUnreachableError,
   524: GatewayTimeoutError,
-  525: OriginUnreachableError,
-  526: OriginUnreachableError,
+  // Their own class, not more entries on the one above: an unreachable origin is
+  // a passing outage and these are a deployment somebody has to fix.
+  525: OriginTLSError,
+  526: OriginTLSError,
 };
-
-/**
- * The two of those that a wait loop cannot outlast.
- *
- * 525 and 526 are a handshake the edge and the platform cannot agree on — an
- * expired certificate, a mismatched name. Nothing about that is passing, so
- * they get their own message and {@link isTransient} leaves them alone; the
- * other four are an origin that is down or unreachable, which is what a restart
- * looks like from outside and does come back.
- */
-const TLS_STATUSES = new Set([525, 526]);
 
 /**
  * What a caller is told when a proxy abandoned the request and named nothing.
@@ -219,8 +229,10 @@ const TLS_STATUSES = new Set([525, 526]);
  */
 const GATEWAY_TIMEOUT_MESSAGE =
   'a proxy in front of the platform gave up waiting for it to answer. Nothing was ' +
-  'cancelled: the platform never saw this deadline, so whatever work this request had ' +
-  'already started is still running. Most often that is a foreground exec, which ends ' +
+  'cancelled: the platform never saw this deadline, so anything this request had already ' +
+  'set going carries on without it — usually it has the request and is still working, ' +
+  'though a 504 can come from a hop that never reached it. Most often that is a ' +
+  'foreground exec, which ends ' +
   'this way after about two minutes however large a timeout_s it was given — the ' +
   'ceiling belongs to the proxy, not to the platform, so a larger timeout_s buys no ' +
   'time and background: true with exec_poll is the way to run something slower. After ' +
@@ -229,27 +241,30 @@ const GATEWAY_TIMEOUT_MESSAGE =
 
 /** What a caller is told when the platform's own answer arrived unreadable. */
 const ORIGIN_RESPONSE_MESSAGE =
-  'the platform answered a proxy in front of it with something the proxy could not read — ' +
-  'an empty, unknown or oversized response. Unlike an unreachable origin, the request did ' +
-  'arrive: it may have been carried out in full, in part, or not at all, and it is the ' +
-  'answer that was lost rather than never produced. Retrying a read costs nothing; before ' +
+  'the platform received the request and the exchange then broke on the way back — an ' +
+  'empty or unreadable response, a connection dropped before the headers, an origin that ' +
+  'stopped part-way. Unlike an unreachable origin, the request did arrive, so it may have ' +
+  'been carried out in full, in part, or not at all. Retrying a read costs nothing; before ' +
   'retrying anything that creates something — a computer, a snapshot — check whether the ' +
   'first attempt took effect, or you may end up with two of it';
 
 /** What a caller is told when a proxy could not reach the platform at all. */
 const ORIGIN_UNREACHABLE_MESSAGE =
-  'a proxy in front of the platform could not reach it. The request never arrived, so ' +
-  'nothing was started and nothing is running — unlike a gateway timeout, there is no ' +
-  'work on the other side of this to account for. Usually the platform restarting or a ' +
-  'short outage, which clears on its own; if it persists the platform is down, and ' +
-  'waiting is the only thing that helps';
+  'a proxy in front of the platform could not reach it. Almost always that means the ' +
+  'request was never sent, so nothing was started and there is no work on the other side ' +
+  'of this to account for — unlike a gateway timeout. Almost, rather than never, because ' +
+  'a connection can also time out after it was established, and bytes already on the wire ' +
+  'are not unsent because the answer never came back: retry a read freely, and look before ' +
+  'retrying something that creates. Usually this is the platform restarting or a short ' +
+  'outage, which clears on its own; if it persists the platform is down, and waiting is ' +
+  'the only thing that helps';
 
 /** The same, for the two of those that waiting will not fix. */
 const ORIGIN_TLS_MESSAGE =
-  'a proxy in front of the platform could not complete a TLS handshake with it. The ' +
-  'request never arrived, so nothing was started and nothing is running. This is a ' +
-  'misconfigured deployment rather than a passing outage — an expired or mismatched ' +
-  'certificate fails the same way on every retry, so report it rather than waiting it out';
+  'a proxy in front of the platform could not complete a TLS handshake with it, so the ' +
+  'request was never sent. This is a misconfigured deployment rather than a passing ' +
+  'outage — an expired or mismatched certificate fails the same way on every retry, so ' +
+  'report it rather than waiting it out';
 
 /**
  * Whether the response named this failure in the shape this surface uses.
@@ -292,9 +307,11 @@ export function errorForStatus(status: number, message: string, body?: unknown):
   if (Cls === OriginResponseError && !platformNamed(body)) {
     return new OriginResponseError(ORIGIN_RESPONSE_MESSAGE, status, body);
   }
+  if (Cls === OriginTLSError) {
+    return new OriginTLSError(ORIGIN_TLS_MESSAGE, status, body);
+  }
   if (Cls === OriginUnreachableError) {
-    const said = TLS_STATUSES.has(status) ? ORIGIN_TLS_MESSAGE : ORIGIN_UNREACHABLE_MESSAGE;
-    return new OriginUnreachableError(said, status, body);
+    return new OriginUnreachableError(ORIGIN_UNREACHABLE_MESSAGE, status, body);
   }
   return new Cls(message, status, body);
 }
