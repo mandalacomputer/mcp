@@ -84,6 +84,37 @@ export class ConnectivityError extends MandalaError {
   override name = 'ConnectivityError';
 }
 
+/**
+ * 504, 524 — a proxy in front of the platform gave up before the platform answered.
+ *
+ * Not a refusal. The request arrived, is very likely still running, and nothing
+ * was cancelled; what ended was one hop's willingness to hold a connection open
+ * with no response crossing it.
+ *
+ * One class, two retry answers, and {@link isTransient} keeps them apart by
+ * status rather than by type on purpose. A 504 is retryable and a 524 is not,
+ * because of where each is reachable from: the wait tools are the only thing
+ * here that retries, they poll with short requests, and a 504 on one of those
+ * is infrastructure noise that clears. A 524 is only ever reached by holding a
+ * request open past the ceiling below — so retrying it unchanged reproduces it
+ * exactly, at the same place, because the hop that gave up never saw how long
+ * the caller asked to wait.
+ *
+ * Against `app.mandala.computer` that hop is Cloudflare and the ceiling is about
+ * two minutes. Measured 2026-08-20: `sleep 130` died at 125.2s with
+ * `timeout_s: 300` and at 125.3s with `timeout_s: 3600`, while `sleep 110`
+ * returned normally at 110.6s. A foreground `exec` slower than that always ends
+ * here; `background: true` is the shape that does not, because it answers as
+ * soon as the command has started.
+ *
+ * The abandoned command keeps running, which is why the next call on the same
+ * computer often raises {@link ConflictError} — the guest agent is still busy
+ * with it. That is this failure continuing, not a second one.
+ */
+export class GatewayTimeoutError extends APIError {
+  override name = 'GatewayTimeoutError';
+}
+
 const BY_STATUS: Record<number, typeof APIError> = {
   401: AuthenticationError,
   402: PlanLimitError,
@@ -91,11 +122,38 @@ const BY_STATUS: Record<number, typeof APIError> = {
   404: NotFoundError,
   409: ConflictError,
   503: UnavailableError,
+  504: GatewayTimeoutError,
+  524: GatewayTimeoutError,
 };
+
+/**
+ * What a caller is told when a proxy abandoned the request.
+ *
+ * Written here rather than taken from the response, which is the one case where
+ * the body is worth discarding. A 524 is generated at the edge, so it carries a
+ * proxy's HTML error page or — when the request asked for JSON, as every request
+ * from this server does — nothing at all. The empty case is the dangerous one:
+ * it left the model reading the bare string `HTTP 524`, which names no cause, no
+ * culprit and no way out, and whose obvious next move is a retry that fails
+ * identically.
+ */
+const GATEWAY_TIMEOUT_MESSAGE =
+  'a proxy in front of the platform gave up waiting for it to answer. Nothing was ' +
+  'cancelled: whatever this request started is still running, which is why the next ' +
+  'call on the same computer may report the guest agent as busy. A foreground exec ' +
+  'ends this way after about two minutes however large a timeout_s it was given — the ' +
+  'ceiling belongs to the proxy, not to the platform. Re-run it with background: true ' +
+  'and read the output with exec_poll';
 
 /** Build the error for a status, with the platform's own message when it sent one. */
 export function errorForStatus(status: number, message: string, body?: unknown): APIError {
   const Cls = BY_STATUS[status] ?? APIError;
+  // Unconditionally, rather than only when the body was empty: a proxy's error
+  // page is not this platform's error, so there is no status where relaying it
+  // beats saying what happened.
+  if (Cls === GatewayTimeoutError) {
+    return new GatewayTimeoutError(GATEWAY_TIMEOUT_MESSAGE, status, body);
+  }
   return new Cls(message, status, body);
 }
 

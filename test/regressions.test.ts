@@ -21,7 +21,13 @@ import {
   wantsHelp,
   wantsVersion,
 } from '../src/cli.js';
-import { CancelledError, ConnectivityError, errorForStatus, isTransient } from '../src/errors.js';
+import {
+  CancelledError,
+  ConnectivityError,
+  errorForStatus,
+  GatewayTimeoutError,
+  isTransient,
+} from '../src/errors.js';
 import { failed, MAX_INLINE_IMAGE_BYTES, unwrapComputer } from '../src/format.js';
 import {
   CancelledError as PublicCancelledError,
@@ -1577,6 +1583,37 @@ describe('background process handles', () => {
     expect(P.execHandle('vm-1', Number.MAX_SAFE_INTEGER)).toBe(
       `computers/vm-1/exec/${Number.MAX_SAFE_INTEGER}`,
     );
+  });
+});
+
+describe('a proxy giving up is not reported as a bare status', () => {
+  it('names the ceiling, the survivor, and the way out', () => {
+    // Cloudflare content-negotiates its error page, and every request from this
+    // server asks for JSON, so the 524 arrives with an EMPTY body — which left
+    // Api's fallback message as the bare string 'HTTP 524'.
+    const err = errorForStatus(524, 'HTTP 524');
+    expect(err).toBeInstanceOf(GatewayTimeoutError);
+    expect(err.status).toBe(524);
+    expect(err.message).toMatch(/proxy/);
+    expect(err.message).toMatch(/still running/);
+    expect(err.message).toMatch(/background: true/);
+  });
+
+  it('discards the proxy error page rather than truncating it into the message', () => {
+    const html = '<!DOCTYPE html><html><body>error code: 524</body></html>';
+    expect(errorForStatus(524, html).message).not.toMatch(/DOCTYPE/);
+  });
+
+  it('reaches the model as a readable failure, not a status line', () => {
+    expect(said(failed(errorForStatus(524, 'HTTP 524')))).toMatch(/proxy.*\(HTTP 524\)/s);
+  });
+
+  it('keeps 504 retryable and 524 not', () => {
+    // Same class, different answer, and the split is by where each is reachable
+    // from: the wait tools poll with short requests, where a 504 is a blip. A
+    // 524 is only reached past the ceiling, where retrying reproduces it.
+    expect(isTransient(errorForStatus(504, 'HTTP 504'))).toBe(true);
+    expect(isTransient(errorForStatus(524, 'HTTP 524'))).toBe(false);
   });
 });
 
