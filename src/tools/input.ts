@@ -73,18 +73,23 @@ export const registerInput: Registrar = (server, session) => {
     ({ computer_id, width, fresh }, extra) =>
       guarded(async () => {
         const id = session.resolve(computer_id);
-        const shot = await session.api
-          .with(extra.signal)
-          .bytes('GET', P.computerAction(id, 'screenshot'), {
+        const shot = await session.api.with(extra.signal).bytes(
+          'GET',
+          P.computerAction(id, 'screenshot'),
+          {
             query: { w: width, fresh: fresh ? 1 : undefined },
-          });
+          },
+          MAX_INLINE_IMAGE_BYTES,
+        );
         // The bound `read_file` observes, observed here too. A 3840x2160 capture
         // of a dense screen is the case it exists for: refused with its size and
         // the parameter that fixes it, rather than turned into ~85 MB of base64
         // in a context that then has room for nothing else.
-        if (shot.bytes.length > MAX_INLINE_IMAGE_BYTES) {
+        if (shot.truncated) {
+          const size =
+            shot.totalBytes === undefined ? `more than ${shot.bytes.length}` : shot.totalBytes;
           return refused(
-            `That screenshot is ${shot.bytes.length} bytes, over the ${MAX_INLINE_IMAGE_BYTES}-byte inline limit. An image cannot be truncated, so nothing was returned. Ask again with a width — e.g. width: 1280 — and click using full-size coordinates.`,
+            `That screenshot is ${size} bytes, over the ${MAX_INLINE_IMAGE_BYTES}-byte inline limit. An image cannot be truncated, so nothing was returned. Ask again with a width — e.g. width: 1280 — and click using full-size coordinates.`,
           );
         }
         // What came back has to actually be an image. A captive portal or a

@@ -67,9 +67,11 @@ export function image(bytes: Uint8Array, mimeType: string, note?: string): CallT
 export function failed(err: unknown): CallToolResult {
   const message = err instanceof MandalaError || err instanceof Error ? err.message : String(err);
   const status = (err as { status?: number })?.status;
+  const withStatus =
+    status && message !== `HTTP ${status}` ? `${message} (HTTP ${status})` : message;
   return {
     isError: true,
-    content: [{ type: 'text', text: status ? `${message} (HTTP ${status})` : message }],
+    content: [{ type: 'text', text: withStatus }],
   };
 }
 
