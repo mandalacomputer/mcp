@@ -102,7 +102,14 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
   // Which status a request ends at is unchanged as long as it stays under the
   // limit, because the body is still parsed: a non-initialize with no session
   // is still a 400, not a 401 about the key it also did not send.
-  const fullBody = express.json({ limit: '80mb' });
+  // 96mb rather than 80: the limit exists for write_file, and it could not
+  // carry one. The platform caps a transfer at 64 MiB, base64 is four bytes for
+  // every three, and the JSON-RPC envelope is on top of that — 89,478,488
+  // characters of content against a limit of 83,886,080, so the largest file
+  // this server is documented to write was refused with a 413 by the very
+  // allowance that was raised for it. The real ceiling was about 59 MiB, which
+  // is not a number anybody would have found except by hitting it.
+  const fullBody = express.json({ limit: '96mb' });
   const smallBody = express.json({ limit: '256kb' });
   const parseBody = (req: Request, res: Response, next: express.NextFunction) => {
     const id = req.header('mcp-session-id');
@@ -151,6 +158,18 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
   const serving = (live: Live, res: Response) => {
     live.active++;
     live.lastSeen = Date.now();
+    // `close` fires once and does not fire again for a listener that arrives
+    // after it. The window is small but real — the body is parsed from an I/O
+    // callback, so a client that disconnects while express.json is draining the
+    // request can have closed the response before this handler runs — and what
+    // it leaves behind is permanent: `active` never returns to zero, the sweeper
+    // skips the session forever on the "still being served" test, and the
+    // transport holds a maxSessions slot until the process restarts. A
+    // counter that only goes up is worth one branch.
+    if (res.closed) {
+      live.active--;
+      return;
+    }
     res.on('close', () => {
       live.active--;
       live.lastSeen = Date.now();
