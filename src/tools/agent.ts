@@ -94,10 +94,8 @@ export const registerAgent: Registrar = (server, session) => {
               : stop === 'refusal'
                 ? 'the model declined the task'
                 : `ended: ${stop}`;
-        return said(
-          `${verdict}\n\n${String(done.text ?? '')}\n\nWhat it did:\n${steps.join('\n')}`,
-          done,
-        );
+        const result = `${verdict}\n\n${String(done.text ?? '')}\n\nWhat it did:\n${steps.join('\n')}`;
+        return stop === 'end_turn' ? said(result, done) : refused(result, done);
       }),
   );
 };

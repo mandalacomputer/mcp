@@ -13,6 +13,7 @@ import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { Api, filenameFrom } from '../src/api.js';
 import { isEntrypoint, parse, port, str, wantsHelp, wantsVersion } from '../src/cli.js';
+import { ConnectivityError, errorForStatus, isTransient } from '../src/errors.js';
 import { MAX_INLINE_IMAGE_BYTES, unwrapComputer } from '../src/format.js';
 import * as P from '../src/paths.js';
 import { windowBody } from '../src/paths.js';
@@ -77,6 +78,21 @@ describe('window actions', () => {
   it('leaves the actions that take no geometry alone', () => {
     expect(windowBody({ action: 'focus' })).toEqual({ action: 'focus' });
     expect(windowBody({ action: 'move', x: 5, y: 6 })).toEqual({ action: 'move', x: 5, y: 6 });
+  });
+
+  it('does not forward geometry that belongs to another action', () => {
+    expect(windowBody({ action: 'close', x: 5, y: 6, width: 7, height: 8 })).toEqual({
+      action: 'close',
+    });
+    expect(windowBody({ action: 'move', x: 5, y: 6, width: 7, height: 8 })).toEqual({
+      action: 'move',
+      x: 5,
+      y: 6,
+    });
+    expect(windowBody({ action: 'resize', x: 5, y: 6, width: 7 })).toEqual({
+      action: 'resize',
+      width: 7,
+    });
   });
 });
 
@@ -976,7 +992,9 @@ describe('a file too large to put in a conversation', () => {
     const size = 600 * 1024;
     globalThis.fetch = (() =>
       Promise.resolve(
-        new Response('x'.repeat(size), { headers: { 'Content-Type': 'text/plain' } }),
+        new Response('x'.repeat(size), {
+          headers: { 'Content-Type': 'text/plain', 'Content-Length': String(size) },
+        }),
       )) as typeof fetch;
     const { call, close } = await connect();
     const res = await call('read_file', { path: '/var/log/big.log' });
@@ -999,5 +1017,160 @@ describe('a file too large to put in a conversation', () => {
     expect(out).not.toMatch(/truncated|tail -c/);
     await close();
     platform.restore();
+  });
+});
+
+describe('wait failures that are worth another poll', () => {
+  it.each([409, 429, 502, 503, 504])('retries HTTP %s', (status) => {
+    expect(isTransient(errorForStatus(status, `HTTP ${status}`))).toBe(true);
+  });
+
+  it('retries a connectivity blip but not a cancellation', () => {
+    expect(isTransient(new ConnectivityError('fetch failed'))).toBe(true);
+    expect(isTransient(new Error('cancelled'))).toBe(false);
+  });
+
+  it('does not put base-URL credentials into a reachability error', async () => {
+    const real = globalThis.fetch;
+    globalThis.fetch = (async () => {
+      throw new TypeError('fetch failed');
+    }) as typeof fetch;
+    try {
+      const api = new Api(
+        'com_test',
+        'https://operator:secret@example.test/api/v1?access_token=also-secret',
+      );
+      await expect(api.json('GET', 'computers')).rejects.toThrow(
+        'could not reach https://example.test',
+      );
+      await expect(api.json('GET', 'computers')).rejects.not.toThrow(
+        /secret|operator|access_token/,
+      );
+    } finally {
+      globalThis.fetch = real;
+    }
+  });
+});
+
+describe('results that did not reach their requested condition', () => {
+  it.each(['suspended', 'stopped'])('marks a %s wait as an error', async (status) => {
+    const real = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify({ id: 'vm-1', status }), {
+        headers: { 'Content-Type': 'application/json' },
+      })) as typeof fetch;
+    try {
+      const { call, close } = await connect();
+      const res = await call('wait_for_computer', { until: 'guest', timeout_s: 5 });
+      expect(res.isError).toBe(true);
+      expect(said(res)).toMatch(/start_computer/);
+      await close();
+    } finally {
+      globalThis.fetch = real;
+    }
+  });
+
+  it.each(['max_steps', 'refusal', 'future_stop_reason'])(
+    'marks an agent %s stop as an error',
+    async (stop) => {
+      const real = globalThis.fetch;
+      globalThis.fetch = (async () =>
+        new Response(`event: done\ndata: ${JSON.stringify({ stop, text: 'not done' })}\n\n`, {
+          headers: { 'Content-Type': 'text/event-stream' },
+        })) as typeof fetch;
+      try {
+        const { call, close } = await connect({ modelKey: 'sk-test' });
+        const res = await call('run_agent', { prompt: 'finish the task' });
+        expect(res.isError).toBe(true);
+        await close();
+      } finally {
+        globalThis.fetch = real;
+      }
+    },
+  );
+});
+
+describe('absolute guest paths', () => {
+  it.each([
+    ['exec', { command: 'pwd', cwd: 'tmp' }],
+    ['write_file', { path: 'tmp/a', content: 'x' }],
+    ['read_file', { path: 'tmp/a' }],
+  ])('rejects a relative path for %s before calling the platform', async (tool, args) => {
+    const platform = installFakePlatform();
+    try {
+      const { call, close } = await connect();
+      const res = await call(tool, args);
+      expect(res.isError).toBe(true);
+      expect(platform.calls).toHaveLength(0);
+      await close();
+    } finally {
+      platform.restore();
+    }
+  });
+
+  it('rejects a negative idle-suspend window', async () => {
+    const platform = installFakePlatform();
+    try {
+      const { call, close } = await connect();
+      const res = await call('update_computer', { idle_suspend_min: -1 });
+      expect(res.isError).toBe(true);
+      expect(platform.calls).toHaveLength(0);
+      await close();
+    } finally {
+      platform.restore();
+    }
+  });
+});
+
+describe('malformed computer listings', () => {
+  it('skips null rows without failing the whole valid list', async () => {
+    const real = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify([null, { id: 'vm-1', name: 'desk', status: 'running' }]), {
+        headers: { 'Content-Type': 'application/json' },
+      })) as typeof fetch;
+    try {
+      const { call, close } = await connect();
+      const res = await call('list_computers');
+      expect(res.isError).toBeFalsy();
+      expect(said(res)).toMatch(/ignored 1 malformed computer entry/);
+      expect(said(res)).toMatch(/vm-1/);
+      await close();
+    } finally {
+      globalThis.fetch = real;
+    }
+  });
+});
+
+describe('a large file download', () => {
+  it('cancels the response stream once the inline prefix is known', async () => {
+    const real = globalThis.fetch;
+    let pulls = 0;
+    let cancelled = false;
+    globalThis.fetch = (async () =>
+      new Response(
+        new ReadableStream<Uint8Array>({
+          pull(controller) {
+            pulls++;
+            if (pulls > 64) return controller.close();
+            controller.enqueue(new Uint8Array(64 * 1024).fill(120));
+          },
+          cancel() {
+            cancelled = true;
+          },
+        }),
+        { headers: { 'Content-Type': 'text/plain' } },
+      )) as typeof fetch;
+    try {
+      const { call, close } = await connect();
+      const res = await call('read_file', { path: '/var/log/large.log' });
+      expect(res.isError).toBeFalsy();
+      expect(said(res)).toMatch(/truncated/);
+      expect(cancelled).toBe(true);
+      expect(pulls).toBeLessThan(64);
+      await close();
+    } finally {
+      globalThis.fetch = real;
+    }
   });
 });

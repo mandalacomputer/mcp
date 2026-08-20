@@ -16,6 +16,8 @@ export type HttpConfig = Omit<ServerConfig, 'apiKey'> & {
   sessionTtlMs?: number;
   /** How many live sessions this server will hold at once. */
   maxSessions?: number;
+  /** How many requests may parse a body above 256 KiB at once. */
+  maxLargeBodyParses?: number;
 };
 
 type Live = {
@@ -39,6 +41,8 @@ const DEFAULT_TTL_MS = 30 * 60 * 1000;
  * exhaustion that costs the sender nothing.
  */
 const DEFAULT_MAX_SESSIONS = 256;
+const DEFAULT_MAX_LARGE_BODY_PARSES = 4;
+const SMALL_BODY_BYTES = 256 * 1024;
 
 /**
  * The addresses that mean "this machine only".
@@ -72,6 +76,8 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
   let boundPort = cfg.port;
   const ttl = cfg.sessionTtlMs ?? DEFAULT_TTL_MS;
   const maxSessions = cfg.maxSessions ?? DEFAULT_MAX_SESSIONS;
+  const maxLargeBodyParses = cfg.maxLargeBodyParses ?? DEFAULT_MAX_LARGE_BODY_PARSES;
+  let largeBodyParses = 0;
   // Initializes that have passed the cap check but have not yet reached
   // `onsessioninitialized`. Counted, because the check and the map write are
   // two awaits apart: without a reservation every concurrent initialize reads
@@ -90,14 +96,18 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
   // a request naming a live session whose key digest matches the bearer it
   // carried, which is the same test the POST route applies before doing
   // anything. Everyone else — including an initialize, which is a few hundred
-  // bytes — gets the small one and a 413.
+  // bytes — gets the small one and a 413. Large parses are capped separately:
+  // initialize does not contact the platform, so an arbitrary bearer can still
+  // earn a matching digest and must not be able to start hundreds of concurrent
+  // 96 MiB allocations.
   //
   // Presence of an `Authorization` header is deliberately not the test. This
   // server cannot check a `com_…` key without a round trip to the platform, so
   // a header alone identifies nobody: `Bearer x` would buy the 80mb buffer as
   // cheaply as sending nothing at all, and the limit would bound only the
-  // callers who had not thought about it. A session digest is the one thing
-  // here that was actually earned.
+  // callers who had not thought about it. The digest proves continuity with a
+  // session holder, not that the platform accepted the key; the concurrency
+  // cap above is therefore still required.
   //
   // Which status a request ends at is unchanged as long as it stays under the
   // limit, because the body is still parsed: a non-initialize with no session
@@ -116,7 +126,23 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
     const live = id ? sessions.get(id) : undefined;
     const key = bearer(req);
     const verified = Boolean(live && key && sameKey(live.keyDigest, key));
-    return (verified ? fullBody : smallBody)(req, res, next);
+    const rawLength = req.header('content-length');
+    const mayBeLarge =
+      rawLength === undefined || !/^\d+$/.test(rawLength) || Number(rawLength) > SMALL_BODY_BYTES;
+    if (!verified || !mayBeLarge) return smallBody(req, res, next);
+    if (largeBodyParses >= maxLargeBodyParses) {
+      // Drain without retaining so a keep-alive connection remains usable.
+      req.resume();
+      return unavailable(
+        res,
+        `This server is already parsing its maximum of ${maxLargeBodyParses} large request bodies. Retry shortly.`,
+      );
+    }
+    largeBodyParses++;
+    return fullBody(req, res, (err) => {
+      largeBodyParses--;
+      next(err);
+    });
   };
 
   // Abandoned sessions are closed rather than left holding a transport. A
@@ -228,7 +254,13 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
   });
 
   app.get('/healthz', (_req, res) => {
-    res.json({ ok: true, name: SERVER_NAME, version: SERVER_VERSION, sessions: sessions.size });
+    res.json({
+      ok: true,
+      name: SERVER_NAME,
+      version: SERVER_VERSION,
+      sessions: sessions.size,
+      largeBodyParses,
+    });
   });
 
   app.post('/mcp', parseBody, async (req: Request, res: Response) => {
@@ -237,24 +269,25 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
 
     if (sessionId) {
       const live = sessions.get(sessionId);
-      if (!live) return notFound(res, 'Unknown session. Initialize a new one.');
+      if (!live) return notFound(res, 'Unknown session. Initialize a new one.', rpcId(req));
       // The key is re-checked on every request, not only at initialize. A
       // session id travels in a plain header and is the sort of thing that ends
       // up in a proxy log; on its own it must not be a credential.
       if (!key || !sameKey(live.keyDigest, key)) {
-        return unauthorized(res, 'This session belongs to a different API key.');
+        return unauthorized(res, 'This session belongs to a different API key.', rpcId(req));
       }
       serving(live, res);
       return live.transport.handleRequest(req, res, req.body);
     }
 
     if (!isInitializeRequest(req.body)) {
-      return badRequest(res, 'No session id, and this is not an initialize request.');
+      return badRequest(res, 'No session id, and this is not an initialize request.', rpcId(req));
     }
     if (!key) {
       return unauthorized(
         res,
         'Send your Mandala API key as a bearer token: Authorization: Bearer com_…',
+        rpcId(req),
       );
     }
     // Swept sessions free their slot on the timer; this is the backstop for the
@@ -263,6 +296,7 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
       return unavailable(
         res,
         `This server is holding its maximum of ${maxSessions} sessions. Retry shortly.`,
+        rpcId(req),
       );
     }
     pending++;
@@ -403,10 +437,10 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
           : typeof e.message === 'string'
             ? e.message
             : 'This request body could not be read.';
-      return rpcError(res, e.status, -32000, message);
+      return rpcError(res, e.status, -32000, message, rpcId(_req));
     }
     console.error('mandala-computer-mcp: unhandled error serving a request', err);
-    return rpcError(res, 500, -32603, 'This server failed while serving the request.');
+    return rpcError(res, 500, -32603, 'This server failed while serving the request.', rpcId(_req));
   });
 
   return new Promise((resolve, reject) => {
@@ -511,10 +545,26 @@ function sameKey(expected: Buffer, candidate: string): boolean {
 
 // JSON-RPC-shaped refusals: the client is an MCP client, and an HTML error page
 // or a bare status is something it has no way to report to its user.
-const rpcError = (res: Response, status: number, code: number, message: string) => {
-  res.status(status).json({ jsonrpc: '2.0', error: { code, message }, id: null });
+type RpcId = string | number | null;
+
+function rpcId(req: Request): RpcId {
+  const id = (req.body as { id?: unknown } | null)?.id;
+  return typeof id === 'string' || typeof id === 'number' || id === null ? id : null;
+}
+
+const rpcError = (
+  res: Response,
+  status: number,
+  code: number,
+  message: string,
+  id: RpcId = null,
+) => {
+  res.status(status).json({ jsonrpc: '2.0', error: { code, message }, id });
 };
-const badRequest = (res: Response, m: string) => rpcError(res, 400, -32000, m);
-const unauthorized = (res: Response, m: string) => rpcError(res, 401, -32001, m);
-const notFound = (res: Response, m: string) => rpcError(res, 404, -32001, m);
-const unavailable = (res: Response, m: string) => rpcError(res, 503, -32002, m);
+const badRequest = (res: Response, m: string, id: RpcId = null) =>
+  rpcError(res, 400, -32000, m, id);
+const unauthorized = (res: Response, m: string, id: RpcId = null) =>
+  rpcError(res, 401, -32001, m, id);
+const notFound = (res: Response, m: string, id: RpcId = null) => rpcError(res, 404, -32001, m, id);
+const unavailable = (res: Response, m: string, id: RpcId = null) =>
+  rpcError(res, 503, -32002, m, id);
