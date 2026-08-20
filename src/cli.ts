@@ -44,6 +44,17 @@ type Flags = Record<string, string | boolean>;
  */
 const BOOLEAN = new Set(['help', 'h', 'version', 'v', 'http', 'no-lifecycle']);
 
+const KNOWN = new Set([
+  ...BOOLEAN,
+  'port',
+  'host',
+  'base-url',
+  'computer',
+  'key',
+  'allowed-hosts',
+  'allowed-origins',
+]);
+
 /** What `--http=…` may say to mean no. */
 const FALSEY = new Set(['false', '0', 'no', 'off']);
 
@@ -77,6 +88,11 @@ export function parse(argv: string[]): Flags {
     const eq = body.indexOf('=');
     const name = eq < 0 ? body : body.slice(0, eq);
     const inline = eq < 0 ? undefined : body.slice(eq + 1);
+    if (!KNOWN.has(name)) {
+      throw new Error(
+        `unknown flag --${name}. Valid flags are: ${[...KNOWN].map((flag) => `--${flag}`).join(', ')}`,
+      );
+    }
     // `--http=false` has to mean false. It is the one spelling that carries an
     // explicit answer, and reading it as the truthy string "false" would turn
     // the clearest way to say no into a yes.

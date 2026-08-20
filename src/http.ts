@@ -3,10 +3,10 @@ import type { Server } from 'node:http';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
 import express, { type Request, type Response } from 'express';
-import { MODEL_KEY_HEADER } from './api.js';
+import { Api, MODEL_KEY_HEADER } from './api.js';
 import { createServer, SERVER_NAME, SERVER_VERSION, type ServerConfig } from './server.js';
 
-export type HttpConfig = Omit<ServerConfig, 'apiKey'> & {
+export type HttpConfig = Omit<ServerConfig, 'apiKey' | 'activity'> & {
   port: number;
   host: string;
   /** Hosts this server will answer to, for DNS-rebinding protection. */
@@ -16,7 +16,7 @@ export type HttpConfig = Omit<ServerConfig, 'apiKey'> & {
   sessionTtlMs?: number;
   /** How many live sessions this server will hold at once. */
   maxSessions?: number;
-  /** How many requests may parse a body above 256 KiB at once. */
+  /** How many requests may retain a parsed body above 256 KiB at once. */
   maxLargeBodyParses?: number;
 };
 
@@ -66,6 +66,12 @@ const LOOPBACK = new Set(['127.0.0.1', 'localhost', '::1', '[::1]']);
  * desktop, which it otherwise would be.
  */
 export async function runHttp(cfg: HttpConfig): Promise<Server> {
+  // HTTP does not construct an Api until the first initialize, which made a
+  // bad MANDALA_BASE_URL look like a working bind and then fail that caller
+  // with a generic 500. Validate it before opening the listening socket, using
+  // the same constructor and therefore the same rules as every real session.
+  new Api('startup-validation-only', cfg.baseUrl);
+
   const app = express();
 
   const sessions = new Map<string, Live>();
@@ -139,10 +145,27 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
       );
     }
     largeBodyParses++;
-    return fullBody(req, res, (err) => {
+    let held = true;
+    const release = () => {
+      if (!held) return;
+      held = false;
       largeBodyParses--;
+    };
+    return fullBody(req, res, (err) => {
+      // A failed parse never reaches the route that normally releases this
+      // lease. A successful one keeps it for the handler lifetime: req.body is
+      // the large allocation being bounded, and express.json finishing does
+      // not free it while the asynchronous MCP request is still using it.
+      if (err) release();
+      else res.locals.releaseLargeBody = release;
       next(err);
     });
+  };
+
+  const releaseLargeBody = (res: Response) => {
+    const release = res.locals.releaseLargeBody as (() => void) | undefined;
+    delete res.locals.releaseLargeBody;
+    release?.();
   };
 
   // Abandoned sessions are closed rather than left holding a transport. A
@@ -181,25 +204,29 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
    * the one where `close` never fires to undo the count. The transport and its
    * fully-registered server would sit on a `maxSessions` slot forever.
    */
-  const serving = (live: Live, res: Response) => {
+  const beginActivity = (live: Live): (() => void) => {
     live.active++;
     live.lastSeen = Date.now();
-    // `close` fires once and does not fire again for a listener that arrives
-    // after it. The window is small but real — the body is parsed from an I/O
-    // callback, so a client that disconnects while express.json is draining the
-    // request can have closed the response before this handler runs — and what
-    // it leaves behind is permanent: `active` never returns to zero, the sweeper
-    // skips the session forever on the "still being served" test, and the
-    // transport holds a maxSessions slot until the process restarts. A
-    // counter that only goes up is worth one branch.
-    if (res.closed) {
-      live.active--;
-      return;
-    }
-    res.on('close', () => {
+    let held = true;
+    return () => {
+      if (!held) return;
+      held = false;
       live.active--;
       live.lastSeen = Date.now();
-    });
+    };
+  };
+
+  const serving = async <T>(live: Live, handle: () => Promise<T>): Promise<T> => {
+    const release = beginActivity(live);
+    try {
+      return await handle();
+    } finally {
+      // The socket may close while the tool keeps running. Releasing on
+      // Response.close made the session look idle at that point, so a short
+      // TTL could sweep and close its transport underneath handleRequest.
+      // The work itself is the lifetime that matters.
+      release();
+    }
   };
 
   /** Stamp a session as heard from, without claiming anything is in flight. */
@@ -231,6 +258,8 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
     return ['127.0.0.1', 'localhost', '[::1]'].flatMap((h) => [`${h}:${portNow}`, h]);
   }
 
+  const allowedOrigins = cfg.allowedOrigins?.map((origin) => origin.toLowerCase());
+
   // Host names are case-insensitive, and the SDK's rebinding check is not: it
   // is a plain `allowedHosts.includes(hostHeader)` against the header as sent,
   // so a conformant client that says `Host: LOCALHOST:3000` is answered 403 by
@@ -247,9 +276,11 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
   app.use((req, _res, next) => {
     const raw = req.rawHeaders;
     for (let i = 0; i < raw.length; i += 2) {
-      if (raw[i].toLowerCase() === 'host') raw[i + 1] = raw[i + 1].toLowerCase();
+      const name = raw[i].toLowerCase();
+      if (name === 'host' || name === 'origin') raw[i + 1] = raw[i + 1].toLowerCase();
     }
     if (req.headers.host) req.headers.host = req.headers.host.toLowerCase();
+    if (req.headers.origin) req.headers.origin = req.headers.origin.toLowerCase();
     next();
   });
 
@@ -268,17 +299,25 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
     const key = bearer(req);
 
     if (sessionId) {
-      const live = sessions.get(sessionId);
-      if (!live) return notFound(res, 'Unknown session. Initialize a new one.', rpcId(req));
-      // The key is re-checked on every request, not only at initialize. A
-      // session id travels in a plain header and is the sort of thing that ends
-      // up in a proxy log; on its own it must not be a credential.
-      if (!key || !sameKey(live.keyDigest, key)) {
-        return unauthorized(res, 'This session belongs to a different API key.', rpcId(req));
+      try {
+        const live = sessions.get(sessionId);
+        if (!live) return notFound(res, 'Unknown session. Initialize a new one.', rpcId(req));
+        // The key is re-checked on every request, not only at initialize. A
+        // session id travels in a plain header and is the sort of thing that ends
+        // up in a proxy log; on its own it must not be a credential.
+        if (!key || !sameKey(live.keyDigest, key)) {
+          return unauthorized(res, 'This session belongs to a different API key.', rpcId(req));
+        }
+        return await serving(live, () => live.transport.handleRequest(req, res, req.body));
+      } finally {
+        // A verified session is the only request allowed through the large
+        // parser. Keep its parsed body leased until handleRequest settles.
+        releaseLargeBody(res);
       }
-      serving(live, res);
-      return live.transport.handleRequest(req, res, req.body);
     }
+    // Sessionless requests always use the small parser. This no-op keeps the
+    // ownership explicit if the parser policy changes later.
+    releaseLargeBody(res);
 
     if (!isInitializeRequest(req.body)) {
       return badRequest(res, 'No session id, and this is not an initialize request.', rpcId(req));
@@ -331,9 +370,9 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
         // only thing separating the operator's own client from a page the user
         // happened to open, and the MCP spec asks a locally-bound server to
         // check it.
-        enableDnsRebindingProtection: Boolean(hosts?.length || cfg.allowedOrigins?.length),
+        enableDnsRebindingProtection: Boolean(hosts?.length || allowedOrigins?.length),
         allowedHosts: hosts,
-        allowedOrigins: cfg.allowedOrigins,
+        allowedOrigins,
         onsessioninitialized: (id) => {
           sessions.set(id, {
             transport: t,
@@ -355,6 +394,11 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
       const server = createServer({
         ...cfg,
         apiKey: key,
+        activity: () => {
+          const id = t.sessionId;
+          const live = id ? sessions.get(id) : undefined;
+          return live ? beginActivity(live) : () => {};
+        },
         // Per-caller, and deliberately with no fallback to cfg.modelKey: an
         // operator who set MANDALA_MODEL_KEY for their own stdio use would
         // otherwise be billed for every stranger's run here. Absent means
@@ -396,9 +440,11 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
     }
     // The DELETE is a request and is held for; the GET is the notification
     // stream and is only noted. See `serving`.
-    if (req.method === 'GET') touch(live, res);
-    else serving(live, res);
-    return live.transport.handleRequest(req, res);
+    if (req.method === 'GET') {
+      touch(live, res);
+      return live.transport.handleRequest(req, res);
+    }
+    return serving(live, () => live.transport.handleRequest(req, res));
   };
   app.get('/mcp', bySession);
   app.delete('/mcp', bySession);
