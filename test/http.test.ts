@@ -49,6 +49,15 @@ describe('the hosted transport', () => {
     expect(((await res.json()) as { ok: boolean }).ok).toBe(true);
   });
 
+  it('answers an unknown path with JSON rather than Express HTML', async () => {
+    const res = await fetch(`${url}/not-an-endpoint`);
+    expect(res.status).toBe(404);
+    expect(res.headers.get('content-type')).toContain('application/json');
+    const body = (await res.json()) as { jsonrpc: string; error: { message: string } };
+    expect(body.jsonrpc).toBe('2.0');
+    expect(body.error.message).toContain('Unknown path');
+  });
+
   it('refuses to initialize without one', async () => {
     const res = await post(INIT);
     expect(res.status).toBe(401);

@@ -376,7 +376,7 @@ export const registerComputers: Registrar = (server, session, opts) => {
             }
             if (!isTransient(err)) throw err;
             blocked = err instanceof Error ? err.message : String(err);
-            await sleep(2000, extra.signal);
+            await sleep(2000, signal);
             continue;
           }
           blocked = undefined;
@@ -439,7 +439,7 @@ export const registerComputers: Registrar = (server, session, opts) => {
               if (!isTransient(err)) throw err;
             }
           }
-          await sleep(2000, extra.signal);
+          await sleep(2000, signal);
         }
         // Also a refusal: the deadline passed without the condition being met,
         // which is the same shape of answer as a cancellation and not the same
@@ -598,6 +598,12 @@ export const registerComputers: Registrar = (server, session, opts) => {
             body: name === undefined ? {} : { name },
           }),
         );
+        if (!c.id) {
+          return refused(
+            `The platform accepted the clone of ${id} but sent no id back, so the copy cannot be identified. It may exist and be billable — list_computers will say. The original stays selected.`,
+            withoutCredentials(c),
+          );
+        }
         return said(
           `Cloned ${id} to ${describe(c)}. The original stays selected; use_computer to switch.`,
           withoutCredentials(c),

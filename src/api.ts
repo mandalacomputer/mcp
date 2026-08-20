@@ -179,10 +179,7 @@ export class Api {
       // and the wait loops, which had to test the signal themselves precisely
       // because the message arriving here said nothing true about the cause.
       if (isCancellation(cause, signal)) {
-        throw new CancelledError(
-          `${method} /${path.replace(/^\/+/, '')} was cancelled before the platform answered. ` +
-            'It may still have been received, so treat anything it would have changed as unknown rather than undone.',
-        );
+        throw cancellationError(method, path, 'before the platform answered');
       }
       // Rewritten, because the raw one names the host and the failure a model
       // can act on is "the platform is not reachable", not a DNS error string.
@@ -190,7 +187,7 @@ export class Api {
         `could not reach ${this.#base.origin}: ${cause instanceof Error ? cause.message : String(cause)}`,
       );
     }
-    if (!resp.ok) throw await this.#error(resp);
+    if (!resp.ok) throw await this.#error(resp, method, path, signal);
     return resp;
   }
 
@@ -202,10 +199,23 @@ export class Api {
    * that predates window actions" — and replacing them with a status line would
    * throw away the only part of the response a model can do anything with.
    */
-  async #error(resp: Response): Promise<APIError> {
+  async #error(
+    resp: Response,
+    method: string,
+    path: string,
+    signal: AbortSignal | undefined,
+  ): Promise<APIError> {
     let body: unknown;
     let message = `HTTP ${resp.status}`;
-    const text = await resp.text().catch(() => '');
+    let text = '';
+    try {
+      text = await readBody(method, path, signal, () => resp.text());
+    } catch (cause) {
+      // A response whose error body itself is broken still has a useful status.
+      // Cancellation is different: the caller deliberately ended this read and
+      // must not be told the platform answered with an ordinary HTTP failure.
+      if (cause instanceof CancelledError) throw cause;
+    }
     if (text) {
       try {
         body = JSON.parse(text);
@@ -229,9 +239,14 @@ export class Api {
    * bare `SyntaxError: Unexpected token '<'` is whether the reader learns which
    * request went wrong.
    */
-  async #decode<T>(resp: Response, method: string, path: string): Promise<T | undefined> {
+  async #decode<T>(
+    resp: Response,
+    method: string,
+    path: string,
+    signal?: AbortSignal,
+  ): Promise<T | undefined> {
     if (resp.status === 204) return undefined;
-    const text = await resp.text();
+    const text = await readBody(method, path, signal, () => resp.text());
     if (!text) return undefined;
     try {
       return JSON.parse(text) as T;
@@ -255,10 +270,10 @@ export class Api {
    */
   async json<T = unknown>(method: string, path: string, opts: RequestOptions = {}): Promise<T> {
     const resp = await this.#fetch(method, path, opts);
-    const body = await this.#decode<T>(resp, method, path);
-    if (body === undefined) {
+    const body = await this.#decode<T>(resp, method, path, opts.signal ?? this.#signal);
+    if (body === undefined || body === null) {
       throw new MandalaError(
-        `${method} ${path} answered ${resp.status} with an empty body, where a JSON body was expected`,
+        `${method} ${path} answered ${resp.status} with ${body === null ? 'JSON null' : 'an empty body'}, where a JSON value was expected`,
       );
     }
     return body;
@@ -277,7 +292,7 @@ export class Api {
     opts: RequestOptions = {},
   ): Promise<T | undefined> {
     const resp = await this.#fetch(method, path, opts);
-    return this.#decode<T>(resp, method, path);
+    return this.#decode<T>(resp, method, path, opts.signal ?? this.#signal);
   }
 
   /**
@@ -305,7 +320,7 @@ export class Api {
       // `T | undefined` and not `T`, because an empty body is a real answer
       // here. Typing it as present would let a caller write `items.length`
       // against a value the compiler had been told could not be missing.
-      items: await this.#decode<T>(resp, 'GET', path),
+      items: await this.#decode<T>(resp, 'GET', path, opts.signal ?? this.#signal),
       incomplete: short === null ? null : Number(short),
     };
   }
@@ -321,10 +336,15 @@ export class Api {
     const contentType = mediaType(resp.headers.get('content-type'));
     const limit = typeof maxBytes === 'function' ? maxBytes(contentType) : maxBytes;
     const declared = contentLength(resp);
-    const { bytes, truncated } =
-      limit === undefined
-        ? { bytes: new Uint8Array(await resp.arrayBuffer()), truncated: false }
-        : await readAtMost(resp, limit, declared);
+    const { bytes, truncated } = await readBody(
+      method,
+      path,
+      opts.signal ?? this.#signal,
+      async () =>
+        limit === undefined
+          ? { bytes: new Uint8Array(await resp.arrayBuffer()), truncated: false }
+          : await readAtMost(resp, limit, declared),
+    );
     return {
       bytes,
       contentType,
@@ -358,7 +378,9 @@ export class Api {
     let buffer = '';
     try {
       for (;;) {
-        const { done, value } = await reader.read();
+        const { done, value } = await readBody(method, path, opts.signal ?? this.#signal, () =>
+          reader.read(),
+        );
         if (done) break;
         // Buffered exactly as it arrived. Rewriting terminators per chunk was
         // the tempting shortcut and is wrong: a CRLF split across two reads
@@ -422,6 +444,30 @@ function isCancellation(cause: unknown, signal?: AbortSignal): boolean {
   if (signal?.aborted) return true;
   const name = (cause as { name?: string })?.name;
   return name === 'AbortError' || name === 'TimeoutError';
+}
+
+/** The same cancellation semantics for response bodies as for response headers. */
+async function readBody<T>(
+  method: string,
+  path: string,
+  signal: AbortSignal | undefined,
+  read: () => Promise<T>,
+): Promise<T> {
+  try {
+    return await read();
+  } catch (cause) {
+    if (isCancellation(cause, signal)) {
+      throw cancellationError(method, path, 'while reading the platform response');
+    }
+    throw cause;
+  }
+}
+
+function cancellationError(method: string, path: string, when: string): CancelledError {
+  return new CancelledError(
+    `${method} /${path.replace(/^\/+/, '')} was cancelled ${when}. ` +
+      'It may still have been received, so treat anything it would have changed as unknown rather than undone.',
+  );
 }
 
 /**
@@ -493,7 +539,10 @@ async function readAtMost(
       }
     }
   } finally {
-    if (truncated) await reader.cancel().catch(() => {});
+    // Release the response on every exit, including a rejected read. On a
+    // clean EOF this is a harmless no-op; on an error it prevents the body and
+    // its connection from being left open.
+    await reader.cancel().catch(() => {});
   }
 
   const bytes = new Uint8Array(length);

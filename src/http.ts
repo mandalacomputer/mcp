@@ -403,6 +403,13 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
   app.get('/mcp', bySession);
   app.delete('/mcp', bySession);
 
+  // Express's default 404 is HTML. Keep every answer from this MCP-facing
+  // server in the JSON-RPC shape its clients can surface, even when the path
+  // itself was wrong.
+  app.use((req, res) =>
+    notFound(res, `Unknown path: ${req.method} ${req.path}. Use /mcp or /healthz.`, rpcId(req)),
+  );
+
   // The last word on anything that threw, because Express's own last word is
   // an HTML page.
   //
