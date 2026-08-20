@@ -243,12 +243,15 @@ export class Api {
         else message = text.slice(0, 500);
       } catch {
         message = text.slice(0, 500);
-        // Kept, not just read. errorForStatus replaces the message on every
-        // edge status with wording of its own, and this is the only copy of
-        // what the edge actually said — a Cloudflare Ray ID lives in that HTML
-        // and nowhere else, and it is the first thing support asks for. Shown
-        // to nobody; available to whoever needs it.
-        body = message;
+        // The whole page, not the truncated message. errorForStatus replaces
+        // the message on every edge status with wording of its own, and this is
+        // the only copy of what the edge actually said — a Cloudflare Ray ID
+        // lives in that HTML and nowhere else, and it is the first thing
+        // support asks for. It sits in the footer of a page that runs to
+        // several KB, so slicing to 500 for the message would throw away the
+        // one field this exists to keep. Shown to nobody; available to whoever
+        // needs it.
+        body = text;
       }
     }
     return errorForStatus(resp.status, message, body);

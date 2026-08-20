@@ -232,11 +232,11 @@ const GATEWAY_TIMEOUT_MESSAGE =
   'cancelled: the platform never saw this deadline, so anything this request had already ' +
   'set going carries on without it — usually it has the request and is still working, ' +
   'though a 504 can come from a hop that never reached it. Most often that is a ' +
-  'foreground exec, which ends ' +
+  'foreground exec, and if this one was, it ended ' +
   'this way after about two minutes however large a timeout_s it was given — the ' +
-  'ceiling belongs to the proxy, not to the platform, so a larger timeout_s buys no ' +
-  'time and background: true with exec_poll is the way to run something slower. After ' +
-  'one of those, the next call on that computer may report the guest agent as busy ' +
+  'ceiling belongs to the proxy, not to the platform, so on that route a larger ' +
+  'timeout_s buys no time, background: true with exec_poll is what runs something ' +
+  'slower, and the next call on that computer may report the guest agent as busy ' +
   'with the command that outlived the request';
 
 /** What a caller is told when the platform's own answer arrived unreadable. */
@@ -296,10 +296,6 @@ export function errorForStatus(status: number, message: string, body?: unknown):
   if (Cls === GatewayTimeoutError && !platformNamed(body)) {
     return new GatewayTimeoutError(GATEWAY_TIMEOUT_MESSAGE, status, body);
   }
-  // No such guard here, and the asymmetry is the point. 520-526 are Cloudflare's
-  // own, and every one of them means the request never reached the platform —
-  // so there is no reading on which a body carries the platform's account of
-  // what happened, and nothing to defer to.
   // Guarded, where the unreachable statuses below are not, and the difference is
   // which of them the platform could have spoken through. A 520 is its own
   // answer arriving mangled, so a body that parsed as this surface's JSON
