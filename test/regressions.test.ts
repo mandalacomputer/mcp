@@ -50,6 +50,12 @@ describe('argv parsing', () => {
     expect(parse(['--port', '3000'])).toEqual({ port: '3000' });
     expect(parse(['--http'])).toEqual({ http: true });
   });
+
+  it('rejects unknown long flags instead of silently ignoring them', () => {
+    expect(() => parse(['--computer-id', 'vm-1'])).toThrow(/unknown flag.*--computer-id/i);
+    expect(() => parse(['--api-key=com_test'])).toThrow(/unknown flag.*--api-key/i);
+    expect(() => parse(['--api-key=com_test'])).toThrow(/--computer.*--key/);
+  });
 });
 
 describe('a computer that would not boot', () => {
@@ -671,6 +677,19 @@ describe('a fourth adversarial review', () => {
     await close();
   });
 
+  it('does not hand back an empty image as a screenshot', async () => {
+    globalThis.fetch = (async () =>
+      new Response(new Uint8Array(), {
+        headers: { 'Content-Type': 'image/png' },
+      })) as typeof fetch;
+    const { call, close } = await connect();
+    const res = await call('screenshot');
+    expect(res.isError).toBe(true);
+    expect(res.content.some((c) => c.type === 'image')).toBe(false);
+    expect(said(res)).toMatch(/empty/i);
+    await close();
+  });
+
   it('does not print what a build came from as the reason it failed', async () => {
     // `Build failed: ${c.build?.source}` put the image the machine was built
     // from in the grammatical position of a cause, so the model was told a
@@ -1168,6 +1187,45 @@ describe('malformed computer listings', () => {
   });
 });
 
+describe('malformed snapshot listings', () => {
+  it('skips null and non-object rows without failing the valid inventory', async () => {
+    const real = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      new Response(
+        JSON.stringify([null, 'not-a-snapshot', [], { id: 'snap-1', computer_id: 'vm-1' }]),
+        { headers: { 'Content-Type': 'application/json' } },
+      )) as typeof fetch;
+    try {
+      const { call, close } = await connect();
+      const res = await call('list_snapshots');
+      expect(res.isError).toBeFalsy();
+      expect(said(res)).toMatch(/ignored 3 malformed snapshot entries/);
+      expect(said(res)).toMatch(/snap-1/);
+      await close();
+    } finally {
+      globalThis.fetch = real;
+    }
+  });
+
+  it('does not call an all-malformed inventory empty', async () => {
+    const real = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify([null, 7]), {
+        headers: { 'Content-Type': 'application/json' },
+      })) as typeof fetch;
+    try {
+      const { call, close } = await connect();
+      const res = await call('list_snapshots');
+      expect(res.isError).toBe(true);
+      expect(said(res)).toMatch(/no valid snapshots remained/i);
+      expect(said(res)).not.toMatch(/^0 snapshot/m);
+      await close();
+    } finally {
+      globalThis.fetch = real;
+    }
+  });
+});
+
 describe('a large file download', () => {
   it('cancels the response stream once the inline prefix is known', async () => {
     const real = globalThis.fetch;
@@ -1338,6 +1396,43 @@ describe('truthful recovery results', () => {
     expect(res.isError).toBe(true);
     expect(said(res)).toMatch(/no id|list_computers/i);
     await close();
+  });
+
+  it('refuses a snapshot clone result that cannot identify the copy', async () => {
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify({ name: 'copy' }), {
+        headers: { 'Content-Type': 'application/json' },
+      })) as typeof fetch;
+    const { call, close } = await connect();
+    const res = await call('clone_snapshot', { snapshot_id: 'snap-1' });
+    expect(res.isError).toBe(true);
+    expect(said(res)).toMatch(/no computer id|list_computers/i);
+    await close();
+  });
+});
+
+describe('background process handles', () => {
+  it('refuses pids that cannot be represented safely in a path', async () => {
+    const platform = installFakePlatform();
+    try {
+      const { call, close } = await connect();
+      for (const pid of [0, -1, Number.MAX_SAFE_INTEGER + 1]) {
+        expect((await call('exec_poll', { pid })).isError, `poll accepted ${pid}`).toBe(true);
+        expect((await call('exec_kill', { pid })).isError, `kill accepted ${pid}`).toBe(true);
+      }
+      expect(platform.calls).toHaveLength(0);
+      await close();
+    } finally {
+      platform.restore();
+    }
+  });
+
+  it('defends the path builder against an unsafe pid', () => {
+    expect(() => P.execHandle('vm-1', 0)).toThrow(/positive safe integer/i);
+    expect(() => P.execHandle('vm-1', 1e21)).toThrow(/positive safe integer/i);
+    expect(P.execHandle('vm-1', Number.MAX_SAFE_INTEGER)).toBe(
+      `computers/vm-1/exec/${Number.MAX_SAFE_INTEGER}`,
+    );
   });
 });
 
