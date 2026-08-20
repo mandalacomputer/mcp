@@ -325,7 +325,6 @@ export const registerComputers: Registrar = (server, session, opts) => {
     ({ computer_id, until, timeout_s }, extra) =>
       guarded(async () => {
         const id = session.resolve(computer_id);
-        const deadline = Date.now() + timeout_s * 1000;
         // timeout_s used to gate only the top of the loop, which bounds how
         // often this asks and not how long any one ask may take. Node's fetch
         // has no response deadline of its own beyond undici's five-minute
@@ -347,7 +346,7 @@ export const registerComputers: Registrar = (server, session, opts) => {
         // report, and swallowing every transient would end the wait saying only
         // that the status was never seen.
         let blocked: string | undefined;
-        while (Date.now() < deadline) {
+        while (!untilDeadline.aborted) {
           // The caller giving up ends the wait. The signal aborts the request
           // in flight, but nothing about an aborted request stops the next
           // iteration from starting one — so a cancelled call would go on
@@ -372,6 +371,8 @@ export const registerComputers: Registrar = (server, session, opts) => {
             // let the loop condition end it.
             if (err instanceof CancelledError) {
               blocked = `the status read was still in flight when the ${timeout_s}s deadline arrived`;
+              if (untilDeadline.aborted) break;
+              await sleep(2000, signal);
               continue;
             }
             if (!isTransient(err)) throw err;
@@ -434,6 +435,8 @@ export const registerComputers: Registrar = (server, session, opts) => {
               if (extra.signal?.aborted) return cancelled(id, last);
               if (err instanceof CancelledError) {
                 blocked = `the guest probe was still in flight when the ${timeout_s}s deadline arrived`;
+                if (untilDeadline.aborted) break;
+                await sleep(2000, signal);
                 continue;
               }
               if (!isTransient(err)) throw err;
