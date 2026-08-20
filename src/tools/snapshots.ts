@@ -190,38 +190,6 @@ export const registerSnapshots: Registrar = (server, session, opts) => {
   );
 
   server.registerTool(
-    'clone_snapshot',
-    {
-      title: 'Fork a snapshot into a new computer',
-      description:
-        'Build a new computer from a snapshot, leaving the original untouched. This is the fork half of snapshot-and-fork, and the only thing that works on an orphaned snapshot.',
-      inputSchema: {
-        snapshot_id: z.string(),
-        name: z.string().optional().describe('A name for the new computer.'),
-        select: z
-          .boolean()
-          .default(true)
-          .describe("Make the new computer this session's selected one."),
-      },
-    },
-    ({ snapshot_id, name, select }, extra) =>
-      guarded(async () => {
-        const c = unwrapComputer(
-          await session.api
-            .with(extra.signal)
-            .json('POST', P.snapshotAction(snapshot_id, 'clone'), {
-              body: name === undefined ? {} : { name },
-            }),
-        );
-        if (select && c.id) session.bind(c.id, c.resolution);
-        return said(
-          `Forked ${snapshot_id} into ${describe(c)}${select && c.id ? ', and selected it' : ''}.`,
-          withoutCredentials(c),
-        );
-      }),
-  );
-
-  server.registerTool(
     'snapshot_schedule',
     {
       title: 'Read or set the nightly snapshot',
@@ -270,9 +238,47 @@ export const registerSnapshots: Registrar = (server, session, opts) => {
       }),
   );
 
-  // Deleting bytes somebody may be relying on is the same kind of act as
-  // deleting a computer, so it sits behind the same gate.
+  // clone_snapshot brings a billable machine into existence as surely as
+  // create_computer does, and delete_snapshot destroys bytes as surely as
+  // delete_computer does, so both sit behind the gate those two sit behind.
+  //
+  // clone_snapshot was on the wrong side of it, which left MANDALA_NO_LIFECYCLE
+  // withholding every way of making a computer except this one — an operator
+  // who had turned creation off still had a tool that made computers, and the
+  // first they would learn of it is an invoice.
   if (!opts.lifecycle) return;
+
+  server.registerTool(
+    'clone_snapshot',
+    {
+      title: 'Fork a snapshot into a new computer',
+      description:
+        'Build a new computer from a snapshot, leaving the original untouched. This is the fork half of snapshot-and-fork, and the only thing that works on an orphaned snapshot.',
+      inputSchema: {
+        snapshot_id: z.string(),
+        name: z.string().optional().describe('A name for the new computer.'),
+        select: z
+          .boolean()
+          .default(true)
+          .describe("Make the new computer this session's selected one."),
+      },
+    },
+    ({ snapshot_id, name, select }, extra) =>
+      guarded(async () => {
+        const c = unwrapComputer(
+          await session.api
+            .with(extra.signal)
+            .json('POST', P.snapshotAction(snapshot_id, 'clone'), {
+              body: name === undefined ? {} : { name },
+            }),
+        );
+        if (select && c.id) session.bind(c.id, c.resolution);
+        return said(
+          `Forked ${snapshot_id} into ${describe(c)}${select && c.id ? ', and selected it' : ''}.`,
+          withoutCredentials(c),
+        );
+      }),
+  );
 
   server.registerTool(
     'delete_snapshot',
