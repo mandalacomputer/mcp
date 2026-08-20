@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { CancelledError, isTransient } from '../errors.js';
+import { CancelledError, isTransientForPoll } from '../errors.js';
 import {
   type Computer,
   describe,
@@ -375,7 +375,7 @@ export const registerComputers: Registrar = (server, session, opts) => {
               await sleep(2000, signal);
               continue;
             }
-            if (!isTransient(err)) throw err;
+            if (!isTransientForPoll(err)) throw err;
             blocked = err instanceof Error ? err.message : String(err);
             await sleep(2000, signal);
             continue;
@@ -439,7 +439,7 @@ export const registerComputers: Registrar = (server, session, opts) => {
                 await sleep(2000, signal);
                 continue;
               }
-              if (!isTransient(err)) throw err;
+              if (!isTransientForPoll(err)) throw err;
             }
           }
           await sleep(2000, signal);
