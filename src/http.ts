@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import type { Server } from 'node:http';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
@@ -27,6 +28,13 @@ type Live = {
   lastSeen: number;
   /** Requests currently being served on this session. */
   active: number;
+};
+
+type LargeBodyLease = {
+  /** Add an owner and return its idempotent release callback. */
+  retain: () => () => void;
+  /** Release the parser/route's original ownership. */
+  release: () => void;
 };
 
 const DEFAULT_TTL_MS = 30 * 60 * 1000;
@@ -84,6 +92,9 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
   const maxSessions = cfg.maxSessions ?? DEFAULT_MAX_SESSIONS;
   const maxLargeBodyParses = cfg.maxLargeBodyParses ?? DEFAULT_MAX_LARGE_BODY_PARSES;
   let largeBodyParses = 0;
+  // Tool callbacks inherit the request's lease even when a disconnected
+  // response lets transport.handleRequest() settle before the callback does.
+  const requestBodyLease = new AsyncLocalStorage<LargeBodyLease | undefined>();
   // Initializes that have passed the cap check but have not yet reached
   // `onsessioninitialized`. Counted, because the check and the map write are
   // two awaits apart: without a reservation every concurrent initialize reads
@@ -137,35 +148,71 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
       rawLength === undefined || !/^\d+$/.test(rawLength) || Number(rawLength) > SMALL_BODY_BYTES;
     if (!verified || !mayBeLarge) return smallBody(req, res, next);
     if (largeBodyParses >= maxLargeBodyParses) {
-      // Drain without retaining so a keep-alive connection remains usable.
-      req.resume();
-      return unavailable(
-        res,
-        `This server is already parsing its maximum of ${maxLargeBodyParses} large request bodies. Retry shortly.`,
-      );
+      // Drain before answering so unread request bytes cannot be mistaken for
+      // the next request on a keep-alive connection. A peer that aborts the
+      // upload gets a closed response rather than a misleading reusable one.
+      const cleanup = () => {
+        req.off('end', drained);
+        req.off('aborted', failed);
+        req.off('error', failed);
+      };
+      const drained = () => {
+        cleanup();
+        if (!res.destroyed && !res.headersSent) {
+          unavailable(
+            res,
+            `This server is already parsing its maximum of ${maxLargeBodyParses} large request bodies. Retry shortly.`,
+          );
+        }
+      };
+      const failed = () => {
+        cleanup();
+        res.destroy();
+      };
+      if (req.readableEnded) drained();
+      else {
+        req.once('end', drained);
+        req.once('aborted', failed);
+        req.once('error', failed);
+        req.resume();
+      }
+      return;
     }
     largeBodyParses++;
-    let held = true;
-    const release = () => {
-      if (!held) return;
-      held = false;
-      largeBodyParses--;
+    let references = 1;
+    const drop = () => {
+      if (references <= 0) return;
+      references--;
+      if (references === 0) largeBodyParses--;
+    };
+    const lease: LargeBodyLease = {
+      retain: () => {
+        if (references <= 0) return () => {};
+        references++;
+        let held = true;
+        return () => {
+          if (!held) return;
+          held = false;
+          drop();
+        };
+      },
+      release: drop,
     };
     return fullBody(req, res, (err) => {
       // A failed parse never reaches the route that normally releases this
-      // lease. A successful one keeps it for the handler lifetime: req.body is
-      // the large allocation being bounded, and express.json finishing does
-      // not free it while the asynchronous MCP request is still using it.
-      if (err) release();
-      else res.locals.releaseLargeBody = release;
+      // lease. A successful one keeps it for the route and tool lifetimes:
+      // req.body is the large allocation being bounded, and express.json
+      // finishing does not free it while asynchronous MCP work still uses it.
+      if (err) lease.release();
+      else res.locals.largeBodyLease = lease;
       next(err);
     });
   };
 
   const releaseLargeBody = (res: Response) => {
-    const release = res.locals.releaseLargeBody as (() => void) | undefined;
-    delete res.locals.releaseLargeBody;
-    release?.();
+    const lease = res.locals.largeBodyLease as LargeBodyLease | undefined;
+    delete res.locals.largeBodyLease;
+    lease?.release();
   };
 
   // Abandoned sessions are closed rather than left holding a transport. A
@@ -308,10 +355,14 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
         if (!key || !sameKey(live.keyDigest, key)) {
           return unauthorized(res, 'This session belongs to a different API key.', rpcId(req));
         }
-        return await serving(live, () => live.transport.handleRequest(req, res, req.body));
+        const lease = res.locals.largeBodyLease as LargeBodyLease | undefined;
+        return await requestBodyLease.run(lease, () =>
+          serving(live, () => live.transport.handleRequest(req, res, req.body)),
+        );
       } finally {
         // A verified session is the only request allowed through the large
-        // parser. Keep its parsed body leased until handleRequest settles.
+        // parser. Release the route's ownership here; a tool callback that
+        // outlives handleRequest retains its own reference through activity().
         releaseLargeBody(res);
       }
     }
@@ -360,6 +411,7 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
     // is written to the map from inside handleRequest, so a throw after that
     // point has something to clean up.
     let transport: StreamableHTTPServerTransport | undefined;
+    let finishInitialize = () => {};
     try {
       const hosts = allowedHosts(boundPort);
       const t = new StreamableHTTPServerTransport({
@@ -374,12 +426,22 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
         allowedHosts: hosts,
         allowedOrigins,
         onsessioninitialized: (id) => {
-          sessions.set(id, {
+          const live: Live = {
             transport: t,
             keyDigest: digest(key),
             lastSeen: Date.now(),
-            active: 0,
-          });
+            // Initialize is already in flight when the session first becomes
+            // visible to the sweeper. Count it until handleRequest settles.
+            active: 1,
+          };
+          sessions.set(id, live);
+          let held = true;
+          finishInitialize = () => {
+            if (!held) return;
+            held = false;
+            live.active--;
+            live.lastSeen = Date.now();
+          };
           release();
         },
         onsessionclosed: (id) => {
@@ -397,7 +459,12 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
         activity: () => {
           const id = t.sessionId;
           const live = id ? sessions.get(id) : undefined;
-          return live ? beginActivity(live) : () => {};
+          const finishActivity = live ? beginActivity(live) : () => {};
+          const finishBody = requestBodyLease.getStore()?.retain();
+          return () => {
+            finishBody?.();
+            finishActivity();
+          };
         },
         // Per-caller, and deliberately with no fallback to cfg.modelKey: an
         // operator who set MANDALA_MODEL_KEY for their own stdio use would
@@ -423,6 +490,7 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
       if (transport) void transport.close().catch(() => {});
       throw err;
     } finally {
+      finishInitialize();
       release();
     }
   });
