@@ -14,6 +14,7 @@ export {
   isTransient,
   MandalaError,
   NotFoundError,
+  OriginUnreachableError,
   PermissionDeniedError,
   PlanLimitError,
   UnavailableError,

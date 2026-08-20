@@ -115,6 +115,30 @@ export class GatewayTimeoutError extends APIError {
   override name = 'GatewayTimeoutError';
 }
 
+/**
+ * 520-523, 525, 526 — a proxy in front of the platform could not reach it.
+ *
+ * The rest of what an edge generates on its own, and the same bug as
+ * {@link GatewayTimeoutError} a few statuses along: with no class and no written
+ * message these fell through to the bare `HTTP 522`, which names no cause, no
+ * culprit and no way out — the exact reading that cost the debugging above.
+ *
+ * A different event from a gateway timeout, which is why it is a different type
+ * rather than more entries on that one. A 524 means the request arrived and is
+ * still being worked on; these mean it never arrived at all, so nothing was
+ * started and there is no command outliving anything. A caller branching on the
+ * class to decide whether its work survived gets opposite answers, correctly.
+ *
+ * Deliberately absent from mandala-computer-python's `_exceptions.py`, which
+ * this file otherwise mirrors. That mapping is of the platform's own statuses;
+ * these belong to whatever is deployed in front of it. The divergence is worth
+ * it here because this client's messages are read by a model, which cannot go
+ * and look up what a 523 is.
+ */
+export class OriginUnreachableError extends APIError {
+  override name = 'OriginUnreachableError';
+}
+
 const BY_STATUS: Record<number, typeof APIError> = {
   401: AuthenticationError,
   402: PlanLimitError,
@@ -123,8 +147,25 @@ const BY_STATUS: Record<number, typeof APIError> = {
   409: ConflictError,
   503: UnavailableError,
   504: GatewayTimeoutError,
+  520: OriginUnreachableError,
+  521: OriginUnreachableError,
+  522: OriginUnreachableError,
+  523: OriginUnreachableError,
   524: GatewayTimeoutError,
+  525: OriginUnreachableError,
+  526: OriginUnreachableError,
 };
+
+/**
+ * The two of those that a wait loop cannot outlast.
+ *
+ * 525 and 526 are a handshake the edge and the platform cannot agree on — an
+ * expired certificate, a mismatched name. Nothing about that is passing, so
+ * they get their own message and {@link isTransient} leaves them alone; the
+ * other four are an origin that is down or unreachable, which is what a restart
+ * looks like from outside and does come back.
+ */
+const TLS_STATUSES = new Set([525, 526]);
 
 /**
  * What a caller is told when a proxy abandoned the request.
@@ -136,14 +177,38 @@ const BY_STATUS: Record<number, typeof APIError> = {
  * it left the model reading the bare string `HTTP 524`, which names no cause, no
  * culprit and no way out, and whose obvious next move is a retry that fails
  * identically.
+ *
+ * Worded for any route, and the exec sentence hedged, because any of them can
+ * end here. A 504 in particular is the retryable half of this pair, so the wait
+ * tools reach it while polling and replay it in their give-up text — telling the
+ * caller of a `wait_for_computer` to re-run with `background: true` and read the
+ * output with `exec_poll` would send them after a parameter that tool does not
+ * have. Same for a screenshot or a listing that meets the ceiling.
  */
 const GATEWAY_TIMEOUT_MESSAGE =
   'a proxy in front of the platform gave up waiting for it to answer. Nothing was ' +
-  'cancelled: whatever this request started is still running, which is why the next ' +
-  'call on the same computer may report the guest agent as busy. A foreground exec ' +
-  'ends this way after about two minutes however large a timeout_s it was given — the ' +
-  'ceiling belongs to the proxy, not to the platform. Re-run it with background: true ' +
-  'and read the output with exec_poll';
+  'cancelled: the platform never saw this deadline, so whatever work this request had ' +
+  'already started is still running. Most often that is a foreground exec, which ends ' +
+  'this way after about two minutes however large a timeout_s it was given — the ' +
+  'ceiling belongs to the proxy, not to the platform, so a larger timeout_s buys no ' +
+  'time and background: true with exec_poll is the way to run something slower. After ' +
+  'one of those, the next call on that computer may report the guest agent as busy ' +
+  'with the command that outlived the request';
+
+/** What a caller is told when a proxy could not reach the platform at all. */
+const ORIGIN_UNREACHABLE_MESSAGE =
+  'a proxy in front of the platform could not reach it. The request never arrived, so ' +
+  'nothing was started and nothing is running — unlike a gateway timeout, there is no ' +
+  'work on the other side of this to account for. Usually the platform restarting or a ' +
+  'short outage, which clears on its own; if it persists the platform is down, and ' +
+  'waiting is the only thing that helps';
+
+/** The same, for the two of those that waiting will not fix. */
+const ORIGIN_TLS_MESSAGE =
+  'a proxy in front of the platform could not complete a TLS handshake with it. The ' +
+  'request never arrived, so nothing was started and nothing is running. This is a ' +
+  'misconfigured deployment rather than a passing outage — an expired or mismatched ' +
+  'certificate fails the same way on every retry, so report it rather than waiting it out';
 
 /** Build the error for a status, with the platform's own message when it sent one. */
 export function errorForStatus(status: number, message: string, body?: unknown): APIError {
@@ -153,6 +218,10 @@ export function errorForStatus(status: number, message: string, body?: unknown):
   // beats saying what happened.
   if (Cls === GatewayTimeoutError) {
     return new GatewayTimeoutError(GATEWAY_TIMEOUT_MESSAGE, status, body);
+  }
+  if (Cls === OriginUnreachableError) {
+    const said = TLS_STATUSES.has(status) ? ORIGIN_TLS_MESSAGE : ORIGIN_UNREACHABLE_MESSAGE;
+    return new OriginUnreachableError(said, status, body);
   }
   return new Cls(message, status, body);
 }
@@ -170,6 +239,6 @@ export function isTransient(err: unknown): boolean {
     err instanceof ConflictError ||
     err instanceof UnavailableError ||
     err instanceof ConnectivityError ||
-    (err instanceof APIError && [429, 502, 504].includes(err.status))
+    (err instanceof APIError && [429, 502, 504, 520, 521, 522, 523].includes(err.status))
   );
 }
