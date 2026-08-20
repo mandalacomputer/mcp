@@ -13,8 +13,12 @@ import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { Api, filenameFrom } from '../src/api.js';
 import { isEntrypoint, parse, port, str, wantsHelp, wantsVersion } from '../src/cli.js';
-import { ConnectivityError, errorForStatus, isTransient } from '../src/errors.js';
-import { MAX_INLINE_IMAGE_BYTES, unwrapComputer } from '../src/format.js';
+import { CancelledError, ConnectivityError, errorForStatus, isTransient } from '../src/errors.js';
+import { failed, MAX_INLINE_IMAGE_BYTES, unwrapComputer } from '../src/format.js';
+import {
+  CancelledError as PublicCancelledError,
+  ConnectivityError as PublicConnectivityError,
+} from '../src/index.js';
 import * as P from '../src/paths.js';
 import { windowBody } from '../src/paths.js';
 import { SERVER_VERSION } from '../src/server.js';
@@ -118,6 +122,13 @@ describe('an empty body from a route that should have answered', () => {
     globalThis.fetch = (async () => new Response(null, { status: 204 })) as typeof fetch;
     const api = new Api('com_test', BASE);
     await expect(api.send('DELETE', 'snapshots/snap-1')).resolves.toBeUndefined();
+  });
+
+  it('rejects JSON null on a route that must answer', async () => {
+    globalThis.fetch = (async () =>
+      new Response('null', { headers: { 'Content-Type': 'application/json' } })) as typeof fetch;
+    const api = new Api('com_test', BASE);
+    await expect(api.json('GET', 'computers/vm-1')).rejects.toThrow(/JSON null/);
   });
 });
 
@@ -432,15 +443,29 @@ describe('bodies the platform is not supposed to send', () => {
   it('refuses a screenshot too large to put in a context', async () => {
     // read_file enforced this bound and screenshot walked straight past it, so
     // the cap sat on the smaller of the two paths that produce an image.
+    let pulls = 0;
+    let cancelled = false;
     globalThis.fetch = (async () =>
-      new Response(new Uint8Array(MAX_INLINE_IMAGE_BYTES + 1), {
-        headers: { 'Content-Type': 'image/png' },
-      })) as typeof fetch;
+      new Response(
+        new ReadableStream<Uint8Array>({
+          pull(controller) {
+            pulls++;
+            if (pulls > 200) return controller.close();
+            controller.enqueue(new Uint8Array(64 * 1024));
+          },
+          cancel() {
+            cancelled = true;
+          },
+        }),
+        { headers: { 'Content-Type': 'image/png' } },
+      )) as typeof fetch;
     const { call, close } = await connect();
     const res = await call('screenshot');
     expect(res.isError).toBe(true);
     expect(res.content.some((c) => c.type === 'image')).toBe(false);
     expect(said(res)).toMatch(/width/);
+    expect(cancelled).toBe(true);
+    expect(pulls).toBeLessThan(200);
     await close();
   });
 });
@@ -622,9 +647,10 @@ describe('a fourth adversarial review', () => {
         headers: { 'Content-Type': 'image/png' },
       })) as typeof fetch;
     const { call, close } = await connect();
-    const res = await call('read_file', { path: '/big.png' });
+    const res = await call('read_file', { path: '/tmp/big image&.png' });
     expect(res.isError).toBe(true);
     expect(said(res)).toMatch(/inline limit/);
+    expect(said(res)).toContain("convert '/tmp/big image&.png'");
     await close();
   });
 
@@ -997,14 +1023,14 @@ describe('a file too large to put in a conversation', () => {
         }),
       )) as typeof fetch;
     const { call, close } = await connect();
-    const res = await call('read_file', { path: '/var/log/big.log' });
+    const res = await call('read_file', { path: '/var/log/big file&.log' });
     const out = said(res);
     expect(out).toMatch(/showed 262144 of 614400 bytes/);
     // The resume offset, computed rather than left to the reader: `tail -c +N`
     // counts from one, so an off-by-one here drops or repeats a byte silently.
-    expect(out).toMatch(/tail -c \+262145 \/var\/log\/big\.log/);
+    expect(out).toContain("tail -c +262145 '/var/log/big file&.log'");
     // And the way to move the file rather than read it.
-    expect(out).toMatch(/curl -T \/var\/log\/big\.log/);
+    expect(out).toContain("curl -T '/var/log/big file&.log'");
     await close();
     globalThis.fetch = real;
   });
@@ -1172,5 +1198,159 @@ describe('a large file download', () => {
     } finally {
       globalThis.fetch = real;
     }
+  });
+});
+
+describe('response-body failures', () => {
+  let real: typeof globalThis.fetch;
+
+  beforeEach(() => {
+    real = globalThis.fetch;
+  });
+  afterEach(() => {
+    globalThis.fetch = real;
+  });
+
+  const aborted = () => {
+    const err = new Error('This operation was aborted');
+    err.name = 'AbortError';
+    return Promise.reject(err);
+  };
+
+  it('classifies aborts after headers the same way as aborted fetches', async () => {
+    const response = (status: number) =>
+      ({
+        ok: status >= 200 && status < 300,
+        status,
+        headers: new Headers({ 'Content-Type': 'application/json' }),
+        text: aborted,
+      }) as unknown as Response;
+    const api = new Api('com_test', BASE);
+
+    globalThis.fetch = (async () => response(200)) as typeof fetch;
+    await expect(api.json('GET', 'computers')).rejects.toBeInstanceOf(CancelledError);
+
+    globalThis.fetch = (async () => response(409)) as typeof fetch;
+    await expect(api.json('GET', 'computers')).rejects.toBeInstanceOf(CancelledError);
+  });
+
+  it('classifies binary and streamed body aborts as cancellations', async () => {
+    const api = new Api('com_test', BASE);
+    globalThis.fetch = (async () =>
+      ({
+        ok: true,
+        status: 200,
+        headers: new Headers({ 'Content-Type': 'image/png' }),
+        arrayBuffer: aborted,
+      }) as unknown as Response) as typeof fetch;
+    await expect(api.bytes('GET', 'computers/vm-1/screenshot')).rejects.toBeInstanceOf(
+      CancelledError,
+    );
+
+    globalThis.fetch = (async () =>
+      ({
+        ok: true,
+        status: 200,
+        headers: new Headers({ 'Content-Type': 'text/event-stream' }),
+        body: {
+          getReader: () => ({ read: aborted, cancel: async () => undefined }),
+        },
+      }) as unknown as Response) as typeof fetch;
+    const events = async () => {
+      for await (const _event of api.sse('POST', 'agent')) {
+        // The mocked stream aborts before yielding.
+      }
+    };
+    await expect(events()).rejects.toBeInstanceOf(CancelledError);
+  });
+
+  it('cancels a capped reader even when read itself throws', async () => {
+    let cancelled = false;
+    globalThis.fetch = (async () =>
+      ({
+        ok: true,
+        status: 200,
+        headers: new Headers({ 'Content-Type': 'text/plain' }),
+        body: {
+          getReader: () => ({
+            read: async () => {
+              throw new Error('stream broke');
+            },
+            cancel: async () => {
+              cancelled = true;
+            },
+          }),
+        },
+      }) as unknown as Response) as typeof fetch;
+    const api = new Api('com_test', BASE);
+    await expect(api.bytes('GET', 'files', {}, 10)).rejects.toThrow('stream broke');
+    expect(cancelled).toBe(true);
+  });
+});
+
+describe('truthful recovery results', () => {
+  let real: typeof globalThis.fetch;
+
+  beforeEach(() => {
+    real = globalThis.fetch;
+  });
+  afterEach(() => {
+    globalThis.fetch = real;
+  });
+
+  it('normalises a padded computer id before filtering snapshots', async () => {
+    globalThis.fetch = (async () =>
+      new Response(
+        JSON.stringify([
+          { id: 'snap-1', computer_id: 'vm-1' },
+          { id: 'snap-2', computer_id: 'vm-2' },
+          { id: 'snap-3', unreachable: true },
+        ]),
+        { headers: { 'Content-Type': 'application/json' } },
+      )) as typeof fetch;
+    const { call, close } = await connect();
+    const out = said(await call('list_snapshots', { computer_id: '  vm-1  ' }));
+    expect(out).toContain('snap-1');
+    expect(out).toContain('snap-3');
+    expect(out).not.toContain('snap-2');
+    await close();
+  });
+
+  it('does not invent zero holdings or a missing fingerprint', async () => {
+    globalThis.fetch = (async () =>
+      new Response('{}', { headers: { 'Content-Type': 'application/json' } })) as typeof fetch;
+    const { call, close } = await connect();
+    const out = said(await call('snapshot_holdings'));
+    expect(out).toContain('unknown count');
+    expect(out).toContain('unknown total size');
+    expect(out).toContain('did not provide a fingerprint');
+    expect(out).not.toMatch(/holds 0 snapshot|0\.00 GB/);
+    await close();
+  });
+
+  it('refuses a clone result that cannot identify the copy', async () => {
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify({ name: 'copy' }), {
+        headers: { 'Content-Type': 'application/json' },
+      })) as typeof fetch;
+    const { call, close } = await connect();
+    const res = await call('clone_computer');
+    expect(res.isError).toBe(true);
+    expect(said(res)).toMatch(/no id|list_computers/i);
+    await close();
+  });
+});
+
+describe('the public error surface', () => {
+  it('exports both non-HTTP errors thrown by Api', () => {
+    expect(PublicCancelledError).toBe(CancelledError);
+    expect(PublicConnectivityError).toBe(ConnectivityError);
+  });
+
+  it('does not repeat an empty HTTP error status', () => {
+    expect(said(failed(errorForStatus(409, 'HTTP 409')))).toBe('HTTP 409');
+    expect(said(failed(errorForStatus(409, 'guest still booting')))).toBe(
+      'guest still booting (HTTP 409)',
+    );
   });
 });

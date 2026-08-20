@@ -7,7 +7,9 @@ export { Api, DEFAULT_BASE_URL, MODEL_KEY_HEADER } from './api.js';
 export {
   APIError,
   AuthenticationError,
+  CancelledError,
   ConflictError,
+  ConnectivityError,
   isTransient,
   MandalaError,
   NotFoundError,
