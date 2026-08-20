@@ -91,14 +91,11 @@ export function createBody(args: {
  * The shell command that puts a URL on the guest's screen.
  *
  * The browser is named rather than asked for, and the reasoning is the platform
- * SDK's: `xdg-open`, `exo-open`, `sensible-browser` and `x-www-browser` are all
- * on the base image and all exit 0 while launching nothing, because the image's
- * default-browser association points at a desktop entry it does not ship. Exit 0
- * and an unchanged screen is the worst shape a failure can take — a model reads
- * the success, screenshots, sees nothing, and concludes the page is blank.
- *
- * One place, so that when the platform fixes the association (OPL-3376) this is
- * the line that changes rather than every prompt that ever asked for a browser.
+ * SDK's: Firefox by name, not `xdg-open` or one of the other portable wrappers.
+ * Naming it keeps the choice in one place — this function is the only thing that
+ * decides which browser the guest opens, so a change of image, or of which
+ * browser we want, is a change here rather than in every prompt that ever asked
+ * for a browser.
  */
 export function openUrlCommand(url: string): string {
   const trimmed = url.trim();
