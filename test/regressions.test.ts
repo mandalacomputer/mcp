@@ -1650,6 +1650,16 @@ describe('a proxy giving up is not reported as a bare status', () => {
     expect(isTransient(errorForStatus(520, 'HTTP 520'))).toBe(true);
   });
 
+  it('keeps the proxy error page on the error even though it never shows it', () => {
+    // The page is the wrong thing to put in front of a model and the right
+    // thing to still have: the Ray ID support asks for is in that HTML and
+    // nowhere else, and substituting the message was dropping it.
+    const page = '<html><body>error code: 522 Ray ID: 8f2a1c</body></html>';
+    const err = errorForStatus(522, page, page);
+    expect(err.message).not.toMatch(/Ray ID/);
+    expect(String(err.body)).toMatch(/8f2a1c/);
+  });
+
   it('discards the proxy error page rather than truncating it into the message', () => {
     const html = '<!DOCTYPE html><html><body>error code: 524</body></html>';
     expect(errorForStatus(524, html).message).not.toMatch(/DOCTYPE/);
