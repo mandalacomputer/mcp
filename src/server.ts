@@ -33,7 +33,11 @@ Things that are true here and are not obvious:
 - A computer suspends itself when nobody uses it — 30 minutes by default. Input, exec and file transfers all count as use and resume it. Screenshots deliberately do not, so a loop that only watches can see its own machine go down.
 - A 409 usually clears on its own (a guest still booting, a busy guest agent). A 400 never does.`;
 
-export type ServerConfig = SessionConfig & Partial<ToolOptions>;
+export type ServerConfig = SessionConfig &
+  Partial<ToolOptions> & {
+    /** Internal HTTP hook: hold a session active for the real tool callback lifetime. */
+    activity?: () => () => void;
+  };
 
 /**
  * One MCP server over one account's API key.
@@ -50,6 +54,27 @@ export function createServer(cfg: ServerConfig): McpServer {
     { name: SERVER_NAME, version: SERVER_VERSION },
     { capabilities: { logging: {} }, instructions: INSTRUCTIONS },
   );
+
+  // A cancelled Streamable HTTP response can let transport.handleRequest()
+  // settle while the tool callback is still awaiting platform work. Wrap tool
+  // registration once so the HTTP session lease follows that real lifetime.
+  // Stdio has no hook and pays no cost beyond this branch.
+  if (cfg.activity) {
+    const register = server.registerTool.bind(server) as (...args: unknown[]) => unknown;
+    server.registerTool = ((...args: unknown[]) => {
+      const handlerIndex = args.length - 1;
+      const handler = args[handlerIndex] as (...handlerArgs: unknown[]) => unknown;
+      args[handlerIndex] = async (...handlerArgs: unknown[]) => {
+        const release = cfg.activity?.();
+        try {
+          return await handler(...handlerArgs);
+        } finally {
+          release?.();
+        }
+      };
+      return register(...args);
+    }) as typeof server.registerTool;
+  }
 
   registerComputers(server, session, opts);
   registerInput(server, session, opts);

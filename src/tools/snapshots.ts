@@ -83,8 +83,24 @@ export const registerSnapshots: Registrar = (server, session, opts) => {
             items,
           );
         }
-        const all = items;
-        const warning = incompleteWarning('snapshots', incomplete);
+        const malformed = items.filter(
+          (item) => item === null || typeof item !== 'object' || Array.isArray(item),
+        ).length;
+        const all = items.filter(
+          (item): item is Record<string, unknown> =>
+            item !== null && typeof item === 'object' && !Array.isArray(item),
+        );
+        const warning =
+          incompleteWarning('snapshots', incomplete) +
+          (malformed
+            ? `WARNING: ignored ${malformed} malformed snapshot entr${malformed === 1 ? 'y' : 'ies'} from the platform.\n\n`
+            : '');
+        if (!all.length && malformed) {
+          return refused(
+            `${warning}No valid snapshots remained. This is not an empty snapshot inventory — do not draw conclusions from the malformed listing.`,
+            items,
+          );
+        }
         // The filter keeps the unreachable placeholders, and that is not a
         // nicety. A partial listing does not merely omit rows — the platform
         // APPENDS one `{id, unreachable: true}` stub per snapshot it could not
@@ -277,6 +293,12 @@ export const registerSnapshots: Registrar = (server, session, opts) => {
               body: name === undefined ? {} : { name },
             }),
         );
+        if (!c.id) {
+          return refused(
+            `The platform accepted the clone of ${snapshot_id} but sent no computer id back, so the copy cannot be identified. It may exist and be billable — list_computers will say. The selected computer is unchanged.`,
+            withoutCredentials(c),
+          );
+        }
         if (select && c.id) session.bind(c.id, c.resolution);
         return said(
           `Forked ${snapshot_id} into ${describe(c)}${select && c.id ? ', and selected it' : ''}.`,

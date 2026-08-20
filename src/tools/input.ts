@@ -92,6 +92,11 @@ export const registerInput: Registrar = (server, session) => {
             `That screenshot is ${size} bytes, over the ${MAX_INLINE_IMAGE_BYTES}-byte inline limit. An image cannot be truncated, so nothing was returned. Ask again with a width — e.g. width: 1280 — and click using full-size coordinates.`,
           );
         }
+        if (shot.bytes.length === 0) {
+          return refused(
+            `That screenshot came back empty (${shot.contentType}). Nothing was returned rather than passing zero bytes off as a picture.`,
+          );
+        }
         // What came back has to actually be an image. A captive portal or a
         // misconfigured proxy answering 200 with an HTML page is the case this
         // exists for: without it that page is handed over as image content
