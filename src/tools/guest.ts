@@ -39,7 +39,7 @@ export const registerGuest: Registrar = (server, session) => {
     {
       title: 'Run a command in the guest',
       description:
-        'Run a shell command inside the computer. Runs as root with no display by default — anything that opens a window needs desktop: true, and anything slower than a few seconds needs background: true.',
+        'Run a shell command inside the computer. Runs as root with no display by default — anything that opens a window needs desktop: true, and anything slower than a few seconds needs background: true. Waiting here is capped at about two minutes by a proxy in front of the platform, not by timeout_s.',
       inputSchema: {
         ...idArg,
         command: z.string().describe('A shell command line.'),
@@ -50,7 +50,7 @@ export const registerGuest: Registrar = (server, session) => {
           .max(300)
           .default(30)
           .describe(
-            'How long to wait for it to exit. A command that outlives this keeps running inside the guest — your deadline passing means you stopped waiting, not that the work was destroyed.',
+            'How long to wait for it to exit. A command that outlives this keeps running inside the guest — your deadline passing means you stopped waiting, not that the work was destroyed. Do not reach past about 120 here: a proxy in front of the platform abandons the request at roughly two minutes and answers 524 whatever this says, so a larger number buys no time and only delays the failure. Use background: true for anything slower.',
           ),
         desktop: z
           .boolean()
