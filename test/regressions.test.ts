@@ -26,6 +26,8 @@ import {
   ConnectivityError,
   errorForStatus,
   GatewayTimeoutError,
+  OriginResponseError,
+  OriginUnreachableError,
   isTransient,
   OriginUnreachableError,
 } from '../src/errors.js';
@@ -1620,6 +1622,34 @@ describe('a proxy giving up is not reported as a bare status', () => {
     expect(errorForStatus(524, '<!DOCTYPE html>', '<!DOCTYPE html>').message).toMatch(/proxy/);
   });
 
+  it('does not tell a 520 that its work never happened', () => {
+    // Cloudflare returns 520 when the origin DID receive the request and
+    // answered unreadably. Filed with the unreachable statuses it inherited
+    // "the request never arrived, so nothing was started" — said to a create
+    // that may have just made a billable computer.
+    const err = errorForStatus(520, 'HTTP 520');
+    expect(err).toBeInstanceOf(OriginResponseError);
+    expect(err).not.toBeInstanceOf(OriginUnreachableError);
+    expect(err.message).not.toMatch(/never arrived/);
+    expect(err.message).toMatch(/did arrive/);
+    expect(err.message).toMatch(/creates something/);
+  });
+
+  it('keeps a 520 body the platform may itself have written', () => {
+    // As Api calls it: the message is already lifted from the body's `error`,
+    // and the question is only whether this file then replaces it.
+    const said = 'the hypervisor closed the connection';
+    expect(errorForStatus(520, said, { error: said }).message).toBe(said);
+    // And still substitutes when nothing structured came back.
+    expect(errorForStatus(520, 'HTTP 520', undefined).message).toMatch(/did arrive/);
+  });
+
+  it('still lets a wait loop ride out a 520', () => {
+    // Unsafe to replay a create, safe to replay a poll — and this list is read
+    // only by the wait tools, which do nothing but poll.
+    expect(isTransient(errorForStatus(520, 'HTTP 520'))).toBe(true);
+  });
+
   it('discards the proxy error page rather than truncating it into the message', () => {
     const html = '<!DOCTYPE html><html><body>error code: 524</body></html>';
     expect(errorForStatus(524, html).message).not.toMatch(/DOCTYPE/);
@@ -1650,7 +1680,9 @@ describe('a proxy giving up is not reported as a bare status', () => {
 });
 
 describe('an edge that never reached the platform is not reported as a bare status', () => {
-  it.each([520, 521, 522, 523, 525, 526])('writes a message for HTTP %s', (status) => {
+  // 520 is deliberately absent: it means the platform WAS reached and answered
+  // unreadably, so it is neither this nor a gateway timeout. See its own tests.
+  it.each([521, 522, 523, 525, 526])('writes a message for HTTP %s', (status) => {
     // The same bug as the 524 above, a few statuses along: these fell through
     // to Api's fallback and left the model reading `HTTP 522`.
     const err = errorForStatus(status, `HTTP ${status}`);
