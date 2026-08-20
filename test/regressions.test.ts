@@ -964,3 +964,40 @@ describe('flags and the environment they override', () => {
     expect(wantsHelp(parse(['-h']))).toBe(true);
   });
 });
+
+describe('a file too large to put in a conversation', () => {
+  it('names the way past the truncation it just applied', async () => {
+    // The note said how much it had kept and stopped there. read_file has no
+    // offset argument and the platform serves whole files, so a reader who hit
+    // this had been told exactly what they were missing and nothing at all
+    // about how to reach it — and the tool that can reach it, exec, is bounded
+    // at 16 MiB rather than at this 256 KiB.
+    const real = globalThis.fetch;
+    const size = 600 * 1024;
+    globalThis.fetch = (() =>
+      Promise.resolve(
+        new Response('x'.repeat(size), { headers: { 'Content-Type': 'text/plain' } }),
+      )) as typeof fetch;
+    const { call, close } = await connect();
+    const res = await call('read_file', { path: '/var/log/big.log' });
+    const out = said(res);
+    expect(out).toMatch(/showed 262144 of 614400 bytes/);
+    // The resume offset, computed rather than left to the reader: `tail -c +N`
+    // counts from one, so an off-by-one here drops or repeats a byte silently.
+    expect(out).toMatch(/tail -c \+262145 \/var\/log\/big\.log/);
+    // And the way to move the file rather than read it.
+    expect(out).toMatch(/curl -T \/var\/log\/big\.log/);
+    await close();
+    globalThis.fetch = real;
+  });
+
+  it('says none of that about a file that fitted', async () => {
+    const platform = installFakePlatform();
+    const { call, close } = await connect();
+    const out = said(await call('read_file', { path: '/home/user/a.txt' }));
+    expect(out).toMatch(/hello/);
+    expect(out).not.toMatch(/truncated|tail -c/);
+    await close();
+    platform.restore();
+  });
+});
