@@ -589,3 +589,116 @@ describe('a listing the platform answered with no body at all', () => {
     await close();
   });
 });
+
+describe('a fourth adversarial review', () => {
+  const real = globalThis.fetch;
+  afterEach(() => {
+    globalThis.fetch = real;
+  });
+
+  it('says isError when read_file refuses an oversized image', async () => {
+    // The image branch answered with a plain `text()`. Nothing was delivered —
+    // the file never entered the conversation — but without `isError` a caller
+    // reading it to decide whether the read worked saw a refusal and a file as
+    // the same answer. `screenshot` used `refused` for the identical condition.
+    globalThis.fetch = (async () =>
+      new Response(new Uint8Array(MAX_INLINE_IMAGE_BYTES + 1), {
+        headers: { 'Content-Type': 'image/png' },
+      })) as typeof fetch;
+    const { call, close } = await connect();
+    const res = await call('read_file', { path: '/big.png' });
+    expect(res.isError).toBe(true);
+    expect(said(res)).toMatch(/inline limit/);
+    await close();
+  });
+
+  it('does not hand back a non-image as a screenshot', async () => {
+    // A captive portal or a misconfigured proxy answering 200 with an HTML page
+    // was passed straight through to `image()`, which typed it `text/html` and
+    // called it a picture. The model got something that would not decode and
+    // nothing saying why.
+    globalThis.fetch = (async () =>
+      new Response('<html>sign in to continue</html>', {
+        headers: { 'Content-Type': 'text/html' },
+      })) as typeof fetch;
+    const { call, close } = await connect();
+    const res = await call('screenshot');
+    expect(res.isError).toBe(true);
+    expect(res.content.some((c) => c.type === 'image')).toBe(false);
+    expect(said(res)).toMatch(/text\/html/);
+    await close();
+  });
+
+  it('does not print what a build came from as the reason it failed', async () => {
+    // `Build failed: ${c.build?.source}` put the image the machine was built
+    // from in the grammatical position of a cause, so the model was told a
+    // template name when it asked what went wrong.
+    globalThis.fetch = (async () =>
+      new Response(
+        JSON.stringify({
+          id: 'vm-1',
+          status: 'build-failed',
+          build: { source: 'ubuntu-22.04' },
+          start_error: 'no capacity in region',
+        }),
+        { headers: { 'Content-Type': 'application/json' } },
+      )) as typeof fetch;
+    const { call, close } = await connect();
+    const res = await call('wait_for_computer', { computer_id: 'vm-1', timeout_s: 5 });
+    expect(res.isError).toBe(true);
+    expect(said(res)).toMatch(/no capacity in region/);
+    expect(said(res)).not.toMatch(/Build failed: ubuntu-22\.04/);
+    await close();
+  });
+
+  it('binds the id the platform echoed back, not the one that was typed', async () => {
+    // `use_computer` stored the caller's string. `P.segment` trims before the
+    // call, so " vm-1 " reached the API as vm-1 and worked — but `unbind`
+    // compares with `===`, so deleting vm-1 left the session pointed at a
+    // machine that no longer exists.
+    const platform = installFakePlatform();
+    const { call, close } = await connect({ computerId: undefined });
+    const bound = await call('use_computer', { computer_id: ' vm-1 ' });
+    expect(bound.isError, 'the binding call itself failed').toBeFalsy();
+    const gone = await call('delete_computer', { computer_id: 'vm-1', confirm: true });
+    expect(gone.isError, 'the delete itself failed').toBeFalsy();
+    // The binding has to be gone with it. Left in place, the next call drives a
+    // machine that no longer exists.
+    const res = await call('screenshot');
+    expect(res.isError).toBe(true);
+    expect(said(res)).toMatch(/use_computer|no computer/i);
+    await close();
+    platform.restore();
+  });
+});
+
+describe('flags that are a yes-or-no', () => {
+  it('does not let a boolean flag eat the next argument', () => {
+    // Every flag consumed the following token, so `--http false` set `http` to
+    // the string "false" — truthy — and started the server the user had just
+    // said they did not want. `--no-lifecycle false` withheld the lifecycle
+    // tools for the same reason.
+    expect(parse(['--http', 'false'])).toEqual({ http: true });
+    expect(parse(['--no-lifecycle', '0'])).toEqual({ 'no-lifecycle': true });
+    expect(parse(['--http', '--port', '3000'])).toEqual({ http: true, port: '3000' });
+  });
+
+  it('reads an explicit --flag=false as false', () => {
+    expect(parse(['--http=false'])).toEqual({ http: false });
+    expect(parse(['--http=off'])).toEqual({ http: false });
+    expect(parse(['--http=true'])).toEqual({ http: true });
+  });
+
+  it('still lets a value flag take its value', () => {
+    expect(parse(['--port', '3000'])).toEqual({ port: '3000' });
+    expect(parse(['--key', 'com_a'])).toEqual({ key: 'com_a' });
+  });
+
+  it('answers the short forms every CLI is expected to answer', () => {
+    // `parse` skipped anything without a `--`, so `-h` fell through to a normal
+    // startup and exited 2 with "No API key" — the one message least like the
+    // help that was asked for.
+    expect(parse(['-h'])).toEqual({ help: true });
+    expect(parse(['-v'])).toEqual({ version: true });
+  });
+});
