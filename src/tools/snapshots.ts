@@ -99,8 +99,9 @@ export const registerSnapshots: Registrar = (server, session, opts) => {
         // down in lib/hostroute: an extra unreachable row is visible and is
         // corrected by the next complete answer, while a withheld one makes a
         // row vanish mid-outage, which is the failure worth preventing.
-        const rows = computer_id
-          ? all.filter((s) => s.computer_id === computer_id || s.unreachable)
+        const filterId = computer_id?.trim();
+        const rows = filterId
+          ? all.filter((s) => s.computer_id === filterId || s.unreachable)
           : all;
         const stubs = rows.filter((s) => s.unreachable).length;
         const note = stubs
@@ -127,12 +128,16 @@ export const registerSnapshots: Registrar = (server, session, opts) => {
           size_bytes?: number;
           fingerprint?: string;
         }>('GET', P.computerAction(id, 'snapshots'));
-        const size = ((held.size_bytes ?? 0) / 1e9).toFixed(2);
-        return said(
-          `${id} holds ${held.count ?? 0} snapshot(s), ${size} GB. ` +
-            'To delete them along with the computer, pass this fingerprint to delete_computer as `expect`.',
-          held,
-        );
+        const count =
+          typeof held.count === 'number' ? `${held.count} snapshot(s)` : 'an unknown count';
+        const size =
+          typeof held.size_bytes === 'number'
+            ? `${(held.size_bytes / 1e9).toFixed(2)} GB`
+            : 'an unknown total size';
+        const next = held.fingerprint
+          ? 'To delete them along with the computer, pass this fingerprint to delete_computer as `expect`.'
+          : 'The platform did not provide a fingerprint, so they cannot be safely purged with delete_computer; retry snapshot_holdings.';
+        return said(`${id} holds ${count}, ${size}. ${next}`, held);
       }),
   );
 
