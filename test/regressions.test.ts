@@ -26,9 +26,9 @@ import {
   ConnectivityError,
   errorForStatus,
   GatewayTimeoutError,
-  OriginResponseError,
-  OriginUnreachableError,
   isTransient,
+  OriginResponseError,
+  OriginTLSError,
   OriginUnreachableError,
 } from '../src/errors.js';
 import { failed, MAX_INLINE_IMAGE_BYTES, unwrapComputer } from '../src/format.js';
@@ -1599,7 +1599,7 @@ describe('a proxy giving up is not reported as a bare status', () => {
     expect(err).toBeInstanceOf(GatewayTimeoutError);
     expect(err.status).toBe(524);
     expect(err.message).toMatch(/proxy/);
-    expect(err.message).toMatch(/still running/);
+    expect(err.message).toMatch(/outlived the request/);
     expect(err.message).toMatch(/background: true/);
   });
 
@@ -1682,14 +1682,24 @@ describe('a proxy giving up is not reported as a bare status', () => {
 describe('an edge that never reached the platform is not reported as a bare status', () => {
   // 520 is deliberately absent: it means the platform WAS reached and answered
   // unreadably, so it is neither this nor a gateway timeout. See its own tests.
-  it.each([521, 522, 523, 525, 526])('writes a message for HTTP %s', (status) => {
+  it.each([521, 522, 523])('writes a message for HTTP %s', (status) => {
     // The same bug as the 524 above, a few statuses along: these fell through
     // to Api's fallback and left the model reading `HTTP 522`.
     const err = errorForStatus(status, `HTTP ${status}`);
     expect(err).toBeInstanceOf(OriginUnreachableError);
     expect(err.status).toBe(status);
     expect(err.message).not.toMatch(/^HTTP /);
-    expect(err.message).toMatch(/could not reach it|TLS handshake/);
+    expect(err.message).toMatch(/could not reach it/);
+  });
+
+  it.each([525, 526])('gives HTTP %s its own class, not the unreachable one', (status) => {
+    // Same retry answer isTransient already gave by number, now visible in the
+    // type: an unreachable origin is a passing outage, a certificate is not.
+    const err = errorForStatus(status, `HTTP ${status}`);
+    expect(err).toBeInstanceOf(OriginTLSError);
+    expect(err).not.toBeInstanceOf(OriginUnreachableError);
+    expect(err.message).toMatch(/TLS handshake/);
+    expect(isTransient(err)).toBe(false);
   });
 
   it('says nothing survived, which is the opposite of what a 524 says', () => {
@@ -1697,8 +1707,8 @@ describe('an edge that never reached the platform is not reported as a bare stat
     // carries on; these mean it never arrived. A caller reading either to
     // decide whether to expect a busy guest agent next must get opposite
     // answers, so the two messages must not converge.
-    expect(errorForStatus(522, 'HTTP 522').message).toMatch(/nothing is running/);
-    expect(errorForStatus(524, 'HTTP 524').message).toMatch(/still running/);
+    expect(errorForStatus(522, 'HTTP 522').message).toMatch(/nothing was started/);
+    expect(errorForStatus(524, 'HTTP 524').message).toMatch(/carries on without it/);
   });
 
   it('retries an origin that is down but not a handshake that will not agree', () => {
