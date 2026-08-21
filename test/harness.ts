@@ -5,7 +5,14 @@ import { createServer, type ServerConfig } from '../src/server.js';
 
 export const BASE = 'https://api.test/api/v1';
 
-export type Recorded = { method: string; path: string; body?: unknown; query: URLSearchParams };
+export type Recorded = {
+  method: string;
+  path: string;
+  body?: unknown;
+  query: URLSearchParams;
+  /** Lower-cased, because a header name is compared case-insensitively. */
+  headers: Record<string, string>;
+};
 
 const COMPUTER = {
   id: 'vm-1',
@@ -60,8 +67,12 @@ export function installFakePlatform(): { calls: Recorded[]; restore: () => void 
     } else if (init?.body) {
       body = '<raw bytes>';
     }
-    calls.push({ method, path, body, query: url.searchParams });
-    return respond(method, path);
+    const headers: Record<string, string> = {};
+    new Headers(init?.headers ?? {}).forEach((v, k) => {
+      headers[k.toLowerCase()] = v;
+    });
+    calls.push({ method, path, body, query: url.searchParams, headers });
+    return respond(method, path, headers);
   }) as typeof fetch;
 
   return {
@@ -72,7 +83,7 @@ export function installFakePlatform(): { calls: Recorded[]; restore: () => void 
   };
 }
 
-function respond(method: string, path: string): Response {
+function respond(method: string, path: string, headers: Record<string, string>): Response {
   const json = (v: unknown, status = 200) =>
     new Response(JSON.stringify(v), { status, headers: { 'Content-Type': 'application/json' } });
 
@@ -87,12 +98,11 @@ function respond(method: string, path: string): Response {
   }
   if (path.endsWith('/files')) {
     if (method === 'PUT') return json({ path: '/home/user/a.txt', bytes: 5 });
-    return new Response('hello', {
-      headers: {
-        'Content-Type': 'text/plain',
-        'Content-Disposition': 'attachment; filename="a.txt"',
-      },
-    });
+    // Served as the platform serves it — a window, with the headers that say
+    // which one. A stub that answered 200 with the whole body whatever the
+    // Range said would let every paging bug through, since read_file's own
+    // reading of a response is the thing under test.
+    return download('hello', headers.range);
   }
   if (path.endsWith('/exec')) {
     return json({ exit_code: 0, stdout: 'ok\n', stderr: '', timed_out: false, pid: 4242 });
@@ -130,6 +140,55 @@ function respond(method: string, path: string): Response {
   if (path.endsWith('/snapshots')) return json(method === 'GET' ? HOLDINGS : SNAPSHOT);
   if (path.endsWith('/computers')) return json(method === 'GET' ? [COMPUTER] : COMPUTER);
   return json(COMPUTER);
+}
+
+/**
+ * A file download, answering a `Range` the way the platform's does.
+ *
+ * 206 with a `Content-Range` for a range that names a byte the file has, 416
+ * with `bytes *\/<size>` for one that does not, 200 for a request without a
+ * range. The window is trimmed rather than refused when it runs past the end,
+ * because that is the behaviour a caller has to be able to survive — see
+ * `resolve` in the platform's server/guestfile.go.
+ */
+export function download(content: string | Uint8Array, range?: string): Response {
+  const body = typeof content === 'string' ? Buffer.from(content) : Buffer.from(content);
+  const headers: Record<string, string> = {
+    'Content-Type': 'text/plain',
+    'Content-Disposition': 'attachment; filename="a.txt"',
+    'Accept-Ranges': 'bytes',
+  };
+  const m = range ? /^bytes=(\d+)-(\d*)$/.exec(range.trim()) : null;
+  if (!m) {
+    return new Response(body, {
+      headers: { ...headers, 'Content-Length': String(body.length) },
+    });
+  }
+  const start = Number(m[1]);
+  if (start >= body.length) {
+    return new Response(
+      JSON.stringify({ error: `that range is outside the file, which is ${body.length} bytes` }),
+      {
+        status: 416,
+        headers: {
+          'Content-Type': 'application/json',
+          'Accept-Ranges': 'bytes',
+          'Content-Range': `bytes */${body.length}`,
+        },
+      },
+    );
+  }
+  const asked = m[2] === '' ? body.length - 1 : Number(m[2]);
+  const end = Math.min(asked, body.length - 1);
+  const window = body.subarray(start, end + 1);
+  return new Response(window, {
+    status: 206,
+    headers: {
+      ...headers,
+      'Content-Length': String(window.length),
+      'Content-Range': `bytes ${start}-${end}/${body.length}`,
+    },
+  });
 }
 
 const PNG_1PX =
