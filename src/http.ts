@@ -82,6 +82,15 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
 
   const app = express();
 
+  // parseBody consumes every POST /mcp body. Every other route deliberately
+  // ignores request bodies, so put those requests in flowing mode immediately:
+  // leaving bytes unread can strand a keep-alive connection behind one wrong
+  // path or a GET/DELETE client that sent a body anyway.
+  app.use((req, _res, next) => {
+    if (req.method !== 'POST' || req.path !== '/mcp') req.resume();
+    next();
+  });
+
   const sessions = new Map<string, Live>();
   // The port sessions are actually reachable on, which is not cfg.port when the
   // operator asked for 0. Read when a transport is built rather than captured
@@ -470,7 +479,7 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
         // operator who set MANDALA_MODEL_KEY for their own stdio use would
         // otherwise be billed for every stranger's run here. Absent means
         // run_agent is simply not offered to this session.
-        modelKey: req.header(MODEL_KEY_HEADER),
+        modelKey: req.header(MODEL_KEY_HEADER)?.trim() || undefined,
         // Dropped for the same reason, one field further on. MANDALA_COMPUTER_ID
         // is the operator's own machine, and spreading it into a stranger's
         // session pre-binds their key to a computer on somebody else's account:
