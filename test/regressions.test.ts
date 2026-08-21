@@ -1436,12 +1436,14 @@ describe('response-body failures', () => {
 
   it('classifies aborts after headers the same way as aborted fetches', async () => {
     const response = (status: number) =>
-      ({
-        ok: status >= 200 && status < 300,
-        status,
-        headers: new Headers({ 'Content-Type': 'application/json' }),
-        text: aborted,
-      }) as unknown as Response;
+      new Response(
+        new ReadableStream({
+          pull(controller) {
+            aborted().catch((err) => controller.error(err));
+          },
+        }),
+        { status, headers: { 'Content-Type': 'application/json' } },
+      );
     const api = new Api('com_test', BASE);
 
     globalThis.fetch = (async () => response(200)) as typeof fetch;
@@ -1502,6 +1504,144 @@ describe('response-body failures', () => {
     const api = new Api('com_test', BASE);
     await expect(api.bytes('GET', 'files', {}, 10)).rejects.toThrow('stream broke');
     expect(cancelled).toBe(true);
+  });
+});
+
+describe('bounded JSON and error bodies', () => {
+  let real: typeof globalThis.fetch;
+
+  beforeEach(() => {
+    real = globalThis.fetch;
+  });
+  afterEach(() => {
+    globalThis.fetch = real;
+  });
+
+  const endless = (status: number, onCancel: () => void) =>
+    new Response(
+      new ReadableStream<Uint8Array>({
+        pull(controller) {
+          controller.enqueue(new Uint8Array(1024 * 1024).fill(120));
+        },
+        cancel: onCancel,
+      }),
+      { status, headers: { 'Content-Type': 'application/json' } },
+    );
+
+  it('stops a successful response that exceeds the JSON ceiling', async () => {
+    let cancelled = false;
+    globalThis.fetch = (async () => endless(200, () => (cancelled = true))) as typeof fetch;
+
+    await expect(new Api('com_test', BASE).json('GET', 'computers')).rejects.toThrow(
+      /more than .* bytes of JSON/,
+    );
+    expect(cancelled).toBe(true);
+  });
+
+  it('keeps only a bounded prefix of an oversized error response', async () => {
+    let cancelled = false;
+    globalThis.fetch = (async () => endless(400, () => (cancelled = true))) as typeof fetch;
+
+    await expect(new Api('com_test', BASE).json('GET', 'computers')).rejects.toMatchObject({
+      status: 400,
+    });
+    expect(cancelled).toBe(true);
+  });
+});
+
+describe('a selection concurrent with deletion', () => {
+  it('cannot rebind the session to the computer after delete unbound it', async () => {
+    const real = globalThis.fetch;
+    let releaseSelection!: () => void;
+    let selectionStarted!: () => void;
+    const held = new Promise<void>((resolve) => {
+      releaseSelection = resolve;
+    });
+    const started = new Promise<void>((resolve) => {
+      selectionStarted = resolve;
+    });
+    const calls: string[] = [];
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(typeof input === 'string' ? input : input.toString());
+      const method = init?.method ?? 'GET';
+      calls.push(`${method} ${url.pathname}`);
+      if (method === 'GET' && url.pathname.endsWith('/computers/vm-2')) {
+        selectionStarted();
+        await held;
+        return new Response(
+          JSON.stringify({ id: 'vm-2', status: 'running', resolution: '1280x800x24' }),
+          { headers: { 'Content-Type': 'application/json' } },
+        );
+      }
+      if (method === 'DELETE' && url.pathname.endsWith('/computers/vm-2')) {
+        return new Response(null, { status: 204 });
+      }
+      if (url.pathname.endsWith('/screenshot')) {
+        return new Response(new Uint8Array([1]), { headers: { 'Content-Type': 'image/png' } });
+      }
+      throw new Error(`unexpected request: ${method} ${url.pathname}`);
+    }) as typeof fetch;
+
+    try {
+      const { call, close } = await connect({ computerId: 'vm-1' });
+      const selecting = call('use_computer', { computer_id: 'vm-2' });
+      await started;
+      expect(
+        (await call('delete_computer', { computer_id: 'vm-2', confirm: true })).isError,
+      ).toBeFalsy();
+      releaseSelection();
+      expect((await selecting).isError).toBe(true);
+      expect((await call('screenshot')).isError).toBeFalsy();
+      expect(calls.at(-1)).toMatch(/\/computers\/vm-1\/screenshot$/);
+      await close();
+    } finally {
+      releaseSelection();
+      globalThis.fetch = real;
+    }
+  });
+});
+
+describe('non-deadline response cancellation during a wait', () => {
+  it('does not claim the response was in flight when the wait deadline arrived', async () => {
+    const real = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      new Response(
+        new ReadableStream({
+          async pull(controller) {
+            await new Promise((resolve) => setTimeout(resolve, 4_800));
+            const err = new Error('response stream was cancelled early');
+            err.name = 'AbortError';
+            controller.error(err);
+          },
+        }),
+        { headers: { 'Content-Type': 'application/json' } },
+      )) as typeof fetch;
+
+    try {
+      const { call, close } = await connect();
+      const res = await call('wait_for_computer', { timeout_s: 5 });
+      expect(res.isError).toBe(true);
+      expect(said(res)).toContain('was cancelled while reading the platform response');
+      expect(said(res)).not.toContain('was still in flight when the 5s deadline arrived');
+      await close();
+    } finally {
+      globalThis.fetch = real;
+    }
+  }, 15_000);
+});
+
+describe('press_key validation', () => {
+  it('rejects empty and whitespace-only key names before calling the platform', async () => {
+    const platform = installFakePlatform();
+    try {
+      const { call, close } = await connect();
+      expect((await call('press_key', { keys: [''] })).isError).toBe(true);
+      expect((await call('press_key', { keys: ['  '] })).isError).toBe(true);
+      expect(platform.calls).toHaveLength(0);
+      await close();
+    } finally {
+      platform.restore();
+    }
   });
 });
 

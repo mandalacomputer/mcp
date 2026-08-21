@@ -1,4 +1,4 @@
-import { request as httpRequest, type Server } from 'node:http';
+import { Agent as HttpAgent, request as httpRequest, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -57,6 +57,41 @@ describe('the hosted transport', () => {
     const body = (await res.json()) as { jsonrpc: string; error: { message: string } };
     expect(body.jsonrpc).toBe('2.0');
     expect(body.error.message).toContain('Unknown path');
+  });
+
+  it('drains an ignored body so the keep-alive connection can serve the next request', async () => {
+    const agent = new HttpAgent({ keepAlive: true, maxSockets: 1 });
+    let connections = 0;
+    const count = () => connections++;
+    server.on('connection', count);
+
+    const request = (method: string, path: string, body?: Buffer) =>
+      new Promise<number>((resolve, reject) => {
+        const req = httpRequest(
+          `${url}${path}`,
+          {
+            method,
+            agent,
+            headers: body ? { 'Content-Length': body.length } : undefined,
+          },
+          (res) => {
+            res.resume();
+            res.on('end', () => resolve(res.statusCode ?? 0));
+          },
+        );
+        req.setTimeout(5_000, () => req.destroy(new Error('keep-alive request timed out')));
+        req.on('error', reject);
+        req.end(body);
+      });
+
+    try {
+      expect(await request('POST', '/not-an-endpoint', Buffer.alloc(1024 * 1024))).toBe(404);
+      expect(await request('GET', '/healthz')).toBe(200);
+      expect(connections).toBe(1);
+    } finally {
+      server.off('connection', count);
+      agent.destroy();
+    }
   });
 
   it('refuses to initialize without one', async () => {
