@@ -42,6 +42,10 @@ export type Bytes = {
  */
 const MAX_SSE_BUFFER = 8 * 1024 * 1024;
 
+/** Finite response-body ceilings for the two paths that decode text. */
+const MAX_JSON_BODY_BYTES = 16 * 1024 * 1024;
+const MAX_ERROR_BODY_BYTES = 1024 * 1024;
+
 /**
  * The longest guest exec waits 300 seconds before it answers. Node's bundled
  * fetch also gives response headers 300 seconds by default, so the client can
@@ -227,8 +231,11 @@ export class Api {
     let body: unknown;
     let message = `HTTP ${resp.status}`;
     let text = '';
+    let truncated = false;
     try {
-      text = await readBody(method, path, signal, () => resp.text());
+      ({ text, truncated } = await readBody(method, path, signal, () =>
+        readTextAtMost(resp, MAX_ERROR_BODY_BYTES),
+      ));
     } catch (cause) {
       // A response whose error body itself is broken still has a useful status.
       // Cancellation is different: the caller deliberately ended this read and
@@ -237,20 +244,25 @@ export class Api {
     }
     if (text) {
       try {
+        // A prefix is not JSON even when it happens to end at a syntactically
+        // valid boundary. Only trust a structured platform message after the
+        // entire body arrived.
+        if (truncated) throw new SyntaxError('truncated response body');
         body = JSON.parse(text);
         const err = (body as { error?: unknown })?.error;
         if (typeof err === 'string' && err) message = err;
         else message = text.slice(0, 500);
       } catch {
         message = text.slice(0, 500);
-        // The whole page, not the truncated message. errorForStatus replaces
+        // The bounded page prefix, not the 500-character message. errorForStatus replaces
         // the message on every edge status with wording of its own, and this is
         // the only copy of what the edge actually said — a Cloudflare Ray ID
         // lives in that HTML and nowhere else, and it is the first thing
         // support asks for. It sits in the footer of a page that runs to
         // several KB, so slicing to 500 for the message would throw away the
-        // one field this exists to keep. Shown to nobody; available to whoever
-        // needs it.
+        // one field this exists to keep. The separate body cap prevents a
+        // hostile or broken response from turning that diagnostic into an
+        // unbounded allocation. Shown to nobody; available to whoever needs it.
         body = text;
       }
     }
@@ -274,7 +286,14 @@ export class Api {
     signal?: AbortSignal,
   ): Promise<T | undefined> {
     if (resp.status === 204) return undefined;
-    const text = await readBody(method, path, signal, () => resp.text());
+    const { text, truncated } = await readBody(method, path, signal, () =>
+      readTextAtMost(resp, MAX_JSON_BODY_BYTES),
+    );
+    if (truncated) {
+      throw new MandalaError(
+        `${method} ${path} sent more than ${MAX_JSON_BODY_BYTES} bytes of JSON; refusing to buffer the rest`,
+      );
+    }
     if (!text) return undefined;
     try {
       return JSON.parse(text) as T;
@@ -583,6 +602,15 @@ async function readAtMost(
     offset += chunk.length;
   }
   return { bytes, truncated };
+}
+
+/** Decode a bounded UTF-8 prefix and cancel anything beyond it. */
+async function readTextAtMost(
+  resp: Response,
+  limit: number,
+): Promise<{ text: string; truncated: boolean }> {
+  const { bytes, truncated } = await readAtMost(resp, limit);
+  return { text: new TextDecoder().decode(bytes), truncated };
 }
 
 function parseEvent(chunk: string): SSEEvent | undefined {

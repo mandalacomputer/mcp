@@ -30,6 +30,8 @@ export class Session {
   #current?: string;
   /** WIDTHxHEIGHT of the bound computer, remembered from the last read of it. */
   #screen?: string;
+  /** Successful deletes invalidate selections of the same id already in flight. */
+  readonly #selectionVersions = new Map<string, number>();
 
   constructor(cfg: SessionConfig) {
     this.api = new Api(cfg.apiKey, cfg.baseUrl ?? DEFAULT_BASE_URL);
@@ -50,9 +52,27 @@ export class Session {
     this.#screen = resolution;
   }
 
+  /** Snapshot the delete generation before use_computer starts its confirming read. */
+  selectionVersion(computerId: string): number {
+    return this.#selectionVersions.get(id(computerId) ?? '') ?? 0;
+  }
+
+  /** Bind only if no concurrent delete completed while the id was being checked. */
+  bindIfCurrent(computerId: string, resolution: string | undefined, version: number): boolean {
+    const normalized = id(computerId);
+    if (!normalized || this.selectionVersion(normalized) !== version) return false;
+    this.bind(normalized, resolution);
+    return true;
+  }
+
   /** Forget the binding — after a delete, so the next call does not drive a ghost. */
   unbind(computerId: string): void {
-    if (this.#current !== undefined && this.#current === id(computerId)) {
+    const normalized = id(computerId);
+    if (!normalized) return;
+    // Increment even when another computer is selected: an earlier
+    // use_computer for this id may still be waiting on its GET response.
+    this.#selectionVersions.set(normalized, this.selectionVersion(normalized) + 1);
+    if (this.#current !== undefined && this.#current === normalized) {
       this.#current = undefined;
       this.#screen = undefined;
     }
