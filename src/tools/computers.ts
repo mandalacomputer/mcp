@@ -212,6 +212,7 @@ export const registerComputers: Registrar = (server, session, opts) => {
     },
     ({ computer_id }, extra) =>
       guarded(async () => {
+        const selectionVersion = session.selectionVersion(computer_id);
         // Read it before binding. Binding an id the platform does not recognise
         // would send every subsequent call to a 404 with no clue why, and the
         // read costs one round trip against a session that will make hundreds.
@@ -224,7 +225,11 @@ export const registerComputers: Registrar = (server, session, opts) => {
         // so binding the untrimmed form leaves a later delete_computer("vm-1")
         // unable to clear the selection it just destroyed. The other two bind
         // sites already use `c.id`.
-        session.bind(c.id ?? computer_id, c.resolution);
+        if (!session.bindIfCurrent(c.id ?? computer_id, c.resolution, selectionVersion)) {
+          return refused(
+            `${c.id ?? computer_id} was deleted while it was being selected. The session selection was not changed.`,
+          );
+        }
         return said(
           `Selected ${describe(c)}. Later calls need no computer_id.` +
             (c.status === 'running'
@@ -365,13 +370,16 @@ export const registerComputers: Registrar = (server, session, opts) => {
             // than by reading the error: the request is now bound to two
             // deadlines, and only one of them means anybody stopped caring.
             if (extra.signal?.aborted) return cancelled(id, last);
-            // The other one is this wait's own deadline arriving mid-request.
-            // Not an outage and not a reason to throw — it is the answer the
-            // give-up message below is for, so record what was in flight and
-            // let the loop condition end it.
+            // A body stream can also be cancelled without either signal
+            // firing, so only the deadline signal proves the wait's own timer
+            // arrived. Otherwise retain the cancellation's real diagnostic
+            // and retry the read until the caller's deadline.
             if (err instanceof CancelledError) {
-              blocked = `the status read was still in flight when the ${timeout_s}s deadline arrived`;
-              if (untilDeadline.aborted) break;
+              if (untilDeadline.aborted) {
+                blocked = `the status read was still in flight when the ${timeout_s}s deadline arrived`;
+                break;
+              }
+              blocked = err.message;
               await sleep(2000, signal);
               continue;
             }
@@ -434,8 +442,11 @@ export const registerComputers: Registrar = (server, session, opts) => {
               // not, which is the worse of the two ways to be inconsistent.
               if (extra.signal?.aborted) return cancelled(id, last);
               if (err instanceof CancelledError) {
-                blocked = `the guest probe was still in flight when the ${timeout_s}s deadline arrived`;
-                if (untilDeadline.aborted) break;
+                if (untilDeadline.aborted) {
+                  blocked = `the guest probe was still in flight when the ${timeout_s}s deadline arrived`;
+                  break;
+                }
+                blocked = err.message;
                 await sleep(2000, signal);
                 continue;
               }
