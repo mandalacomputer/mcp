@@ -213,6 +213,33 @@ describe('read_file when the range cannot be served', () => {
     await close();
   });
 
+  it.each([
+    { requested: 0, served: 40, failure: 'skip' },
+    { requested: 40, served: 0, failure: 'repeat' },
+  ])(
+    'refuses a 206 that could $failure bytes from another offset',
+    async ({ requested, served }) => {
+      globalThis.fetch = (async () =>
+        new Response('BAD', {
+          status: 206,
+          headers: {
+            'Content-Type': 'text/plain',
+            'Accept-Ranges': 'bytes',
+            'Content-Range': `bytes ${served}-${served + 2}/100`,
+          },
+        })) as typeof fetch;
+      const { call, close } = await connect();
+      const res = await call('read_file', { path: '/home/user/a.txt', offset: requested });
+      expect(res.isError).toBe(true);
+      const out = res.content.map((c) => (c.type === 'text' ? c.text : '')).join('');
+      expect(out).toContain(`requested from offset ${requested}`);
+      expect(out).toContain(`window starting at offset ${served}`);
+      expect(out).not.toContain('BAD');
+      expect(out).not.toContain('read_file again with offset');
+      await close();
+    },
+  );
+
   it('warns about an ignored offset even when nothing was truncated', async () => {
     // The infinite-loop shape is covered above, and it needed the file to be
     // long enough to truncate. This is the quiet one: /proc/cpuinfo at offset

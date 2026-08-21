@@ -344,12 +344,19 @@ export const registerGuest: Registrar = (server, session) => {
           throw err;
         }
 
-        // Where these bytes actually begin, which is not necessarily where they
-        // were asked to begin. A file whose length the guest cannot measure has no
-        // byte positions to name, so the platform ignores the Range and sends
-        // the file from the start with a 200 — and labelling that as the window
-        // somebody asked for is how a paging loop reads the same bytes forever.
         const served = file.window;
+        // A 206 promises a particular window, and only the requested start can
+        // safely be used as this page. Trusting a contradictory Content-Range
+        // can skip the gap before a later window or repeat a stale earlier one
+        // forever. A 200 is different: an unmeasurable file may legitimately
+        // ignore Range, and that case is diagnosed below without calling it a
+        // served window.
+        if (served && served.start !== offset) {
+          return refused(
+            `${path} was requested from offset ${offset}, but the platform served a window starting at offset ${served.start}. Refusing the mismatched 206 response because using it could skip or repeat file bytes; retry the read rather than continuing from this response.`,
+          );
+        }
+
         const start = served?.start ?? 0;
         const received = file.bytes;
         const receivedNext = start + received.length;
