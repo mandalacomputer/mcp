@@ -430,6 +430,26 @@ export class Api {
       served?.start !== undefined && served.end !== undefined
         ? { start: served.start, end: served.end, total: served.total }
         : undefined;
+    // A 206 is a promise that these bytes are a PART of something, and the
+    // Content-Range is the only thing that says which part. Without a readable
+    // one the response is indistinguishable from a whole-file 200 — same
+    // status-free shape, `truncated` false, no window — so a caller stitching a
+    // file writes a middle chunk at offset zero, and a caller paging one calls
+    // it complete and stops. Refused rather than assumed to start at zero,
+    // because assuming is the exact failure the status exists to prevent, and
+    // because nothing downstream can tell the difference afterwards.
+    //
+    // The platform always sends the header (`bytes %d-%d/%d` in server/api.go).
+    // A hop in front of it that drops the header is the case this is for, and
+    // the same one mandala-computer-typescript's toFileChunk refuses.
+    if (resp.status === 206 && !window) {
+      await resp.body?.cancel().catch(() => {});
+      throw new MandalaError(
+        `${method} ${path} answered 206 without a readable Content-Range ` +
+          `(${resp.headers.get('content-range') ?? 'header absent'}), so where these bytes ` +
+          'belong in the file is unknown',
+      );
+    }
     const { bytes, truncated } = await readBody(
       method,
       path,
@@ -457,7 +477,7 @@ export class Api {
               : undefined
             : // A 206 whose Content-Range said `*`: the window arrived in full
               // and the file's length is still unknown, so this must not fall
-              // through to `bytes.length` and call the window the file.
+              // through to `bytes.length`, which would call the window the file.
               window
               ? undefined
               : bytes.length,

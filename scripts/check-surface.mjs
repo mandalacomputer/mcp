@@ -64,7 +64,21 @@ if (!platform) {
 
 const surfaceSource = readFileSync(join(platform, 'web/lib/surface.ts'), 'utf8');
 
-/** Pull one `export const NAME: Route[] = [...]` table out. */
+/**
+ * Pull one `export const NAME: Route[] = [...]` table out, entry by entry.
+ *
+ * Split by brace depth rather than matched with one regex across the whole
+ * table. A `/method:.*?pattern:/` over the flat text is correct only while
+ * every entry happens to write its method first: reorder two fields, or nest a
+ * literal that quotes a pattern, and the lazy match joins one entry's method to
+ * the next entry's pattern. What comes out is a route neither table has — and a
+ * route that is in neither is not a failure here, it is silence. A checker
+ * whose failure mode is a false all-clear is worse than no checker, which is
+ * what the brace walk is for and why it survived the port.
+ *
+ * The `!routes.size` guard below only catches a parse that found nothing at
+ * all, which is exactly what a mispaired parse is not.
+ */
 function routeTable(name) {
   const decl = `export const ${name}: Route[] = [`;
   const start = surfaceSource.indexOf(decl);
@@ -74,8 +88,18 @@ function routeTable(name) {
   // which closes immediately.
   const body = stripComments(balanced(surfaceSource, start + decl.length - 1, '[', ']'));
   const routes = new Set();
-  const re = /method:\s*'([A-Z]+)'[\s\S]*?pattern:\s*'([^']+)'/g;
-  for (let m = re.exec(body); m; m = re.exec(body)) routes.add(`${m[1]} ${m[2]}`);
+  for (let i = 0, depth = 0, from = 0; i < body.length; i++) {
+    if (body[i] === '{') {
+      if (depth++ === 0) from = i;
+    } else if (body[i] === '}' && --depth === 0) {
+      const entry = body.slice(from, i + 1);
+      const method = /method:\s*'([A-Z]+)'/.exec(entry)?.[1];
+      const pattern = /pattern:\s*'([^']+)'/.exec(entry)?.[1];
+      // Both, out of ONE entry. An entry carrying only half of the pair is not
+      // a route and must not borrow the other half from its neighbour.
+      if (method && pattern) routes.add(`${method} ${pattern}`);
+    }
+  }
   if (!routes.size) throw new Error(`parsed ${name} but found no routes — has its shape changed?`);
   return routes;
 }

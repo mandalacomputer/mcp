@@ -143,10 +143,75 @@ describe('read_file when the range cannot be served', () => {
     const out = res.content.map((c) => (c.type === 'text' ? c.text : '')).join('');
     expect(out).toContain('ignored the offset');
     expect(out).toContain('not the 5000 you asked from');
+    expect(out).toContain('truncated:');
     // So the note must NOT send the reader back into read_file with an offset.
     expect(out).not.toContain('read_file again with offset');
     // The one place exec is still the right answer.
     expect(out).toContain(`tail -c +${MAX_INLINE_BYTES + 1}`);
+    await close();
+  });
+
+  it('refuses a 206 that did not say which bytes it holds', async () => {
+    // The half of the mislabel the status check did not cover. A 206 with no
+    // readable Content-Range — a hop dropped it — has the same shape as a
+    // whole-file 200: nothing was truncated, there is no window, and every
+    // reader downstream calls it a complete file read from offset 0. A caller
+    // paging stops early; a caller stitching writes the middle of the file at
+    // the beginning of its copy. Nothing after this point can tell.
+    globalThis.fetch = (async () =>
+      new Response('efghij', {
+        status: 206,
+        headers: { 'Content-Type': 'text/plain', 'Accept-Ranges': 'bytes' },
+      })) as typeof fetch;
+    const { call, close } = await connect();
+    const res = await call('read_file', { path: '/home/user/a.txt', offset: 4 });
+    expect(res.isError).toBe(true);
+    const out = res.content.map((c) => (c.type === 'text' ? c.text : '')).join('');
+    expect(out).toContain('206 without a readable Content-Range');
+    // And it must not have been passed off as the file.
+    expect(out).not.toContain('efghij');
+    await close();
+  });
+
+  it('warns about an ignored offset even when nothing was truncated', async () => {
+    // The infinite-loop shape is covered above, and it needed the file to be
+    // long enough to truncate. This is the quiet one: /proc/cpuinfo at offset
+    // 5000 fits in the cap, so it comes back as a clean whole-file read with no
+    // sign that the offset went nowhere — a different stretch of bytes from the
+    // ones asked for, reported as a success.
+    globalThis.fetch = (async () =>
+      new Response('processor : 0', {
+        headers: { 'Content-Type': 'text/plain', 'Accept-Ranges': 'none' },
+      })) as typeof fetch;
+    const { call, close } = await connect();
+    const res = await call('read_file', { path: '/proc/cpuinfo', offset: 5000 });
+    const out = res.content.map((c) => (c.type === 'text' ? c.text : '')).join('');
+    expect(out).toContain('processor : 0');
+    expect(out).toContain('not the 5000 you asked from');
+    // Nothing was lost, and saying so is what keeps this from reading as a
+    // failure the caller has to do something about.
+    expect(out).toContain('Nothing is missing from this answer');
+    await close();
+  });
+
+  it('says an image arrived whole because the offset was ignored', async () => {
+    // The same gap on the image path: a small unrangeable picture at a non-zero
+    // offset came back as a picture with nothing about the offset on it.
+    globalThis.fetch = (async () =>
+      new Response(
+        Buffer.from(
+          'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+          'base64',
+        ),
+        { headers: { 'Content-Type': 'image/png', 'Accept-Ranges': 'none' } },
+      )) as typeof fetch;
+    const { call, close } = await connect();
+    const res = await call('read_file', { path: '/proc/self/fd/3.png', offset: 40 });
+    expect(res.isError).toBeFalsy();
+    expect(res.content.some((c) => c.type === 'image')).toBe(true);
+    const out = res.content.map((c) => (c.type === 'text' ? c.text : '')).join('');
+    expect(out).toContain('the offset was ignored');
+    expect(out).toContain('not the 40 you asked from');
     await close();
   });
 

@@ -355,20 +355,28 @@ export const registerGuest: Registrar = (server, session) => {
         const next = start + kept.length;
         const total = file.totalBytes;
         const size = total === undefined ? `more than ${next}` : String(total);
-        // Whether the file goes on past these bytes, which since the Range is a
-        // different question from what `file.truncated` reports. That flag is
-        // about the
-        // WINDOW and only the window: a 9 MiB image arrives as a complete 8 MiB
-        // window and never
-        // trips it, and a window the platform trimmed does not trip it either.
-        // The end of the file is the only thing that settles this, and on a
-        // partial response the Content-Range is where that number comes from.
+        // `file.truncated` is about this response body; `more` is about the
+        // file. They stopped being the same question when the Range arrived: a
+        // 9 MiB image comes back as a complete 8 MiB window that was never
+        // truncated, and so does a window the platform trimmed. On a 206 the
+        // end of the file comes from the Content-Range and nowhere else.
         const more = total === undefined ? file.truncated : next < total;
         // Everything, rather than a part of it. Kept apart from `more` because
         // a read that began at an offset holds only a part of the file even
         // when it read that part to the end — which is what the image branch
         // has to refuse and what the header line has to say.
         const whole = start === 0 && !more;
+        // The platform did not serve a window: either it said outright that it
+        // cannot (`Accept-Ranges: none`, a file whose length the guest cannot
+        // measure) or a hop dropped the status on the way. Either way these
+        // bytes are the head of the file and an offset means nothing here.
+        const unranged = !file.window;
+        // And the caller asked for one, so what came back is not what was asked
+        // for. This is the half that has to be said even when nothing was
+        // truncated: a short /proc file read at offset 5000 arrives whole and
+        // reads as a clean answer, and it is a different stretch of bytes from
+        // the one that was requested.
+        const misled = unranged && offset > 0;
 
         if (file.contentType.startsWith('image/')) {
           // A window of an image is not an image, so this stays a refusal. Two
@@ -395,10 +403,22 @@ export const registerGuest: Registrar = (server, session) => {
               `${path} came back as an empty ${file.contentType} file. Nothing was returned as an image because zero bytes cannot be decoded as one.`,
             );
           }
-          return image(kept, file.contentType, `${path} (${size} bytes)`);
+          // A picture that arrived whole because the offset was ignored is
+          // still a picture, so it goes back — but unremarked it reads as the
+          // window that was asked for, and the next offset would be ignored
+          // just the same. The caption is the only place that can say so.
+          const caption = misled
+            ? `${path} (${size} bytes) — the offset was ignored: this file cannot be read from one, so these are its first bytes and not the ${offset} you asked from.`
+            : `${path} (${size} bytes)`;
+          return image(kept, file.contentType, caption);
         }
 
-        const note = more ? `\n\n[${continuation(path, file, offset, start, next, total)}]` : '';
+        const note =
+          unranged && (more || misled)
+            ? `\n\n[${ignoredOffset(path, file, offset, next, total, more)}]`
+            : more
+              ? `\n\n[${continuation(path, start, next, total)}]`
+              : '';
         const where = whole ? `${size} bytes` : `bytes ${start}-${next - 1} of ${size}`;
         const decoded = decodeUtf8(kept);
         if (decoded === undefined) {
@@ -458,6 +478,14 @@ function pastEnd(path: string, offset: number, size: number | undefined): CallTo
 }
 
 /**
+ * How much of what came back, said the same way by both notes below.
+ */
+function shown(next: number, start: number, total: number | undefined): string {
+  const of = total === undefined ? 'an unknown number of' : String(total);
+  return `showed ${next - start} of ${of} bytes${start ? `, starting at offset ${start}` : ''}`;
+}
+
+/**
  * The note under a read that did not reach the end of the file.
  *
  * It names this tool as the way past this tool, which is the whole of what
@@ -465,48 +493,62 @@ function pastEnd(path: string, offset: number, size: number | undefined): CallTo
  * at the beginning`, and sent the reader to `exec "tail -c +N | head -c M"` —
  * a shell in the guest, an agent-side 16 MiB ceiling, and an off-by-one on
  * `tail`'s one-based count, all to read the next 256 KiB of a file.
- *
- * The exec route survives for exactly one case: a file whose length the guest
- * could not measure, where the platform ignores the Range and there is no
- * offset that will do anything. Telling that reader to call back with an offset
- * would be telling it to read the same bytes again forever.
  */
 function continuation(
   path: string,
-  file: Bytes,
-  offset: number,
   start: number,
   next: number,
   total: number | undefined,
 ): string {
-  const of = total === undefined ? 'an unknown number of' : String(total);
-  const shown = `showed ${next - start} of ${of} bytes${start ? `, starting at offset ${start}` : ''}`;
-  // A file the platform could not measure. `Accept-Ranges: none` is it saying
-  // so outright; a 200 with no window is the same situation seen from the other
-  // side, and covers a proxy that dropped the header on the way.
-  if (!file.window) {
-    const why = file.unrangeable
-      ? `${path} has no length the guest can report — a /proc entry, say — so the platform served it from the start and ignored the offset`
-      : `the platform answered with the whole file rather than a window, so it ignored the offset`;
-    const what =
-      offset > 0
-        ? `these bytes are the START of ${path}, not the ${offset} you asked from`
-        : `an offset would be ignored the same way, so this file cannot be paged`;
-    return (
-      `truncated: ${shown}. ${why} — ${what}. Read on with ` +
-      `exec "tail -c +${next + 1} ${shellQuote(path)} | head -c ${MAX_INLINE_BYTES}" instead — ` +
-      `tail counts from one, which is why that number is one past the last byte shown.`
-    );
-  }
   const pieces =
     total === undefined ? 'many' : String(Math.ceil((total - next) / MAX_INLINE_BYTES));
   return (
-    `truncated: ${shown}. To read on, call read_file again with offset: ${next} — ` +
-    `that is where this window stopped, and it is not always where you asked it to. ` +
-    `Covering the rest would take about ${pieces} more reads; if you want the whole file rather than ` +
-    `a part of it, push it out of the guest instead of through this conversation, ` +
+    `truncated: ${shown(next, start, total)}. To read on, call read_file again with ` +
+    `offset: ${next} — that is where this window stopped, and a window is allowed to be ` +
+    `shorter than the one asked for, so it is not always where you would have counted to. ` +
+    `Covering the rest would take about ${pieces} more reads; if you want the whole file rather ` +
+    `than a part of it, push it out of the guest instead of through this conversation, ` +
     `e.g. exec "curl -T ${shellQuote(path)} <your-upload-url>".`
   );
+}
+
+/**
+ * The note under a read whose Range the platform did not serve.
+ *
+ * A file whose length the guest cannot measure — a `/proc` entry — has no byte
+ * positions to name, so the platform ignores the header and sends the file from
+ * the start with a `200`. Two things go wrong if that is left unsaid, and they
+ * are different enough to need separate sentences: bytes the caller asked for at
+ * an offset are not the bytes it got, and there is no offset that would have
+ * worked, so an answer that reads like an ordinary truncation sends a paging
+ * loop round to ask for the same bytes forever.
+ *
+ * This is the one place the exec workaround survives, and it earns its keep
+ * here: `tail -c +N` is the only thing that can start part-way into a file this
+ * route will only ever hand over whole.
+ */
+function ignoredOffset(
+  path: string,
+  file: Bytes,
+  offset: number,
+  next: number,
+  total: number | undefined,
+  more: boolean,
+): string {
+  const head = more
+    ? `truncated: ${shown(next, 0, total)}`
+    : `read whole: ${next} bytes, which is all of ${path}`;
+  const why = file.unrangeable
+    ? `${path} has no length the guest can report — a /proc entry, say — so the platform served it from the start and ignored the offset`
+    : `the platform answered with the whole file rather than a window, so it ignored the offset`;
+  const what =
+    offset > 0
+      ? `these bytes are the START of ${path}, not the ${offset} you asked from`
+      : 'an offset would be ignored the same way, so this file cannot be paged';
+  const onward = more
+    ? `Read on with exec "tail -c +${next + 1} ${shellQuote(path)} | head -c ${MAX_INLINE_BYTES}" instead — tail counts from one, which is why that number is one past the last byte shown.`
+    : `Nothing is missing from this answer. To read part of a file like this rather than all of it, use exec "tail -c +N ${shellQuote(path)} | head -c M" — tail counts from one, so N is your offset plus one.`;
+  return `${head}. ${why} — ${what}. ${onward}`;
 }
 
 /**
