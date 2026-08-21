@@ -351,16 +351,22 @@ export const registerGuest: Registrar = (server, session) => {
         // somebody asked for is how a paging loop reads the same bytes forever.
         const served = file.window;
         const start = served?.start ?? 0;
-        const kept = file.bytes;
-        const next = start + kept.length;
+        const received = file.bytes;
+        const receivedNext = start + received.length;
         const total = file.totalBytes;
-        const size = total === undefined ? `more than ${next}` : String(total);
+        const size =
+          total === undefined
+            ? served
+              ? 'an unknown number of'
+              : `more than ${receivedNext}`
+            : String(total);
         // `file.truncated` is about this response body; `more` is about the
         // file. They stopped being the same question when the Range arrived: a
         // 9 MiB image comes back as a complete 8 MiB window that was never
         // truncated, and so does a window the platform trimmed. On a 206 the
         // end of the file comes from the Content-Range and nowhere else.
-        const more = total === undefined ? file.truncated : next < total;
+        const more =
+          total === undefined ? served !== undefined || file.truncated : receivedNext < total;
         // Everything, rather than a part of it. Kept apart from `more` because
         // a read that began at an offset holds only a part of the file even
         // when it read that part to the end — which is what the image branch
@@ -390,6 +396,15 @@ export const registerGuest: Registrar = (server, session) => {
               `${path} is a ${file.contentType} and this read started at offset ${start}, so what came back is a slice out of the middle of it. A slice of a PNG is not a picture, and nothing was decoded as one. Read it with offset: 0 to get the image itself — the file is ${size} bytes, and anything over ${MAX_INLINE_IMAGE_BYTES} is refused there too, with what to do about it.`,
             );
           }
+          // A wildcard total says only that this is a window, never that the
+          // window is the whole image. Even a short body that fitted under the
+          // cap is therefore not safe to decode, and its unknown size is not
+          // evidence that it exceeded the cap either.
+          if (served && total === undefined) {
+            return refused(
+              `${path} arrived as a partial ${file.contentType} response whose total size is unknown. A window of an image is not a picture, so nothing was decoded as one. Read it again from offset: 0 through an endpoint that reports the full size, or push the original out of the guest with exec "curl -T ${shellQuote(path)} <your-upload-url>".`,
+            );
+          }
           // The refusal now knows the file's real length, off the window's
           // Content-Range, where it could only say "more than" before — and it
           // no longer reads as though the bytes themselves were out of reach.
@@ -398,7 +413,7 @@ export const registerGuest: Registrar = (server, session) => {
               `${path} is a ${file.contentType} of ${size} bytes, over the ${MAX_INLINE_IMAGE_BYTES}-byte inline limit. It was not read into the conversation, because an image cannot be truncated and one this size would end it. The file is not out of reach — read_file serves a window of any file at any offset — but a window of a PNG is not a picture, so shrink it in the guest and read that: exec "convert ${shellQuote(path)} -resize 1280x ${shellQuote(`${path}.small.png`)}". To keep the original, push it out of the guest with exec "curl -T ${shellQuote(path)} <your-upload-url>".`,
             );
           }
-          if (kept.length === 0) {
+          if (received.length === 0) {
             return refused(
               `${path} came back as an empty ${file.contentType} file. Nothing was returned as an image because zero bytes cannot be decoded as one.`,
             );
@@ -410,8 +425,16 @@ export const registerGuest: Registrar = (server, session) => {
           const caption = misled
             ? `${path} (${size} bytes) — the offset was ignored: this file cannot be read from one, so these are its first bytes and not the ${offset} you asked from.`
             : `${path} (${size} bytes)`;
-          return image(kept, file.contentType, caption);
+          return image(received, file.contentType, caption);
         }
+
+        // Do not advance into the middle of a UTF-8 character. If the cap cut
+        // a valid text prefix after the leading bytes of its final character,
+        // leave those few bytes for the next page. Binary content is preserved
+        // exactly: utf8Page only trims when everything before that incomplete
+        // tail is itself valid UTF-8.
+        const kept = more ? utf8Page(received) : received;
+        const next = start + kept.length;
 
         const note =
           unranged && (more || misled)
@@ -590,6 +613,34 @@ function decodeUtf8(bytes: Uint8Array): string | undefined {
   const bad = s.split('\ufffd').length - 1;
   if (bad > 1 || (bad === 1 && !s.slice(-4).includes('\ufffd'))) return undefined;
   return s;
+}
+
+/** Leave an incomplete final UTF-8 character for the next byte window. */
+function utf8Page(bytes: Uint8Array): Uint8Array {
+  if (bytes.length === 0) return bytes;
+
+  let lead = bytes.length - 1;
+  while (lead > 0 && bytes[lead] >= 0x80 && bytes[lead] <= 0xbf) lead--;
+  const first = bytes[lead];
+  const expected =
+    first >= 0xc2 && first <= 0xdf
+      ? 2
+      : first >= 0xe0 && first <= 0xef
+        ? 3
+        : first >= 0xf0 && first <= 0xf4
+          ? 4
+          : 1;
+  const present = bytes.length - lead;
+  // Never return an empty page with the same continuation offset. This can
+  // only happen for an unusually tiny partial response, not at the normal cap.
+  if (lead === 0 || expected === 1 || present >= expected) return bytes;
+
+  try {
+    new TextDecoder('utf-8', { fatal: true }).decode(bytes.subarray(0, lead));
+    return bytes.subarray(0, lead);
+  } catch {
+    return bytes;
+  }
 }
 
 /** The one line a model needs off an exec result, before the JSON. */

@@ -96,30 +96,26 @@ const EXERCISE: Record<string, Record<string, unknown>[]> = {
 const routesOf = (calls: Recorded[]) =>
   new Set(calls.map((c) => `${c.method} ${patternFor(c.path)}`));
 
-/**
- * The headers the platform documents as parameters, anywhere on the surface.
- *
- * Every request also carries `Authorization`, `Accept` and a `Content-Type`.
- * None is a parameter of a route — they are how any request is made rather than
- * what this one asks for — so they are not in the platform's table and must not
- * be compared against it. Restricting to the documented names rather than
- * excluding those three by hand means a header the platform adds later is
- * compared, instead of quietly falling through a denylist nobody updated.
- */
-const DOCUMENTED_HEADERS = new Set(
-  [...PARAMETERS.values()].flat().flatMap((p) => (p.startsWith('header:') ? [p.slice(7)] : [])),
+/** Generic HTTP machinery rather than route parameters. */
+const GENERIC_HEADERS = new Set(['authorization', 'accept', 'content-type']);
+
+/** Preserve the platform table's spelling while matching names case-insensitively. */
+const DOCUMENTED_HEADERS = new Map(
+  [...PARAMETERS.values()]
+    .flat()
+    .flatMap((p) => (p.startsWith('header:') ? [[p.slice(7).toLowerCase(), p.slice(7)]] : [])),
 );
 
 /** What one call actually carried, in the mirror's spelling. */
 function parametersOf(call: Recorded): string[] {
   const sent = [
     ...[...call.query.keys()].map((k) => `query:${k}`),
-    // Matched case-insensitively, because a header name is: the mirror spells
-    // `Range` and `X-Model-Key` as the platform's table does, and what went out
-    // on the wire is whatever this server's own code wrote.
-    ...[...DOCUMENTED_HEADERS]
-      .filter((h) => call.headers[h.toLowerCase()] !== undefined)
-      .map((h) => `header:${h}`),
+    // Enumerate what actually went out, excluding only the three headers every
+    // request needs. Known parameters use the platform table's spelling;
+    // anything unknown keeps its wire spelling so the comparison rejects it.
+    ...Object.keys(call.headers)
+      .filter((h) => !GENERIC_HEADERS.has(h.toLowerCase()))
+      .map((h) => `header:${DOCUMENTED_HEADERS.get(h.toLowerCase()) ?? h}`),
   ];
   // Only an object body has named fields. A file upload's body is the file.
   if (call.body && typeof call.body === 'object' && !Array.isArray(call.body)) {
@@ -207,6 +203,22 @@ describe('the surface this server calls', () => {
       for (const p of sent) if (!known.has(p)) outside.push(`${route}  ${p}`);
     }
     expect(outside.sort(), 'this server sends parameters the platform ignores').toEqual([]);
+  });
+
+  it('records an undocumented header instead of filtering it out', () => {
+    const call: Recorded = {
+      method: 'GET',
+      path: '/computers',
+      query: new URLSearchParams(),
+      body: undefined,
+      headers: {
+        authorization: 'Bearer test',
+        accept: 'application/json',
+        'content-type': 'application/json',
+        'x-obsolete-paramter': 'true',
+      },
+    };
+    expect(parametersOf(call)).toContain('header:x-obsolete-paramter');
   });
 
   it('leaves exactly the pinned part of the parameter surface unsent', async () => {

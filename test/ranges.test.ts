@@ -120,6 +120,46 @@ describe('read_file pages through a large file', () => {
     expect(out).toContain(`read_file again with offset: ${MAX_INLINE_BYTES}`);
     await close();
   });
+
+  it('keeps an unknown-total 206 incomplete even when its body fits under the cap', async () => {
+    globalThis.fetch = (async () =>
+      new Response('first window', {
+        status: 206,
+        headers: {
+          'Content-Type': 'text/plain',
+          'Accept-Ranges': 'bytes',
+          'Content-Range': 'bytes 0-11/*',
+        },
+      })) as typeof fetch;
+    const { call, close } = await connect();
+    const res = await call('read_file', { path: '/tmp/unknown.txt' });
+    const out = res.content.map((c) => (c.type === 'text' ? c.text : '')).join('');
+    expect(out).toContain('truncated:');
+    expect(out).toContain('an unknown number of bytes');
+    expect(out).toContain('read_file again with offset: 12');
+    await close();
+  });
+
+  it('continues before a UTF-8 character split by the text cap', async () => {
+    const prefix = Buffer.alloc(MAX_INLINE_BYTES - 1, 0x61);
+    const body = Buffer.concat([prefix, Buffer.from('€ after')]);
+    serve((range) => download(body, range ?? undefined));
+    const { call, close } = await connect();
+
+    const first = await call('read_file', { path: '/tmp/utf8.txt' });
+    const firstOut = first.content.map((c) => (c.type === 'text' ? c.text : '')).join('');
+    expect(firstOut).not.toContain('�');
+    expect(firstOut).toContain(`read_file again with offset: ${MAX_INLINE_BYTES - 1}`);
+
+    const second = await call('read_file', {
+      path: '/tmp/utf8.txt',
+      offset: MAX_INLINE_BYTES - 1,
+    });
+    const secondOut = second.content.map((c) => (c.type === 'text' ? c.text : '')).join('');
+    expect(secondOut).toContain('€ after');
+    expect(secondOut).not.toContain('Base64:');
+    await close();
+  });
 });
 
 describe('read_file when the range cannot be served', () => {
@@ -278,6 +318,26 @@ describe('read_file and images', () => {
     expect(out).toContain(`of ${size} bytes`);
     // And it no longer reads as though the bytes were out of reach.
     expect(out).toContain('read_file serves a window of any file');
+    await close();
+  });
+
+  it('does not decode an unknown-total image window as a complete image', async () => {
+    globalThis.fetch = (async () =>
+      new Response(new Uint8Array(100), {
+        status: 206,
+        headers: {
+          'Content-Type': 'image/png',
+          'Accept-Ranges': 'bytes',
+          'Content-Range': 'bytes 0-99/*',
+        },
+      })) as typeof fetch;
+    const { call, close } = await connect();
+    const res = await call('read_file', { path: '/tmp/unknown.png' });
+    expect(res.isError).toBe(true);
+    expect(res.content.some((c) => c.type === 'image')).toBe(false);
+    const out = res.content.map((c) => (c.type === 'text' ? c.text : '')).join('');
+    expect(out).toContain('partial image/png response whose total size is unknown');
+    expect(out).not.toContain('over the');
     await close();
   });
 
