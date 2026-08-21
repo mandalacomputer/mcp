@@ -56,6 +56,31 @@ export class ConflictError extends APIError {
   override name = 'ConflictError';
 }
 
+/**
+ * 416 — the `Range` named no byte the file has.
+ *
+ * Its own class because it is the one refusal on the download route that a
+ * caller can correct without knowing anything it did not just learn: the
+ * response carries `Content-Range: bytes *\/<size>`, so the file's real length
+ * arrives with the complaint about the offset. {@link size} is that number,
+ * kept off the message so a tool can put the offset it sent beside it.
+ *
+ * A model paging a file it has not measured is the caller that meets this, and
+ * an offset past the end is the mistake it will actually make.
+ */
+export class RangeNotSatisfiableError extends APIError {
+  override name = 'RangeNotSatisfiableError';
+  constructor(
+    message: string,
+    status: number,
+    body?: unknown,
+    /** The file's real length, off `Content-Range`, when the response sent one. */
+    readonly size?: number,
+  ) {
+    super(message, status, body);
+  }
+}
+
 /** 503 — a hypervisor could not be reached, so an inventory would be short. */
 export class UnavailableError extends APIError {
   override name = 'UnavailableError';
@@ -204,6 +229,12 @@ const BY_STATUS: Record<number, typeof APIError> = {
   403: PermissionDeniedError,
   404: NotFoundError,
   409: ConflictError,
+  // Only ever reached through errorForStatus, which cannot see the response
+  // headers and so cannot fill in `size`. Api.#error builds this one itself for
+  // that reason; the entry is here so the mapping stays complete, and so a 416
+  // arriving from anywhere else is still the right class with the platform's
+  // own message on it.
+  416: RangeNotSatisfiableError,
   // The other status a proxy writes on its own, and it was the one gap left in
   // this range: with no entry it fell through to a bare APIError, so a model
   // read `HTTP 502` or 500 characters of nginx's HTML — the exact failure the
