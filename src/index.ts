@@ -19,6 +19,7 @@ export {
   OriginUnreachableError,
   PermissionDeniedError,
   PlanLimitError,
+  RangeNotSatisfiableError,
   UnavailableError,
 } from './errors.js';
 export { type HttpConfig, runHttp } from './http.js';

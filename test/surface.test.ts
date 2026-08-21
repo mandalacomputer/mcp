@@ -1,5 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { ALLOWED, patternFor, UNIMPLEMENTED } from './allowlist.js';
+import {
+  ALLOWED,
+  PARAMETERS,
+  patternFor,
+  UNIMPLEMENTED,
+  UNIMPLEMENTED_PARAMETERS,
+} from './allowlist.js';
 import { connect, installFakePlatform, type Recorded } from './harness.js';
 
 /**
@@ -15,21 +21,34 @@ import { connect, installFakePlatform, type Recorded } from './harness.js';
 const EXERCISE: Record<string, Record<string, unknown>[]> = {
   list_templates: [{}],
   list_sizes: [{}],
-  list_computers: [{}],
+  list_computers: [{}, { allow_partial: true }],
   get_computer: [{}],
   use_computer: [{ computer_id: 'vm-1' }],
   start_computer: [{}],
   stop_computer: [{}],
   suspend_computer: [{}],
   restart_computer: [{}],
-  update_computer: [{ name: 'renamed' }],
+  // Two shapes, because a resize needs the computer stopped and a rename does
+  // not, so the platform refuses them together.
+  update_computer: [
+    { name: 'renamed' },
+    { cpu: 4, ram_mb: 4096, disk_gb: 40 },
+    { idle_suspend_min: 30 },
+  ],
   wait_for_computer: [{ until: 'guest' }],
   get_desktop_url: [{}],
-  create_computer: [{ template: 'base' }],
+  // A named size and an explicit shape are alternatives, never both.
+  create_computer: [
+    { template: 'base', name: 'made', cpu: 2, ram_mb: 2048, disk_gb: 20, resolution: '1280x800' },
+    { size: 'small' },
+  ],
   clone_computer: [{ name: 'copy' }],
-  delete_computer: [{ computer_id: 'vm-2', confirm: true }],
+  delete_computer: [
+    { computer_id: 'vm-2', confirm: true },
+    { computer_id: 'vm-2', confirm: true, delete_snapshots: true, expect: 'fp-abc123' },
+  ],
 
-  screenshot: [{}],
+  screenshot: [{}, { width: 800, fresh: true }],
   click: [{ x: 10, y: 20 }],
   type_text: [{ text: 'hi' }],
   press_key: [{ keys: ['ctrl', 'c'] }],
@@ -40,28 +59,91 @@ const EXERCISE: Record<string, Record<string, unknown>[]> = {
   cursor_position: [{}],
   wait: [{ seconds: 1 }],
 
-  exec: [{ command: 'true' }],
+  exec: [{ command: 'true' }, { command: 'sleep 1', background: true, cwd: '/tmp', desktop: true }],
   exec_poll: [{ pid: 4242 }],
   exec_kill: [{ pid: 4242 }],
   open_url: [{ url: 'https://example.com' }],
-  list_windows: [{}],
-  window_action: [{ window_id: '0x2600003', action: 'focus' }],
+  list_windows: [{}, { include_all: true }],
+  window_action: [
+    { window_id: '0x2600003', action: 'focus' },
+    { window_id: '0x2600003', action: 'move', x: 10, y: 20 },
+    { window_id: '0x2600003', action: 'resize', width: 640, height: 480 },
+  ],
   write_file: [{ path: '/home/user/a.txt', content: 'hello' }],
-  read_file: [{ path: '/home/user/a.txt' }],
+  // The offset is the parameter, and it is the whole of OPL-3740: without an
+  // argument that turns into a Range this route is reachable and a file over
+  // 64 MiB still is not.
+  read_file: [{ path: '/home/user/a.txt' }, { path: '/home/user/a.txt', offset: 2 }],
 
-  list_snapshots: [{}],
+  list_snapshots: [{}, { allow_partial: true, include_unfinished: true }],
   snapshot_holdings: [{}],
-  create_snapshot: [{}],
+  create_snapshot: [{}, { memory: true }],
   restore_snapshot: [{ snapshot_id: 'snap-1', confirm: true }],
-  clone_snapshot: [{ snapshot_id: 'snap-1' }],
-  snapshot_schedule: [{}, { set: { enabled: true, hour: 4 } }, { clear: true }],
+  clone_snapshot: [{ snapshot_id: 'snap-1' }, { snapshot_id: 'snap-1', name: 'copy' }],
+  snapshot_schedule: [
+    {},
+    { set: { enabled: true, hour: 4, minute: 30, tz: 'UTC' } },
+    { clear: true },
+  ],
   delete_snapshot: [{ snapshot_id: 'snap-1', confirm: true }],
 
-  run_agent: [{ prompt: 'open firefox' }],
+  run_agent: [
+    { prompt: 'open firefox' },
+    { prompt: 'open firefox', system: 'be brief', max_steps: 3 },
+  ],
 };
 
 const routesOf = (calls: Recorded[]) =>
   new Set(calls.map((c) => `${c.method} ${patternFor(c.path)}`));
+
+/** Generic HTTP machinery rather than route parameters. */
+const GENERIC_HEADERS = new Set(['authorization', 'accept', 'content-type']);
+
+/** Preserve the platform table's spelling while matching names case-insensitively. */
+const DOCUMENTED_HEADERS = new Map(
+  [...PARAMETERS.values()]
+    .flat()
+    .flatMap((p) => (p.startsWith('header:') ? [[p.slice(7).toLowerCase(), p.slice(7)]] : [])),
+);
+
+/** What one call actually carried, in the mirror's spelling. */
+function parametersOf(call: Recorded): string[] {
+  const sent = [
+    ...[...call.query.keys()].map((k) => `query:${k}`),
+    // Enumerate what actually went out, excluding only the three headers every
+    // request needs. Known parameters use the platform table's spelling;
+    // anything unknown keeps its wire spelling so the comparison rejects it.
+    ...Object.keys(call.headers)
+      .filter((h) => !GENERIC_HEADERS.has(h.toLowerCase()))
+      .map((h) => `header:${DOCUMENTED_HEADERS.get(h.toLowerCase()) ?? h}`),
+  ];
+  // Only an object body has named fields. A file upload's body is the file.
+  if (call.body && typeof call.body === 'object' && !Array.isArray(call.body)) {
+    sent.push(...Object.keys(call.body).map((k) => `body:${k}`));
+  }
+  return sent;
+}
+
+/** Everything this server sent, by route. */
+function sentParameters(calls: Recorded[]): Map<string, Set<string>> {
+  const byRoute = new Map<string, Set<string>>();
+  for (const call of calls) {
+    const route = `${call.method} ${patternFor(call.path)}`;
+    const set = byRoute.get(route) ?? new Set<string>();
+    for (const p of parametersOf(call)) set.add(p);
+    byRoute.set(route, set);
+  }
+  return byRoute;
+}
+
+/** Every tool, with every argument set, against the fake platform. */
+async function exerciseEverything(
+  call: (n: string, a: Record<string, unknown>) => Promise<unknown>,
+) {
+  for (const [name, argSets] of Object.entries(EXERCISE)) {
+    for (const args of argSets) await call(name, args);
+  }
+}
 
 describe('the surface this server calls', () => {
   let platform: ReturnType<typeof installFakePlatform>;
@@ -100,14 +182,64 @@ describe('the surface this server calls', () => {
 
   it('leaves exactly the pinned part of the platform surface unreached', async () => {
     const { call, close } = await connect({ modelKey: 'sk-ant-test' });
-    for (const [name, argSets] of Object.entries(EXERCISE)) {
-      for (const args of argSets) await call(name, args);
-    }
+    await exerciseEverything(call);
     await close();
 
     const called = routesOf(platform.calls);
     const unreached = [...ALLOWED].filter((r) => !called.has(r)).sort();
     expect(unreached).toEqual([...UNIMPLEMENTED].sort());
+  });
+
+  it('sends only parameters the platform documents', async () => {
+    // A field the platform does not read is a field it ignores, silently: the
+    // call succeeds, and the thing the caller asked for does not happen.
+    const { call, close } = await connect({ modelKey: 'sk-ant-test' });
+    await exerciseEverything(call);
+    await close();
+
+    const outside: string[] = [];
+    for (const [route, sent] of sentParameters(platform.calls)) {
+      const known = new Set(PARAMETERS.get(route) ?? []);
+      for (const p of sent) if (!known.has(p)) outside.push(`${route}  ${p}`);
+    }
+    expect(outside.sort(), 'this server sends parameters the platform ignores').toEqual([]);
+  });
+
+  it('records an undocumented header instead of filtering it out', () => {
+    const call: Recorded = {
+      method: 'GET',
+      path: '/computers',
+      query: new URLSearchParams(),
+      body: undefined,
+      headers: {
+        authorization: 'Bearer test',
+        accept: 'application/json',
+        'content-type': 'application/json',
+        'x-obsolete-paramter': 'true',
+      },
+    };
+    expect(parametersOf(call)).toContain('header:x-obsolete-paramter');
+  });
+
+  it('leaves exactly the pinned part of the parameter surface unsent', async () => {
+    // The test the route table could not be: `Range` was documented, on a route
+    // this server called on every read_file, and unsendable — and every other
+    // test in this file passed for the whole time that was true.
+    const { call, close } = await connect({ modelKey: 'sk-ant-test' });
+    await exerciseEverything(call);
+    await close();
+
+    const sent = sentParameters(platform.calls);
+    const unsent: string[] = [];
+    for (const [route, params] of PARAMETERS) {
+      // A route nobody calls sends none of its parameters; its own line in
+      // UNIMPLEMENTED already says so, and repeating it here per parameter
+      // would bury the ones that are genuinely missing.
+      if (UNIMPLEMENTED.has(route)) continue;
+      const actual = sent.get(route) ?? new Set<string>();
+      for (const p of params) if (!actual.has(p)) unsent.push(`${route}  ${p}`);
+    }
+    expect(unsent.sort()).toEqual([...UNIMPLEMENTED_PARAMETERS].sort());
   });
 
   it('withholds the lifecycle tools when they are turned off', async () => {
