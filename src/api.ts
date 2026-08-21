@@ -5,6 +5,7 @@ import {
   ConnectivityError,
   errorForStatus,
   MandalaError,
+  RangeNotSatisfiableError,
 } from './errors.js';
 
 export const DEFAULT_BASE_URL = 'https://app.mandala.computer/api/v1';
@@ -29,8 +30,37 @@ export type Bytes = {
   filename?: string;
   /** True when the response was deliberately stopped at the caller's cap. */
   truncated: boolean;
-  /** Exact size when the response declared one, or when it fitted in full. */
+  /**
+   * Exact size when the response declared one, or when it fitted in full.
+   *
+   * On a `206` this is the WHOLE file's length, off `Content-Range`, and not
+   * the length of the window that came back — which is the number a caller
+   * paging through a file needs and the only place it appears.
+   */
   totalBytes?: number;
+  /**
+   * Which bytes of the file these are, when the platform served a window.
+   *
+   * Present only on a `206`, because that status is the only promise that the
+   * `Range` was honoured. A `200` may perfectly well be a response to a request
+   * that carried one — an unmeasurable file has no byte positions to name, so
+   * the platform ignores the header and sends the whole thing — and reporting
+   * the head of a file as the window somebody asked for is how a paging loop
+   * reads the same bytes forever.
+   *
+   * `total` is absent for a `Content-Range` whose total is `*`: the window is
+   * known and the file's length is not.
+   */
+  window?: { start: number; end: number; total?: number };
+  /**
+   * True when the response said this file cannot be served in windows at all.
+   *
+   * `Accept-Ranges: none`, which the platform sets for a file whose length the
+   * guest could not measure — a `/proc` entry, say. Worth keeping apart from a
+   * merely absent window, because it is the difference between "ask again
+   * differently" and "there is no offset that will work on this file".
+   */
+  unrangeable: boolean;
 };
 
 /**
@@ -266,6 +296,15 @@ export class Api {
         body = text;
       }
     }
+    // The one status whose headers say more than its body does. `Content-Range:
+    // bytes *\/<size>` carries the file's real length, and errorForStatus takes
+    // no headers — deliberately, since every other status it maps is decided by
+    // the number alone. So this one is built here, where the response is still
+    // in hand, and the length rides on the error to whoever asked for the range.
+    if (resp.status === 416) {
+      const total = parseContentRange(resp.headers.get('content-range'))?.total;
+      return new RangeNotSatisfiableError(message, resp.status, body, total);
+    }
     return errorForStatus(resp.status, message, body);
   }
 
@@ -383,6 +422,34 @@ export class Api {
     const contentType = mediaType(resp.headers.get('content-type'));
     const limit = typeof maxBytes === 'function' ? maxBytes(contentType) : maxBytes;
     const declared = contentLength(resp);
+    // Only off a 206. See Bytes.window: the status is the promise, and a 200
+    // carrying a stray Content-Range would otherwise be read as one.
+    const served =
+      resp.status === 206 ? parseContentRange(resp.headers.get('content-range')) : undefined;
+    const window =
+      served?.start !== undefined && served.end !== undefined
+        ? { start: served.start, end: served.end, total: served.total }
+        : undefined;
+    // A 206 is a promise that these bytes are a PART of something, and the
+    // Content-Range is the only thing that says which part. Without a readable
+    // one the response is indistinguishable from a whole-file 200 — same
+    // status-free shape, `truncated` false, no window — so a caller stitching a
+    // file writes a middle chunk at offset zero, and a caller paging one calls
+    // it complete and stops. Refused rather than assumed to start at zero,
+    // because assuming is the exact failure the status exists to prevent, and
+    // because nothing downstream can tell the difference afterwards.
+    //
+    // The platform always sends the header (`bytes %d-%d/%d` in server/api.go).
+    // A hop in front of it that drops the header is the case this is for, and
+    // the same one mandala-computer-typescript's toFileChunk refuses.
+    if (resp.status === 206 && !window) {
+      await resp.body?.cancel().catch(() => {});
+      throw new MandalaError(
+        `${method} ${path} answered 206 without a readable Content-Range ` +
+          `(${resp.headers.get('content-range') ?? 'header absent'}), so where these bytes ` +
+          'belong in the file is unknown',
+      );
+    }
     const { bytes, truncated } = await readBody(
       method,
       path,
@@ -397,12 +464,25 @@ export class Api {
       contentType,
       filename: filenameFrom(resp.headers.get('content-disposition')),
       truncated,
+      // The window's total first, because on a partial response every other
+      // number here is about the window: Content-Length is how long THIS body
+      // is, and `bytes.length` is how much of it was kept. Reading either as
+      // the file's size is how a caller decides it has the whole thing.
       totalBytes:
-        truncated && declared !== undefined && declared > bytes.length
-          ? declared
+        window?.total !== undefined
+          ? window.total
           : truncated
-            ? undefined
-            : bytes.length,
+            ? declared !== undefined && declared > bytes.length
+              ? declared
+              : undefined
+            : // A 206 whose Content-Range said `*`: the window arrived in full
+              // and the file's length is still unknown, so this must not fall
+              // through to `bytes.length`, which would call the window the file.
+              window
+              ? undefined
+              : bytes.length,
+      unrangeable: (resp.headers.get('accept-ranges') ?? '').trim().toLowerCase() === 'none',
+      window,
     };
   }
 
@@ -534,6 +614,39 @@ function cancellationError(method: string, path: string, when: string): Cancelle
 function mediaType(header: string | null): string {
   const bare = (header ?? '').split(';')[0].trim().toLowerCase();
   return bare || 'application/octet-stream';
+}
+
+/**
+ * `Content-Range`, in both the shapes this surface sends.
+ *
+ * `bytes A-B/T` on a 206 says which bytes arrived and how long the file is;
+ * `bytes *\/T` on a 416 says only the length, which is the one thing a caller
+ * who guessed an offset wrong needs. Both are parsed here so the two readers
+ * cannot disagree about the grammar, and `*` in either position comes back as
+ * `undefined` rather than as a number nothing sent.
+ *
+ * A malformed header is nothing rather than a throw: it is metadata about a
+ * body that already arrived, and failing a download over the label on it would
+ * be a worse answer than the one this gives.
+ */
+function parseContentRange(
+  header: string | null,
+): { start?: number; end?: number; total?: number } | undefined {
+  if (!header) return undefined;
+  const m = /^\s*bytes\s+(?:(\d+)-(\d+)|\*)\/(\d+|\*)\s*$/i.exec(header);
+  if (!m) return undefined;
+  const num = (v: string | undefined): number | undefined => {
+    if (v === undefined || v === '*') return undefined;
+    const n = Number(v);
+    return Number.isSafeInteger(n) ? n : undefined;
+  };
+  const start = num(m[1]);
+  const end = num(m[2]);
+  // A window whose end precedes its start describes no bytes. Dropping the pair
+  // rather than passing it on keeps `end - start + 1` from being negative in
+  // every caller that trusts this.
+  if (start !== undefined && end !== undefined && end < start) return undefined;
+  return { start, end, total: num(m[3]) };
 }
 
 /** A trustworthy response length, when fetch has not transparently decoded it. */

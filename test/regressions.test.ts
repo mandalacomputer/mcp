@@ -32,6 +32,7 @@ import {
   OriginResponseError,
   OriginTLSError,
   OriginUnreachableError,
+  RangeNotSatisfiableError,
 } from '../src/errors.js';
 import { failed, MAX_INLINE_IMAGE_BYTES, unwrapComputer } from '../src/format.js';
 import {
@@ -41,11 +42,12 @@ import {
   OriginResponseError as PublicOriginResponseError,
   OriginTLSError as PublicOriginTLSError,
   OriginUnreachableError as PublicOriginUnreachableError,
+  RangeNotSatisfiableError as PublicRangeNotSatisfiableError,
 } from '../src/index.js';
 import * as P from '../src/paths.js';
 import { windowBody } from '../src/paths.js';
 import { SERVER_VERSION } from '../src/server.js';
-import { BASE, connect, installFakePlatform } from './harness.js';
+import { BASE, connect, download, installFakePlatform } from './harness.js';
 
 /** Everything a tool said, as one string. */
 const said = (res: CallToolResult) =>
@@ -1187,27 +1189,28 @@ describe('flags and the environment they override', () => {
 
 describe('a file too large to put in a conversation', () => {
   it('names the way past the truncation it just applied', async () => {
-    // The note said how much it had kept and stopped there. read_file has no
-    // offset argument and the platform serves whole files, so a reader who hit
+    // The note said how much it had kept and stopped there. read_file had no
+    // offset argument and the platform served whole files, so a reader who hit
     // this had been told exactly what they were missing and nothing at all
-    // about how to reach it — and the tool that can reach it, exec, is bounded
-    // at 16 MiB rather than at this 256 KiB.
+    // about how to reach it. Now the way past it is this tool itself, and the
+    // note has to say so with the offset already worked out — a reader that
+    // adds 256 KiB by hand is wrong the moment a window comes back short.
     const real = globalThis.fetch;
     const size = 600 * 1024;
-    globalThis.fetch = (() =>
+    globalThis.fetch = ((_input: unknown, init?: RequestInit) =>
       Promise.resolve(
-        new Response('x'.repeat(size), {
-          headers: { 'Content-Type': 'text/plain', 'Content-Length': String(size) },
-        }),
+        download('x'.repeat(size), new Headers(init?.headers ?? {}).get('range') ?? undefined),
       )) as typeof fetch;
     const { call, close } = await connect();
     const res = await call('read_file', { path: '/var/log/big file&.log' });
     const out = said(res);
     expect(out).toMatch(/showed 262144 of 614400 bytes/);
-    // The resume offset, computed rather than left to the reader: `tail -c +N`
-    // counts from one, so an off-by-one here drops or repeats a byte silently.
-    expect(out).toContain("tail -c +262145 '/var/log/big file&.log'");
-    // And the way to move the file rather than read it.
+    expect(out).toContain('read_file again with offset: 262144');
+    // The exec workaround is gone from this note. It cost a shell in the guest
+    // and an off-by-one on tail's one-based count to read the next 256 KiB.
+    expect(out).not.toContain('tail -c');
+    // And the way to move the file rather than read it, which is still the
+    // right answer for a file you want whole.
     expect(out).toContain("curl -T '/var/log/big file&.log'");
     await close();
     globalThis.fetch = real;
@@ -1218,7 +1221,7 @@ describe('a file too large to put in a conversation', () => {
     const { call, close } = await connect();
     const out = said(await call('read_file', { path: '/home/user/a.txt' }));
     expect(out).toMatch(/hello/);
-    expect(out).not.toMatch(/truncated|tail -c/);
+    expect(out).not.toMatch(/truncated|offset:/);
     await close();
     platform.restore();
   });
@@ -2008,6 +2011,16 @@ describe('the public error surface', () => {
     expect(PublicOriginResponseError).toBe(OriginResponseError);
     expect(PublicOriginTLSError).toBe(OriginTLSError);
     expect(PublicOriginUnreachableError).toBe(OriginUnreachableError);
+  });
+
+  it('exports the one error that carries a number rather than only a message', () => {
+    // A 416 answers with the file's real length on its Content-Range, and
+    // RangeNotSatisfiableError is where that number survives the trip. An
+    // embedder paging a guest file catches this to find out how long the file
+    // it guessed about actually is; caught as a bare APIError, the length is
+    // gone and the only way on is another guess.
+    expect(PublicRangeNotSatisfiableError).toBe(RangeNotSatisfiableError);
+    expect(new RangeNotSatisfiableError('outside the file', 416, undefined, 4096).size).toBe(4096);
   });
 
   it('does not repeat an empty HTTP error status', () => {

@@ -63,6 +63,183 @@ export const V1_ROUTES: Route[] = [
   r('DELETE', 'computers/:id/schedule'),
 ];
 
+/**
+ * Every query parameter, header and body field the platform documents, by route.
+ *
+ * The second mirror, and the one the first turned out to need. V1_ROUTES proves
+ * this server can reach every route; it cannot say whether a call carries the
+ * arguments that make the route worth reaching. `Range` on `GET
+ * computers/:id/files` is the case that proved it: the platform shipped it in
+ * OPL-3727 naming this server as the caller it was for, `check:surface` went on
+ * reporting "in step with gorillacloud (32 routes)", and read_file went on
+ * telling models it could not page — because a header is a parameter of a route
+ * that already existed, and a route table has nowhere to put one.
+ *
+ * Mirrored from the DOCS table in `web/lib/apidoc.ts` in the platform repo, and
+ * compared by `scripts/check-surface.mjs`. That table is the published contract
+ * — it is what generates the OpenAPI document and the docs site — so a
+ * parameter absent from it is one no caller has been told about, and a
+ * parameter here that is absent from it is one this server is sending into a
+ * handler that ignores it.
+ *
+ * Kept in the wire spelling, not this server's: `ram_mb` and not `ramMb`, and
+ * `body:timeout_s` for a tool argument that happens to share the name, so the
+ * comparison is against what the platform actually reads.
+ */
+export const PARAMETERS: ReadonlyMap<string, readonly string[]> = new Map([
+  ['GET templates', []],
+  ['GET sizes', []],
+
+  ['GET computers', ['query:allow_partial']],
+  [
+    'POST computers',
+    [
+      'body:name',
+      'body:size',
+      'body:template',
+      'body:cpu',
+      'body:ram_mb',
+      'body:disk_gb',
+      'body:resolution',
+      'body:start',
+    ],
+  ],
+  ['GET computers/:id', []],
+  [
+    'PATCH computers/:id',
+    ['body:name', 'body:cpu', 'body:ram_mb', 'body:disk_gb', 'body:idle_suspend_min'],
+  ],
+  ['DELETE computers/:id', ['query:snapshots', 'query:expect']],
+  ['POST computers/:id/start', []],
+  ['POST computers/:id/stop', ['query:force']],
+  ['POST computers/:id/suspend', []],
+  ['POST computers/:id/restart', []],
+  ['POST computers/:id/clone', ['body:name']],
+
+  // Computer use.
+  ['GET computers/:id/screenshot', ['query:w', 'query:fresh']],
+  [
+    'POST computers/:id/input',
+    [
+      'body:action',
+      'body:x',
+      'body:y',
+      'body:coordinate',
+      'body:start_coordinate',
+      'body:text',
+      'body:key',
+      'body:keys',
+      'body:button',
+      'body:scroll_direction',
+      'body:amount',
+      'body:scroll_amount',
+      'body:duration',
+    ],
+  ],
+  [
+    'POST computers/:id/exec',
+    ['body:command', 'body:session', 'body:timeout_s', 'body:background', 'body:cwd', 'body:env'],
+  ],
+  ['GET computers/:id/exec/:pid', []],
+  ['DELETE computers/:id/exec/:pid', []],
+  ['GET computers/:id/windows', ['query:include']],
+  [
+    'POST computers/:id/windows/:window',
+    ['body:action', 'body:x', 'body:y', 'body:width', 'body:height'],
+  ],
+
+  [
+    'POST computers/:id/agent',
+    [
+      'header:X-Model-Key',
+      'body:prompt',
+      'body:system',
+      'body:max_steps',
+      'body:model',
+      'body:stream',
+    ],
+  ],
+  [
+    'POST chat/completions',
+    [
+      'header:X-Model-Key',
+      'body:computer_id',
+      'body:messages',
+      'body:model',
+      'body:max_steps',
+      'body:stream',
+    ],
+  ],
+
+  // The upload's body is the file, raw — there are no named fields to mirror.
+  ['PUT computers/:id/files', ['query:path']],
+  // And the download's answer is the file. `Range` is the one header a caller
+  // sends that reaches the daemon, and read_file's whole ability to page
+  // through a file larger than one request moves is this line.
+  ['GET computers/:id/files', ['query:path', 'header:Range']],
+
+  ['GET snapshots', ['query:allow_partial', 'query:include']],
+  ['GET computers/:id/snapshots', []],
+  ['POST computers/:id/snapshots', ['body:name', 'body:memory']],
+  ['POST snapshots/:id/restore', []],
+  ['POST snapshots/:id/clone', ['body:name']],
+  ['DELETE snapshots/:id', []],
+  ['GET computers/:id/schedule', []],
+  ['PUT computers/:id/schedule', ['body:enabled', 'body:hour', 'body:minute', 'body:tz']],
+  ['DELETE computers/:id/schedule', []],
+]);
+
+/**
+ * Parameters the platform documents that this server does not send.
+ *
+ * Two kinds in one set, and each entry says which it is. A DECISION is an
+ * alternate spelling of something this server does send: the input route
+ * accepts Anthropic's computer-use vocabulary alongside this API's own, so a
+ * model's `tool_use.input` block can be forwarded without translation, which
+ * leaves several fields with two names apiece. Picking one and sending it
+ * consistently is the point; sending both would be two ways for one call to
+ * mean different things. A GAP is a parameter no tool can currently reach —
+ * work to do, listed here so that it is somebody's to close rather than
+ * nobody's to notice.
+ *
+ * One set rather than two because what the test needs is the union: the
+ * question it asks is "is every documented parameter either sent or accounted
+ * for", and which kind of account it is belongs on the line, not in the shape
+ * of the file.
+ *
+ * Parameters of a route in UNIMPLEMENTED are not listed — a route nobody calls
+ * sends none of its parameters, and repeating all six of chat/completions'
+ * would say nothing that route's own line does not.
+ */
+export const UNIMPLEMENTED_PARAMETERS: ReadonlySet<string> = new Set([
+  // DECISION. `keys: ['ctrl', 'c']` is sent instead. The chord-as-one-string
+  // form cannot express a key whose own name contains the separator.
+  'POST computers/:id/input  body:key',
+  // DECISION. `scroll_direction` is sent instead — `button` is the flat
+  // vocabulary's name for it, and on a route that also accepts a real mouse
+  // button that is a word worth not overloading.
+  'POST computers/:id/input  body:button',
+  // DECISION. `amount` is sent instead. Same value, two names.
+  'POST computers/:id/input  body:scroll_amount',
+  // DECISION. The model is the one this server was configured with, through
+  // MODEL_KEY_HEADER, and run_agent bills that key for every step. Offering a
+  // model argument would let the caller pick something the key may not be
+  // entitled to, and the failure would arrive several steps into a run.
+  'POST computers/:id/agent  body:model',
+  // GAP. exec takes command, timeout_s, desktop, background and cwd, and there
+  // is no way to set an environment variable for a command — so anything
+  // needing one has to be written as `FOO=bar cmd`, which is a shell away from
+  // what the caller asked for.
+  'POST computers/:id/exec  body:env',
+  // GAP. create_snapshot takes `memory` and nothing else, so every snapshot
+  // this server captures is unnamed — and the name is what a person picks one
+  // out of a list by.
+  'POST computers/:id/snapshots  body:name',
+  // GAP. stop_computer cannot ask for a forced stop, so a guest that will not
+  // shut down cleanly has no answer here at all.
+  'POST computers/:id/stop  query:force',
+]);
+
 export const key = (route: Route) => `${route.method} ${route.pattern}`;
 export const ALLOWED = new Set(V1_ROUTES.map(key));
 
