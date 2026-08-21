@@ -180,7 +180,7 @@ export const registerInput: Registrar = (server, session) => {
       inputSchema: {
         ...idArg,
         keys: z
-          .array(z.string())
+          .array(z.string().trim().min(1, 'Key names must not be empty.'))
           .min(1)
           .describe('One key, or several for a chord pressed together.'),
         hold_seconds: z
