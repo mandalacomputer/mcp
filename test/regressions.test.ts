@@ -2100,3 +2100,71 @@ describe('a snapshot with a reason attached to it', () => {
     });
   });
 });
+
+describe('a guest that will not shut down', () => {
+  let platform: ReturnType<typeof installFakePlatform>;
+
+  beforeEach(() => {
+    platform = installFakePlatform();
+  });
+  afterEach(() => platform.restore());
+
+  const stops = () => platform.calls.filter((c) => c.path.endsWith('/stop'));
+
+  it('asks for the forced stop the caller asked for', async () => {
+    const { call, close } = await connect();
+    await call('stop_computer', { force: true });
+    await close();
+    expect(stops()).toHaveLength(1);
+    // A string, not `1` and not `true`: the platform's schema for this one is
+    // `enum: ['true']`, so anything else is a parameter it does not recognise.
+    expect(stops()[0].query.get('force')).toBe('true');
+  });
+
+  it('omits force on a polite stop rather than sending it false', async () => {
+    // `force=false` would be a value outside the platform's enum, which is a
+    // 400 at best and an ignored parameter at worst — and the polite stop is
+    // the one a caller gets by not asking for anything.
+    const { call, close } = await connect();
+    await call('stop_computer', {});
+    await call('stop_computer', { force: false });
+    await close();
+    expect(stops()).toHaveLength(2);
+    for (const s of stops()) expect(s.query.get('force')).toBeNull();
+  });
+
+  it('says the power was pulled, and says it only when it was', async () => {
+    // The two stops are indistinguishable in the computer they leave behind:
+    // both stopped, both with their disk. Only the answer can say which one
+    // threw away what was in RAM.
+    const { call, close } = await connect();
+    expect(said(await call('stop_computer', { force: true }))).toContain('power was pulled');
+    expect(said(await call('stop_computer', {}))).not.toContain('power was pulled');
+    await close();
+  });
+
+  it('offers force on stop and on no other power tool', async () => {
+    // start, suspend and restart are different operations with different
+    // outcomes; the reason this GAP mattered is that a model with no `force`
+    // reaches for one of them, or for delete_computer, instead.
+    const { client, close } = await connect();
+    const tools = new Map((await client.listTools()).tools.map((t) => [t.name, t]));
+    await close();
+    expect(Object.keys(tools.get('stop_computer')?.inputSchema.properties ?? {}).sort()).toEqual([
+      'computer_id',
+      'force',
+    ]);
+    for (const other of ['start_computer', 'suspend_computer', 'restart_computer']) {
+      expect(Object.keys(tools.get(other)?.inputSchema.properties ?? {})).toEqual(['computer_id']);
+    }
+  });
+
+  it('warns about the lost work in the description, not only in the schema', async () => {
+    const { client, close } = await connect();
+    const stop = (await client.listTools()).tools.find((t) => t.name === 'stop_computer');
+    await close();
+    expect(stop?.description).toContain('force');
+    const force = stop?.inputSchema.properties?.force as { description?: string } | undefined;
+    expect(force?.description).toMatch(/lost|written to disk/);
+  });
+});

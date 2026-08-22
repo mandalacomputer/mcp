@@ -25,7 +25,9 @@ const EXERCISE: Record<string, Record<string, unknown>[]> = {
   get_computer: [{}],
   use_computer: [{ computer_id: 'vm-1' }],
   start_computer: [{}],
-  stop_computer: [{}],
+  // The force is the whole of OPL-3748: without it this route is reachable and
+  // a guest that will not shut down cleanly still has no second move.
+  stop_computer: [{}, { force: true }],
   suspend_computer: [{}],
   restart_computer: [{}],
   // Two shapes, because a resize needs the computer stopped and a rename does
