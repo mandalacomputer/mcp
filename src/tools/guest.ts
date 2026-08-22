@@ -54,7 +54,7 @@ export const registerGuest: Registrar = (server, session) => {
     {
       title: 'Run a command in the guest',
       description:
-        'Run a shell command inside the computer. Runs as root with no display by default — anything that opens a window needs desktop: true, and anything slower than a few seconds needs background: true. Against the hosted platform, waiting here is capped at about two minutes by a proxy in front of it, not by timeout_s.',
+        'Run a shell command inside the computer. Runs as root with no display by default — anything that opens a window needs desktop: true, anything slower than a few seconds needs background: true, and anything that needs an environment variable takes env rather than an assignment written into the command. Against the hosted platform, waiting here is capped at about two minutes by a proxy in front of it, not by timeout_s.',
       inputSchema: {
         ...idArg,
         command: z.string().describe('A shell command line.'),
@@ -80,15 +80,21 @@ export const registerGuest: Registrar = (server, session) => {
             'Return a handle immediately instead of waiting. Use for builds, installs, test suites and servers, then read output with exec_poll. Strictly better than backgrounding with "&", which throws away the exit code and the output.',
           ),
         cwd: absolutePath('cwd').optional(),
+        env: z
+          .record(z.string(), z.string())
+          .optional()
+          .describe(
+            'Environment for this command, as {NAME: "value"}. Use it instead of writing FOO=bar in front of the command: a prefix assignment is shell syntax, so a value holding a space, a quote, a newline or a $ has to be quoted correctly by you and is silently truncated or re-parsed when it is not, while this reaches the process whole and unquoted. It also keeps a secret out of the command line, which is world-readable in the guest\'s ps and, for a background command, comes back to you inside every exec_poll answer. The variables are added on top of the guest\'s login profile rather than replacing it, so PATH and the rest are still there, and they apply to this command only — including with desktop: true. Names must not be empty or contain "=".',
+          ),
       },
     },
-    ({ computer_id, command, timeout_s, desktop, background, cwd }, extra) =>
+    ({ computer_id, command, timeout_s, desktop, background, cwd, env }, extra) =>
       guarded(async () => {
         const id = session.resolve(computer_id);
         const res = await session.api
           .with(extra.signal)
           .json<Record<string, unknown>>('POST', P.computerAction(id, 'exec'), {
-            body: P.execBody({ command, timeout_s, desktop, background, cwd }),
+            body: P.execBody({ command, timeout_s, desktop, background, cwd, env }),
           });
         if (background) {
           // A pid is the whole product of a background exec: without one there

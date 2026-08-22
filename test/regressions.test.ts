@@ -2168,3 +2168,103 @@ describe('a guest that will not shut down', () => {
     expect(force?.description).toMatch(/lost|written to disk/);
   });
 });
+
+describe('an environment for a command, rather than a shell prefix', () => {
+  let platform: ReturnType<typeof installFakePlatform>;
+
+  beforeEach(() => {
+    platform = installFakePlatform();
+  });
+  afterEach(() => platform.restore());
+
+  const execs = () => platform.calls.filter((c) => c.path.endsWith('/exec'));
+
+  it('sends the variables the caller named', async () => {
+    const { call, close } = await connect();
+    await call('exec', { command: 'npm run build', env: { NODE_ENV: 'production' } });
+    await close();
+    expect(execs()).toHaveLength(1);
+    expect(execs()[0].body).toMatchObject({ env: { NODE_ENV: 'production' } });
+  });
+
+  it('carries a value the shell would have taken apart', async () => {
+    // The whole reason this argument exists. As `FOO=... cmd` every one of
+    // these needs the caller to quote it, and the failure is silent: the
+    // variable gets the first word, or the rest becomes another argument, or
+    // $HOME is expanded by the guest's shell into something the caller never
+    // wrote.
+    const awkward = {
+      MESSAGE: 'two words',
+      QUOTED: `it's "fine"`,
+      LITERAL: '$HOME and `date`',
+      MULTILINE: 'first\nsecond',
+    };
+    const { call, close } = await connect();
+    await call('exec', { command: 'env', env: awkward });
+    await close();
+    expect((execs()[0].body as Record<string, unknown>).env).toEqual(awkward);
+  });
+
+  it('omits an environment nobody gave, rather than sending an empty one', async () => {
+    const { call, close } = await connect();
+    await call('exec', { command: 'true' });
+    await call('exec', { command: 'true', env: {} });
+    await close();
+    expect(execs()).toHaveLength(2);
+    for (const c of execs()) expect(c.body).not.toHaveProperty('env');
+  });
+
+  it('refuses a name that is the assignment, before waking the computer', async () => {
+    // `{'FOO=bar': ''}` is the prefix-assignment mistake moved into the object,
+    // and the platform only notices it after `use` has resumed a suspended
+    // guest and billed for the resume. Refused here, nothing is called at all.
+    const { call, close } = await connect();
+    const res = await call('exec', { command: 'true', env: { 'FOO=bar': '' } });
+    expect(res.isError).toBe(true);
+    expect(said(res)).toContain("{FOO: 'bar'}");
+    expect(execs()).toHaveLength(0);
+    await close();
+  });
+
+  it.each([
+    ['an empty name', { '': 'x' }, /empty name/i],
+    ['a NUL in a name', { 'A\0B': 'x' }, /NUL/],
+    ['a NUL in a value', { A: 'x\0y' }, /NUL/],
+  ])('refuses %s, which the guest agent would silently truncate', async (_what, env, why) => {
+    const { call, close } = await connect();
+    const res = await call('exec', { command: 'true', env });
+    expect(res.isError).toBe(true);
+    expect(said(res)).toMatch(why);
+    expect(execs()).toHaveLength(0);
+    await close();
+  });
+
+  it('leaves the platform to police how many and how long', () => {
+    // The ceilings (64 entries, 4096 bytes an entry) are the platform's policy
+    // and are not mirrored here, so a change to them is not a change that has
+    // to land in two repositories to take effect.
+    const many = Object.fromEntries(Array.from({ length: 200 }, (_, i) => [`V${i}`, 'x']));
+    expect(() => P.execEnv(many)).not.toThrow();
+    expect(() => P.execEnv({ BIG: 'x'.repeat(10_000) })).not.toThrow();
+  });
+
+  it('drops an empty environment at the body rather than at the tool', () => {
+    expect(P.execEnv(undefined)).toBeUndefined();
+    expect(P.execEnv({})).toBeUndefined();
+    expect(P.execBody({ command: 'true', env: {} })).toEqual({ command: 'true' });
+    expect(P.execBody({ command: 'true', env: { A: '1' } })).toEqual({
+      command: 'true',
+      env: { A: '1' },
+    });
+  });
+
+  it('is a launch argument, so exec_poll does not take one', async () => {
+    // `env` belongs to starting a process. Offering it on the poll would be an
+    // argument that changes nothing, on the one tool a model calls repeatedly.
+    const { client, close } = await connect();
+    const { tools } = await client.listTools();
+    await close();
+    const poll = tools.find((t) => t.name === 'exec_poll');
+    expect(Object.keys(poll?.inputSchema.properties ?? {})).not.toContain('env');
+  });
+});

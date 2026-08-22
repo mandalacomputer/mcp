@@ -61,7 +61,19 @@ const EXERCISE: Record<string, Record<string, unknown>[]> = {
   cursor_position: [{}],
   wait: [{ seconds: 1 }],
 
-  exec: [{ command: 'true' }, { command: 'sleep 1', background: true, cwd: '/tmp', desktop: true }],
+  // The env is the whole of OPL-3746: without an argument that reaches the
+  // body, this route is reachable and a variable still has to be written into
+  // the command line as `FOO=bar cmd`.
+  exec: [
+    { command: 'true' },
+    {
+      command: 'sleep 1',
+      background: true,
+      cwd: '/tmp',
+      desktop: true,
+      env: { NODE_ENV: 'production' },
+    },
+  ],
   exec_poll: [{ pid: 4242 }],
   exec_kill: [{ pid: 4242 }],
   open_url: [{ url: 'https://example.com' }],
