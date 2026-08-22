@@ -1,11 +1,17 @@
-/** Advance past one single-, double-, or backtick-quoted literal. */
-function quotedEnd(text, from) {
+/** The end of one quoted literal, or -1 when the literal is never closed. */
+function quotedClose(text, from) {
   const quote = text[from];
   for (let i = from + 1; i < text.length; i++) {
     if (text[i] === '\\') i++;
     else if (text[i] === quote) return i + 1;
   }
-  return text.length;
+  return -1;
+}
+
+/** Advance past one single-, double-, or backtick-quoted literal. */
+function quotedEnd(text, from) {
+  const end = quotedClose(text, from);
+  return end === -1 ? text.length : end;
 }
 
 /** Whether a slash here can begin a regex literal rather than divide values. */
@@ -34,6 +40,53 @@ function regexEnd(text, from) {
     }
   }
   return from + 1;
+}
+
+const SHORT_ESCAPES = { n: '\n', t: '\t', r: '\r', b: '\b', f: '\f', v: '\v', 0: '\0' };
+
+/**
+ * The text a quoted literal spells, with its escape sequences resolved.
+ *
+ * The walk that finds the literal is escape-aware and the read of it has to
+ * be too, or the two disagree about where the value ends: `pattern: "a\"b"`
+ * is one literal to `quotedClose` and the value `a"b`, but read raw it is the
+ * two characters `a\` and a route the platform never served.
+ */
+function unescaped(text) {
+  if (!text.includes('\\')) return text;
+  let out = '';
+  for (let i = 0; i < text.length; i++) {
+    if (text[i] !== '\\') {
+      out += text[i];
+      continue;
+    }
+    const next = text[++i];
+    if (next === undefined) break;
+    if (next === 'x') {
+      out += String.fromCharCode(Number.parseInt(text.slice(i + 1, i + 3), 16));
+      i += 2;
+    } else if (next === 'u' && text[i + 1] === '{') {
+      const end = text.indexOf('}', i + 2);
+      out += String.fromCodePoint(Number.parseInt(text.slice(i + 2, end), 16));
+      i = end;
+    } else if (next === 'u') {
+      out += String.fromCharCode(Number.parseInt(text.slice(i + 1, i + 5), 16));
+      i += 4;
+    } else {
+      // Anything else stands for itself: `\'`, `\"`, `` \` ``, `\\`, `\$`.
+      out += SHORT_ESCAPES[next] ?? next;
+    }
+  }
+  return out;
+}
+
+/** Whether a template literal interpolates, as opposed to spelling `\${`. */
+function hasHole(text) {
+  for (let i = 0; i < text.length; i++) {
+    if (text[i] === '\\') i++;
+    else if (text[i] === '$' && text[i + 1] === '{') return true;
+  }
+  return false;
 }
 
 /** Escape a literal so it matches itself when interpolated into a RegExp. */
@@ -135,9 +188,14 @@ export function topLevelKeys(body) {
  * spelling: a `pattern: "x"` read only for single quotes returns undefined,
  * the entry is dropped as half-written, and the route it named surfaces as a
  * platform that dropped a route it still serves.
+ *
+ * The literal is walked rather than matched, for the same reason the scan
+ * around it is: a value alternation like `"[^"]*"` ends at the first quote
+ * whether or not a backslash precedes it, so it disagrees with `quotedClose`
+ * about which quote closes the literal and hands back a truncated value.
  */
 export function topLevelField(body, name) {
-  const at = new RegExp(`${escapeRegExp(name)}\\s*:\\s*('[^']*'|"[^"]*"|\`[^\`]*\`)`, 'y');
+  const at = new RegExp(`${escapeRegExp(name)}\\s*:\\s*`, 'y');
   let depth = 0;
   let i = 0;
   while (i < body.length) {
@@ -155,13 +213,23 @@ export function topLevelField(body, name) {
     // sticky match started inside a longer word would read it as one.
     if (depth === 0 && !/[\w$]/.test(body[i - 1] ?? '')) {
       at.lastIndex = i;
-      const m = at.exec(body);
-      if (m) {
-        // A template literal with a hole in it has no value to read here, and
-        // guessing one would be worse than the undefined a half-written entry
-        // already returns.
-        if (m[1][0] === '`' && m[1].includes('${')) return undefined;
-        return m[1].slice(1, -1);
+      if (at.exec(body)) {
+        const start = at.lastIndex;
+        const quote = body[start];
+        const end = quote === "'" || quote === '"' || quote === '`' ? quotedClose(body, start) : -1;
+        // A value that is not a closed string literal is not this key's value.
+        // Walking on rather than returning leaves the read where it was: the
+        // key is only found where it is spelled the way the table spells it.
+        if (end !== -1) {
+          const inner = body.slice(start + 1, end - 1);
+          // A template literal with a hole in it has no value to read here, and
+          // guessing one would be worse than the undefined a half-written entry
+          // already returns. An escaped `${` is not a hole — it is two of the
+          // characters the pattern is spelled with, and dropping the entry over
+          // it is the same false alarm in the other direction.
+          if (quote === '`' && hasHole(inner)) return undefined;
+          return unescaped(inner);
+        }
       }
     }
     i++;
