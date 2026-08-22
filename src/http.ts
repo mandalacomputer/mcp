@@ -59,8 +59,17 @@ const SMALL_BODY_BYTES = 256 * 1024;
  * is an operator saying they want this reachable from elsewhere. Treating that
  * as loopback would hand them a Host allowlist naming addresses their callers
  * never send, and the deployment would answer 403 to everything.
+ *
+ * The whole of 127.0.0.0/8 is loopback, not only 127.0.0.1. Binding
+ * `127.0.0.2` used to skip the default Host check because the set named three
+ * spellings and nothing else on this machine.
  */
-const LOOPBACK = new Set(['127.0.0.1', 'localhost', '::1', '[::1]']);
+function isLoopbackHost(host: string): boolean {
+  const h = host.toLowerCase();
+  if (h === 'localhost' || h === '::1' || h === '[::1]') return true;
+  const m = /^127\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(h);
+  return Boolean(m && [m[1], m[2], m[3]].every((part) => Number(part) <= 255));
+}
 
 /**
  * The hosted install: one URL, and every caller brings their own key.
@@ -148,14 +157,7 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
   const fullBody = express.json({ limit: '96mb' });
   const smallBody = express.json({ limit: '256kb' });
   const parseBody = (req: Request, res: Response, next: express.NextFunction) => {
-    const id = req.header('mcp-session-id');
-    const live = id ? sessions.get(id) : undefined;
-    const key = bearer(req);
-    const verified = Boolean(live && key && sameKey(live.keyDigest, key));
-    const rawLength = req.header('content-length');
-    const mayBeLarge =
-      rawLength === undefined || !/^\d+$/.test(rawLength) || Number(rawLength) > SMALL_BODY_BYTES;
-    if (!verified || !mayBeLarge) return smallBody(req, res, next);
+    if (!wouldUseLargeParser(req, sessions)) return smallBody(req, res, next);
     if (largeBodyParses >= maxLargeBodyParses) {
       // Drain before answering so unread request bytes cannot be mistaken for
       // the next request on a keep-alive connection. A peer that aborts the
@@ -310,8 +312,9 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
     // Lowercased to match the folded header — an operator who writes
     // `Example.COM` means the same host the client sends as `example.com`.
     if (cfg.allowedHosts?.length) return cfg.allowedHosts.map((h) => h.toLowerCase());
-    if (!LOOPBACK.has(cfg.host)) return undefined;
-    return ['127.0.0.1', 'localhost', '[::1]'].flatMap((h) => [`${h}:${portNow}`, h]);
+    if (!isLoopbackHost(cfg.host)) return undefined;
+    const names = new Set(['127.0.0.1', 'localhost', '[::1]', cfg.host.toLowerCase()]);
+    return [...names].flatMap((h) => [`${h}:${portNow}`, h]);
   }
 
   const allowedOrigins = cfg.allowedOrigins?.map((origin) => origin.toLowerCase());
@@ -563,7 +566,7 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
     if (typeof e?.type === 'string' && typeof e.status === 'number') {
       const message =
         e.type === 'entity.too.large'
-          ? 'Request body is too large. Bodies above 256KB are accepted only on an established session, by a caller whose key matches it — initialize first, then send this there.'
+          ? tooLargeMessage(_req, sessions)
           : typeof e.message === 'string'
             ? e.message
             : 'This request body could not be read.';
@@ -653,6 +656,29 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
     }) as typeof http.close;
     http.on('close', teardown);
   });
+}
+
+/**
+ * Whether this request is allowed through the 96mb parser.
+ *
+ * Shared with the 413 handler so a verified session that actually hit that
+ * ceiling is not told to initialize for 256KB.
+ */
+function wouldUseLargeParser(req: Request, sessions: Map<string, Live>): boolean {
+  const id = req.header('mcp-session-id');
+  const live = id ? sessions.get(id) : undefined;
+  const key = bearer(req);
+  const verified = Boolean(live && key && sameKey(live.keyDigest, key));
+  const rawLength = req.header('content-length');
+  const mayBeLarge =
+    rawLength === undefined || !/^\d+$/.test(rawLength) || Number(rawLength) > SMALL_BODY_BYTES;
+  return verified && mayBeLarge;
+}
+
+function tooLargeMessage(req: Request, sessions: Map<string, Live>): string {
+  return wouldUseLargeParser(req, sessions)
+    ? 'Request body is too large. This established session accepts at most 96MB.'
+    : 'Request body is too large. Bodies above 256KB are accepted only on an established session, by a caller whose key matches it — initialize first, then send this there.';
 }
 
 function bearer(req: Request): string | undefined {

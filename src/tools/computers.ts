@@ -212,31 +212,35 @@ export const registerComputers: Registrar = (server, session, opts) => {
     },
     ({ computer_id }, extra) =>
       guarded(async () => {
-        const selectionVersion = session.selectionVersion(computer_id);
-        // Read it before binding. Binding an id the platform does not recognise
-        // would send every subsequent call to a 404 with no clue why, and the
-        // read costs one round trip against a session that will make hundreds.
-        const c = unwrapComputer(
-          await session.api.with(extra.signal).json('GET', P.computer(computer_id)),
-        );
-        // The id the platform echoed back, not the one that was typed. They can
-        // differ — `P.segment` trims before the call, so " vm-1 " reaches the
-        // API as vm-1 — and `unbind` and `noteResolution` compare with `===`,
-        // so binding the untrimmed form leaves a later delete_computer("vm-1")
-        // unable to clear the selection it just destroyed. The other two bind
-        // sites already use `c.id`.
-        if (!session.bindIfCurrent(c.id ?? computer_id, c.resolution, selectionVersion)) {
-          return refused(
-            `${c.id ?? computer_id} was deleted while it was being selected. The session selection was not changed.`,
+        const selectionVersion = session.beginSelection(computer_id);
+        try {
+          // Read it before binding. Binding an id the platform does not recognise
+          // would send every subsequent call to a 404 with no clue why, and the
+          // read costs one round trip against a session that will make hundreds.
+          const c = unwrapComputer(
+            await session.api.with(extra.signal).json('GET', P.computer(computer_id)),
           );
+          // The id the platform echoed back, not the one that was typed. They can
+          // differ — `P.segment` trims before the call, so " vm-1 " reaches the
+          // API as vm-1 — and `unbind` and `noteResolution` compare with `===`,
+          // so binding the untrimmed form leaves a later delete_computer("vm-1")
+          // unable to clear the selection it just destroyed. The other two bind
+          // sites already use `c.id`.
+          if (!session.bindIfCurrent(c.id ?? computer_id, c.resolution, selectionVersion)) {
+            return refused(
+              `${c.id ?? computer_id} was deleted while it was being selected. The session selection was not changed.`,
+            );
+          }
+          return said(
+            `Selected ${describe(c)}. Later calls need no computer_id.` +
+              (c.status === 'running'
+                ? ''
+                : `\n\nIt is ${c.status ?? 'not running'} — start_computer before driving it.`),
+            withoutCredentials(c),
+          );
+        } finally {
+          session.endSelection(computer_id);
         }
-        return said(
-          `Selected ${describe(c)}. Later calls need no computer_id.` +
-            (c.status === 'running'
-              ? ''
-              : `\n\nIt is ${c.status ?? 'not running'} — start_computer before driving it.`),
-          withoutCredentials(c),
-        );
       }),
   );
 
@@ -417,10 +421,10 @@ export const registerComputers: Registrar = (server, session, opts) => {
             // than by reading the error: the request is now bound to two
             // deadlines, and only one of them means anybody stopped caring.
             if (extra.signal?.aborted) return cancelled(id, last);
-            // A body stream can also be cancelled without either signal
-            // firing, so only the deadline signal proves the wait's own timer
-            // arrived. Otherwise retain the cancellation's real diagnostic
-            // and retry the read until the caller's deadline.
+            // A body stream can also fail without either signal firing (an
+            // undici idle timeout is an AbortError). That is a transport
+            // failure, not a cancellation, and is retried below as transient.
+            // Only the deadline signal proves the wait's own timer arrived.
             if (err instanceof CancelledError) {
               if (untilDeadline.aborted) {
                 blocked = `the status read was still in flight when the ${timeout_s}s deadline arrived`;
@@ -715,7 +719,8 @@ export const registerComputers: Registrar = (server, session, opts) => {
         // agreed to — and the race checkExpectation exists for is exactly that:
         // a capture that finishes between the decision and the click, then gets
         // destroyed by a confirmation that predates it.
-        if (delete_snapshots && !expect) {
+        const fingerprint = expect?.trim() || undefined;
+        if (delete_snapshots && !fingerprint) {
           return refused(
             'Refusing to purge snapshots without a fingerprint. Call snapshot_holdings on this computer, ' +
               'check that the count and size are what you meant to destroy, and pass its fingerprint as `expect`. ' +
@@ -727,7 +732,7 @@ export const registerComputers: Registrar = (server, session, opts) => {
           .send<{ snapshots_deleted?: number }>('DELETE', P.computer(computer_id), {
             query: {
               snapshots: delete_snapshots ? 'delete' : undefined,
-              expect: delete_snapshots ? expect : undefined,
+              expect: delete_snapshots ? fingerprint : undefined,
             },
           });
         session.unbind(computer_id);

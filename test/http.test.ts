@@ -500,6 +500,8 @@ describe('a body from a caller who sent no key', () => {
     const body = (await res.json()) as { jsonrpc: string; error: { message: string } };
     expect(body.jsonrpc).toBe('2.0');
     expect(body.error.message).toContain('too large');
+    expect(body.error.message).toContain('256KB');
+    expect(body.error.message).toContain('initialize first');
     expect(JSON.stringify(body)).not.toContain('node_modules');
   });
 

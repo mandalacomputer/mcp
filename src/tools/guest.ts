@@ -42,6 +42,19 @@ const MAX_INLINE_BYTES = 256 * 1024;
  */
 const MAX_WINDOW_BYTES = MAX_INLINE_IMAGE_BYTES;
 
+/**
+ * Raster types that MCP image content can carry safely.
+ *
+ * `image/*` includes `image/svg+xml`, and a client that inlines that MIME as
+ * a picture can execute script from a guest file. SVG is XML; it goes through
+ * the text / base64 path like any other non-raster file.
+ */
+const INLINE_IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
+
+function isInlineImage(contentType: string): boolean {
+  return INLINE_IMAGE_TYPES.has(contentType);
+}
+
 const absolutePath = (what: string) =>
   z
     .string()
@@ -332,9 +345,10 @@ export const registerGuest: Registrar = (server, session) => {
               // caps below — the most this tool could ever hand back — because
               // the content type that decides between them is not known until
               // the response arrives, and asking for the text window would clip
-              // every image over 256 KiB into something that will not decode.
-              // Text is still cut to MAX_INLINE_BYTES by the cap callback,
-              // which cancels the rest of the body rather than reading it.
+              // every raster image over 256 KiB into something that will not
+              // decode. SVG and other non-raster `image/*` types are not
+              // inlined as pictures, so they take the text cap — otherwise an
+              // 8 MiB SVG would land in the conversation as text/base64.
               //
               // Asking for a window at all is what makes a large file reachable:
               // without a Range the platform serves whole files and refuses
@@ -343,7 +357,7 @@ export const registerGuest: Registrar = (server, session) => {
               headers: { Range: `bytes=${offset}-${windowEnd(offset)}` },
             },
             (contentType) =>
-              contentType.startsWith('image/') ? MAX_INLINE_IMAGE_BYTES : MAX_INLINE_BYTES,
+              isInlineImage(contentType) ? MAX_INLINE_IMAGE_BYTES : MAX_INLINE_BYTES,
           );
         } catch (err) {
           if (err instanceof RangeNotSatisfiableError) return pastEnd(path, offset, err.size);
@@ -397,7 +411,7 @@ export const registerGuest: Registrar = (server, session) => {
         // the one that was requested.
         const misled = unranged && offset > 0;
 
-        if (file.contentType.startsWith('image/')) {
+        if (isInlineImage(file.contentType)) {
           // A window of an image is not an image, so this stays a refusal. Two
           // ways to be holding one, and they are different mistakes: a picture
           // too big to put in a conversation, and a picture somebody asked for
@@ -455,7 +469,11 @@ export const registerGuest: Registrar = (server, session) => {
             : more
               ? `\n\n[${continuation(path, start, next, total)}]`
               : '';
-        const where = whole ? `${size} bytes` : `bytes ${start}-${next - 1} of ${size}`;
+        const where = whole
+          ? `${size} bytes`
+          : kept.length === 0
+            ? `empty window at offset ${start} of ${size}`
+            : `bytes ${start}-${next - 1} of ${size}`;
         const decoded = decodeUtf8(kept);
         if (decoded === undefined) {
           return text(
@@ -613,41 +631,64 @@ function shellQuote(value: string): string {
   return `'${value.replaceAll("'", `'"'"'`)}'`;
 }
 
+/** How many bytes a UTF-8 lead promises, or 1 if it is not a multi-byte lead. */
+function utf8Expected(first: number): number {
+  return first >= 0xc2 && first <= 0xdf
+    ? 2
+    : first >= 0xe0 && first <= 0xef
+      ? 3
+      : first >= 0xf0 && first <= 0xf4
+        ? 4
+        : 1;
+}
+
+/**
+ * Start of a genuinely incomplete multi-byte sequence at the tail, if any.
+ *
+ * Walks back over continuation bytes to the lead. Accepts only a valid lead
+ * whose remaining bytes are all continuations and whose length is short of
+ * what that lead promised — not "any 1–3 octets that make the prefix decode".
+ */
+function incompleteUtf8Lead(bytes: Uint8Array): number | undefined {
+  if (bytes.length === 0) return undefined;
+  let lead = bytes.length - 1;
+  while (lead > 0 && bytes[lead] >= 0x80 && bytes[lead] <= 0xbf) lead--;
+  const expected = utf8Expected(bytes[lead]);
+  const present = bytes.length - lead;
+  if (expected <= 1 || present >= expected) return undefined;
+  return lead;
+}
+
 /** UTF-8 if it is UTF-8, and undefined if it plainly is not. */
 function decodeUtf8(bytes: Uint8Array): string | undefined {
-  // Non-fatal on purpose. A truncated read can cut a multi-byte character in
-  // half, and one replacement character at the very end is a casualty of the
-  // cap rather than proof the file is binary.
-  const s = new TextDecoder('utf-8').decode(bytes);
-  // A NUL is legal UTF-8 and is never in a file anybody meant to read as text,
-  // so it is the tell that this is a binary. Replacement characters anywhere
-  // but the tail say the same thing.
-  if (s.includes('\u0000')) return undefined;
-  const bad = s.split('\ufffd').length - 1;
-  if (bad > 1 || (bad === 1 && !s.slice(-4).includes('\ufffd'))) return undefined;
-  return s;
+  // A NUL is legal UTF-8 and is never in a file anybody meant to read as text.
+  if (bytes.includes(0)) return undefined;
+  const fatal = new TextDecoder('utf-8', { fatal: true });
+  try {
+    return fatal.decode(bytes);
+  } catch {
+    // A truncated read can cut a multi-byte character in half. One incomplete
+    // sequence at the very end is a casualty of the cap rather than proof the
+    // file is binary. A real U+FFFD (EF BF BD) is valid UTF-8 and decodes
+    // fatally above. Stray 0xff/0xfe (or any other invalid suffix) must not
+    // be stripped until the prefix happens to decode.
+    const lead = incompleteUtf8Lead(bytes);
+    if (lead === undefined) return undefined;
+    try {
+      return `${fatal.decode(bytes.subarray(0, lead))}\ufffd`;
+    } catch {
+      return undefined;
+    }
+  }
 }
 
 /** Leave an incomplete final UTF-8 character for the next byte window. */
 function utf8Page(bytes: Uint8Array): Uint8Array {
   if (bytes.length === 0) return bytes;
-
-  let lead = bytes.length - 1;
-  while (lead > 0 && bytes[lead] >= 0x80 && bytes[lead] <= 0xbf) lead--;
-  const first = bytes[lead];
-  const expected =
-    first >= 0xc2 && first <= 0xdf
-      ? 2
-      : first >= 0xe0 && first <= 0xef
-        ? 3
-        : first >= 0xf0 && first <= 0xf4
-          ? 4
-          : 1;
-  const present = bytes.length - lead;
+  const lead = incompleteUtf8Lead(bytes);
   // Never return an empty page with the same continuation offset. This can
   // only happen for an unusually tiny partial response, not at the normal cap.
-  if (lead === 0 || expected === 1 || present >= expected) return bytes;
-
+  if (lead === undefined || lead === 0) return bytes;
   try {
     new TextDecoder('utf-8', { fatal: true }).decode(bytes.subarray(0, lead));
     return bytes.subarray(0, lead);

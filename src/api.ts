@@ -81,9 +81,21 @@ const MAX_ERROR_BODY_BYTES = 1024 * 1024;
  * fetch also gives response headers 300 seconds by default, so the client can
  * lose that race while the command is still finishing in the guest. Keep the
  * public exec limit and give the platform enough time to report its timeout.
+ *
+ * The body is a different clock. undici's default `bodyTimeout` is 300 seconds
+ * of silence *between chunks*, and `run_agent` SSE (or a long exec that has
+ * already sent headers) can sit quiet after that. Raising only the header
+ * allowance left those streams aborting on the default idle limit. Zero
+ * disables it: a quiet gap is not a dead connection, and the caller's
+ * AbortSignal is what ends a request nobody is waiting for.
  */
 export const PLATFORM_HEADERS_TIMEOUT_MS = 330_000;
-const PLATFORM_DISPATCHER = new Agent({ headersTimeout: PLATFORM_HEADERS_TIMEOUT_MS });
+/** Disabled. A finite idle limit is what used to kill a quiet SSE stream. */
+export const PLATFORM_BODY_TIMEOUT_MS = 0;
+const PLATFORM_DISPATCHER = new Agent({
+  headersTimeout: PLATFORM_HEADERS_TIMEOUT_MS,
+  bodyTimeout: PLATFORM_BODY_TIMEOUT_MS,
+});
 
 /** One server-sent event off the agent route. */
 export type SSEEvent = { event: string; data: unknown };
@@ -566,17 +578,27 @@ export class Api {
 /**
  * Was this rejection the caller hanging up, rather than the network?
  *
- * The signal is the reliable half: `AbortSignal.abort(reason)` rejects the
- * fetch with whatever reason was given, which may be any value at all, so the
- * error alone cannot be relied on to say what happened. The name check is for
- * the rest — `AbortSignal.timeout` raises `TimeoutError`, and a stream torn
- * down mid-read raises `AbortError` without the signal this call was watching
- * ever having fired.
+ * The watched signal is the only reliable answer. `AbortSignal.abort(reason)`
+ * rejects the fetch with whatever reason was given, which may be any value at
+ * all, so the error name cannot be relied on to say what happened. An undici
+ * body or idle timeout is also an `AbortError` / `TimeoutError` /
+ * `BodyTimeoutError` without that signal ever having fired — those are
+ * transport failures. Calling them a cancellation sent wait loops down the
+ * "the caller gave up" path while the caller was still waiting.
  */
-function isCancellation(cause: unknown, signal?: AbortSignal): boolean {
-  if (signal?.aborted) return true;
+function isCancellation(_cause: unknown, signal?: AbortSignal): boolean {
+  return Boolean(signal?.aborted);
+}
+
+/** An undici / fetch abort that is not the caller's signal. */
+function isTransportAbort(cause: unknown): boolean {
   const name = (cause as { name?: string })?.name;
-  return name === 'AbortError' || name === 'TimeoutError';
+  return (
+    name === 'AbortError' ||
+    name === 'TimeoutError' ||
+    name === 'BodyTimeoutError' ||
+    name === 'HeadersTimeoutError'
+  );
 }
 
 /** The same cancellation semantics for response bodies as for response headers. */
@@ -591,6 +613,13 @@ async function readBody<T>(
   } catch (cause) {
     if (isCancellation(cause, signal)) {
       throw cancellationError(method, path, 'while reading the platform response');
+    }
+    if (isTransportAbort(cause)) {
+      throw new ConnectivityError(
+        `could not finish reading ${method} /${path.replace(/^\/+/, '')}: ${
+          cause instanceof Error ? cause.message : String(cause)
+        }`,
+      );
     }
     throw cause;
   }

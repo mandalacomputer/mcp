@@ -67,6 +67,18 @@ describe('deleting a computer', () => {
     expect(del?.query.get('expect')).toBe('fp-abc123');
   });
 
+  it('trims a copied fingerprint before sending it', async () => {
+    const { call, close } = await connect();
+    await call('delete_computer', {
+      computer_id: 'vm-1',
+      confirm: true,
+      delete_snapshots: true,
+      expect: 'fp-abc123\n',
+    });
+    await close();
+    expect(lastDelete()?.query.get('expect')).toBe('fp-abc123');
+  });
+
   it('does not smuggle a fingerprint onto a delete that is not purging', async () => {
     const { call, close } = await connect();
     await call('delete_computer', {
@@ -84,21 +96,24 @@ describe('deleting a computer', () => {
     const real = globalThis.fetch;
     globalThis.fetch = (async () => new Response(null, { status: 204 })) as typeof fetch;
 
-    const { call, close } = await connect();
-    const res = await call('delete_computer', {
-      computer_id: 'vm-1',
-      confirm: true,
-      delete_snapshots: true,
-      expect: 'fp-abc123',
-    });
-    await close();
-    globalThis.fetch = real;
+    try {
+      const { call, close } = await connect();
+      const res = await call('delete_computer', {
+        computer_id: 'vm-1',
+        confirm: true,
+        delete_snapshots: true,
+        expect: 'fp-abc123',
+      });
+      await close();
 
-    // "and 0 of its snapshot(s)" is an affirmative claim that nothing was
-    // destroyed, about the one call here that cannot be undone. Silence from
-    // the platform is not that claim.
-    expect(textOf(res)).not.toContain('0 of its snapshot');
-    expect(textOf(res)).toContain('its snapshots');
+      // "and 0 of its snapshot(s)" is an affirmative claim that nothing was
+      // destroyed, about the one call here that cannot be undone. Silence from
+      // the platform is not that claim.
+      expect(textOf(res)).not.toContain('0 of its snapshot');
+      expect(textOf(res)).toContain('its snapshots');
+    } finally {
+      globalThis.fetch = real;
+    }
   });
 
   it("passes on the platform's refusal when the set moved underneath it", async () => {
@@ -112,18 +127,21 @@ describe('deleting a computer', () => {
         { status: 409, headers: { 'Content-Type': 'application/json' } },
       )) as typeof fetch;
 
-    const { call, close } = await connect();
-    const res = await call('delete_computer', {
-      computer_id: 'vm-1',
-      confirm: true,
-      delete_snapshots: true,
-      expect: 'fp-stale',
-    });
-    await close();
-    globalThis.fetch = real;
+    try {
+      const { call, close } = await connect();
+      const res = await call('delete_computer', {
+        computer_id: 'vm-1',
+        confirm: true,
+        delete_snapshots: true,
+        expect: 'fp-stale',
+      });
+      await close();
 
-    expect(res.isError).toBe(true);
-    expect(textOf(res)).toContain('changed while you were deciding');
+      expect(res.isError).toBe(true);
+      expect(textOf(res)).toContain('changed while you were deciding');
+    } finally {
+      globalThis.fetch = real;
+    }
   });
 });
 
