@@ -41,11 +41,29 @@ describe('the surface source scanner', () => {
     expect(topLevelField(`pattern: 'computers/:id'`, 'pattern')).toBe('computers/:id');
   });
 
+  it('reads a value whose quote is escaped inside it', () => {
+    // The value alternation this replaced ended at the first `"`, backslash or
+    // not, so the value came back as `a\` — a route in neither table, reported
+    // as one the platform serves and the mirror forgot.
+    expect(topLevelField(`pattern: "a\\"b"`, 'pattern')).toBe('a"b');
+    expect(topLevelField(`pattern: 'a\\'b', method: 'GET'`, 'pattern')).toBe("a'b");
+    expect(topLevelField('pattern: `a\\`b`', 'pattern')).toBe('a`b');
+    expect(topLevelField(`pattern: 'a\\\\b'`, 'pattern')).toBe('a\\b');
+  });
+
   it('declines a template literal with a hole rather than reading it raw', () => {
     // Half of a route is not a route, and the entry is dropped as half-written.
     // Handing back the source text of the interpolation would be a pattern the
     // platform never serves, compared against a mirror as if it did.
     expect(topLevelField(`pattern: \`computers/\${id}\``, 'pattern')).toBeUndefined();
+  });
+
+  it('reads an escaped interpolation as the characters it spells', () => {
+    // The other half of the same escape blindness: `\${` interpolates nothing,
+    // so declining it drops a whole route as half-written and the mirror is
+    // told the platform stopped serving it.
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: the spelling is the subject
+    expect(topLevelField('pattern: `a\\${b}`', 'pattern')).toBe('a${b}');
   });
 
   it('takes a key with a regex metacharacter in it literally', () => {
