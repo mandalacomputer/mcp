@@ -27,7 +27,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { balanced, stripComments, topLevelKeys } from './surface-text.mjs';
+import { balanced, stripComments, topLevelField, topLevelKeys } from './surface-text.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repo = resolve(here, '..');
@@ -69,12 +69,17 @@ const surfaceSource = readFileSync(join(platform, 'web/lib/surface.ts'), 'utf8')
  *
  * Split by brace depth rather than matched with one regex across the whole
  * table. A `/method:.*?pattern:/` over the flat text is correct only while
- * every entry happens to write its method first: reorder two fields, or nest a
- * literal that quotes a pattern, and the lazy match joins one entry's method to
- * the next entry's pattern. What comes out is a route neither table has — and a
- * route that is in neither is not a failure here, it is silence. A checker
- * whose failure mode is a false all-clear is worse than no checker, which is
- * what the brace walk is for and why it survived the port.
+ * every entry happens to write its method first: reorder two fields and the
+ * lazy match joins one entry's method to the next entry's pattern. What comes
+ * out is a route neither table has — and a route that is in neither is not a
+ * failure here, it is silence. A checker whose failure mode is a false
+ * all-clear is worse than no checker, which is what the brace walk is for and
+ * why it survived the port.
+ *
+ * Slicing the entry is only half of it. Within one entry the fields are read at
+ * that entry's own depth, because a nested literal can quote a `pattern` of its
+ * own — an options bag, a `handler: {}` with a path in it — and a regex over
+ * the entry takes whichever comes first.
  *
  * The `!routes.size` guard below only catches a parse that found nothing at
  * all, which is exactly what a mispaired parse is not.
@@ -92,11 +97,12 @@ function routeTable(name) {
     if (body[i] === '{') {
       if (depth++ === 0) from = i;
     } else if (body[i] === '}' && --depth === 0) {
-      const entry = body.slice(from, i + 1);
-      const method = /method:\s*'([A-Z]+)'/.exec(entry)?.[1];
-      const pattern = /pattern:\s*'([^']+)'/.exec(entry)?.[1];
-      // Both, out of ONE entry. An entry carrying only half of the pair is not
-      // a route and must not borrow the other half from its neighbour.
+      // Both, out of ONE entry and at that entry's own depth. An entry
+      // carrying only half of the pair is not a route, and must borrow the
+      // other half neither from its neighbour nor from a literal nested in it.
+      const entry = body.slice(from + 1, i);
+      const method = topLevelField(entry, 'method');
+      const pattern = topLevelField(entry, 'pattern');
       if (method && pattern) routes.add(`${method} ${pattern}`);
     }
   }
