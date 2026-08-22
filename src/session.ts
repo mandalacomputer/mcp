@@ -32,6 +32,10 @@ export class Session {
   #screen?: string;
   /** Successful deletes invalidate selections of the same id already in flight. */
   readonly #selectionVersions = new Map<string, number>();
+  /** In-flight `use_computer` reads, so their generation cannot be evicted. */
+  readonly #selectionPins = new Map<string, number>();
+  /** Bound so a long-lived stdio session cannot grow one entry per deleted id. */
+  static readonly #MAX_SELECTION_VERSIONS = 256;
 
   constructor(cfg: SessionConfig) {
     this.api = new Api(cfg.apiKey, cfg.baseUrl ?? DEFAULT_BASE_URL);
@@ -57,6 +61,30 @@ export class Session {
     return this.#selectionVersions.get(id(computerId) ?? '') ?? 0;
   }
 
+  /**
+   * Pin this id's generation for one in-flight `use_computer`.
+   *
+   * The confirming GET can outlive hundreds of other deletes. Evicting this
+   * id's entry in that window would reset the generation to 0 and let
+   * `bindIfCurrent` succeed against a computer that was already destroyed.
+   */
+  beginSelection(computerId: string): number {
+    const normalized = id(computerId);
+    if (normalized) {
+      this.#selectionPins.set(normalized, (this.#selectionPins.get(normalized) ?? 0) + 1);
+    }
+    return this.selectionVersion(computerId);
+  }
+
+  /** Drop one pin taken by {@link beginSelection}. */
+  endSelection(computerId: string): void {
+    const normalized = id(computerId);
+    if (!normalized) return;
+    const held = this.#selectionPins.get(normalized) ?? 0;
+    if (held <= 1) this.#selectionPins.delete(normalized);
+    else this.#selectionPins.set(normalized, held - 1);
+  }
+
   /** Bind only if no concurrent delete completed while the id was being checked. */
   bindIfCurrent(computerId: string, resolution: string | undefined, version: number): boolean {
     const normalized = id(computerId);
@@ -71,7 +99,21 @@ export class Session {
     if (!normalized) return;
     // Increment even when another computer is selected: an earlier
     // use_computer for this id may still be waiting on its GET response.
-    this.#selectionVersions.set(normalized, this.selectionVersion(normalized) + 1);
+    // Recency is delete-then-set so a repeated id is the newest entry and an
+    // old deletion can be evicted first. The value itself has to stay: dropping
+    // it would reset the generation to 0 and let that in-flight bind succeed.
+    // A pinned id is never evicted, even if it is the oldest — that pin is
+    // exactly an in-flight bindIfCurrent that still needs the generation.
+    const next = this.selectionVersion(normalized) + 1;
+    this.#selectionVersions.delete(normalized);
+    this.#selectionVersions.set(normalized, next);
+    if (this.#selectionVersions.size > Session.#MAX_SELECTION_VERSIONS) {
+      for (const key of this.#selectionVersions.keys()) {
+        if (key === normalized || key === this.#current || this.#selectionPins.has(key)) continue;
+        this.#selectionVersions.delete(key);
+        if (this.#selectionVersions.size <= Session.#MAX_SELECTION_VERSIONS) break;
+      }
+    }
     if (this.#current !== undefined && this.#current === normalized) {
       this.#current = undefined;
       this.#screen = undefined;

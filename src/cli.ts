@@ -79,7 +79,11 @@ export function parse(argv: string[]): Flags {
       flags[arg === '-h' ? 'help' : 'version'] = true;
       continue;
     }
-    if (!arg.startsWith('--')) continue;
+    if (!arg.startsWith('--')) {
+      throw new Error(
+        `unexpected argument ${arg}. This program takes flags, not commands — try --help.`,
+      );
+    }
     // Split at the first `=`, not with `split('=', 2)` — the limit argument
     // discards the remainder rather than keeping it, so `--key=com_a=b` would
     // silently yield `com_a`. Values with an `=` in them are the ordinary case
