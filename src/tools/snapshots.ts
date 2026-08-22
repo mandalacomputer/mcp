@@ -162,9 +162,15 @@ export const registerSnapshots: Registrar = (server, session, opts) => {
     {
       title: 'Snapshot a computer',
       description:
-        'Capture a computer so it can be restored or forked later. A disk snapshot is the filesystem; a memory snapshot also saves the running session, so a fork of it comes up with the same processes and windows already open.',
+        'Capture a computer so it can be restored or forked later. A disk snapshot is the filesystem; a memory snapshot also saves the running session, so a fork of it comes up with the same processes and windows already open. Name it after the step it is about — that name is what picks it out of the list later.',
       inputSchema: {
         ...idArg,
+        name: z
+          .string()
+          .optional()
+          .describe(
+            'What this capture is of: "before the upgrade", "clean install", "reproduces the bug". It is the only place the reason for taking it can be written down — restore_snapshot, clone_snapshot and delete_snapshot all take an id, so a set of captures of one computer is otherwise told apart by timestamp alone, and the wrong guess on the last of those is unrecoverable. Omit it and the platform names the snapshot after the computer and the time, which says when but never why.',
+          ),
         memory: z
           .boolean()
           .default(false)
@@ -173,15 +179,22 @@ export const registerSnapshots: Registrar = (server, session, opts) => {
           ),
       },
     },
-    ({ computer_id, memory }, extra) =>
+    ({ computer_id, name, memory }, extra) =>
       guarded(async () => {
         const id = session.resolve(computer_id);
         const res = await session.api
           .with(extra.signal)
-          .json('POST', P.computerAction(id, 'snapshots'), {
-            body: P.snapshotBody(memory),
+          .json<Record<string, unknown>>('POST', P.computerAction(id, 'snapshots'), {
+            body: P.snapshotBody({ memory, name }),
           });
-        return said(`Snapshotted ${id}${memory ? ' with its memory' : ''}.`, res);
+        // The name read back rather than the one sent, because the interesting
+        // case is the one that was not sent: the platform generates
+        // "<computer> <timestamp>" when `name` is absent, and that generated
+        // name is what a later list_snapshots will show. Saying it here is the
+        // difference between a caller that can find this capture again and one
+        // that has to go looking for it.
+        const called = typeof res?.name === 'string' && res.name.trim() ? ` as "${res.name}"` : '';
+        return said(`Snapshotted ${id}${memory ? ' with its memory' : ''}${called}.`, res);
       }),
   );
 

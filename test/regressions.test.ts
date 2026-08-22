@@ -2030,3 +2030,73 @@ describe('the public error surface', () => {
     );
   });
 });
+
+describe('a snapshot with a reason attached to it', () => {
+  let platform: ReturnType<typeof installFakePlatform>;
+
+  beforeEach(() => {
+    platform = installFakePlatform();
+  });
+  afterEach(() => platform.restore());
+
+  const captures = () => platform.calls.filter((c) => c.method === 'POST');
+
+  it('sends the name the caller gave it', async () => {
+    const { call, close } = await connect();
+    await call('create_snapshot', { name: 'before the upgrade', memory: true });
+    await close();
+    expect(captures()).toHaveLength(1);
+    expect(captures()[0].body).toEqual({ name: 'before the upgrade', memory: true });
+  });
+
+  it('omits a name nobody gave, rather than sending an empty one', async () => {
+    // The platform reads an ABSENT name as "generate one from the computer and
+    // the time" and an empty string as a name — so a `name: ''` on the wire is
+    // the one way to end up with a snapshot that has no name at all, which is
+    // worse than the generated one it replaced. Whitespace is the same input
+    // wearing a disguise.
+    const { call, close } = await connect();
+    await call('create_snapshot', {});
+    await call('create_snapshot', { name: '   ' });
+    await close();
+    expect(captures()).toHaveLength(2);
+    for (const c of captures()) expect(c.body).toEqual({ memory: false });
+  });
+
+  it('says what the snapshot ended up called', async () => {
+    // Including when the caller named nothing: the generated name is what
+    // list_snapshots will show, and a caller who is never told it has to go
+    // looking for the capture it just took.
+    const { call, close } = await connect();
+    expect(said(await call('create_snapshot', {}))).toContain('as "s"');
+    await close();
+  });
+
+  it('does not invent a name when the platform sends none back', async () => {
+    const real = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify({ id: 'snap-9' }), {
+        headers: { 'Content-Type': 'application/json' },
+      })) as typeof fetch;
+    try {
+      const { call, close } = await connect();
+      const out = said(await call('create_snapshot', { name: 'clean install' }));
+      expect(out).toContain('Snapshotted');
+      expect(out).not.toContain(' as "');
+      await close();
+    } finally {
+      globalThis.fetch = real;
+    }
+  });
+
+  it('builds the body from named arguments, not a positional flag', () => {
+    // snapshotBody took a bare boolean until OPL-3747. The shape is pinned so
+    // a second boolean cannot be appended to it later and be read the wrong way
+    // round at the one call site.
+    expect(P.snapshotBody({ memory: false })).toEqual({ memory: false });
+    expect(P.snapshotBody({ memory: true, name: '  spaced  ' })).toEqual({
+      memory: true,
+      name: 'spaced',
+    });
+  });
+});

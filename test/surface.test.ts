@@ -77,7 +77,10 @@ const EXERCISE: Record<string, Record<string, unknown>[]> = {
 
   list_snapshots: [{}, { allow_partial: true, include_unfinished: true }],
   snapshot_holdings: [{}],
-  create_snapshot: [{}, { memory: true }],
+  // The name is the whole of OPL-3747: without an argument that reaches the
+  // body, this route is reachable and every snapshot it takes is still
+  // anonymous.
+  create_snapshot: [{}, { memory: true, name: 'before-upgrade' }],
   restore_snapshot: [{ snapshot_id: 'snap-1', confirm: true }],
   clone_snapshot: [{ snapshot_id: 'snap-1' }, { snapshot_id: 'snap-1', name: 'copy' }],
   snapshot_schedule: [
