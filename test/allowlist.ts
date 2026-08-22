@@ -226,11 +226,6 @@ export const UNIMPLEMENTED_PARAMETERS: ReadonlySet<string> = new Set([
   // model argument would let the caller pick something the key may not be
   // entitled to, and the failure would arrive several steps into a run.
   'POST computers/:id/agent  body:model',
-  // GAP. exec takes command, timeout_s, desktop, background and cwd, and there
-  // is no way to set an environment variable for a command — so anything
-  // needing one has to be written as `FOO=bar cmd`, which is a shell away from
-  // what the caller asked for.
-  'POST computers/:id/exec  body:env',
 ]);
 
 export const key = (route: Route) => `${route.method} ${route.pattern}`;
