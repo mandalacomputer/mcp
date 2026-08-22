@@ -212,31 +212,35 @@ export const registerComputers: Registrar = (server, session, opts) => {
     },
     ({ computer_id }, extra) =>
       guarded(async () => {
-        const selectionVersion = session.selectionVersion(computer_id);
-        // Read it before binding. Binding an id the platform does not recognise
-        // would send every subsequent call to a 404 with no clue why, and the
-        // read costs one round trip against a session that will make hundreds.
-        const c = unwrapComputer(
-          await session.api.with(extra.signal).json('GET', P.computer(computer_id)),
-        );
-        // The id the platform echoed back, not the one that was typed. They can
-        // differ — `P.segment` trims before the call, so " vm-1 " reaches the
-        // API as vm-1 — and `unbind` and `noteResolution` compare with `===`,
-        // so binding the untrimmed form leaves a later delete_computer("vm-1")
-        // unable to clear the selection it just destroyed. The other two bind
-        // sites already use `c.id`.
-        if (!session.bindIfCurrent(c.id ?? computer_id, c.resolution, selectionVersion)) {
-          return refused(
-            `${c.id ?? computer_id} was deleted while it was being selected. The session selection was not changed.`,
+        const selectionVersion = session.beginSelection(computer_id);
+        try {
+          // Read it before binding. Binding an id the platform does not recognise
+          // would send every subsequent call to a 404 with no clue why, and the
+          // read costs one round trip against a session that will make hundreds.
+          const c = unwrapComputer(
+            await session.api.with(extra.signal).json('GET', P.computer(computer_id)),
           );
+          // The id the platform echoed back, not the one that was typed. They can
+          // differ — `P.segment` trims before the call, so " vm-1 " reaches the
+          // API as vm-1 — and `unbind` and `noteResolution` compare with `===`,
+          // so binding the untrimmed form leaves a later delete_computer("vm-1")
+          // unable to clear the selection it just destroyed. The other two bind
+          // sites already use `c.id`.
+          if (!session.bindIfCurrent(c.id ?? computer_id, c.resolution, selectionVersion)) {
+            return refused(
+              `${c.id ?? computer_id} was deleted while it was being selected. The session selection was not changed.`,
+            );
+          }
+          return said(
+            `Selected ${describe(c)}. Later calls need no computer_id.` +
+              (c.status === 'running'
+                ? ''
+                : `\n\nIt is ${c.status ?? 'not running'} — start_computer before driving it.`),
+            withoutCredentials(c),
+          );
+        } finally {
+          session.endSelection(computer_id);
         }
-        return said(
-          `Selected ${describe(c)}. Later calls need no computer_id.` +
-            (c.status === 'running'
-              ? ''
-              : `\n\nIt is ${c.status ?? 'not running'} — start_computer before driving it.`),
-          withoutCredentials(c),
-        );
       }),
   );
 

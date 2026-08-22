@@ -52,6 +52,7 @@ import {
 import * as P from '../src/paths.js';
 import { windowBody } from '../src/paths.js';
 import { SERVER_VERSION } from '../src/server.js';
+import { Session } from '../src/session.js';
 import { BASE, connect, download, installFakePlatform } from './harness.js';
 
 /** Everything a tool said, as one string. */
@@ -2335,5 +2336,53 @@ describe('read_file raster images and text', () => {
     await close();
     expect(said(res)).toContain('empty window at offset 5 of 100');
     expect(said(res)).not.toMatch(/bytes 5--1/);
+  });
+
+  it('applies the text cap to SVG instead of the 8 MiB image window', async () => {
+    const body = `<svg>${'x'.repeat(300 * 1024)}</svg>`;
+    globalThis.fetch = (async () =>
+      new Response(body, {
+        status: 200,
+        headers: {
+          'Content-Type': 'image/svg+xml',
+          'Content-Length': String(Buffer.byteLength(body)),
+        },
+      })) as typeof fetch;
+    const { call, close } = await connect();
+    const res = await call('read_file', { path: '/tmp/big.svg' });
+    await close();
+    expect(res.content.some((c) => c.type === 'image')).toBe(false);
+    expect(said(res)).toContain(`bytes 0-${256 * 1024 - 1}`);
+    expect(said(res)).toMatch(/truncated: showed 262144 of 307211/);
+    expect(said(res).length).toBeLessThan(MAX_INLINE_IMAGE_BYTES);
+  });
+
+  it('does not treat an invalid 0xff 0xfe suffix as truncated UTF-8', async () => {
+    const body = Buffer.concat([Buffer.from('hello'), Buffer.from([0xff, 0xfe])]);
+    globalThis.fetch = (async () =>
+      new Response(body, {
+        status: 200,
+        headers: {
+          'Content-Type': 'application/octet-stream',
+          'Content-Length': String(body.length),
+        },
+      })) as typeof fetch;
+    const { call, close } = await connect();
+    const res = await call('read_file', { path: '/tmp/blob.bin' });
+    await close();
+    expect(said(res)).toMatch(/Base64:/);
+    expect(said(res)).toContain(body.toString('base64'));
+  });
+});
+
+describe('selection generations under eviction pressure', () => {
+  it('does not evict a generation an in-flight use_computer still holds', () => {
+    const session = new Session({ apiKey: 'com_test', baseUrl: BASE });
+    const snapped = session.beginSelection('vm-target');
+    expect(snapped).toBe(0);
+    session.unbind('vm-target');
+    for (let i = 0; i < 300; i++) session.unbind(`vm-other-${i}`);
+    expect(session.bindIfCurrent('vm-target', '1280x800x24', snapped)).toBe(false);
+    session.endSelection('vm-target');
   });
 });
