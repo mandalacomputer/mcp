@@ -36,6 +36,11 @@ function regexEnd(text, from) {
   return from + 1;
 }
 
+/** Escape a literal so it matches itself when interpolated into a RegExp. */
+function escapeRegExp(text) {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 /** Remove comments without treating comment markers inside strings as syntax. */
 export function stripComments(text) {
   let clean = '';
@@ -117,7 +122,7 @@ export function topLevelKeys(body) {
 }
 
 /**
- * The single-quoted value of one key of an object literal, at its own depth only.
+ * The quoted value of one key of an object literal, at its own depth only.
  *
  * A sibling of `topLevelKeys`, and for the same reason: a route entry can nest
  * literals that carry keys of the same names — an options bag, a `handler: {}`
@@ -125,9 +130,14 @@ export function topLevelKeys(body) {
  * whichever comes first rather than the entry's own. Returns undefined when the
  * key is not there at this depth, which is how a half-written entry is told
  * apart from a route.
+ *
+ * All three quote styles, because nothing about the table requires today's
+ * spelling: a `pattern: "x"` read only for single quotes returns undefined,
+ * the entry is dropped as half-written, and the route it named surfaces as a
+ * platform that dropped a route it still serves.
  */
 export function topLevelField(body, name) {
-  const at = new RegExp(`${name}\\s*:\\s*'([^']*)'`, 'y');
+  const at = new RegExp(`${escapeRegExp(name)}\\s*:\\s*('[^']*'|"[^"]*"|\`[^\`]*\`)`, 'y');
   let depth = 0;
   let i = 0;
   while (i < body.length) {
@@ -146,9 +156,69 @@ export function topLevelField(body, name) {
     if (depth === 0 && !/[\w$]/.test(body[i - 1] ?? '')) {
       at.lastIndex = i;
       const m = at.exec(body);
-      if (m) return m[1];
+      if (m) {
+        // A template literal with a hole in it has no value to read here, and
+        // guessing one would be worse than the undefined a half-written entry
+        // already returns.
+        if (m[1][0] === '`' && m[1].includes('${')) return undefined;
+        return m[1].slice(1, -1);
+      }
     }
     i++;
   }
   return undefined;
+}
+
+/**
+ * Each `{...}` of a list body, at the body's own depth.
+ *
+ * Literal-aware for the same reason `balanced` is, and it is not a nicety: a
+ * lone brace inside any string, template or regex in the table — `note: 'the }
+ * closer'` — moves a raw counter one step it should not take. One step is all
+ * it costs. The depth never returns to zero on an entry boundary again, so no
+ * later entry is ever emitted, and every route after the stray brace is
+ * dropped. What the caller sees is a shorter list, not an error: `routes.size`
+ * is still non-zero, so the guard for a parse that found nothing does not fire,
+ * and the routes that went missing are reported as routes the platform dropped.
+ * That is the false all-clear the entry split exists to prevent, arriving by
+ * way of the split itself.
+ */
+export function entries(body) {
+  const out = [];
+  let depth = 0;
+  let from = 0;
+  let i = 0;
+  while (i < body.length) {
+    const ch = body[i];
+    if (ch === "'" || ch === '"' || ch === '`') {
+      i = quotedEnd(body, i);
+      continue;
+    }
+    if (ch === '/' && body[i + 1] === '/') {
+      const end = body.indexOf('\n', i + 2);
+      i = end === -1 ? body.length : end;
+      continue;
+    }
+    if (ch === '/' && body[i + 1] === '*') {
+      const end = body.indexOf('*/', i + 2);
+      i = end === -1 ? body.length : end + 2;
+      continue;
+    }
+    if (ch === '/' && regexCanStart(body, i)) {
+      i = regexEnd(body, i);
+      continue;
+    }
+    if (ch === '{') {
+      if (depth++ === 0) from = i;
+    } else if (ch === '}') {
+      // Valid source cannot close a brace it never opened, and the recovery for
+      // one is the bug above: throwing says so instead of returning a short list
+      // that reads like a table which lost some routes.
+      if (depth === 0) throw new Error(`unbalanced } at offset ${i}`);
+      if (--depth === 0) out.push(body.slice(from + 1, i));
+    }
+    i++;
+  }
+  if (depth !== 0) throw new Error('unbalanced { in list body');
+  return out;
 }
