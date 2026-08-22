@@ -130,6 +130,13 @@ application that failed to start from one that has not painted yet. Match on
 **screenshots deliberately do not**, so a loop that only watches can see its own
 machine go down under it.
 
+**A stop is a request, and can be refused.** `stop_computer` asks the guest to
+shut down and gives it time to do it. A hung X session, a modal "unsaved
+changes" dialog or a service that ignores its own shutdown will refuse that
+identically every time it is asked. `force: true` pulls the power instead — the
+equivalent of holding the button in — and whatever the guest had not written to
+disk goes with it, so it is the second attempt rather than the first.
+
 **Purging snapshots is bound to the set you were shown.** Deleting a computer
 keeps its snapshots by default. To destroy them too, read `snapshot_holdings`
 first — a count, a byte total and a fingerprint — and pass that fingerprint to

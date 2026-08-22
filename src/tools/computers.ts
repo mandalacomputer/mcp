@@ -52,7 +52,7 @@ const cancelled = (id: string, last: string) =>
 const POWER_DESCRIPTIONS: Record<string, string> = {
   start:
     'Boot a computer, or resume a suspended one — a resume restores the saved session, same processes and windows, in about a second.',
-  stop: 'Shut a computer down. Discards a saved session if there is one. The disk is kept.',
+  stop: 'Shut a computer down: the guest is asked, and given time to do it. Discards a saved session if there is one. The disk is kept. `force` pulls the power instead, for a guest that will not come down on its own.',
   suspend:
     "Write the guest's RAM to disk and give the host its memory back. A pause, not a stop: start_computer resumes the same session.",
   restart:
@@ -243,7 +243,29 @@ export const registerComputers: Registrar = (server, session, opts) => {
   // Power. Not behind the lifecycle gate: a server that may only attach to
   // computers somebody else made still has to be able to bring one up, and a
   // stopped computer refuses every other tool here.
-  for (const action of ['start', 'stop', 'suspend', 'restart'] as const) {
+  //
+  // Four tools around one request, and stop registered on its own below it:
+  // stop is the only power action with a second argument to take, and folding
+  // an optional one into the loop would leave the other three advertising a
+  // parameter their route does not read.
+  const power = (
+    action: string,
+    computer_id: string | undefined,
+    extra: { signal?: AbortSignal },
+    opts: { query?: Record<string, string | undefined>; note?: string } = {},
+  ) =>
+    guarded(async () => {
+      const id = session.resolve(computer_id);
+      const c = unwrapComputer(
+        await session.api
+          .with(extra.signal)
+          .json('POST', P.computerAction(id, action), { query: opts.query }),
+      );
+      session.noteResolution(id, c.resolution);
+      return said(`${action}: ${describe(c)}${opts.note ?? ''}`, withoutCredentials(c));
+    });
+
+  for (const action of ['start', 'suspend', 'restart'] as const) {
     server.registerTool(
       `${action}_computer`,
       {
@@ -251,17 +273,42 @@ export const registerComputers: Registrar = (server, session, opts) => {
         description: POWER_DESCRIPTIONS[action],
         inputSchema: { ...idArg },
       },
-      ({ computer_id }, extra) =>
-        guarded(async () => {
-          const id = session.resolve(computer_id);
-          const c = unwrapComputer(
-            await session.api.with(extra.signal).json('POST', P.computerAction(id, action)),
-          );
-          session.noteResolution(id, c.resolution);
-          return said(`${action}: ${describe(c)}`, withoutCredentials(c));
-        }),
+      ({ computer_id }, extra) => power(action, computer_id, extra),
     );
   }
+
+  server.registerTool(
+    'stop_computer',
+    {
+      title: 'Stop a computer',
+      description: POWER_DESCRIPTIONS.stop,
+      inputSchema: {
+        ...idArg,
+        force: z
+          .boolean()
+          .optional()
+          .describe(
+            'Pull the power instead of asking, the way holding the button in does. Anything the guest had not written to disk is lost, so this is the second attempt and not the first: stop it politely, and reach for `force` when what comes back is a computer still running — a hung X session, a modal "unsaved changes" dialog, or a service that ignores SIGTERM will refuse the polite stop identically every time it is asked.',
+          ),
+      },
+    },
+    ({ computer_id, force }, extra) =>
+      power('stop', computer_id, extra, {
+        // The platform's schema for this one is `enum: ['true']` — a string,
+        // with no false in it — so an unforced stop omits the parameter rather
+        // than sending `force=false`, the way `allow_partial` and
+        // `snapshots=delete` are omitted here already.
+        query: { force: force ? 'true' : undefined },
+        // Said in the answer and not only in the schema, because the two stops
+        // are indistinguishable afterwards: both leave a stopped computer with
+        // its disk, and only one of them threw away what was in RAM. A
+        // transcript that does not say which happened is a transcript nobody
+        // can debug the missing work from.
+        note: force
+          ? '\n\nThe power was pulled rather than asked for: whatever the guest had not written to disk is gone.'
+          : undefined,
+      }),
+  );
 
   server.registerTool(
     'update_computer',

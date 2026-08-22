@@ -231,9 +231,6 @@ export const UNIMPLEMENTED_PARAMETERS: ReadonlySet<string> = new Set([
   // needing one has to be written as `FOO=bar cmd`, which is a shell away from
   // what the caller asked for.
   'POST computers/:id/exec  body:env',
-  // GAP. stop_computer cannot ask for a forced stop, so a guest that will not
-  // shut down cleanly has no answer here at all.
-  'POST computers/:id/stop  query:force',
 ]);
 
 export const key = (route: Route) => `${route.method} ${route.pattern}`;
