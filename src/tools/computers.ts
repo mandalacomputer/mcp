@@ -417,10 +417,10 @@ export const registerComputers: Registrar = (server, session, opts) => {
             // than by reading the error: the request is now bound to two
             // deadlines, and only one of them means anybody stopped caring.
             if (extra.signal?.aborted) return cancelled(id, last);
-            // A body stream can also be cancelled without either signal
-            // firing, so only the deadline signal proves the wait's own timer
-            // arrived. Otherwise retain the cancellation's real diagnostic
-            // and retry the read until the caller's deadline.
+            // A body stream can also fail without either signal firing (an
+            // undici idle timeout is an AbortError). That is a transport
+            // failure, not a cancellation, and is retried below as transient.
+            // Only the deadline signal proves the wait's own timer arrived.
             if (err instanceof CancelledError) {
               if (untilDeadline.aborted) {
                 blocked = `the status read was still in flight when the ${timeout_s}s deadline arrived`;
@@ -715,7 +715,8 @@ export const registerComputers: Registrar = (server, session, opts) => {
         // agreed to — and the race checkExpectation exists for is exactly that:
         // a capture that finishes between the decision and the click, then gets
         // destroyed by a confirmation that predates it.
-        if (delete_snapshots && !expect) {
+        const fingerprint = expect?.trim() || undefined;
+        if (delete_snapshots && !fingerprint) {
           return refused(
             'Refusing to purge snapshots without a fingerprint. Call snapshot_holdings on this computer, ' +
               'check that the count and size are what you meant to destroy, and pass its fingerprint as `expect`. ' +
@@ -727,7 +728,7 @@ export const registerComputers: Registrar = (server, session, opts) => {
           .send<{ snapshots_deleted?: number }>('DELETE', P.computer(computer_id), {
             query: {
               snapshots: delete_snapshots ? 'delete' : undefined,
-              expect: delete_snapshots ? expect : undefined,
+              expect: delete_snapshots ? fingerprint : undefined,
             },
           });
         session.unbind(computer_id);

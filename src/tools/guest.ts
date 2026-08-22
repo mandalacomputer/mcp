@@ -42,6 +42,19 @@ const MAX_INLINE_BYTES = 256 * 1024;
  */
 const MAX_WINDOW_BYTES = MAX_INLINE_IMAGE_BYTES;
 
+/**
+ * Raster types that MCP image content can carry safely.
+ *
+ * `image/*` includes `image/svg+xml`, and a client that inlines that MIME as
+ * a picture can execute script from a guest file. SVG is XML; it goes through
+ * the text / base64 path like any other non-raster file.
+ */
+const INLINE_IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
+
+function isInlineImage(contentType: string): boolean {
+  return INLINE_IMAGE_TYPES.has(contentType);
+}
+
 const absolutePath = (what: string) =>
   z
     .string()
@@ -397,7 +410,7 @@ export const registerGuest: Registrar = (server, session) => {
         // the one that was requested.
         const misled = unranged && offset > 0;
 
-        if (file.contentType.startsWith('image/')) {
+        if (isInlineImage(file.contentType)) {
           // A window of an image is not an image, so this stays a refusal. Two
           // ways to be holding one, and they are different mistakes: a picture
           // too big to put in a conversation, and a picture somebody asked for
@@ -455,7 +468,11 @@ export const registerGuest: Registrar = (server, session) => {
             : more
               ? `\n\n[${continuation(path, start, next, total)}]`
               : '';
-        const where = whole ? `${size} bytes` : `bytes ${start}-${next - 1} of ${size}`;
+        const where = whole
+          ? `${size} bytes`
+          : kept.length === 0
+            ? `empty window at offset ${start} of ${size}`
+            : `bytes ${start}-${next - 1} of ${size}`;
         const decoded = decodeUtf8(kept);
         if (decoded === undefined) {
           return text(
@@ -615,17 +632,24 @@ function shellQuote(value: string): string {
 
 /** UTF-8 if it is UTF-8, and undefined if it plainly is not. */
 function decodeUtf8(bytes: Uint8Array): string | undefined {
-  // Non-fatal on purpose. A truncated read can cut a multi-byte character in
-  // half, and one replacement character at the very end is a casualty of the
-  // cap rather than proof the file is binary.
-  const s = new TextDecoder('utf-8').decode(bytes);
-  // A NUL is legal UTF-8 and is never in a file anybody meant to read as text,
-  // so it is the tell that this is a binary. Replacement characters anywhere
-  // but the tail say the same thing.
-  if (s.includes('\u0000')) return undefined;
-  const bad = s.split('\ufffd').length - 1;
-  if (bad > 1 || (bad === 1 && !s.slice(-4).includes('\ufffd'))) return undefined;
-  return s;
+  // A NUL is legal UTF-8 and is never in a file anybody meant to read as text.
+  if (bytes.includes(0)) return undefined;
+  const fatal = new TextDecoder('utf-8', { fatal: true });
+  try {
+    return fatal.decode(bytes);
+  } catch {
+    // A truncated read can cut a multi-byte character in half. One incomplete
+    // sequence at the very end is a casualty of the cap rather than proof the
+    // file is binary. A real U+FFFD (EF BF BD) is valid UTF-8 and must not be
+    // counted as that casualty — the non-fatal decoder emits the same character
+    // for both, which is why this tries a fatal decode first.
+    for (let n = 1; n <= 3 && n <= bytes.length; n++) {
+      try {
+        return `${fatal.decode(bytes.subarray(0, bytes.length - n))}\ufffd`;
+      } catch {}
+    }
+    return undefined;
+  }
 }
 
 /** Leave an incomplete final UTF-8 character for the next byte window. */

@@ -11,7 +11,12 @@ import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { Api, filenameFrom, PLATFORM_HEADERS_TIMEOUT_MS } from '../src/api.js';
+import {
+  Api,
+  filenameFrom,
+  PLATFORM_BODY_TIMEOUT_MS,
+  PLATFORM_HEADERS_TIMEOUT_MS,
+} from '../src/api.js';
 import {
   isEntrypoint,
   lifecycleEnabled,
@@ -66,6 +71,7 @@ describe('platform response deadlines', () => {
     try {
       await new Api('com_test', BASE).json('GET', 'computers');
       expect(PLATFORM_HEADERS_TIMEOUT_MS).toBeGreaterThan(300_000);
+      expect(PLATFORM_BODY_TIMEOUT_MS).toBe(0);
       expect(dispatcher).toBeTruthy();
     } finally {
       globalThis.fetch = real;
@@ -899,9 +905,10 @@ describe('flags that are a yes-or-no', () => {
     // Every flag consumed the following token, so `--http false` set `http` to
     // the string "false" — truthy — and started the server the user had just
     // said they did not want. `--no-lifecycle false` withheld the lifecycle
-    // tools for the same reason.
-    expect(parse(['--http', 'false'])).toEqual({ http: true });
-    expect(parse(['--no-lifecycle', '0'])).toEqual({ 'no-lifecycle': true });
+    // tools for the same reason. A leftover token is now a refusal, not a
+    // silent skip that still starts HTTP.
+    expect(() => parse(['--http', 'false'])).toThrow(/unexpected argument false/);
+    expect(() => parse(['--no-lifecycle', '0'])).toThrow(/unexpected argument 0/);
     expect(parse(['--http', '--port', '3000'])).toEqual({ http: true, port: '3000' });
   });
 
@@ -1437,7 +1444,7 @@ describe('response-body failures', () => {
     return Promise.reject(err);
   };
 
-  it('classifies aborts after headers the same way as aborted fetches', async () => {
+  it('classifies aborts after headers as transport failures unless the caller signal fired', async () => {
     const response = (status: number) =>
       new Response(
         new ReadableStream({
@@ -1450,13 +1457,13 @@ describe('response-body failures', () => {
     const api = new Api('com_test', BASE);
 
     globalThis.fetch = (async () => response(200)) as typeof fetch;
-    await expect(api.json('GET', 'computers')).rejects.toBeInstanceOf(CancelledError);
+    await expect(api.json('GET', 'computers')).rejects.toBeInstanceOf(ConnectivityError);
 
     globalThis.fetch = (async () => response(409)) as typeof fetch;
-    await expect(api.json('GET', 'computers')).rejects.toBeInstanceOf(CancelledError);
+    await expect(api.json('GET', 'computers')).rejects.toMatchObject({ status: 409 });
   });
 
-  it('classifies binary and streamed body aborts as cancellations', async () => {
+  it('classifies binary and streamed body aborts as transport failures', async () => {
     const api = new Api('com_test', BASE);
     globalThis.fetch = (async () =>
       ({
@@ -1466,7 +1473,7 @@ describe('response-body failures', () => {
         arrayBuffer: aborted,
       }) as unknown as Response) as typeof fetch;
     await expect(api.bytes('GET', 'computers/vm-1/screenshot')).rejects.toBeInstanceOf(
-      CancelledError,
+      ConnectivityError,
     );
 
     globalThis.fetch = (async () =>
@@ -1483,7 +1490,7 @@ describe('response-body failures', () => {
         // The mocked stream aborts before yielding.
       }
     };
-    await expect(events()).rejects.toBeInstanceOf(CancelledError);
+    await expect(events()).rejects.toBeInstanceOf(ConnectivityError);
   });
 
   it('cancels a capped reader even when read itself throws', async () => {
@@ -1605,7 +1612,7 @@ describe('a selection concurrent with deletion', () => {
 });
 
 describe('non-deadline response cancellation during a wait', () => {
-  it('does not claim the response was in flight when the wait deadline arrived', async () => {
+  it('does not call a transport abort a cancellation', async () => {
     const real = globalThis.fetch;
     globalThis.fetch = (async () =>
       new Response(
@@ -1624,8 +1631,8 @@ describe('non-deadline response cancellation during a wait', () => {
       const { call, close } = await connect();
       const res = await call('wait_for_computer', { timeout_s: 5 });
       expect(res.isError).toBe(true);
-      expect(said(res)).toContain('was cancelled while reading the platform response');
-      expect(said(res)).not.toContain('was still in flight when the 5s deadline arrived');
+      expect(said(res)).toMatch(/Gave up after 5s/);
+      expect(said(res)).not.toContain('was cancelled while reading the platform response');
       await close();
     } finally {
       globalThis.fetch = real;
@@ -2266,5 +2273,67 @@ describe('an environment for a command, rather than a shell prefix', () => {
     await close();
     const poll = tools.find((t) => t.name === 'exec_poll');
     expect(Object.keys(poll?.inputSchema.properties ?? {})).not.toContain('env');
+  });
+});
+
+describe('leftover argv', () => {
+  it('refuses a positional instead of starting the stdio server', () => {
+    expect(() => parse(['help'])).toThrow(/unexpected argument help/);
+    expect(() => parse(['--http', 'please'])).toThrow(/unexpected argument please/);
+  });
+});
+
+describe('read_file raster images and text', () => {
+  const real = globalThis.fetch;
+  afterEach(() => {
+    globalThis.fetch = real;
+  });
+
+  it('does not return SVG as MCP image content', async () => {
+    globalThis.fetch = (async () =>
+      new Response('<svg xmlns="http://www.w3.org/2000/svg"></svg>', {
+        status: 200,
+        headers: { 'Content-Type': 'image/svg+xml', 'Content-Length': '47' },
+      })) as typeof fetch;
+    const { call, close } = await connect();
+    const res = await call('read_file', { path: '/tmp/icon.svg' });
+    await close();
+    expect(res.content.some((c) => c.type === 'image')).toBe(false);
+    expect(said(res)).toContain('<svg');
+  });
+
+  it('keeps a file of real U+FFFD characters as text', async () => {
+    const body = 'one \uFFFD two \uFFFD three';
+    globalThis.fetch = (async () =>
+      new Response(Buffer.from(body, 'utf8'), {
+        status: 200,
+        headers: {
+          'Content-Type': 'text/plain',
+          'Content-Length': String(Buffer.byteLength(body)),
+        },
+      })) as typeof fetch;
+    const { call, close } = await connect();
+    const res = await call('read_file', { path: '/tmp/replacements.txt' });
+    await close();
+    expect(said(res)).toContain(body);
+    expect(said(res)).not.toMatch(/Base64:/);
+  });
+
+  it('does not render an empty window as bytes N--1', async () => {
+    globalThis.fetch = (async () =>
+      new Response(new Uint8Array(), {
+        status: 206,
+        headers: {
+          'Content-Type': 'text/plain',
+          'Accept-Ranges': 'bytes',
+          'Content-Range': 'bytes 5-5/100',
+          'Content-Length': '0',
+        },
+      })) as typeof fetch;
+    const { call, close } = await connect();
+    const res = await call('read_file', { path: '/tmp/log.txt', offset: 5 });
+    await close();
+    expect(said(res)).toContain('empty window at offset 5 of 100');
+    expect(said(res)).not.toMatch(/bytes 5--1/);
   });
 });

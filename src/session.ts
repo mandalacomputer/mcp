@@ -32,6 +32,8 @@ export class Session {
   #screen?: string;
   /** Successful deletes invalidate selections of the same id already in flight. */
   readonly #selectionVersions = new Map<string, number>();
+  /** Bound so a long-lived stdio session cannot grow one entry per deleted id. */
+  static readonly #MAX_SELECTION_VERSIONS = 256;
 
   constructor(cfg: SessionConfig) {
     this.api = new Api(cfg.apiKey, cfg.baseUrl ?? DEFAULT_BASE_URL);
@@ -71,7 +73,19 @@ export class Session {
     if (!normalized) return;
     // Increment even when another computer is selected: an earlier
     // use_computer for this id may still be waiting on its GET response.
-    this.#selectionVersions.set(normalized, this.selectionVersion(normalized) + 1);
+    // Recency is delete-then-set so a repeated id is the newest entry and an
+    // old deletion can be evicted first. The value itself has to stay: dropping
+    // it would reset the generation to 0 and let that in-flight bind succeed.
+    const next = this.selectionVersion(normalized) + 1;
+    this.#selectionVersions.delete(normalized);
+    this.#selectionVersions.set(normalized, next);
+    if (this.#selectionVersions.size > Session.#MAX_SELECTION_VERSIONS) {
+      for (const key of this.#selectionVersions.keys()) {
+        if (key === normalized || key === this.#current) continue;
+        this.#selectionVersions.delete(key);
+        if (this.#selectionVersions.size <= Session.#MAX_SELECTION_VERSIONS) break;
+      }
+    }
     if (this.#current !== undefined && this.#current === normalized) {
       this.#current = undefined;
       this.#screen = undefined;
