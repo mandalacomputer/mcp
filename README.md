@@ -102,6 +102,13 @@ what `exec`, files and a painted screen actually need.
 `desktop: true` cannot draw. `open_url` is the reliable way to put a web page on
 the screen — and it returns before the browser paints, sometimes by ten seconds.
 
+**A variable belongs in `env`, not in front of the command.** `exec` takes an
+`env` object, and `FOO=bar cmd` is a different thing: it is shell syntax, so a
+value with a space or a quote in it is yours to quote and is silently cut in
+half when you get it wrong. It also puts the value in the guest's `ps` for
+anyone logged into the machine, and a background command's command line comes
+back inside every `exec_poll` answer.
+
 **Anything slow wants `background: true`.** A build or an install run in the
 foreground comes back as a timeout, with the work still going inside the guest
 and its output unreadable. With a handle you get the exit code and the output,

@@ -118,6 +118,7 @@ export function execBody(args: {
   desktop?: boolean;
   background?: boolean;
   cwd?: string;
+  env?: Record<string, string>;
 }): Json {
   const body: Json = { command: args.command };
   if (args.timeout_s !== undefined) body.timeout_s = args.timeout_s;
@@ -126,7 +127,52 @@ export function execBody(args: {
   if (args.desktop) body.session = 'desktop';
   if (args.background) body.background = true;
   if (args.cwd) body.cwd = args.cwd;
+  const env = execEnv(args.env);
+  if (env) body.env = env;
   return body;
+}
+
+/**
+ * The environment for one command, refused here rather than at the platform.
+ *
+ * An empty object is dropped rather than sent, for the reason `desktop` is
+ * dropped: `execEnvList` returns nil for `len(env) == 0`, so an empty object and
+ * an absent one are already the same request, and the one that says so in fewer
+ * fields is the one worth sending.
+ *
+ * The three rules below are checked in this process because the platform checks
+ * them AFTER it has resumed the computer. `POST computers/:id/exec` runs its
+ * `use` — which wakes a suspended guest and bills the resume — before `Exec`
+ * ever looks at the environment, so a malformed name costs a machine coming up
+ * to be told no. They are also the rules that will not drift: they are what an
+ * entry IS in the list the guest agent takes, `NAME=value` strings separated by
+ * NULs, rather than policy. The ceilings on how many entries and how long one
+ * may be (64 and 4096 bytes, execbg.go) are policy, are the platform's to
+ * change, and are deliberately not repeated here.
+ *
+ * The `=` case is the one a model actually gets wrong. `{'FOO=bar': ''}` is the
+ * assignment written into the name, which is the same mistake as writing the
+ * assignment into the command line — so the refusal says the shape rather than
+ * just the rule.
+ */
+export function execEnv(env?: Record<string, string>): Json | undefined {
+  if (!env) return undefined;
+  const entries = Object.entries(env);
+  if (entries.length === 0) return undefined;
+  for (const [name, value] of entries) {
+    if (!name) throw new Error('env has an entry with an empty name');
+    if (name.includes('=')) {
+      throw new Error(
+        `env name must not contain '=': ${name}. The name and the value are separate here — pass {FOO: 'bar'}, not {'FOO=bar': ''}.`,
+      );
+    }
+    // A NUL ends a C string, so the guest agent would take the half in front of
+    // it and drop the rest without saying so.
+    if (name.includes('\0') || value.includes('\0')) {
+      throw new Error(`env entry ${name} must not contain a NUL`);
+    }
+  }
+  return Object.fromEntries(entries);
 }
 
 // --- input ----------------------------------------------------------------
