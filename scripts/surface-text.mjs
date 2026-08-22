@@ -115,3 +115,40 @@ export function topLevelKeys(body) {
   }
   return keys;
 }
+
+/**
+ * The single-quoted value of one key of an object literal, at its own depth only.
+ *
+ * A sibling of `topLevelKeys`, and for the same reason: a route entry can nest
+ * literals that carry keys of the same names — an options bag, a `handler: {}`
+ * with a path in it — and a plain `/pattern:\s*'([^']+)'/` over the entry takes
+ * whichever comes first rather than the entry's own. Returns undefined when the
+ * key is not there at this depth, which is how a half-written entry is told
+ * apart from a route.
+ */
+export function topLevelField(body, name) {
+  const at = new RegExp(`${name}\\s*:\\s*'([^']*)'`, 'y');
+  let depth = 0;
+  let i = 0;
+  while (i < body.length) {
+    const ch = body[i];
+    if (ch === '{' || ch === '[' || ch === '(') depth++;
+    else if (ch === '}' || ch === ']' || ch === ')') depth--;
+    else if (ch === "'" || ch === '"' || ch === '`') {
+      i = quotedEnd(body, i);
+      continue;
+    } else if (ch === '/' && regexCanStart(body, i)) {
+      i = regexEnd(body, i);
+      continue;
+    }
+    // Not mid-identifier: `submethod: 'x'` holds the letters of `method`, and a
+    // sticky match started inside a longer word would read it as one.
+    if (depth === 0 && !/[\w$]/.test(body[i - 1] ?? '')) {
+      at.lastIndex = i;
+      const m = at.exec(body);
+      if (m) return m[1];
+    }
+    i++;
+  }
+  return undefined;
+}
