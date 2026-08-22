@@ -312,7 +312,25 @@ export function windowBody(args: {
   return { action: args.action };
 }
 
-export const snapshotBody = (memory: boolean): Json => ({ memory });
+/**
+ * The body for a capture: what to include, and what to call it.
+ *
+ * An args object rather than the bare boolean it was, matching `createBody` and
+ * `execBody` next to it — `memory` was never going to be the only thing this
+ * route took, and a second positional boolean is the kind of call site nobody
+ * reads correctly.
+ *
+ * A name that is only whitespace is dropped rather than sent, and that is the
+ * one case worth spelling out. The daemon defaults an EMPTY name to
+ * "<computer> <timestamp>" and stores anything else exactly as it arrives (see
+ * `newSnapMeta` in the platform's server/snapshot.go), so "   " is the single
+ * input that produces a snapshot nobody can pick out of a list — a blank row
+ * where the generated name it displaced would have said something.
+ */
+export function snapshotBody(args: { memory: boolean; name?: string }): Json {
+  const name = args.name?.trim();
+  return omitUndefined({ memory: args.memory, name: name || undefined });
+}
 
 export function scheduleBody(args: {
   enabled: boolean;
