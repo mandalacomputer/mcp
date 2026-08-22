@@ -27,7 +27,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { balanced, stripComments, topLevelField, topLevelKeys } from './surface-text.mjs';
+import { balanced, entries, stripComments, topLevelField, topLevelKeys } from './surface-text.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repo = resolve(here, '..');
@@ -81,6 +81,11 @@ const surfaceSource = readFileSync(join(platform, 'web/lib/surface.ts'), 'utf8')
  * own — an options bag, a `handler: {}` with a path in it — and a regex over
  * the entry takes whichever comes first.
  *
+ * The split itself is `entries`, which skips literals rather than counting
+ * every brace it sees. A raw count is the same bug one level down: a lone `}`
+ * in a string desyncs the depth for good, and the entries after it are dropped
+ * without a word.
+ *
  * The `!routes.size` guard below only catches a parse that found nothing at
  * all, which is exactly what a mispaired parse is not.
  */
@@ -93,18 +98,13 @@ function routeTable(name) {
   // which closes immediately.
   const body = stripComments(balanced(surfaceSource, start + decl.length - 1, '[', ']'));
   const routes = new Set();
-  for (let i = 0, depth = 0, from = 0; i < body.length; i++) {
-    if (body[i] === '{') {
-      if (depth++ === 0) from = i;
-    } else if (body[i] === '}' && --depth === 0) {
-      // Both, out of ONE entry and at that entry's own depth. An entry
-      // carrying only half of the pair is not a route, and must borrow the
-      // other half neither from its neighbour nor from a literal nested in it.
-      const entry = body.slice(from + 1, i);
-      const method = topLevelField(entry, 'method');
-      const pattern = topLevelField(entry, 'pattern');
-      if (method && pattern) routes.add(`${method} ${pattern}`);
-    }
+  for (const entry of entries(body)) {
+    // Both, out of ONE entry and at that entry's own depth. An entry carrying
+    // only half of the pair is not a route, and must borrow the other half
+    // neither from its neighbour nor from a literal nested in it.
+    const method = topLevelField(entry, 'method');
+    const pattern = topLevelField(entry, 'pattern');
+    if (method && pattern) routes.add(`${method} ${pattern}`);
   }
   if (!routes.size) throw new Error(`parsed ${name} but found no routes — has its shape changed?`);
   return routes;
