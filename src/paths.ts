@@ -22,6 +22,41 @@ export const SNAPSHOTS = 'snapshots';
  */
 export const MOVES = 'moves';
 
+/** What the account has used, over a window. Account-scoped, like {@link MOVES}. */
+export const USAGE = 'usage';
+
+/**
+ * An RFC 3339 timestamp WITH a time zone, which is the only kind `GET /usage`
+ * takes.
+ *
+ * Checked here rather than left to the platform, because the mistake this
+ * catches does not look like one. `2026-08-01T00:00:00` has no zone, and the
+ * zone that would have to be assumed is the server's rather than the caller's —
+ * so a lenient reading does not fail, it answers a window shifted by however
+ * many hours, on the one call whose output somebody compares against a bill. A
+ * model writing a date by hand is exactly the caller that produces this.
+ */
+const RFC3339 = /^\d{4}-\d{2}-\d{2}[Tt]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:[Zz]|[+-]\d{2}:\d{2})$/;
+
+/** The window to ask about, or undefined for the account's billing period. */
+export function usageQuery(from?: string, to?: string): Record<string, string> | undefined {
+  const query: Record<string, string> = {};
+  for (const [name, value] of [
+    ['from', from],
+    ['to', to],
+  ] as const) {
+    if (value === undefined) continue;
+    if (!RFC3339.test(value)) {
+      throw new Error(
+        `${name} must be an RFC 3339 timestamp with a time zone, e.g. 2026-08-01T00:00:00Z — ` +
+          `got ${JSON.stringify(value)}`,
+      );
+    }
+    query[name] = value;
+  }
+  return Object.keys(query).length ? query : undefined;
+}
+
 /**
  * One path segment, checked before it is encoded.
  *
