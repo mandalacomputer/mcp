@@ -57,6 +57,9 @@ const SNAPSHOT = { id: 'snap-1', computer_id: 'vm-1', name: 's', kind: 'disk', s
 
 const HOLDINGS = { count: 2, size_bytes: 6_100_000_000, fingerprint: 'fp-abc123' };
 
+/** The plan's retention window. Every tier non-zero, so a tool that drops one shows it. */
+export const RETENTION = { daily: 7, weekly: 4, monthly: 12 };
+
 /**
  * One usage report, complete: both shortfall flags false and the breakdown
  * present. The degraded shapes are built in the test that is about them.
@@ -190,6 +193,7 @@ function respond(method: string, path: string, headers: Record<string, string>):
   // either were a prefix of the other — they are not, and the two are kept
   // adjacent so that stays visible.
   if (path === '/usage') return json(USAGE);
+  if (path === '/retention') return json(RETENTION);
   if (path === '/moves') return json({ moves: [MOVE_DONE] });
   if (path.endsWith('/move')) return json(MOVE_STARTED, 202);
   if (path === '/snapshots') return json([SNAPSHOT]);
