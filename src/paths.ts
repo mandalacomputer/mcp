@@ -24,6 +24,15 @@ export const MOVES = 'moves';
 
 /** What the account has used, over a window. Account-scoped, like {@link MOVES}. */
 export const USAGE = 'usage';
+/**
+ * How long automatic snapshots are kept — the plan's retention window.
+ *
+ * Account-scoped like {@link USAGE} and {@link MOVES}, and answered by the
+ * control plane rather than by a hypervisor, so it cannot come back short the
+ * way a fleet listing can. Read-only: the plan owns retention, and there is no
+ * write on any surface.
+ */
+export const RETENTION = 'retention';
 
 /**
  * An RFC 3339 timestamp WITH a time zone, which is the only kind `GET /usage`

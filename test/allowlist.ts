@@ -73,6 +73,10 @@ export const V1_ROUTES: Route[] = [
   // a related reason: the figures include computers that have since been
   // deleted, which is precisely the line an unexplained invoice is about.
   r('GET', 'usage'),
+  // How long the automatic snapshots a schedule takes are kept. Account-scoped
+  // like `usage` and `moves`, and read-only on every surface: the plan owns
+  // retention.
+  r('GET', 'retention'),
 ];
 
 /**
@@ -208,6 +212,8 @@ export const PARAMETERS: ReadonlyMap<string, readonly string[]> = new Map([
   // Both bounds, and both optional: with neither, the platform answers over the
   // account's current billing period.
   ['GET usage', ['query:from', 'query:to']],
+
+  ['GET retention', []],
 ]);
 
 /**

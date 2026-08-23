@@ -45,6 +45,9 @@ const EXERCISE: Record<string, Record<string, unknown>[]> = {
   // Both bounds, because a call that names neither cannot show the parameter
   // sweep that this server can send either.
   get_usage: [{}, { from: '2026-08-01T00:00:00Z', to: '2026-08-22T00:00:00Z' }],
+  // No arguments to sweep: the window belongs to the account, so there is no id
+  // and nothing to filter by.
+  get_retention: [{}],
   wait_for_computer: [{ until: 'guest' }],
   get_desktop_url: [{}],
   // A named size and an explicit shape are alternatives, never both.
@@ -309,10 +312,30 @@ describe('the allowlist itself', () => {
     // The previous tests prove this server stays inside ALLOWED. This proves
     // ALLOWED stays honest, so widening it later is a deliberate act. None of
     // these are owner-scoped inside the daemon.
-    const internal = new Set(['audit', 'host', 'fleet', 'retention']);
+    //
+    // `retention` WAS in this set and came out of it deliberately (OPL-3767,
+    // OPL-3783), which is the act this test exists to force. The platform put
+    // `GET retention` on its public allowlist — the READ is tenant API now,
+    // answered from the plan catalogue by the control plane rather than
+    // forwarded to a daemon at all — and the reason recorded here was wrong
+    // besides: `PUT /retention` IS owner-scoped, it sets the calling tenant's
+    // own policy. What keeps the WRITE off every surface is that the plan owns
+    // retention, so a tenant setting its own would be granting itself history it
+    // has not paid for. A head-segment check cannot tell a GET from a PUT, so
+    // the test below is what holds that line.
+    const internal = new Set(['audit', 'host', 'fleet']);
     for (const route of ALLOWED) {
       const first = route.split(' ')[1].split('/')[0];
       expect(internal.has(first), `${route} reaches an ops endpoint`).toBe(false);
     }
+  });
+
+  it('reaches retention only to read it', () => {
+    // The plan owns the window, so a write to it is a tenant granting itself a
+    // longer history than it pays for. The platform refuses one on both its
+    // surfaces; this is the mirror of that refusal, so a PUT could not be added
+    // to ALLOWED without deleting a test.
+    const verbs = [...ALLOWED].filter((r) => r.endsWith(' retention')).map((r) => r.split(' ')[0]);
+    expect(verbs).toEqual(['GET']);
   });
 });
