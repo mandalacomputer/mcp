@@ -13,6 +13,7 @@ export {
   GatewayTimeoutError,
   isTransient,
   MandalaError,
+  MoveRequiredError,
   NotFoundError,
   OriginResponseError,
   OriginTLSError,
