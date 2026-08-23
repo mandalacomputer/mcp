@@ -81,7 +81,8 @@ entirely.
 `list_windows`, `window_action`, `read_file`, `write_file`
 
 **Snapshots** — `list_snapshots`, `snapshot_holdings`, `create_snapshot`,
-`restore_snapshot`, `clone_snapshot`, `snapshot_schedule`, `delete_snapshot`
+`restore_snapshot`, `clone_snapshot`, `snapshot_schedule`, `get_retention`,
+`delete_snapshot`
 
 **Spending** — `get_usage`
 
@@ -110,6 +111,12 @@ arrival. Tell whoever you are working for what it costs before you call it, and
 read `list_moves` if the wait runs out. A move that ends `moved` rather than
 `done` is the one to read carefully — the computer **is** on another host, at
 its old size, and an ordinary `update_computer` finishes the job.
+
+**A schedule says when, not how long.** `snapshot_schedule` sets the window a
+computer's automatic snapshot is taken in; `get_retention` is what says how many
+of them survive, and it takes no computer because the window belongs to the
+account. Only automatic snapshots are ever aged out, so taking one with
+`create_snapshot` is how a model keeps something past it.
 
 **A usage total that is short does not look short.** `get_usage` answers what
 the account has spent — the read to make before and after a batch of computers,
