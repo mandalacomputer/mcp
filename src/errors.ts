@@ -2,9 +2,12 @@
  * What the platform's status codes mean, as types.
  *
  * The distinctions here are the ones an agent has to act on and cannot infer
- * from prose. A 409 clears on its own and is worth retrying; a 400 never does
- * and retrying it burns a turn. A 402 is a plan limit, which no amount of
- * waiting fixes and which the user — not the model — has to resolve.
+ * from prose. A 400 never clears and retrying it burns a turn. A 402 is a plan
+ * limit, which no amount of waiting fixes and which the user — not the model —
+ * has to resolve. A 409 is the one that is not uniform: most of them are a
+ * passing state and worth retrying, and some are a decision about the request
+ * that no retry turns into a yes — see {@link ConflictError} and
+ * {@link MoveRequiredError}.
  *
  * Mirrors the mapping in mandala-computer-python's `_exceptions.py`, and
  * deliberately so: two clients disagreeing about what a 402 is means the same
@@ -50,10 +53,77 @@ export class NotFoundError extends APIError {
  *
  * The one status on this list that is usually temporary: a guest still booting,
  * a guest agent busy with another call, a desktop session that has not come up
- * yet. Worth retrying; the others are not.
+ * yet. Worth retrying; the others on this list are not.
+ *
+ * USUALLY, and the exception is why {@link MoveRequiredError} exists. Whether a
+ * 409 clears is a property of the BODY and not of the status: some describe a
+ * passing state, and some describe a decision about the request — the size does
+ * not fit, the computer is the wrong one for this, the saved session cannot
+ * travel — which no amount of retrying turns into a yes. This class said
+ * "worth retrying" flatly, {@link isTransient} agreed with it, and that
+ * predicate is exported, so a host application wrapping a resize in
+ * `if (isTransient(err)) retry()` looped on a refusal that was never going to
+ * move (OPL-3775).
+ *
+ * Only the refusal that could be acted on has been given a class of its own so
+ * far, because a type is worth adding where a caller can DO something different
+ * with it. The rest stay here and the message is what distinguishes them, which
+ * is what the platform's own reference now says to read.
  */
 export class ConflictError extends APIError {
   override name = 'ConflictError';
+}
+
+/**
+ * The 409 that is an OFFER rather than a refusal: a resize needs the computer
+ * moved to another host first.
+ *
+ * `PATCH /computers/{id}` growing `ram_mb` past what the computer's current host
+ * can run answers 409 with a `move` object on the body rather than only a
+ * sentence — `{"required":true,"possible":true}` means somewhere else in the
+ * region could run that size, and `POST /computers/{id}/move` is how a caller
+ * agrees to go there. `possible:false` means nowhere in the region can, and the
+ * size is the thing to change.
+ *
+ * Its own class for the reason {@link RangeNotSatisfiableError} has one: it is a
+ * refusal the caller can correct without knowing anything it did not just learn,
+ * and the correction is a different call rather than a smaller number. Reaching
+ * it through a bare `ConflictError` left the flag on `body` where nothing looked
+ * for it, and left the retry predicate saying yes.
+ *
+ * {@link movePossible} is the branch, and it is deliberately read off the body
+ * here rather than left to every caller: `move.required` is true in both cases
+ * and it is the second field that decides what to do.
+ */
+export class MoveRequiredError extends ConflictError {
+  override name = 'MoveRequiredError';
+  constructor(
+    message: string,
+    status: number,
+    body: unknown,
+    /** Whether a host in this region could run the size that was asked for. */
+    readonly movePossible: boolean,
+  ) {
+    super(message, status, body);
+  }
+}
+
+/**
+ * The `move` object the platform puts on the refusal above, if this body has one.
+ *
+ * Shape-checked rather than trusted: this decides a retry policy and a tool's
+ * next step, so a body with a `move` key that is a string, or an object with no
+ * `possible`, must read as "not that refusal" rather than as a move that is
+ * impossible. Absent and malformed are the same answer here, and it is the
+ * conservative one — an ordinary ConflictError, which is what this was before.
+ */
+function moveOffer(body: unknown): { possible: boolean } | undefined {
+  if (!body || typeof body !== 'object') return undefined;
+  const move = (body as { move?: unknown }).move;
+  if (!move || typeof move !== 'object') return undefined;
+  const { required, possible } = move as { required?: unknown; possible?: unknown };
+  if (required !== true || typeof possible !== 'boolean') return undefined;
+  return { possible };
 }
 
 /**
@@ -390,6 +460,14 @@ function platformNamed(body: unknown): boolean {
 /** Build the error for a status, with the platform's own message when it sent one. */
 export function errorForStatus(status: number, message: string, body?: unknown): APIError {
   const Cls = BY_STATUS[status] ?? APIError;
+  // The 409 that is an offer, told apart by its body. Before the substitutions
+  // below because it never wants one: the platform's sentence here is the whole
+  // explanation of what will not fit and what moving would cost, written to be
+  // read by whoever has to agree to it.
+  if (Cls === ConflictError) {
+    const offer = moveOffer(body);
+    if (offer) return new MoveRequiredError(message, status, body, offer.possible);
+  }
   // Substituted for an empty body, which says nothing, and for a proxy's HTML
   // page, which says 500 characters of nothing. NOT for a structured message:
   // that is the one case where the response knows more than this file does.
@@ -442,8 +520,19 @@ export function errorForStatus(status: number, message: string, body?: unknown):
  * predicate taking only an error can tell you the second. Even here, a 502 or a
  * 504 can arrive after the platform has already acted — so retry reads freely,
  * and check before repeating anything that creates something.
+ *
+ * Nor is a status enough on its own to answer it. 409 is the case: most of them
+ * are a passing state, and the move offer is a decision that no retry changes,
+ * which is why the check below leads with the type rather than the number. If a
+ * second such refusal earns a class, it belongs on that line too.
  */
 export function isTransient(err: unknown): boolean {
+  // A move offer is a 409 and is NOT transient — it is a decision about the
+  // size that was asked for, and the same request answers the same way forever.
+  // First, because it is a subclass of the very branch below that would say yes
+  // (OPL-3775). An embedder wrapping a resize in `if (isTransient(err)) retry()`
+  // is the caller this line is for.
+  if (err instanceof MoveRequiredError) return false;
   return (
     err instanceof ConflictError ||
     err instanceof UnavailableError ||

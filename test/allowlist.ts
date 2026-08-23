@@ -29,6 +29,13 @@ export const V1_ROUTES: Route[] = [
   r('POST', 'computers/:id/restart'),
   r('POST', 'computers/:id/clone'),
 
+  // Taking up the offer a refused resize makes, and reading how it went
+  // (OPL-3766). A collection rather than `computers/:id/move`, which is the
+  // platform's decision and worth knowing when mirroring it: a per-computer read
+  // could not tell a computer with no move from an id that does not exist.
+  r('POST', 'computers/:id/move'),
+  r('GET', 'moves'),
+
   // Computer use.
   r('GET', 'computers/:id/screenshot'),
   r('POST', 'computers/:id/input'),
@@ -115,6 +122,11 @@ export const PARAMETERS: ReadonlyMap<string, readonly string[]> = new Map([
   ['POST computers/:id/suspend', []],
   ['POST computers/:id/restart', []],
   ['POST computers/:id/clone', ['body:name']],
+  // The same sizing group PATCH takes, minus the two fields a move cannot
+  // deliver: the platform reads only these three off the body and ignores the
+  // rest, so a rename sent here would be dropped without a word.
+  ['POST computers/:id/move', ['body:cpu', 'body:ram_mb', 'body:disk_gb']],
+  ['GET moves', []],
 
   // Computer use.
   ['GET computers/:id/screenshot', ['query:w', 'query:fresh']],
