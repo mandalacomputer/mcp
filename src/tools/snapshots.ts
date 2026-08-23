@@ -19,6 +19,37 @@ const idArg = {
     .describe('Which computer. Defaults to the one selected with use_computer.'),
 };
 
+/**
+ * The sentence in front of a retention window, for the reason every tool here
+ * leads with one: the model reads the text, and three integers in a JSON blob
+ * do not say what they select.
+ *
+ * Says what SURVIVES rather than restating the numbers. A tier at zero is left
+ * out entirely rather than printed as "0 monthly", which reads like a promise
+ * about monthlies; and an all-zero window — what an account with no active
+ * subscription reads — is stated as the plan granting no retained history,
+ * without claiming anything about what happens to snapshots already taken. The
+ * platform's own reference stops in the same place and for the same reason.
+ */
+const retentionLine = (r: unknown): string => {
+  const v = (r ?? {}) as Record<string, unknown>;
+  const n = (x: unknown) => (typeof x === 'number' && Number.isFinite(x) && x > 0 ? x : 0);
+  const parts = [
+    n(v.daily) && `${n(v.daily)} daily`,
+    n(v.weekly) && `${n(v.weekly)} weekly`,
+    n(v.monthly) && `${n(v.monthly)} monthly`,
+  ].filter(Boolean);
+  if (!parts.length) {
+    return 'This plan grants no retained automatic history. Snapshots you take by hand are unaffected — they are never removed automatically.';
+  }
+  return (
+    `Automatic snapshots are kept: ${parts.join(', ')}. ` +
+    'That is the newest automatic snapshot in each of the last N periods THAT HAVE ONE — periods ' +
+    'containing a capture, not periods on the calendar, cut in UTC. Snapshots you take by hand are ' +
+    'never aged out.'
+  );
+};
+
 export const registerSnapshots: Registrar = (server, session, opts) => {
   server.registerTool(
     'list_snapshots',
@@ -228,7 +259,7 @@ export const registerSnapshots: Registrar = (server, session, opts) => {
     {
       title: 'Read or set the nightly snapshot',
       description:
-        'When the platform takes this computer\'s automatic snapshot. Reading takes no arguments; setting takes an hour. There is deliberately no "last run" here — snapshots carry real capture times, and that is what a freshness check should read.',
+        'When the platform takes this computer\'s automatic snapshot. Reading takes no arguments; setting takes an hour. There is deliberately no "last run" here — snapshots carry real capture times, and that is what a freshness check should read. This says when they are TAKEN and not how long they survive: `get_retention` is the other half, and it is what tells you whether the snapshots this schedule takes will still be there next month.',
       inputSchema: {
         ...idArg,
         set: z
@@ -269,6 +300,22 @@ export const registerSnapshots: Registrar = (server, session, opts) => {
           );
         }
         return json(await session.api.with(extra.signal).json('GET', path));
+      }),
+  );
+
+  server.registerTool(
+    'get_retention',
+    {
+      title: 'Read how long automatic snapshots are kept',
+      description:
+        "The plan's retention window — the other half of `snapshot_schedule`, which says when snapshots are taken and deliberately has no field for how long they survive. Read it before promising anyone that a backup will still be there, and before taking a snapshot you mean to keep. Takes no arguments: the window belongs to the ACCOUNT, not to a computer, though each computer keeps its own set under it. ONLY AUTOMATIC SNAPSHOTS ARE AGED OUT — one you took yourself with take_snapshot is never removed automatically, which is how you keep something past the window.",
+      inputSchema: {},
+      annotations: { readOnlyHint: true },
+    },
+    (_args, extra) =>
+      guarded(async () => {
+        const body = await session.api.with(extra.signal).json('GET', P.RETENTION);
+        return said(retentionLine(body), body);
       }),
   );
 
