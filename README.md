@@ -83,6 +83,8 @@ entirely.
 **Snapshots** — `list_snapshots`, `snapshot_holdings`, `create_snapshot`,
 `restore_snapshot`, `clone_snapshot`, `snapshot_schedule`, `delete_snapshot`
 
+**Spending** — `get_usage`
+
 **Delegating** — `run_agent`, registered only when a model key is present:
 `MANDALA_MODEL_KEY` on stdio, or the caller's own `X-Model-Key` header over HTTP.
 
@@ -108,6 +110,20 @@ arrival. Tell whoever you are working for what it costs before you call it, and
 read `list_moves` if the wait runs out. A move that ends `moved` rather than
 `done` is the one to read carefully — the computer **is** on another host, at
 its old size, and an ordinary `update_computer` finishes the job.
+
+**A usage total that is short does not look short.** `get_usage` answers what
+the account has spent — the read to make before and after a batch of computers,
+and the one to make when somebody asks what anything cost. Every figure in it is
+a sum across the hypervisors the account's computers are on, so a host that could
+not be reached does not leave a gap: it leaves a total that is quietly too small.
+The answer says so in its FIRST line when that has happened, ahead of the
+numbers, because a caveat under a figure is a caveat that has already been acted
+on. Two kinds, and only one of them clears by retrying.
+
+One window at a time, at most 62 days of it, reaching back 399 — every
+hypervisor replays its ledger a day at a time to answer, so an older period is
+read by naming both `from` and `to` rather than by widening one of them. `to` on
+its own is measured from the current billing period and is refused.
 
 **`exec` runs as root with no display.** A GUI application started without
 `desktop: true` cannot draw. `open_url` is the reliable way to put a web page on

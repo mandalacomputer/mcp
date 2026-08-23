@@ -57,6 +57,33 @@ const SNAPSHOT = { id: 'snap-1', computer_id: 'vm-1', name: 's', kind: 'disk', s
 
 const HOLDINGS = { count: 2, size_bytes: 6_100_000_000, fingerprint: 'fp-abc123' };
 
+/**
+ * One usage report, complete: both shortfall flags false and the breakdown
+ * present. The degraded shapes are built in the test that is about them.
+ */
+export const USAGE = {
+  period: {
+    start: '2026-08-04T00:00:00.000Z',
+    end: '2026-09-04T00:00:00.000Z',
+    source: 'subscription',
+  },
+  from: '2026-08-04T00:00:00.000Z',
+  to: '2026-08-22T12:00:00.000Z',
+  usage: {
+    run_hours: 12.5,
+    vcpu_hours: 25,
+    ram_gb_hours: 50,
+    snapshot_gb_hours: 96,
+    snapshot_gb_months: 0.13,
+    disk_gb_hours: 480,
+    disk_gb_months: 0.66,
+    computers: [{ id: 'vm-1', name: 'scratch', run_hours: 12.5, vcpu_hours: 25, ram_gb_hours: 50 }],
+  },
+  degraded: false,
+  unmetered: false,
+  reported_through: '2026-08-20',
+};
+
 const AGENT_STREAM =
   'event: step\ndata: {"n":1,"tool":"computer","action":"screenshot","detail":"took a screenshot"}\n\n' +
   'event: done\ndata: {"steps":1,"stop":"end_turn","text":"Done.","usage":{}}\n\n';
@@ -162,6 +189,7 @@ function respond(method: string, path: string, headers: Record<string, string>):
   // Before the computer routes, and `/moves` before `/move` would be a clash if
   // either were a prefix of the other — they are not, and the two are kept
   // adjacent so that stays visible.
+  if (path === '/usage') return json(USAGE);
   if (path === '/moves') return json({ moves: [MOVE_DONE] });
   if (path.endsWith('/move')) return json(MOVE_STARTED, 202);
   if (path === '/snapshots') return json([SNAPSHOT]);
