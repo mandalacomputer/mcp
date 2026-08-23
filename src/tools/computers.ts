@@ -568,10 +568,12 @@ export const registerComputers: Registrar = (server, session, opts) => {
               'Full control — keyboard and pointer, but NOT the clipboard: the platform does not run the ' +
                 'channel QEMU carries VNC cut text on, so text pasted into this socket is dropped silently ' +
                 'and telling somebody to paste into it does not work. Move text with run_command and ' +
-                'desktop: true instead — reading is `xclip -o -selection clipboard`, and a write has to ' +
-                'outlive the command that starts it (`printf %s "$text" | setsid xclip -selection ' +
-                'clipboard &`) because an X selection belongs to a live process. Treat this link as a ' +
-                'password for that desktop; it ends when the computer restarts.',
+                'desktop: true instead. Reading is `xclip -o -selection clipboard`. A write needs BOTH ' +
+                'setsid, so the holder outlives the command (an X selection belongs to a live process), ' +
+                'and the output redirected, or the resident xclip holds the pipe the guest agent is ' +
+                'reading and the command runs to its full timeout before answering: ' +
+                "`printf %s 'your text' | setsid xclip -selection clipboard >/dev/null 2>&1 &`. " +
+                'Treat this link as a password for that desktop; it ends when the computer restarts.',
               links,
             )
           : said(
