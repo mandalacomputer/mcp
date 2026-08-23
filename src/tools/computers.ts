@@ -683,13 +683,13 @@ export const registerComputers: Registrar = (server, session, opts) => {
           .string()
           .optional()
           .describe(
-            'Start of the window, RFC 3339 with a time zone — "2026-08-01T00:00:00Z". Omit for the start of the billing period. A timestamp without a zone is refused rather than guessed at. Records go back 400 days.',
+            'Start of the window, RFC 3339 with a time zone — "2026-08-01T00:00:00Z". Omit for the start of the billing period, and send it WITH `to` when you are asking about a period that has closed — `to` on its own is measured from the current period and is refused. A timestamp without a zone is refused rather than guessed at. Records go back 399 days.',
           ),
         to: z
           .string()
           .optional()
           .describe(
-            'End of the window, same format. Omit for now. A time in the future is answered as now, and the answer says which instant it used.',
+            'End of the window, same format. Omit for now. A time in the future is answered as now, and the answer says which instant it used. The window itself may be at most 62 days — every hypervisor replays its ledger a day at a time to answer — so read an older period by naming both bounds rather than by widening this one.',
           ),
       },
       annotations: { readOnlyHint: true },

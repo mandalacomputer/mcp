@@ -120,6 +120,11 @@ The answer says so in its FIRST line when that has happened, ahead of the
 numbers, because a caveat under a figure is a caveat that has already been acted
 on. Two kinds, and only one of them clears by retrying.
 
+One window at a time, at most 62 days of it, reaching back 399 — every
+hypervisor replays its ledger a day at a time to answer, so an older period is
+read by naming both `from` and `to` rather than by widening one of them. `to` on
+its own is measured from the current billing period and is refused.
+
 **`exec` runs as root with no display.** A GUI application started without
 `desktop: true` cannot draw. `open_url` is the reliable way to put a web page on
 the screen — and it returns before the browser paints, sometimes by ten seconds.
