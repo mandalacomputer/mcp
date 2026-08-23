@@ -319,7 +319,7 @@ export const registerComputers: Registrar = (server, session, opts) => {
     {
       title: 'Rename or resize a computer',
       description:
-        "Change a computer's name, its size, or its idle window. The platform refuses these in combination on purpose — a resize needs the computer stopped and the other two do not, so one request cannot honour both without applying half of it.",
+        "Change a computer's name, its size, or its idle window. The platform refuses these in combination on purpose — a resize needs the computer stopped and the other two do not, so one request cannot honour both without applying half of it. A SUSPENDED computer counts as stopped for a resize, and its saved desktop cannot survive one: the vCPU count and the memory size are part of the saved state, so it is discarded and the next start is a cold boot. Resume it and finish what is open before resizing, or say so before you do it.",
       inputSchema: {
         ...idArg,
         name: z.string().optional(),
@@ -565,7 +565,23 @@ export const registerComputers: Registrar = (server, session, opts) => {
         }
         return control
           ? said(
-              'Full control — keyboard, pointer and clipboard. Treat this link as a password for that desktop; it ends when the computer restarts.',
+              'Full control — keyboard and pointer, but NOT the clipboard: the platform does not run the ' +
+                'channel QEMU carries VNC cut text on, so text pasted into this socket is dropped silently ' +
+                'and telling somebody to paste into it does not work. Move text with run_command and ' +
+                'desktop: true instead. Reading is `xclip -o -selection clipboard`. A write needs BOTH ' +
+                'setsid, so the holder outlives the command (an X selection belongs to a live process), ' +
+                'and the output redirected, or the resident xclip holds the pipe the guest agent is ' +
+                'reading and the command runs to its full timeout before answering. Send the text base64 ' +
+                'rather than quoted — an apostrophe in what you are pasting would end the shell word — ' +
+                'and poll rather than reading straight back, because being granted a selection is ' +
+                'asynchronous and the next read can still be the old clipboard — bounded, a few seconds, ' +
+                "since the redirection also swallows xclip's own errors and a guest without it never " +
+                'changes the selection at all. Quote the base64 exactly as shown: GNU base64 wraps at 76 ' +
+                'columns, and inside the quotes those newlines are harmless (base64 -d takes them) while ' +
+                'UNQUOTED one of them would end the pipeline and leave an empty clipboard behind a ' +
+                'command that answered 200. ' +
+                "`printf %s '<BASE64>' | base64 -d | setsid xclip -selection clipboard >/dev/null 2>&1 &`. " +
+                'Treat this link as a password for that desktop; it ends when the computer restarts.',
               links,
             )
           : said(
@@ -603,7 +619,14 @@ export const registerComputers: Registrar = (server, session, opts) => {
           ),
         cpu: z.number().int().min(1).optional(),
         ram_mb: z.number().int().min(512).optional(),
-        disk_gb: z.number().int().min(1).optional(),
+        disk_gb: z
+          .number()
+          .int()
+          .min(1)
+          .optional()
+          .describe(
+            "The template's own disk is a FLOOR, not a default — read it from list_templates. A smaller number is raised to it silently and the account is charged the raised figure, so asking for less than the template needs spends more of the plan's disk pool than the number here suggests and can be refused outright.",
+          ),
         resolution: z
           .string()
           .optional()
