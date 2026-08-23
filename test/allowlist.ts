@@ -16,6 +16,10 @@ const r = (method: string, pattern: string): Route => ({ method, pattern });
 
 export const V1_ROUTES: Route[] = [
   r('GET', 'templates'),
+  // The template document format (platform OPL-3568): the published JSON
+  // Schema, and a check of a document against it that stores nothing.
+  r('GET', 'templates/schema'),
+  r('POST', 'templates/validate'),
   r('GET', 'sizes'),
 
   r('GET', 'computers'),
@@ -104,6 +108,11 @@ export const V1_ROUTES: Route[] = [
  */
 export const PARAMETERS: ReadonlyMap<string, readonly string[]> = new Map([
   ['GET templates', []],
+  // Neither takes a query parameter or a header. The validate route's body is
+  // the document itself, raw rather than a JSON envelope with named fields, so
+  // it contributes nothing here.
+  ['GET templates/schema', []],
+  ['POST templates/validate', []],
   ['GET sizes', []],
 
   ['GET computers', ['query:allow_partial']],
@@ -273,6 +282,13 @@ export const UNIMPLEMENTED = new Set([
   // pointed somewhere; it is nothing at all to an MCP client, which has neither
   // a base URL to redirect nor a reason to prefer the vocabulary.
   'POST chat/completions',
+  // The template document routes (platform OPL-3568). Pinned rather than given
+  // tools because there is nothing yet to point them at: no route publishes a
+  // document, so a tool that validated one would check a file this server gives
+  // the model no way to use. They become worth a tool with publish and
+  // launch-by-ref, and until then the gap stays a line somebody has to delete.
+  'GET templates/schema',
+  'POST templates/validate',
 ]);
 
 /**
