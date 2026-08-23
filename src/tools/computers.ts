@@ -576,9 +576,10 @@ export const registerComputers: Registrar = (server, session, opts) => {
                 'and poll rather than reading straight back, because being granted a selection is ' +
                 'asynchronous and the next read can still be the old clipboard — bounded, a few seconds, ' +
                 "since the redirection also swallows xclip's own errors and a guest without it never " +
-                'changes the selection at all. The base64 must be ONE LINE and quoted as shown: GNU ' +
-                'base64 wraps at 76 columns, and a newline here ends the pipeline and leaves an empty ' +
-                'clipboard behind a command that answered 200. ' +
+                'changes the selection at all. Quote the base64 exactly as shown: GNU base64 wraps at 76 ' +
+                'columns, and inside the quotes those newlines are harmless (base64 -d takes them) while ' +
+                'UNQUOTED one of them would end the pipeline and leave an empty clipboard behind a ' +
+                'command that answered 200. ' +
                 "`printf %s '<BASE64>' | base64 -d | setsid xclip -selection clipboard >/dev/null 2>&1 &`. " +
                 'Treat this link as a password for that desktop; it ends when the computer restarts.',
               links,
