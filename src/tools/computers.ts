@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { CancelledError, isTransientForPoll } from '../errors.js';
+import { CancelledError, isTransientForPoll, MoveRequiredError } from '../errors.js';
 import {
   type Computer,
   describe,
@@ -48,6 +48,111 @@ const sleep = (ms: number, signal?: AbortSignal) =>
  */
 const cancelled = (id: string, last: string) =>
   refused(`Cancelled after waiting for ${id}; it was last seen ${last}. Nothing was changed.`);
+
+/**
+ * What a move looks like on the wire (OPL-3766).
+ *
+ * Mirrors the platform's `Move` schema, which mirrors moveView in its lib/moves
+ * — deliberately not the whole row: `from_host` and `to_host` are recorded there
+ * and never sent, because which machine a computer is on is the platform's
+ * business and not a tenant's.
+ */
+type Move = {
+  computer_id: string;
+  state: string;
+  detail?: string;
+  live: boolean;
+  cpu?: number;
+  ram_mb?: number;
+  disk_gb?: number;
+  started_at?: string;
+  finished_at?: string;
+};
+
+const movesOf = (body: unknown): Move[] => {
+  const list = (body as { moves?: unknown } | null)?.moves;
+  return Array.isArray(list) ? (list as Move[]) : [];
+};
+
+/**
+ * The resize refusal that is an OFFER, turned into a next step (OPL-3775).
+ *
+ * The platform's own sentence first, because it is the one that says what will
+ * not fit and what moving costs — written for whoever has to agree to it. What
+ * this adds is the two things that sentence cannot know: that retrying is
+ * pointless, and the name of the tool that takes the offer up.
+ *
+ * Both halves matter. Without the first, a model reads 409, reads "worth
+ * retrying" in every other refusal it has met, and loops. Without the second it
+ * has been told a way out exists and has nothing to call — which is the whole
+ * defect this closes, and which is worse for a model than for a person, since a
+ * person can go and look at the dashboard.
+ */
+const moveOffered = (id: string, err: MoveRequiredError) =>
+  refused(
+    err.movePossible
+      ? `${err.message}\n\nThis does not clear by itself: retrying the same resize gets the same answer for ` +
+          `as long as ${id} is on that host. move_computer applies exactly this size and moves the computer ` +
+          `to a host in the region that can run it. Say what that costs before you call it — the computer's ` +
+          `disk is copied to different hardware, and it has to be stopped first.`
+      : `${err.message}\n\nThis does not clear by itself, and there is nothing to move to: no host in this ` +
+          `region can run that size at all. Ask for less RAM.`,
+  );
+
+/** The size a move is applying, for a line a person can read. */
+const moveShape = (m: Move) =>
+  [m.cpu && `${m.cpu} vCPU`, m.ram_mb && `${m.ram_mb} MB RAM`, m.disk_gb && `${m.disk_gb} GB disk`]
+    .filter(Boolean)
+    .join(' · ') || 'no change';
+
+/** One row of list_moves. */
+const moveLine = (m: Move) =>
+  `${m.computer_id}: ${m.state}${m.live ? ' (running)' : ''} — ${moveShape(m)}${m.detail ? ` — ${m.detail}` : ''}`;
+
+/**
+ * A move that has stopped, read as the four different things it can be.
+ *
+ * The states are not four flavours of the same outcome and reading them that way
+ * is the mistake worth designing against, because the recovery differs and two
+ * of them are not failures at all:
+ *
+ *   done    the computer is on the new host at the new size. Success.
+ *   moved   the computer IS on another host, at its OLD size. The move landed
+ *           and the resize did not. Not "the move failed" — saying so would send
+ *           a caller looking for a machine that is no longer where it was — and
+ *           recoverable with an ordinary update_computer, because it is now on a
+ *           host that can run the size.
+ *   failed  nothing happened. The computer is where it was, untouched.
+ *   lost    we stopped watching. It may well have completed; go and look.
+ *
+ * `moved`, `failed` and `lost` are refusals so that a caller reading `isError`
+ * to decide whether its resize happened gets the right answer — and `moved`
+ * carries the loudest instruction of the three, because it is the one where the
+ * computer has genuinely changed and the caller might not notice.
+ */
+const finishedMove = (id: string, m: Move) => {
+  const detail = m.detail ? ` ${m.detail}` : '';
+  if (m.state === 'done') return said(`${id} moved and is now ${moveShape(m)}.`, m);
+  if (m.state === 'moved') {
+    return refused(
+      `${id} MOVED to another host but was NOT resized — it is still at its old size.${detail} The move ` +
+        `itself is done and does not need repeating; it is now on a host that can run the size, so ` +
+        `update_computer resizes it where it is.`,
+      m,
+    );
+  }
+  if (m.state === 'failed') {
+    return refused(
+      `${id} was not moved and was not resized — it is where it was, untouched.${detail}`,
+      m,
+    );
+  }
+  return refused(
+    `The move of ${id} stopped being watched, so we cannot say whether it finished.${detail} Read ` +
+      `get_computer to see which size it is at now before doing anything else.`,
+    m,
+  );
+};
 
 const POWER_DESCRIPTIONS: Record<string, string> = {
   start:
@@ -353,11 +458,168 @@ export const registerComputers: Registrar = (server, session, opts) => {
             'Nothing to change — give at least one of name, cpu, ram_mb, disk_gb, idle_suspend_min.',
           );
         }
-        const c = unwrapComputer(
-          await session.api.with(extra.signal).json('PATCH', P.computer(id), { body }),
-        );
+        let c: Computer;
+        try {
+          c = unwrapComputer(
+            await session.api.with(extra.signal).json('PATCH', P.computer(id), { body }),
+          );
+        } catch (err) {
+          // The one refusal on this route that is an offer rather than an end
+          // (OPL-3775). Caught here and nowhere else because this is the only
+          // route that produces it, and because the next step names a tool —
+          // which the error class, shared with every embedder, has no business
+          // knowing about.
+          if (err instanceof MoveRequiredError) return moveOffered(id, err);
+          throw err;
+        }
         session.noteResolution(id, c.resolution);
         return said(describe(c), withoutCredentials(c));
+      }),
+  );
+
+  server.registerTool(
+    'move_computer',
+    {
+      title: 'Move a computer to a host that can run a bigger size',
+      description:
+        'Grow a computer past what its current host can run, by moving it to another host in the same region first. Only call this after update_computer has refused a resize and said a move is possible: it is the second half of that refusal and nothing else. THIS MOVES THE MACHINE TO DIFFERENT HARDWARE and copies its disk to get there — say so before you call it. The computer must be STOPPED (suspended is not stopped here: a saved desktop only loads on the host that wrote it, so resume and stop it, or discard the session). One move runs per account at a time. Everything is decided again when this runs, so it can still refuse. Waits for the outcome and reports it; list_moves reads it if the wait runs out.',
+      inputSchema: {
+        ...idArg,
+        // Required, unlike every other field here, and unlike the same argument
+        // on update_computer. A move exists to escape a RAM ceiling: the
+        // platform fills an omitted ram_mb from the computer's current size and
+        // then refuses the move for not needing one, so a call without it can
+        // only ever be refused. Requiring it here turns a guaranteed 409 into a
+        // schema the model cannot get wrong.
+        ram_mb: z
+          .number()
+          .int()
+          .min(512)
+          .describe('The size that did not fit. Must be MORE than the computer has now.'),
+        cpu: z
+          .number()
+          .int()
+          .min(1)
+          .optional()
+          .describe('Applied with the move. Omit to leave alone.'),
+        disk_gb: z
+          .number()
+          .int()
+          .min(1)
+          .optional()
+          .describe('Applied with the move, after the copy. Disks grow only.'),
+        timeout_s: z
+          .number()
+          .int()
+          .min(5)
+          .max(900)
+          .default(300)
+          .describe(
+            'How long to wait for the move to finish before handing back and letting you poll.',
+          ),
+      },
+    },
+    ({ computer_id, ram_mb, cpu, disk_gb, timeout_s }, extra) =>
+      guarded(async () => {
+        const id = session.resolve(computer_id);
+        const body = {
+          ram_mb,
+          ...(cpu !== undefined && { cpu }),
+          ...(disk_gb !== undefined && { disk_gb }),
+        };
+
+        // One deadline for the whole call, armed before the POST rather than
+        // after it, for the reason wait_for_computer gives: timeout_s is a
+        // promise about when this comes back, and a per-poll timer bounds how
+        // often it asks instead.
+        const untilDeadline = AbortSignal.timeout(timeout_s * 1000);
+        const signal = extra.signal
+          ? AbortSignal.any([extra.signal, untilDeadline])
+          : untilDeadline;
+        const api = session.api.with(signal);
+
+        // The 202. Its body is the move as it stood the moment it was accepted,
+        // and it is kept because it is the only description of this move that
+        // does not depend on a later read succeeding.
+        const started = (await api.json('POST', P.computerAction(id, 'move'), { body })) as Move;
+
+        let last: Move = started;
+        let blocked: string | undefined;
+        while (!untilDeadline.aborted) {
+          if (extra.signal?.aborted) {
+            return refused(
+              `Cancelled while waiting for ${id} to move. THE MOVE IS STILL RUNNING — nothing was stopped, ` +
+                `because a disk crossing between two hosts cannot be called back. list_moves says where it ` +
+                `got to.`,
+              last,
+            );
+          }
+          let mine: Move | undefined;
+          try {
+            mine = movesOf(await api.json('GET', P.MOVES)).find((m) => m.computer_id === id);
+          } catch (err) {
+            if (extra.signal?.aborted) continue;
+            if (err instanceof CancelledError) {
+              if (untilDeadline.aborted) break;
+              blocked = err.message;
+              await sleep(2000, signal);
+              continue;
+            }
+            // The poll reads the control plane's own table, so the statuses
+            // worth riding out are the ones that mean "ask again" — exactly
+            // wait_for_computer's list. Anything else is a real failure, and
+            // the move is still running behind it, which a thrown error's
+            // handler has no way to say. So it is said here.
+            if (!isTransientForPoll(err)) {
+              return refused(
+                `${err instanceof Error ? err.message : String(err)}\n\nTHE MOVE IS STILL RUNNING — this ` +
+                  `was the poll failing, not the move. list_moves says where it got to.`,
+                last,
+              );
+            }
+            blocked = err instanceof Error ? err.message : String(err);
+            await sleep(2000, signal);
+            continue;
+          }
+          blocked = undefined;
+          // A move that is no longer listed is one the platform reaped, and it
+          // reaps for one reason: the computer was deleted. Not a state to keep
+          // polling for.
+          if (!mine) {
+            return refused(
+              `The move of ${id} is no longer listed. That happens when the computer is deleted — check ` +
+                `list_computers.`,
+              last,
+            );
+          }
+          last = mine;
+          if (!mine.live) return finishedMove(id, mine);
+          await sleep(2000, signal);
+        }
+        return refused(
+          blocked
+            ? `Gave up watching after ${timeout_s}s; the platform could not be asked — the last attempt said: ` +
+                `${blocked}. THE MOVE IS STILL RUNNING. list_moves says where it got to.`
+            : `Still moving after ${timeout_s}s, which a large disk takes. THE MOVE IS STILL RUNNING and ` +
+                `nothing was changed by giving up on the wait. list_moves says where it got to.`,
+          last,
+        );
+      }),
+  );
+
+  server.registerTool(
+    'list_moves',
+    {
+      title: 'List moves in progress and their outcomes',
+      description:
+        'Every move on this account: the ones running and the ones that finished in the last day. Read this after move_computer if the wait ran out, and read it when a move is refused because another computer on the account is already being moved — only one runs at a time, and this says which one and how far along. `live` is the flag to poll on.',
+      inputSchema: {},
+    },
+    (_args, extra) =>
+      guarded(async () => {
+        const moves = movesOf(await session.api.with(extra.signal).json('GET', P.MOVES));
+        if (!moves.length) return said('No moves on this account.', []);
+        return said(moves.map(moveLine).join('\n'), moves);
       }),
   );
 

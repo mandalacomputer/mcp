@@ -72,7 +72,7 @@ entirely.
 
 **Lifecycle** — `create_computer`, `start_computer`, `stop_computer`,
 `suspend_computer`, `restart_computer`, `update_computer`, `clone_computer`,
-`delete_computer`
+`delete_computer`, `move_computer`, `list_moves`
 
 **Driving the desktop** — `screenshot`, `click`, `type_text`, `press_key`,
 `scroll`, `drag`, `move_mouse`, `mouse_button`, `cursor_position`, `wait`
@@ -97,6 +97,17 @@ common way one of these sessions goes wrong.
 hypervisor has started the VM; the desktop inside comes up seconds later.
 `wait_for_computer(until="guest")` waits for the software to answer, which is
 what `exec`, files and a painted screen actually need.
+
+**A resize can be refused with an offer rather than a no.** Growing a computer
+past what the host it is on can run comes back as a refusal that says another
+host in the region could run it. That one does not clear by waiting — retrying
+the same resize gets the same answer for as long as the computer is on that
+host. `move_computer` is how you take the offer up: it moves the machine to
+different hardware, copying its disk to get there, and applies the size on
+arrival. Tell whoever you are working for what it costs before you call it, and
+read `list_moves` if the wait runs out. A move that ends `moved` rather than
+`done` is the one to read carefully — the computer **is** on another host, at
+its old size, and an ordinary `update_computer` finishes the job.
 
 **`exec` runs as root with no display.** A GUI application started without
 `desktop: true` cannot draw. `open_url` is the reliable way to put a web page on
