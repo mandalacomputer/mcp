@@ -37,6 +37,11 @@ const EXERCISE: Record<string, Record<string, unknown>[]> = {
     { cpu: 4, ram_mb: 4096, disk_gb: 40 },
     { idle_suspend_min: 30 },
   ],
+  // All three sizing fields in one call, because the platform reads exactly
+  // these three off a move and the parameter sweep below is what proves it. A
+  // move is the sizing group and never a rename, so there is only one shape.
+  move_computer: [{ ram_mb: 26000, cpu: 2, disk_gb: 40 }],
+  list_moves: [{}],
   wait_for_computer: [{ until: 'guest' }],
   get_desktop_url: [{}],
   // A named size and an explicit shape are alternatives, never both.

@@ -12,6 +12,15 @@ export const TEMPLATES = 'templates';
 export const SIZES = 'sizes';
 export const COMPUTERS = 'computers';
 export const SNAPSHOTS = 'snapshots';
+/**
+ * Every move on the account, live and recently finished (OPL-3766).
+ *
+ * A collection and not `computers/:id/move`, which is the platform's own
+ * decision and worth knowing here: a per-computer read could not tell a computer
+ * with no move from an id that does not exist, so there is no such route. The
+ * poll filters this by `computer_id`.
+ */
+export const MOVES = 'moves';
 
 /**
  * One path segment, checked before it is encoded.

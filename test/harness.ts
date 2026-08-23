@@ -30,6 +30,29 @@ const COMPUTER = {
   },
 };
 
+/**
+ * A move, as the platform answers it (OPL-3766).
+ *
+ * Two of them, because the route and the poll answer different moments of the
+ * same operation and a stub that returned one shape for both would let a tool
+ * that reads `live` off the wrong response pass. The POST is the 202 — the move
+ * as it stood when it was accepted — and the listing is where it ended up.
+ */
+const MOVE_STARTED = {
+  computer_id: 'vm-1',
+  state: 'moving',
+  detail: '',
+  live: true,
+  ram_mb: 26000,
+  started_at: '2026-08-23T02:00:12.699Z',
+};
+const MOVE_DONE = {
+  ...MOVE_STARTED,
+  state: 'done',
+  live: false,
+  finished_at: '2026-08-23T02:00:17.336Z',
+};
+
 const SNAPSHOT = { id: 'snap-1', computer_id: 'vm-1', name: 's', kind: 'disk', state: 'durable' };
 
 const HOLDINGS = { count: 2, size_bytes: 6_100_000_000, fingerprint: 'fp-abc123' };
@@ -136,6 +159,11 @@ function respond(method: string, path: string, headers: Record<string, string>):
   // that computer's HOLDINGS — a count, a total and a fingerprint, never the
   // snapshots themselves; POST there captures one. A stub that answered all
   // three alike would let a tool reading the wrong shape pass.
+  // Before the computer routes, and `/moves` before `/move` would be a clash if
+  // either were a prefix of the other — they are not, and the two are kept
+  // adjacent so that stays visible.
+  if (path === '/moves') return json({ moves: [MOVE_DONE] });
+  if (path.endsWith('/move')) return json(MOVE_STARTED, 202);
   if (path === '/snapshots') return json([SNAPSHOT]);
   if (path.endsWith('/snapshots')) return json(method === 'GET' ? HOLDINGS : SNAPSHOT);
   if (path.endsWith('/computers')) return json(method === 'GET' ? [COMPUTER] : COMPUTER);
