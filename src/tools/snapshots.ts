@@ -25,7 +25,7 @@ export const registerSnapshots: Registrar = (server, session, opts) => {
     {
       title: 'List snapshots',
       description:
-        'Every snapshot on this account. `orphaned` means its computer is gone: such a snapshot can still be cloned into a new computer, but cannot be restored, because a restore puts the disk back on a source that no longer exists.',
+        'Every snapshot on this account. `orphaned` means its computer is gone: such a snapshot can still be cloned into a new computer, but cannot be restored, because a restore puts the disk back on a source that no longer exists. Read `state` before acting on a row: a capture still being taken is listed FIRST and is not a snapshot yet — it reads `capturing` and its id begins `cap-`, and restore, clone and delete all fail on one. `pending` is the point at which it can be acted on, and `durable` means it has reached backup storage as well.',
       inputSchema: {
         computer_id: z
           .string()
@@ -175,7 +175,7 @@ export const registerSnapshots: Registrar = (server, session, opts) => {
           .boolean()
           .default(false)
           .describe(
-            "Include the running session. A memory snapshot records the screen resolution and the host's machine type, so it will only load onto a matching one.",
+            'Include the running session. A memory snapshot is a saved machine, so it only loads back into the shape it came off: resize the computer afterwards and the restore is refused, because the vCPU count and the memory size are part of the state rather than decoration around it. Clone it instead in that case, which restores the disk and boots fresh.',
           ),
       },
     },
@@ -203,7 +203,7 @@ export const registerSnapshots: Registrar = (server, session, opts) => {
     {
       title: 'Restore a snapshot',
       description:
-        'Put a snapshot back onto the computer it came from, discarding everything on that disk since. Refused on an orphaned snapshot — clone_snapshot is what works there.',
+        'Put a snapshot back onto the computer it came from, discarding everything on that disk since. Refused on an orphaned snapshot — clone_snapshot is what works there. It leaves the computer RUNNING whatever state it was in: restoring a stopped one boots it, which is a start like any other and is charged. A disk snapshot comes back to a fresh boot, a memory one to the captured session, and either way a suspended session the computer was holding is discarded with the disk it was saved against.',
       inputSchema: {
         snapshot_id: z.string(),
         confirm: z
