@@ -109,6 +109,55 @@ const moveShape = (m: Move) =>
 const moveLine = (m: Move) =>
   `${m.computer_id}: ${m.state}${m.live ? ' (running)' : ''} — ${moveShape(m)}${m.detail ? ` — ${m.detail}` : ''}`;
 
+type Usage = {
+  from?: string;
+  to?: string;
+  usage?: {
+    run_hours?: number;
+    vcpu_hours?: number;
+    ram_gb_hours?: number;
+    disk_gb_months?: number;
+  };
+  degraded?: boolean;
+  unmetered?: boolean;
+};
+
+/**
+ * The sentence in front of a usage report, and the reason this tool does not
+ * simply hand back the JSON the way list_sizes does.
+ *
+ * Two of these fields are caveats on every number beside them, and a model
+ * reading a body top to bottom will act on `vcpu_hours` long before it reaches
+ * `degraded`. Every figure is a sum across the hypervisors the account's
+ * computers are on, so a host that did not contribute leaves a total that is
+ * quietly too small rather than an obviously missing row — the one failure mode
+ * a spend check must never present as fact. Saying it first is the difference
+ * between a caveat that is present and a caveat that is read.
+ *
+ * The two are kept apart because only one of them clears: `degraded` is a host
+ * that could not be reached and comes right when it comes back, `unmetered` is a
+ * host running a daemon older than the meter, and telling a caller to wait for
+ * that one is advice that never comes true.
+ */
+const usageLine = (u: Usage): string => {
+  const t = u.usage ?? {};
+  const window = u.from && u.to ? `${u.from} to ${u.to}` : 'this billing period';
+  const head =
+    `${t.vcpu_hours ?? 0} vCPU-hours, ${t.run_hours ?? 0} running hours and ` +
+    `${t.disk_gb_months ?? 0} GB-months of disk over ${window}.`;
+  const short = [
+    u.degraded && 'a hypervisor could not be reached (retry — this one clears)',
+    u.unmetered &&
+      'a hypervisor is running a daemon older than the meter (waiting will not fix it)',
+  ].filter(Boolean);
+  if (!short.length) return head;
+  return (
+    `THESE TOTALS MAY BE TOO LOW: ${short.join(', and ')}. Every figure is a sum across the fleet, so ` +
+    `a host that did not answer leaves a short total rather than a missing row — do not reconcile ` +
+    `this against an invoice while it says so.\n\n${head}`
+  );
+};
+
 /**
  * A move that has stopped, read as the four different things it can be.
  *
@@ -620,6 +669,37 @@ export const registerComputers: Registrar = (server, session, opts) => {
         const moves = movesOf(await session.api.with(extra.signal).json('GET', P.MOVES));
         if (!moves.length) return said('No moves on this account.', []);
         return said(moves.map(moveLine).join('\n'), moves);
+      }),
+  );
+
+  server.registerTool(
+    'get_usage',
+    {
+      title: 'Read what this account has used',
+      description:
+        'What this account has spent: running hours weighted by cores and memory, the storage it holds, and the per-computer breakdown behind the totals — the same figures the billing page shows. Read it before and after a batch of computers to know what one cost, and read it when asked how much anything has cost. Defaults to the current billing period, which is the window an invoice covers. READ THE FIRST LINE OF THE ANSWER: a hypervisor that could not be reached makes every total too LOW rather than absent, and that line is the only thing that says so.',
+      inputSchema: {
+        from: z
+          .string()
+          .optional()
+          .describe(
+            'Start of the window, RFC 3339 with a time zone — "2026-08-01T00:00:00Z". Omit for the start of the billing period. A timestamp without a zone is refused rather than guessed at. Records go back 400 days.',
+          ),
+        to: z
+          .string()
+          .optional()
+          .describe(
+            'End of the window, same format. Omit for now. A time in the future is answered as now, and the answer says which instant it used.',
+          ),
+      },
+      annotations: { readOnlyHint: true },
+    },
+    ({ from, to }, extra) =>
+      guarded(async () => {
+        const body = (await session.api
+          .with(extra.signal)
+          .json('GET', P.USAGE, { query: P.usageQuery(from, to) })) as Usage;
+        return said(usageLine(body), body);
       }),
   );
 
