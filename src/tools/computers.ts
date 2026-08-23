@@ -571,8 +571,11 @@ export const registerComputers: Registrar = (server, session, opts) => {
                 'desktop: true instead. Reading is `xclip -o -selection clipboard`. A write needs BOTH ' +
                 'setsid, so the holder outlives the command (an X selection belongs to a live process), ' +
                 'and the output redirected, or the resident xclip holds the pipe the guest agent is ' +
-                'reading and the command runs to its full timeout before answering: ' +
-                "`printf %s 'your text' | setsid xclip -selection clipboard >/dev/null 2>&1 &`. " +
+                'reading and the command runs to its full timeout before answering. Send the text base64 ' +
+                'rather than quoted — an apostrophe in what you are pasting would end the shell word — ' +
+                'and poll rather than reading straight back, because being granted a selection is ' +
+                'asynchronous and the next read can still be the old clipboard: ' +
+                '`printf %s <BASE64> | base64 -d | setsid xclip -selection clipboard >/dev/null 2>&1 &`. ' +
                 'Treat this link as a password for that desktop; it ends when the computer restarts.',
               links,
             )
