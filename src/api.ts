@@ -6,6 +6,7 @@ import {
   errorForStatus,
   MandalaError,
   RangeNotSatisfiableError,
+  RateLimitError,
 } from './errors.js';
 
 export const DEFAULT_BASE_URL = 'https://app.mandala.computer/api/v1';
@@ -355,6 +356,19 @@ export class Api {
     if (resp.status === 416) {
       const total = parseContentRange(resp.headers.get('content-range'))?.total;
       return new RangeNotSatisfiableError(message, resp.status, body, total);
+    }
+    // The other one, for the same reason: `Retry-After` is a header, and it is
+    // the platform saying how long to wait rather than leaving the wait tools
+    // to guess. Built here while the response is still in hand; the BY_STATUS
+    // entry covers a 429 reaching errorForStatus from anywhere else, without
+    // the number.
+    if (resp.status === 429) {
+      return new RateLimitError(
+        message,
+        resp.status,
+        body,
+        retryAfterMs(resp.headers.get('retry-after')),
+      );
     }
     return errorForStatus(resp.status, message, body);
   }
@@ -715,6 +729,25 @@ function parseContentRange(
   // every caller that trusts this.
   if (start !== undefined && end !== undefined && end < start) return undefined;
   return { start, end, total: num(m[3]) };
+}
+
+/**
+ * A `Retry-After` header, in milliseconds from now.
+ *
+ * Both spellings the header has: delta-seconds, and an HTTP date. A date in the
+ * past is zero rather than negative, because the only consumer is a sleep.
+ *
+ * A malformed value is nothing rather than a throw, for parseContentRange's
+ * reason — it is metadata about a refusal that already arrived, and the poll
+ * loops have their own interval to fall back on.
+ */
+function retryAfterMs(header: string | null): number | undefined {
+  if (!header) return undefined;
+  const seconds = Number(header);
+  if (Number.isFinite(seconds) && seconds >= 0) return seconds * 1_000;
+  const at = Date.parse(header);
+  if (!Number.isFinite(at)) return undefined;
+  return Math.max(at - Date.now(), 0);
 }
 
 /** A trustworthy response length, when fetch has not transparently decoded it. */

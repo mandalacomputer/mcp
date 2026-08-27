@@ -151,6 +151,32 @@ export class RangeNotSatisfiableError extends APIError {
   }
 }
 
+/**
+ * 429 — the request is valid; the caller has spent a temporary rate budget.
+ *
+ * A class rather than a number in a list, and that is the OPL-3724 change in
+ * one line: {@link isTransient} used to reach 429 by matching `err.status`,
+ * which meant this client answered "is it worth retrying" by a mechanism the
+ * other two did not share. It is a moment rather than a property of the
+ * request, exactly like a 409, and it belongs in the same shape.
+ *
+ * {@link retryAfterMs} is set when the response carried a usable `Retry-After`.
+ * The poll loops honour it, because retrying at their own faster cadence is
+ * how a rate limit becomes a longer one.
+ */
+export class RateLimitError extends APIError {
+  override name = 'RateLimitError';
+  constructor(
+    message: string,
+    status: number,
+    body?: unknown,
+    /** From `Retry-After`, in milliseconds from now, when the response sent one. */
+    readonly retryAfterMs?: number,
+  ) {
+    super(message, status, body);
+  }
+}
+
 /** 503 — a hypervisor could not be reached, so an inventory would be short. */
 export class UnavailableError extends APIError {
   override name = 'UnavailableError';
@@ -186,14 +212,20 @@ export class ConnectivityError extends MandalaError {
  * was cancelled; what ended was one hop's willingness to hold a connection open
  * with no response crossing it.
  *
- * One class, two retry answers, and {@link isTransient} keeps them apart by
- * status rather than by type on purpose. A 504 is retryable and a 524 is not,
- * because of where each is reachable from: the wait tools are the only thing
- * here that retries, they poll with short requests, and a 504 on one of those
- * is infrastructure noise that clears. A 524 is only ever reached by holding a
- * request open past the ceiling below — so retrying it unchanged reproduces it
- * exactly, at the same place, because the hop that gave up never saw how long
- * the caller asked to wait.
+ * One class, two retry answers, and {@link isTransientForPoll} keeps them apart
+ * by status rather than by type on purpose — the ONE place a status number
+ * still decides anything, because a type cannot separate two statuses that
+ * share it. A 504 is worth polling again and a 524 is not, because of where
+ * each is reachable from: the wait tools are the only thing here that retries,
+ * they poll with short requests, and a 504 on one of those is infrastructure
+ * noise that clears. A 524 is only ever reached by holding a request open past
+ * the ceiling below — so retrying it unchanged reproduces it exactly, at the
+ * same place, because the hop that gave up never saw how long the caller asked
+ * to wait.
+ *
+ * Neither is in {@link isTransient}. That predicate is what an embedder may
+ * wrap a create in, and a gateway timeout is the case where the platform has
+ * most likely acted already (OPL-3724).
  *
  * Against `app.mandala.computer` that hop is Cloudflare and the ceiling is about
  * two minutes. Measured 2026-08-20: `sleep 130` died at 125.2s with
@@ -282,12 +314,16 @@ export class OriginResponseError extends APIError {
  * passing outage; an expired or mismatched certificate fails identically on
  * every retry, and is a deployment somebody has to go and fix.
  *
- * {@link isTransient} already drew that line by status number, so the retry
- * behaviour here is unchanged — but a caller reading the TYPE was told the two
- * were the same thing, while the list beside it said they were not. The
- * mandala-computer-python SDK had the same pairing and a worse consequence: its
- * fatal-error set names classes, so a wait helper could not tell 526 from 522
- * and spent its whole timeout retrying a certificate.
+ * The line was already drawn by status number, so the retry behaviour here was
+ * unchanged when this class appeared — but a caller reading the TYPE was told
+ * the two were the same thing, while the list beside it said they were not.
+ *
+ * The type is now what draws it: {@link isTransientForPoll} names this class in
+ * its fatal set, and 521-523 fall through to the poll (OPL-3724). Which is also
+ * why splitting it mattered more than it looked — the mandala-computer-python
+ * SDK had the same pairing and named classes in its fatal set, so a wait helper
+ * there could not tell 526 from 522 and spent its whole timeout retrying a
+ * certificate.
  */
 export class OriginTLSError extends APIError {
   override name = 'OriginTLSError';
@@ -305,12 +341,19 @@ const BY_STATUS: Record<number, typeof APIError> = {
   // arriving from anywhere else is still the right class with the platform's
   // own message on it.
   416: RangeNotSatisfiableError,
+  // Reached through errorForStatus only when the response headers were not in
+  // hand — Api.#error builds this one itself, for RangeNotSatisfiableError's
+  // reason: `Retry-After` is on the headers and the number is worth keeping.
+  // The entry is here so a 429 arriving from anywhere else is still the right
+  // class, which is what {@link isTransient} now asks about.
+  429: RateLimitError,
   // The other status a proxy writes on its own, and it was the one gap left in
   // this range: with no entry it fell through to a bare APIError, so a model
   // read `HTTP 502` or 500 characters of nginx's HTML — the exact failure the
-  // statuses below exist to remove. It is also in isTransient, which means the
-  // wait tools reach it and replay whichever of those two it was into their
-  // give-up text. Filed with 520 because the honest answer is the same one:
+  // statuses below exist to remove. It polls through isTransientForPoll — the
+  // outcome of a 502 is unknown, and a read whose outcome is unknown can simply
+  // be read again — so the wait tools reach it and replay whichever of those two
+  // it was into their give-up text. Filed with 520 because the honest answer is the same one:
   // unknown. See BAD_GATEWAY_MESSAGE for why it is not filed with 521-523.
   502: OriginResponseError,
   503: UnavailableError,
@@ -344,9 +387,9 @@ const BY_STATUS: Record<number, typeof APIError> = {
  * why the text is built per status rather than written once. The ceiling — about
  * two minutes, a larger `timeout_s` buying no time, `background: true` as the
  * shape that survives it — is a fact about a 524 specifically. A 504 comes from
- * any hop that gave up early, at no fixed deadline, and {@link isTransient} says
- * it is worth retrying unchanged; telling its caller that retrying buys no time
- * contradicts that and is false besides. Hedging on "if this was an exec" does
+ * any hop that gave up early, at no fixed deadline, and
+ * {@link isTransientForPoll} says it is worth retrying unchanged; telling its
+ * caller that retrying buys no time contradicts that and is false besides. Hedging on "if this was an exec" does
  * not fix it, because the wrong half is the status, not the route.
  */
 const GATEWAY_TIMEOUT_SHARED =
@@ -503,23 +546,38 @@ export function errorForStatus(status: number, message: string, body?: unknown):
 /**
  * Whether an error is worth trying again without changing the request.
  *
- * Used by the wait tools, which are the only place in this server that retries
- * on a caller's behalf. Everything else surfaces the refusal, because a model
- * that can read "the guest agent is not answering yet (the computer may still be
- * booting)" is better placed to decide than a fixed policy is.
+ * The PUBLIC answer, exported from the package, and therefore a contract with
+ * embedders rather than a private note to this file. Its caller is a host
+ * application wrapping an arbitrary call in `if (isTransient(err)) retry()` —
+ * including one that creates something — so it names only failures that both
+ * clear on their own AND are safe to replay blind.
  *
- * Exported, and therefore a contract with embedders rather than a private note
- * to this file — which is the whole reason it is narrower than
- * {@link isTransientForPoll}. A host application wrapping `create_computer` in
- * `if (isTransient(err)) retry()` is the caller this list has to be safe for,
- * and the 52x statuses are not safe for it: 520-523 mean the outcome is unknown,
- * so replaying a create can leave two billable computers behind a failure that
- * looked like nothing happened.
+ * Answered by TYPE, with no status numbers at all, which is the OPL-3724
+ * decision written down. Three clients had drifted into three mechanisms for
+ * one question: this file matched classes plus a list of numbers, the
+ * TypeScript SDK matched classes alone, and the Python SDK named the fatal
+ * exceptions and retried the rest. The status list is what let this one drift,
+ * because a number can be added to it without anyone having to say which of the
+ * three answers changed. It now reads identically in all three:
+ *
+ * - {@link ConflictError} — something is in flight that this cannot run
+ *   alongside, minus the one that is a decision
+ * - {@link RateLimitError} — a cadence, and the response usually says how long
+ * - {@link UnavailableError} — a hypervisor briefly out of reach
+ * - {@link ConnectivityError} — the request never left
+ *
+ * 502 and 504 USED to be here and are deliberately gone. The paragraph below
+ * had already conceded the point that removes them: both can arrive after the
+ * platform has acted, so replaying a `create_computer` through one can leave a
+ * second billable computer behind a failure that read as nothing having
+ * happened. A status that is not safe for the riskiest caller of an exported
+ * predicate does not belong in it. Nothing waits less as a result — the wait
+ * tools ask {@link isTransientForPoll}, which still rides both out.
  *
  * "Worth trying again" is not "the call definitely did not happen", and no
- * predicate taking only an error can tell you the second. Even here, a 502 or a
- * 504 can arrive after the platform has already acted — so retry reads freely,
- * and check before repeating anything that creates something.
+ * predicate taking only an error can tell you the second. Even here, a 409 can
+ * be answered after a change landed. So retry reads freely, and check before
+ * repeating anything that creates something.
  *
  * Nor is a status enough on its own to answer it. 409 is the case: most of them
  * are a passing state, and the move offer is a decision that no retry changes,
@@ -535,26 +593,94 @@ export function isTransient(err: unknown): boolean {
   if (err instanceof MoveRequiredError) return false;
   return (
     err instanceof ConflictError ||
+    err instanceof RateLimitError ||
     err instanceof UnavailableError ||
-    err instanceof ConnectivityError ||
-    (err instanceof APIError && [429, 502, 504].includes(err.status))
+    err instanceof ConnectivityError
   );
 }
 
 /**
- * The same question, asked by a loop that only ever reads.
+ * The same words, a different question: worth POLLING again.
  *
- * Deliberately not exported from the package. The wait tools poll
- * `GET /computers/:id` and an `exec 'true'` probe, and replaying either costs
- * nothing, so they can ride out the statuses whose outcome is unknown — a 52x
- * during a boot wait is an outage to sit through, not a reason to fail a caller
- * who asked to wait. That reasoning is a property of what those two calls DO,
- * not of the error, which is exactly why it cannot be published as one: the same
- * `true` handed to an embedder retrying a create means something else entirely.
+ * Asked only by the wait tools, and deliberately not exported. They replay a
+ * `GET /computers/:id`, a `GET /moves`, a build read or an `exec 'exit 0'`
+ * probe — every one of them idempotent, every one of them under a deadline the
+ * caller set. That pair of properties is what makes this predicate generous,
+ * and it is a property of what those calls DO rather than of the error, which
+ * is exactly why it cannot be published: the same `true` handed to an embedder
+ * retrying a create means something else entirely.
  *
- * 525 and 526 stay out. A TLS handshake that fails once fails identically on
- * every retry, so waiting on one only spends the caller's deadline.
+ * DENY-LIST, and the inversion is the second half of the OPL-3724 decision.
+ * Where {@link isTransient} names what may be retried, this names what may not
+ * and polls through everything else. The polarity follows from who pays for a
+ * wrong answer. Retrying something unretryable costs one poll interval and,
+ * at worst, the deadline the caller chose. NOT retrying something that would
+ * have cleared costs a wait that reports a machine as unreachable while it was
+ * coming up — and every status the edge invents next year lands in that second
+ * category under an allow-list, silently, until somebody notices and adds a
+ * number. This way round, an unmapped 5xx is ridden out, which is what a poll
+ * loop was for.
+ *
+ * The line is REQUEST versus MOMENT. A failure describing the request answers
+ * the same way forever and is fatal here; a failure describing the moment is
+ * what a poll exists to outlast.
+ *
+ * Fatal, therefore:
+ *
+ * - anything that is not a failed REQUEST. That is the floor, and a deny-list
+ *   needs one: only {@link APIError} and {@link ConnectivityError} describe an
+ *   exchange with the platform that did not work, and only those can be worth
+ *   making again. A `TypeError` from a bug in this file is not the platform
+ *   being slow, and riding one out spends the caller's deadline before
+ *   reporting the wrong cause.
+ *
+ *   A bare {@link MandalaError} is caught by the same floor, and that is the
+ *   half worth spelling out. `Api` raises them for a response that arrived and
+ *   made no sense — "expected JSON from GET /computers/:id, got: <html>" — and
+ *   a poll loop raises them as verdicts about a poll that SUCCEEDED. Neither is
+ *   a moment to outlast: one is a defect and the other is an answer. Polling
+ *   through a verdict is an infinite loop with a deadline on it, which is
+ *   exactly what the TypeScript SDK's suite caught when this predicate was
+ *   ported there with `MandalaError` as its floor.
+ * - {@link CancelledError} — the caller hung up. Excluded by the floor above,
+ *   since it is neither, and retrying something nobody is waiting for is what
+ *   `with(signal)` exists to stop.
+ * - {@link MoveRequiredError} — a decision about the size that was asked for.
+ * - {@link OriginTLSError} (525, 526) — a certificate the edge and the platform
+ *   cannot agree on fails identically on every retry, so waiting one out spends
+ *   the whole deadline to report the wrong cause. Its own message says to go and
+ *   fix the deployment; this is what makes that true.
+ * - 524 — reached only by holding a request open past the edge's ceiling, so an
+ *   identical retry reproduces it at the same place. It shares
+ *   {@link GatewayTimeoutError} with 504, which is retryable, and that is why
+ *   this one status is still matched by NUMBER: the type cannot separate them.
+ * - anything below 500 that is not named. A 4xx describes the request — a bad
+ *   body, a revoked key, a plan limit, a deleted id, an offset past the end of a
+ *   file — and repeating it unchanged cannot change the answer. Three are named
+ *   because they describe the moment instead: 409 (something in flight), 429 (a
+ *   cadence), and 408, which RFC 9110 defines as a request the client may repeat
+ *   unchanged and which the edge in front of this surface does emit.
+ *
+ *   A 3xx goes with the 4xx, which is why the test is `>= 500` rather than "not
+ *   a 4xx". `Api` treats every non-2xx as an error and does not follow
+ *   redirects, so a MANDALA_BASE_URL missing its trailing path answers 301 — and
+ *   under a 4xx-only rule that was polled until the deadline, ending in a
+ *   give-up that named nothing about the redirect. The mandala-computer-python
+ *   SDK found that one; this is the same rule, and it is why all three now say
+ *   `>= 500`.
+ *
+ * Everything at 5xx polls through, 502 and 520-523 included: they mean the
+ * outcome is unknown, and a read whose outcome is unknown can simply be read
+ * again.
  */
 export function isTransientForPoll(err: unknown): boolean {
-  return isTransient(err) || (err instanceof APIError && [520, 521, 522, 523].includes(err.status));
+  if (!(err instanceof APIError) && !(err instanceof ConnectivityError)) return false;
+  if (err instanceof MoveRequiredError) return false;
+  if (err instanceof OriginTLSError) return false;
+  if (err instanceof APIError) {
+    if (err.status === 524) return false;
+    if (err.status === 408 || err.status === 409 || err.status === 429) return true;
+    return err.status >= 500;
+  }
+  return true;
 }

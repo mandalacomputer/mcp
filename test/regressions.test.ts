@@ -30,15 +30,19 @@ import {
 import {
   type APIError,
   CancelledError,
+  ConflictError,
   ConnectivityError,
   errorForStatus,
   GatewayTimeoutError,
   isTransient,
   isTransientForPoll,
+  MandalaError,
   OriginResponseError,
   OriginTLSError,
   OriginUnreachableError,
   RangeNotSatisfiableError,
+  RateLimitError,
+  UnavailableError,
 } from '../src/errors.js';
 import { failed, MAX_INLINE_IMAGE_BYTES, unwrapComputer } from '../src/format.js';
 import {
@@ -49,6 +53,7 @@ import {
   OriginTLSError as PublicOriginTLSError,
   OriginUnreachableError as PublicOriginUnreachableError,
   RangeNotSatisfiableError as PublicRangeNotSatisfiableError,
+  RateLimitError as PublicRateLimitError,
 } from '../src/index.js';
 import * as P from '../src/paths.js';
 import { windowBody } from '../src/paths.js';
@@ -1273,8 +1278,67 @@ describe('a file too large to put in a conversation', () => {
 });
 
 describe('wait failures that are worth another poll', () => {
-  it.each([409, 429, 502, 503, 504])('retries HTTP %s', (status) => {
+  it.each([409, 429, 503])('retries HTTP %s for anyone', (status) => {
     expect(isTransient(errorForStatus(status, `HTTP ${status}`))).toBe(true);
+  });
+
+  it.each([502, 504, 520, 521, 522, 523])(
+    'polls through HTTP %s but does not publish it',
+    (status) => {
+      // The OPL-3724 split, per status. Both predicates used to be allow-lists
+      // and 502/504 were on both, which said an embedder could safely replay a
+      // create through a failure whose outcome nobody knows. The wait tools still
+      // ride every one of these out — they only ever replay a read.
+      const err = errorForStatus(status, `HTTP ${status}`);
+      expect(isTransientForPoll(err)).toBe(true);
+      expect(isTransient(err)).toBe(false);
+    },
+  );
+
+  it('polls through a status nobody has mapped, and fails fast on a bad request', () => {
+    // Why the poll predicate is a deny-list. Under the old allow-list every
+    // status the edge invents next was fatal to a wait until somebody noticed
+    // and added a number; a 5xx is a moment and a wait exists to outlast one.
+    // The line is REQUEST versus MOMENT, and a 4xx is the request — written as
+    // a range so an unmapped one lands on the right side too.
+    expect(isTransientForPoll(errorForStatus(500, 'HTTP 500'))).toBe(true);
+    expect(isTransientForPoll(errorForStatus(507, 'HTTP 507'))).toBe(true);
+    expect(isTransientForPoll(errorForStatus(400, 'HTTP 400'))).toBe(false);
+    expect(isTransientForPoll(errorForStatus(405, 'HTTP 405'))).toBe(false);
+    expect(isTransientForPoll(errorForStatus(418, 'HTTP 418'))).toBe(false);
+    // 408 is the third 4xx that describes a moment: RFC 9110 defines it as a
+    // request the client may repeat unchanged, and the edge in front of this
+    // surface emits it.
+    expect(isTransientForPoll(errorForStatus(408, 'HTTP 408'))).toBe(true);
+    // And a 3xx goes with the 4xx, which is why the test is `>= 500` rather
+    // than "not a 4xx". Api does not follow redirects and treats every non-2xx
+    // as an error, so a MANDALA_BASE_URL missing its trailing path answers 301
+    // — polled to the deadline under a 4xx-only rule, ending in a give-up that
+    // named nothing about the redirect.
+    for (const status of [301, 302, 303, 307, 308]) {
+      expect(isTransientForPoll(errorForStatus(status, `HTTP ${status}`))).toBe(false);
+    }
+  });
+
+  it('does not poll through anything that is not a failed request', () => {
+    // The floor a deny-list needs, and it is narrower than "our error": only an
+    // APIError or a ConnectivityError describes an exchange that did not work.
+    //
+    // A TypeError from a bug in this server is not a hypervisor being slow. A
+    // caller who hung up is not either. And a bare MandalaError is the case
+    // that actually bit — Api raises them for a response that arrived and made
+    // no sense, and a poll loop raises them as verdicts about a poll that
+    // SUCCEEDED ("this move is no longer listed"). Polling through a verdict is
+    // an infinite loop with a deadline on it; the TypeScript SDK's suite caught
+    // exactly that when this predicate was ported there with MandalaError as
+    // its floor, in three tests that stopped terminating.
+    expect(isTransientForPoll(new TypeError('cannot read properties of undefined'))).toBe(false);
+    expect(isTransientForPoll(new CancelledError('the caller gave up'))).toBe(false);
+    expect(isTransientForPoll(new MandalaError('that move is no longer listed'))).toBe(false);
+    // What the floor lets through, so it is not merely an allow-list wearing a
+    // deny-list's shape.
+    expect(isTransientForPoll(new ConnectivityError('fetch failed'))).toBe(true);
+    expect(isTransientForPoll(errorForStatus(503, 'HTTP 503'))).toBe(true);
   });
 
   it('retries a connectivity blip but not a cancellation', () => {
@@ -1896,11 +1960,19 @@ describe('a proxy giving up is not reported as a bare status', () => {
     expect(said(failed(errorForStatus(524, 'HTTP 524')))).toMatch(/proxy.*\(HTTP 524\)/s);
   });
 
-  it('keeps 504 retryable and 524 not', () => {
+  it('keeps 504 pollable and 524 not', () => {
     // Same class, different answer, and the split is by where each is reachable
     // from: the wait tools poll with short requests, where a 504 is a blip. A
     // 524 is only reached past the ceiling, where retrying reproduces it.
-    expect(isTransient(errorForStatus(504, 'HTTP 504'))).toBe(true);
+    //
+    // The one place a STATUS still decides a retry, and it has to be: a type
+    // cannot separate two statuses that share it. Everything else moved to
+    // classes in OPL-3724.
+    expect(isTransientForPoll(errorForStatus(504, 'HTTP 504'))).toBe(true);
+    expect(isTransientForPoll(errorForStatus(524, 'HTTP 524'))).toBe(false);
+    // Neither is published. A gateway timeout is the case where the platform
+    // has most likely acted already, so an embedder must not replay one blind.
+    expect(isTransient(errorForStatus(504, 'HTTP 504'))).toBe(false);
     expect(isTransient(errorForStatus(524, 'HTTP 524'))).toBe(false);
   });
 
@@ -1916,8 +1988,9 @@ describe('a proxy giving up is not reported as a bare status', () => {
     for (const ceiling of ['two minutes', 'timeout_s', 'background: true', 'exec_poll']) {
       expect(timedOut).not.toMatch(ceiling);
     }
-    // And it must not contradict the retry policy the same file publishes.
-    expect(isTransient(errorForStatus(504, 'HTTP 504'))).toBe(true);
+    // And it must not contradict the retry policy the same file acts on: this
+    // wording tells the reader to try again, and the wait tools do.
+    expect(isTransientForPoll(errorForStatus(504, 'HTTP 504'))).toBe(true);
     expect(timedOut).toMatch(/the same call again is the move/);
 
     // 524 keeps all of it, still hedged on the route, because a screenshot or a
@@ -2002,8 +2075,8 @@ describe('an edge that never reached the platform is not reported as a bare stat
     // Left out of the mapping while its neighbours were added, so it fell
     // through to a bare APIError — the model read `HTTP 502` or 500 characters
     // of nginx's HTML, which is the failure this whole range exists to remove.
-    // It is in isTransient, so the wait tools reach it and replay whichever of
-    // those two it was into their give-up text.
+    // It polls through isTransientForPoll, so the wait tools reach it and
+    // replay whichever of those two it was into their give-up text.
     const err = errorForStatus(502, 'HTTP 502');
     expect(err).toBeInstanceOf(OriginResponseError);
     expect(err.message).not.toBe('HTTP 502');
@@ -2014,23 +2087,30 @@ describe('an edge that never reached the platform is not reported as a bare stat
     expect(err.message).not.toMatch(/nothing was started/);
     expect(err.message).toMatch(/unknown/);
     expect(err.message).toMatch(/check/);
-    expect(isTransient(err)).toBe(true);
+    expect(isTransientForPoll(err)).toBe(true);
   });
 
-  it('keeps the exported retry policy off the statuses whose outcome is unknown', () => {
+  it('keeps the exported retry policy off every status whose outcome is unknown', () => {
     // The published contract, which an embedder wraps around calls this server
-    // knows nothing about. Widening it to the 52x range was safe for the wait
-    // loop and not for them: every one of these means the request may or may
-    // not have been carried out, so `if (isTransient(err)) retry()` around a
-    // create is how one computer becomes two.
-    for (const status of [520, 521, 522, 523, 525, 526]) {
+    // knows nothing about. Every one of these means the request may or may not
+    // have been carried out, so `if (isTransient(err)) retry()` around a create
+    // is how one computer becomes two.
+    //
+    // 502 and 504 were on this list until OPL-3724 and are the reason it was
+    // rewritten: the docstring beside them already conceded that both can
+    // arrive after the platform has acted, which is the same hazard the 52x
+    // range was kept out for. A status that is not safe for the riskiest caller
+    // of an exported predicate does not belong in it.
+    for (const status of [502, 504, 520, 521, 522, 523, 524, 525, 526]) {
       expect(isTransient(errorForStatus(status, `HTTP ${status}`))).toBe(false);
     }
-    // And the statuses it did cover before are still covered, so nothing that
-    // was retryable for an embedder quietly stopped being so.
-    for (const status of [409, 429, 502, 503, 504]) {
+    // What survives is answered by TYPE, with no status numbers at all — the
+    // same four classes the TypeScript and Python SDKs now name, so one
+    // question has one answer in three clients.
+    for (const status of [409, 429, 503]) {
       expect(isTransient(errorForStatus(status, `HTTP ${status}`))).toBe(true);
     }
+    expect(isTransient(new ConnectivityError('fetch failed'))).toBe(true);
   });
 
   it('discards the proxy error page rather than truncating it into the message', () => {
@@ -2056,6 +2136,21 @@ describe('the public error surface', () => {
     expect(PublicOriginResponseError).toBe(OriginResponseError);
     expect(PublicOriginTLSError).toBe(OriginTLSError);
     expect(PublicOriginUnreachableError).toBe(OriginUnreachableError);
+  });
+
+  it('exports every class its own retry predicate names', () => {
+    // isTransient is exported and answers by TYPE alone since OPL-3724, so an
+    // embedder who wants to know WHY it said yes has to be able to catch the
+    // four classes it asks about. RateLimitError was the gap: 429 used to be a
+    // number inside the predicate and had no class at all, so `retryAfterMs`
+    // could not reach a caller and the platform's own "wait this long" was
+    // thrown away by everyone but the poll loops.
+    expect(isTransient(new ConflictError('the guest agent is not answering yet', 409))).toBe(true);
+    expect(isTransient(new RateLimitError('slow down', 429))).toBe(true);
+    expect(isTransient(new UnavailableError('a hypervisor is out of reach', 503))).toBe(true);
+    expect(isTransient(new ConnectivityError('fetch failed'))).toBe(true);
+    expect(PublicRateLimitError).toBe(RateLimitError);
+    expect(new RateLimitError('slow down', 429, undefined, 30_000).retryAfterMs).toBe(30_000);
   });
 
   it('exports the one error that carries a number rather than only a message', () => {
