@@ -132,7 +132,9 @@ const NATIVE_FETCH = globalThis.fetch;
  * an embedder that installs an instrumented fetch means it to be used.
  */
 export const platformFetch = (): typeof globalThis.fetch =>
-  globalThis.fetch === NATIVE_FETCH ? (undiciFetch as unknown as typeof globalThis.fetch) : globalThis.fetch;
+  globalThis.fetch === NATIVE_FETCH
+    ? (undiciFetch as unknown as typeof globalThis.fetch)
+    : globalThis.fetch;
 
 /** One server-sent event off the agent route. */
 export type SSEEvent = { event: string; data: unknown };
