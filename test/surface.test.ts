@@ -32,8 +32,8 @@ const EXERCISE: Record<string, Record<string, unknown>[]> = {
     { namespace: 'acc-1', name: 'devbox', version: '1.0.0' },
   ],
   retire_template: [
-    { namespace: 'acc-1', name: 'devbox', version: '1.0.0' },
-    { namespace: 'acc-1', name: 'devbox' },
+    { namespace: 'acc-1', name: 'devbox', version: '1.0.0', confirm: true },
+    { namespace: 'acc-1', name: 'devbox', confirm: true },
   ],
   // Compiling one (platform OPL-3791, OPL-3794). `no_reuse` on one of the two,
   // for the same reason.

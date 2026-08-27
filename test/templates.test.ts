@@ -141,6 +141,7 @@ describe('naming a version', () => {
       namespace: 'acc-1',
       name: 'devbox',
       version: '',
+      confirm: true,
     });
     expect(res.isError).toBe(true);
     expect(textOf(res)).toMatch(/MAJOR\.MINOR\.PATCH/);
@@ -174,7 +175,11 @@ describe('naming a version', () => {
 describe('retiring one', () => {
   it('says what went, what is left, and that the ref count does not go back', async () => {
     const { call, close } = await connect();
-    const res = await call('retire_template', { namespace: 'acc-1', name: 'devbox' });
+    const res = await call('retire_template', {
+      namespace: 'acc-1',
+      name: 'devbox',
+      confirm: true,
+    });
     const said = textOf(res);
 
     expect(said).toMatch(/Retired 1 version/);
@@ -188,7 +193,7 @@ describe('retiring one', () => {
 
   it('sends DELETE with no body', async () => {
     const { call, close } = await connect();
-    await call('retire_template', { namespace: 'acc-1', name: 'devbox' });
+    await call('retire_template', { namespace: 'acc-1', name: 'devbox', confirm: true });
     const call_ = sent('/templates/acc-1/devbox', 'DELETE');
     expect(call_).toBeDefined();
     expect(call_?.body).toBeUndefined();
@@ -377,6 +382,66 @@ describe('a short build listing', () => {
     const res = await call('list_builds');
     expect(res.isError).toBeFalsy();
     expect(textOf(res)).toMatch(/bld-1/);
+    await close();
+  });
+});
+
+describe('what /code-review found', () => {
+  /**
+   * The repo's own convention for an unrecoverable tool.
+   *
+   * delete_computer, restore_snapshot and delete_snapshot all take
+   * `confirm: z.literal(true)`. Retiring is strictly LESS recoverable than any
+   * of them — a deleted snapshot's name can be used again, a retired ref never
+   * can — and it was the only one without a gate.
+   */
+  it('will not retire without confirm, and the schema says so', async () => {
+    const { client, call, close } = await connect();
+    const res = await call('retire_template', { namespace: 'acc-1', name: 'devbox' });
+    expect(res.isError).toBe(true);
+    expect(platform.calls.filter((c) => c.method === 'DELETE')).toHaveLength(0);
+
+    const tools = (await client.listTools()).tools;
+    const retire = tools.find((t) => t.name === 'retire_template');
+    expect(retire?.inputSchema.required).toContain('confirm');
+    await close();
+  });
+
+  /**
+   * `progress` is not a superset of the job record. The two projectors overlap
+   * only on id, status and error: publicTemplateBuild carries `ref` and both
+   * timestamps, publicBuildProgress carries the phase and the steps. Read as
+   * progress alone, get_build could not say which template a build was for.
+   */
+  it('tells the model which template a build was for, and where it got to', async () => {
+    const { call, close } = await connect();
+    const res = await call('get_build', { build_id: 'bld-1' });
+    const said = textOf(res);
+    expect(said).toMatch(/acc-1\/devbox@1\.0\.0/); // ref, from the job record
+    expect(said).toMatch(/"phase"/); // phase, from progress
+    expect(said).toMatch(/"started_at"/);
+    await close();
+  });
+
+  /**
+   * The MCP SDK's default request timeout is 60s and only `notifications/progress`
+   * resets it — `_onprogress` is bound to that schema alone. A logging
+   * notification is not a keepalive, so a fifteen-minute build was cancelled at
+   * sixty seconds on a default client.
+   */
+  it('sends progress notifications when the client asked for them', async () => {
+    const { client, close } = await connect();
+    const seen: { progress: number; message?: string }[] = [];
+    // `onprogress` is the SDK's own mechanism: it registers the handler AND
+    // mints the progressToken, which is what the server needs in order to
+    // address a notification back at this request.
+    await client.callTool({ name: 'watch_build', arguments: { build_id: 'bld-1' } }, undefined, {
+      onprogress: (p) => {
+        seen.push(p as { progress: number; message?: string });
+      },
+    });
+    expect(seen.length).toBeGreaterThan(0);
+    expect(seen.some((p) => (p.message ?? '').includes('copying'))).toBe(true);
     await close();
   });
 });

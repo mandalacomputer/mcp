@@ -22,7 +22,7 @@ const namespaceArg = {
   namespace: z
     .string()
     .describe(
-      'The account id the template is published under. Your own templates are in your account id, which is the `namespace` on every row of list_templates that is yours; `system` is ours.',
+      'The account id the template is published under. READ IT OFF A `ref`: every row of list_templates carries one shaped `<namespace>/<name>@<version>`, and the part before the slash is the namespace. Rows reading `system` are the templates we publish; anything else is your own account id. There is no separate `namespace` field on a template — the ref is where it lives.',
     ),
   name: z.string().describe('The template name, without the namespace or the version.'),
 };
@@ -55,7 +55,7 @@ export const registerTemplates: Registrar = (server, session) => {
     {
       title: 'Check a template document',
       description:
-        'Check a document against the schema and the rules a publish applies, WITHOUT publishing it. Nothing is stored and no ref is claimed, so this is safe on a draft and safe to call repeatedly — and it reports every problem at once, where publish_template stops at the first thing that blocks it. Always check before publishing: a ref is immutable, so a document published with a mistake in it cannot be corrected under the same version.',
+        'Check a document against the SCHEMA, without publishing it. Nothing is stored and no ref is claimed, so this is safe on a draft and safe to call repeatedly, and every problem comes back at once. Always check before publishing: a ref is immutable, so a document published with a mistake in it cannot be corrected under that version. WHAT IT CANNOT SEE: this reads the document alone and knows nothing about your account, so `valid: true` does not mean publish_template will succeed. Whether the namespace is yours, whether the family is yours, whether your plan may publish at all, and whether the ref is already taken or retired are all decided at publish time and can still refuse a document that checks out here.',
       inputSchema: {
         document: z
           .string()
@@ -76,7 +76,7 @@ export const registerTemplates: Registrar = (server, session) => {
         // it actually got is the list of problems it asked for.
         return body.valid
           ? said(
-              'The document is valid. `doc_digest` identifies it; `build_digest` covers only what decides the image, so comparing it against a previous check tells you whether an edit means a rebuild.',
+              'The document is valid — against the schema. Publishing can still refuse it for something only your account decides: the namespace, the family, your plan, or a ref already taken. `doc_digest` identifies the document and changes with any edit at all. `build_digest` covers only what decides the image, so comparing it against a previous check tells you whether an edit means a rebuild — but it is present ONLY for a document with no `spec.from`, and a document that declares build steps must have one, so a buildable document gets `build_digest_needs` instead, naming the parent whose digest would be required.',
               body,
             )
           : said(
@@ -138,7 +138,20 @@ export const registerTemplates: Registrar = (server, session) => {
       title: 'Retire a template you published',
       description:
         'Stop a template resolving, and give its row back against your ceiling. WITHOUT `version` THIS RETIRES EVERY VERSION OF THE NAME — that is what retiring a template means here, and it is deliberately not get_template\'s "the newest". Pass `version` to take exactly one. THIS CANNOT BE UNDONE: a retired ref is refused for ever, identical bytes included, so the version you retire can never be published again — publish the next version instead. Computers are NOT affected: a computer is built from the image the ref resolved to and holds no reference to the document, so anything already running, stopped or suspended keeps working. What a retire breaks is resolution — a NEW create naming the ref is refused. Say what it costs before you call it.',
-      inputSchema: { ...namespaceArg, version: versionArg },
+      inputSchema: {
+        ...namespaceArg,
+        version: versionArg,
+        // The same gate delete_computer, restore_snapshot and delete_snapshot
+        // take. This is strictly LESS recoverable than any of them — a deleted
+        // snapshot's name can be used again, a retired ref never can — and it
+        // was the only unrecoverable tool here without one. `destructiveHint`
+        // delegates the question to the host application; this asks it here.
+        confirm: z
+          .literal(true)
+          .describe(
+            'Must be true. Retiring cannot be undone, and without `version` it takes every version of the name.',
+          ),
+      },
       annotations: { destructiveHint: true, idempotentHint: false },
     },
     ({ namespace, name, version }, extra) =>
@@ -232,14 +245,31 @@ export const registerTemplates: Registrar = (server, session) => {
     {
       title: 'Get a build',
       description:
-        'What became of one build, and which step it is on. Reads once and returns; watch_build is what follows a running one. It stays readable after the build has finished, so this is also how you find out which step failed on a build nobody was watching.',
+        'What became of one build, which template it was for, and which step it is on. Reads once and returns; watch_build is what follows a running one. It stays readable after the build has finished, so this is also how you find out which step failed on a build nobody was watching.',
       inputSchema: { build_id: z.string().describe('The id build_template returned.') },
       annotations: { readOnlyHint: true },
     },
     ({ build_id }, extra) =>
-      guarded(async () =>
-        json(await session.api.with(extra.signal).json('GET', P.buildAction(build_id, 'progress'))),
-      ),
+      guarded(async () => {
+        // BOTH routes, because neither answer contains the other. The two
+        // projectors in the platform's lib/projection overlap only on `id`,
+        // `status` and `error`: publicTemplateBuild carries `ref` and both
+        // timestamps, publicBuildProgress carries the phase and the steps. This
+        // tool was pinned as "progress is a superset", which was simply untrue —
+        // read that way it could not tell a model WHICH TEMPLATE a build was for
+        // (/code-review, OPL-3835).
+        //
+        // One tool rather than two, still. An MCP client pays for every tool in
+        // the model's context before any is called, and "get_build" and
+        // "get_build_progress" differing by a word is how a model picks the
+        // wrong one. Two requests inside one call is the cheaper trade.
+        const api = session.api.with(extra.signal);
+        const [job, progress] = await Promise.all([
+          api.json<Record<string, unknown>>('GET', P.build(build_id)),
+          api.json<Record<string, unknown>>('GET', P.buildAction(build_id, 'progress')),
+        ]);
+        return json({ ...job, ...progress });
+      }),
   );
 
   server.registerTool(
@@ -254,6 +284,11 @@ export const registerTemplates: Registrar = (server, session) => {
     ({ build_id }, extra) =>
       guarded(async () => {
         let last: Record<string, unknown> | undefined;
+        // The token the CLIENT sends when it wants progress. Without one there
+        // is nothing to address a progress notification to, and this falls back
+        // to logging alone.
+        const progressToken = extra._meta?.progressToken;
+        let sent = 0;
         // Whether a well-formed `done` actually arrived, as against whether any
         // event did (adversarial review, OPL-3835). Without it a stream that
         // reached EOF after a `progress` — a proxy cutting it, a host going away
@@ -278,12 +313,41 @@ export const registerTemplates: Registrar = (server, session) => {
           if (!isRecord(ev.data)) continue;
           if (ev.event === 'done') sawDone = true;
           last = ev.data;
-          await server.server
-            .sendLoggingMessage({
-              level: 'info',
-              data: `${ev.data.phase ?? '?'} ${ev.data.step ?? 0}/${ev.data.of ?? 0} ${ev.data.note ?? ''}`.trim(),
-            })
-            .catch(() => {});
+          const line =
+            `${ev.data.phase ?? '?'} ${ev.data.step ?? 0}/${ev.data.of ?? 0} ${ev.data.note ?? ''}`.trim();
+          // A PROGRESS notification, not only a logging one, and this is what
+          // makes the tool usable at all (/code-review, OPL-3835). The MCP SDK's
+          // default request timeout is 60 seconds and only `notifications/progress`
+          // resets it — `_onprogress` in shared/protocol.js is bound to that
+          // schema alone. sendLoggingMessage sends `notifications/message`, which
+          // no client treats as a keepalive. So a build the platform is willing
+          // to stream for fifty minutes, and which build_template tells the model
+          // takes "roughly fifteen", was cancelled at sixty seconds on a default
+          // client and came back as a cancellation rather than an outcome —
+          // precisely the "indistinguishable from a hang" this tool exists to
+          // remove.
+          if (progressToken !== undefined) {
+            sent += 1;
+            await extra
+              .sendNotification({
+                method: 'notifications/progress',
+                params: {
+                  progressToken,
+                  // `of` is the step count, which is 0 until the build reaches
+                  // its first step — sent only once it means something, since a
+                  // total of 0 renders as a finished bar.
+                  progress: typeof ev.data.step === 'number' ? ev.data.step : sent,
+                  ...(typeof ev.data.of === 'number' && ev.data.of > 0
+                    ? { total: ev.data.of }
+                    : {}),
+                  message: line,
+                },
+              })
+              .catch(() => {});
+          }
+          // Kept as well: this is what a person watching a terminal sees, and it
+          // is the only channel when the client asked for no progress.
+          await server.server.sendLoggingMessage({ level: 'info', data: line }).catch(() => {});
           if (ev.event === 'done') break;
         }
         // `|| !last` as well, which is unreachable — a `done` sets both in the

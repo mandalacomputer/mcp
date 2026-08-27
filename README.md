@@ -223,8 +223,10 @@ bytes included, so the version you retire can never be published again. What it
 does *not* touch is any computer: a computer is built from the image the ref
 resolved to and holds no reference to the document, so anything already running,
 stopped or suspended keeps working. The tool says all of this in its own
-description and carries `destructiveHint`, so a host application can gate it
-behind a confirmation.
+description, carries `destructiveHint`, and requires `confirm: true` — the same
+gate `delete_computer`, `restore_snapshot` and `delete_snapshot` take. It is
+strictly less recoverable than any of them: a deleted snapshot's name can be
+used again, a retired ref never can.
 
 An empty `version` is refused here rather than sent. That spelling — which a
 model is more likely than a program to produce for an optional argument — read as

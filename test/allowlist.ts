@@ -308,17 +308,6 @@ export const UNIMPLEMENTED = new Set([
   // pointed somewhere; it is nothing at all to an MCP client, which has neither
   // a base URL to redirect nor a reason to prefer the vocabulary.
   'POST chat/completions',
-  // DECISION. `GET builds/:id` answers the job record — id, ref, status, the two
-  // timestamps. `GET builds/:id/progress` answers all of that AND which step of
-  // how many is running, because the platform restates `status` on it precisely
-  // so that one poll answers both questions. So `get_build` reads progress, and
-  // this route would be a second tool that returns strictly less.
-  //
-  // Not a gap: an MCP client pays for every tool in the model's context before
-  // any of them is called, and two tools whose names differ by a word and whose
-  // answers differ by a subset is how a model picks the wrong one. The SDKs keep
-  // both, because a program choosing between them costs nothing.
-  'GET builds/:id',
   // The two template document routes were pinned here, behind a comment saying
   // they "become worth a tool with publish and launch-by-ref". Publish shipped
   // in platform OPL-3789 and launch-by-ref in OPL-3788, so the line became
