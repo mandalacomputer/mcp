@@ -10,6 +10,7 @@ export {
   CancelledError,
   ConflictError,
   ConnectivityError,
+  ConnectivityInterruptedError,
   GatewayTimeoutError,
   isTransient,
   MandalaError,

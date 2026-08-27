@@ -200,9 +200,67 @@ export class CancelledError extends MandalaError {
   override name = 'CancelledError';
 }
 
-/** The platform could not be reached at all. Safe for a wait loop to retry. */
+/**
+ * The request never left. Nothing was dispatched, so anything may be replayed.
+ *
+ * NARROWER than it used to be, and the narrowing is the point. This class once
+ * wrapped every rejection the transport produced, which meant it also carried
+ * the failures that happen AFTER the request reached the platform — a socket
+ * reset while the response body was being read, a protocol error on the way
+ * back. Those wear the opposite outcome: the platform may well have acted, and
+ * the answer is what was lost. They now get {@link ConnectivityInterruptedError},
+ * which is a subclass, so `catch (e) { if (e instanceof ConnectivityError) }`
+ * still sees both.
+ *
+ * What is left here is what the name always claimed: DNS that did not resolve,
+ * a socket that was refused, a connect that timed out, a TLS handshake that
+ * failed. Not one byte of the request was written, so {@link isTransient} can
+ * say yes to it even for a caller replaying a create.
+ *
+ * `Api` raises this one only for a cause it can positively identify as
+ * connect-phase; see `neverDispatched` in `src/api.ts`. Everything it cannot
+ * identify is the subclass, because the cost of the two wrong answers is not
+ * symmetric — see there.
+ */
 export class ConnectivityError extends MandalaError {
   override name = 'ConnectivityError';
+}
+
+/**
+ * The request was dispatched and the answer was lost. Outcome unknown.
+ *
+ * A socket that resets while the response body is being read, an HTTP parser
+ * error on the way back, an undici body or headers timeout, a connection
+ * failure this client cannot place in either phase. The shared property is the
+ * one that matters: the platform may have received the request and acted on it,
+ * and nothing in the error says whether it did.
+ *
+ * So this is FATAL to {@link isTransient} and transparent to
+ * {@link isTransientForPoll}, and the split is the same one OPL-3724 made for
+ * 502 and 504. Its words apply here unchanged — "a status that is not safe for
+ * the riskiest caller of an exported predicate does not belong in it" — and
+ * this case had escaped them only because it wears a class whose name says the
+ * request never left. `computers.create()` reaches the platform, the platform
+ * builds the computer, the socket dies mid-response: an embedder asking
+ * {@link isTransient} used to be told yes, replayed the create, and paid for
+ * two computers.
+ *
+ * A SUBCLASS rather than a sibling, which is what keeps this from breaking
+ * anyone. `instanceof ConnectivityError` still matches, so existing catch
+ * blocks and {@link isTransientForPoll}'s floor need no change; only the one
+ * predicate that promises blind replay had to learn the difference. It is the
+ * same shape {@link MoveRequiredError} has under {@link ConflictError}, for the
+ * same reason: a case that is genuinely a kind of its parent and genuinely
+ * answers one question the other way.
+ *
+ * The poll predicate still rides it out, and that is not an oversight. The wait
+ * tools replay reads — a `GET /computers/:id`, an `exec 'exit 0'` probe — and a
+ * read whose outcome was lost can simply be read again. Only a caller who might
+ * be replaying a WRITE needs the distinction, which is exactly the caller
+ * {@link isTransient} is exported for.
+ */
+export class ConnectivityInterruptedError extends ConnectivityError {
+  override name = 'ConnectivityInterruptedError';
 }
 
 /**
@@ -566,6 +624,14 @@ export function errorForStatus(status: number, message: string, body?: unknown):
  * - {@link UnavailableError} — a hypervisor briefly out of reach
  * - {@link ConnectivityError} — the request never left
  *
+ * That last line is now literally true, and it was not always. The class used
+ * to cover every transport rejection, a lost response body included, so this
+ * predicate told a caller replaying a create that the platform had not been
+ * reached when in fact it had been and the answer was what went missing.
+ * {@link ConnectivityInterruptedError} carries that case now and is excluded
+ * below — the same decision as the paragraph after this one, applied to the
+ * one class it had missed (OPL-3855).
+ *
  * 502 and 504 USED to be here and are deliberately gone. The paragraph below
  * had already conceded the point that removes them: both can arrive after the
  * platform has acted, so replaying a `create_computer` through one can leave a
@@ -591,6 +657,10 @@ export function isTransient(err: unknown): boolean {
   // (OPL-3775). An embedder wrapping a resize in `if (isTransient(err)) retry()`
   // is the caller this line is for.
   if (err instanceof MoveRequiredError) return false;
+  // A lost RESPONSE is not a request that never left, and only one of the two
+  // is safe to replay blind. Same shape as the line above and the same reason:
+  // a subclass of a branch below that would otherwise say yes (OPL-3855).
+  if (err instanceof ConnectivityInterruptedError) return false;
   return (
     err instanceof ConflictError ||
     err instanceof RateLimitError ||
@@ -642,6 +712,13 @@ export function isTransient(err: unknown): boolean {
  *   through a verdict is an infinite loop with a deadline on it, which is
  *   exactly what the TypeScript SDK's suite caught when this predicate was
  *   ported there with `MandalaError` as its floor.
+ *
+ *   {@link ConnectivityInterruptedError} passes that floor and is meant to, on
+ *   the strength of what the callers here DO. It says the outcome of one
+ *   request is unknown; every request this predicate guards is a read, and a
+ *   read whose outcome is unknown can be read again. Fatal to
+ *   {@link isTransient} and transparent here is the whole point of there being
+ *   two predicates.
  * - {@link CancelledError} — the caller hung up. Excluded by the floor above,
  *   since it is neither, and retrying something nobody is waiting for is what
  *   `with(signal)` exists to stop.
