@@ -6,6 +6,7 @@ import {
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
+import { type AddressInfo, createServer as createSocketServer, type Socket } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -32,6 +33,7 @@ import {
   CancelledError,
   ConflictError,
   ConnectivityError,
+  ConnectivityInterruptedError,
   errorForStatus,
   GatewayTimeoutError,
   isTransient,
@@ -48,6 +50,7 @@ import { failed, MAX_INLINE_IMAGE_BYTES, unwrapComputer } from '../src/format.js
 import {
   CancelledError as PublicCancelledError,
   ConnectivityError as PublicConnectivityError,
+  ConnectivityInterruptedError as PublicConnectivityInterruptedError,
   GatewayTimeoutError as PublicGatewayTimeoutError,
   OriginResponseError as PublicOriginResponseError,
   OriginTLSError as PublicOriginTLSError,
@@ -1003,12 +1006,47 @@ describe('a call nobody is waiting for any more', () => {
 
   it('still calls a real connectivity failure what it is', async () => {
     const real = globalThis.fetch;
+    // Shaped like a refused socket, which is what a real one looks like: the
+    // rejection is a `TypeError: fetch failed` and the phase is only legible on
+    // its cause. Without one this is now read as a possible dispatch (OPL-3855),
+    // so the cause is what keeps this about the cancellation confusion it was
+    // written for rather than about the new split.
     globalThis.fetch = (async () => {
-      throw new TypeError('fetch failed');
+      throw Object.assign(new TypeError('fetch failed'), {
+        cause: Object.assign(new Error('connect ECONNREFUSED 127.0.0.1:443'), {
+          code: 'ECONNREFUSED',
+          syscall: 'connect',
+        }),
+      });
     }) as typeof fetch;
     const api = new Api('com_test', BASE);
     await expect(api.json('GET', 'computers')).rejects.toThrow(/could not reach/);
+    await expect(api.json('GET', 'computers')).rejects.toBeInstanceOf(ConnectivityError);
+    await expect(api.json('GET', 'computers')).rejects.not.toBeInstanceOf(
+      ConnectivityInterruptedError,
+    );
     globalThis.fetch = real;
+  });
+
+  it('does not call an unrecognised transport failure a connect failure', async () => {
+    // The fail-closed half. A rejection this client cannot place — no cause, or
+    // one it has no rule for — must be read as possibly dispatched, because the
+    // caller who pays for a wrong answer here is an embedder replaying a create.
+    const real = globalThis.fetch;
+    globalThis.fetch = (async () => {
+      throw new TypeError('fetch failed');
+    }) as typeof fetch;
+    try {
+      const api = new Api('com_test', BASE);
+      await expect(api.json('GET', 'computers')).rejects.toBeInstanceOf(
+        ConnectivityInterruptedError,
+      );
+      const err = await api.json('GET', 'computers').catch((e: unknown) => e);
+      expect(isTransient(err)).toBe(false);
+      expect(isTransientForPoll(err)).toBe(true);
+    } finally {
+      globalThis.fetch = real;
+    }
   });
 
   it('does not report a stalled guest probe as a platform outage', async () => {
@@ -1384,21 +1422,33 @@ describe('wait failures that are worth another poll', () => {
   });
 
   it('does not put base-URL credentials into a reachability error', async () => {
+    // Both classes, because the split gave this message a second spelling and a
+    // secret leaks just as well from either (OPL-3855). Each names the origin
+    // and only the origin — `URL.origin` drops userinfo and the query, which is
+    // what makes that true.
     const real = globalThis.fetch;
-    globalThis.fetch = (async () => {
-      throw new TypeError('fetch failed');
-    }) as typeof fetch;
+    const refused = Object.assign(new Error('connect ECONNREFUSED'), {
+      code: 'ECONNREFUSED',
+      syscall: 'connect',
+    });
+    const reset = Object.assign(new Error('other side closed'), { code: 'UND_ERR_SOCKET' });
     try {
-      const api = new Api(
-        'com_test',
-        'https://operator:secret@example.test/api/v1?access_token=also-secret',
-      );
-      await expect(api.json('GET', 'computers')).rejects.toThrow(
-        'could not reach https://example.test',
-      );
-      await expect(api.json('GET', 'computers')).rejects.not.toThrow(
-        /secret|operator|access_token/,
-      );
+      for (const [cause, expected] of [
+        [refused, 'could not reach https://example.test'],
+        [reset, 'GET /computers to https://example.test'],
+      ] as const) {
+        globalThis.fetch = (async () => {
+          throw Object.assign(new TypeError('fetch failed'), { cause });
+        }) as typeof fetch;
+        const api = new Api(
+          'com_test',
+          'https://operator:secret@example.test/api/v1?access_token=also-secret',
+        );
+        await expect(api.json('GET', 'computers')).rejects.toThrow(expected);
+        await expect(api.json('GET', 'computers')).rejects.not.toThrow(
+          /secret|operator|access_token/,
+        );
+      }
     } finally {
       globalThis.fetch = real;
     }
@@ -2553,5 +2603,193 @@ describe('selection generations under eviction pressure', () => {
     for (let i = 0; i < 300; i++) session.unbind(`vm-other-${i}`);
     expect(session.bindIfCurrent('vm-target', '1280x800x24', snapped)).toBe(false);
     session.endSelection('vm-target');
+  });
+});
+
+describe('a connection failure after the request was sent (OPL-3855)', () => {
+  // The hazard, as one sentence: `computers.create()` reaches the platform, the
+  // platform builds the computer, and the socket dies while the response is
+  // being read. Every client wrapped that in the class whose name says the
+  // request never left, so `isTransient` said yes, an embedder replayed the
+  // create, and the account paid for two computers.
+  //
+  // Real sockets rather than a stubbed fetch, deliberately. What is under test
+  // is whether undici's cause chain can be read to tell the two phases apart —
+  // a stub that throws a hand-made error would only test the classifier against
+  // errors this file invented, which is the half that was never in doubt.
+
+  /** A TCP server that behaves however the test needs, and the base URL for it. */
+  const serving = async (
+    handler: (socket: Socket) => void,
+    scheme: 'http' | 'https' = 'http',
+  ): Promise<{ url: string; close: () => Promise<void> }> => {
+    const server = createSocketServer(handler);
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const { port } = server.address() as AddressInfo;
+    return {
+      url: `${scheme}://127.0.0.1:${port}/api/v1`,
+      close: () => new Promise<void>((resolve) => server.close(() => resolve())),
+    };
+  };
+
+  const failureFrom = async (url: string): Promise<unknown> => {
+    try {
+      await new Api('com_test', url).json('GET', 'computers');
+      throw new Error('expected the request to fail');
+    } catch (err) {
+      return err;
+    }
+  };
+
+  it('says the request never left only when it can prove that', async () => {
+    // A closed port and a name that does not resolve. Nothing was written, so
+    // replaying even a create is safe and the public predicate may say so.
+    //
+    // Port 2 rather than an ephemeral one bound and closed here: the OS is free
+    // to hand a just-released ephemeral port to another listener, and this suite
+    // runs files concurrently with test/http.test.ts binding dozens of them — a
+    // collision would dispatch the request and fail below, pointing at the
+    // classifier rather than at the port. Not port 1, which fetch refuses
+    // outright as a bad port, so it never reaches a connect to be refused.
+    for (const url of ['http://127.0.0.1:2/api/v1', 'http://no-such-host-xyzzy.invalid/api/v1']) {
+      const err = await failureFrom(url);
+      expect(err).toBeInstanceOf(ConnectivityError);
+      expect(err).not.toBeInstanceOf(ConnectivityInterruptedError);
+      expect(isTransient(err)).toBe(true);
+      expect(isTransientForPoll(err)).toBe(true);
+    }
+  });
+
+  it('does not read a TLS alert after the handshake as a connect failure', async () => {
+    // The prefix that used to be here — `ERR_SSL_` — is how Node spells every
+    // OpenSSL reason, fatal alerts included, and an alert can arrive on any
+    // record. A TLS-terminating proxy that dies while the response is being
+    // read answers one of these with the request long since on the wire, so the
+    // prefix put a possibly-dispatched failure into the class that says nothing
+    // was sent. That is the bug this whole file is about, reintroduced by the
+    // first fix for it.
+    const real = globalThis.fetch;
+    try {
+      for (const code of [
+        'ERR_SSL_TLSV1_ALERT_INTERNAL_ERROR',
+        'ERR_SSL_SSLV3_ALERT_BAD_RECORD_MAC',
+        'ERR_SSL_DECRYPTION_FAILED_OR_BAD_RECORD_MAC',
+        // Node's own prefix is no safer, which is why neither survived:
+        // renegotiation is by definition mid-connection.
+        'ERR_TLS_RENEGOTIATION_DISABLED',
+      ]) {
+        globalThis.fetch = (async () => {
+          throw Object.assign(new TypeError('fetch failed'), {
+            cause: Object.assign(new Error(code), { code }),
+          });
+        }) as typeof fetch;
+        const err = await new Api('com_test', BASE)
+          .json('GET', 'computers')
+          .catch((e: unknown) => e);
+        expect(err, code).toBeInstanceOf(ConnectivityInterruptedError);
+        expect(isTransient(err), code).toBe(false);
+      }
+      // And the handshake codes that ARE named still answer the other way, so
+      // this is a narrowing rather than a surrender.
+      for (const code of ['ERR_SSL_WRONG_VERSION_NUMBER', 'CERT_HAS_EXPIRED']) {
+        globalThis.fetch = (async () => {
+          throw Object.assign(new TypeError('fetch failed'), {
+            cause: Object.assign(new Error(code), { code }),
+          });
+        }) as typeof fetch;
+        const err = await new Api('com_test', BASE)
+          .json('GET', 'computers')
+          .catch((e: unknown) => e);
+        expect(err, code).toBeInstanceOf(ConnectivityError);
+        expect(err, code).not.toBeInstanceOf(ConnectivityInterruptedError);
+        expect(isTransient(err), code).toBe(true);
+      }
+    } finally {
+      globalThis.fetch = real;
+    }
+  });
+
+  it('treats a handshake failure as a connect failure', async () => {
+    // TLS completes before the request exists, so a certificate or protocol
+    // mismatch is still "never left" — here, https onto a plaintext port.
+    const { url, close } = await serving((socket) => {
+      socket.on('data', () => socket.write('not tls at all\r\n'));
+    }, 'https');
+    try {
+      const err = await failureFrom(url);
+      expect(err).toBeInstanceOf(ConnectivityError);
+      expect(err).not.toBeInstanceOf(ConnectivityInterruptedError);
+      expect(isTransient(err)).toBe(true);
+    } finally {
+      await close();
+    }
+  });
+
+  it('does not promise a blind replay once the request is on the wire', async () => {
+    // Three shapes of the same outcome — the platform got the request and the
+    // answer was lost — and the phase is what they share, not the errno.
+    const cases: Array<[string, (socket: Socket) => void]> = [
+      ['reset with the request sent', (socket) => socket.on('data', () => socket.destroy())],
+      [
+        'a response that is not HTTP',
+        (socket) =>
+          socket.on('data', () => {
+            socket.write('NOT HTTP AT ALL\r\n\r\n');
+            socket.end();
+          }),
+      ],
+      [
+        'a body that dies mid-stream',
+        (socket) =>
+          socket.on('data', () => {
+            socket.write(
+              'HTTP/1.1 200 OK\r\nContent-Length: 100\r\nContent-Type: application/json\r\n\r\n{"a":',
+            );
+            setTimeout(() => socket.destroy(), 30);
+          }),
+      ],
+    ];
+    for (const [what, handler] of cases) {
+      const { url, close } = await serving(handler);
+      try {
+        const err = await failureFrom(url);
+        expect(err, what).toBeInstanceOf(ConnectivityInterruptedError);
+        // Still a ConnectivityError, which is what makes the split non-breaking:
+        // an existing catch block, and the poll predicate's floor, see no change.
+        expect(err, what).toBeInstanceOf(ConnectivityError);
+        // The two predicates, disagreeing on purpose. A create must not be
+        // replayed blind; a GET the wait loops poll may be read again.
+        expect(isTransient(err), what).toBe(false);
+        expect(isTransientForPoll(err), what).toBe(true);
+        // And the message says which of the two happened, since the old one
+        // told every reader the platform had not been reached.
+        expect((err as Error).message, what).toMatch(/unknown rather than undone/);
+      } finally {
+        await close();
+      }
+    }
+  });
+
+  it('is the same class through the public entrypoint', () => {
+    // src/index.ts is the library face, and a second copy of a class is a
+    // silent `instanceof` that never matches.
+    expect(PublicConnectivityInterruptedError).toBe(ConnectivityInterruptedError);
+    expect(new PublicConnectivityInterruptedError('lost') instanceof PublicConnectivityError).toBe(
+      true,
+    );
+  });
+
+  it('rides out a body reset it used to die on', () => {
+    // The half of this that was not a predicate bug. A socket that dies
+    // mid-body surfaces from fetch as `TypeError: terminated`, which the old
+    // name-only test in readBody did not match, so it came out as a raw
+    // TypeError — neither transient nor pollable. A wait loop ended reporting a
+    // machine unreachable over a blip it existed to outlast.
+    const terminated = new TypeError('terminated');
+    (terminated as { cause?: unknown }).cause = Object.assign(new Error('other side closed'), {
+      code: 'UND_ERR_SOCKET',
+    });
+    expect(isTransientForPoll(terminated)).toBe(false);
+    expect(isTransientForPoll(new ConnectivityInterruptedError('lost'))).toBe(true);
   });
 });
