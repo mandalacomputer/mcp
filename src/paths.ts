@@ -181,8 +181,13 @@ export const buildAction = (id: string, action: string) => `${build(id)}/${actio
 /**
  * `no_reuse`, sent only when it is asked for.
  *
- * The platform reads the PRESENCE of the key rather than its value, so
- * `no_reuse=false` would ask for the opposite of what it says.
+ * Omitted rather than sent as `false`, and the reason is the documented schema
+ * rather than a claim about the parser: lib/apidoc gives this parameter
+ * `enum: ['true']`, so `true` is the only value the reference admits.
+ *
+ * This said the platform reads the key's PRESENCE, which is false —
+ * server/buildjob.go reads `Get("no_reuse") == "true"`. The request was right
+ * either way; the stated reason was not (/code-review, OPL-3835).
  */
 export const buildQuery = (noReuse?: boolean): Record<string, string> =>
   noReuse ? { no_reuse: 'true' } : {};
