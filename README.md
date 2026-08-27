@@ -84,6 +84,11 @@ entirely.
 `restore_snapshot`, `clone_snapshot`, `snapshot_schedule`, `get_retention`,
 `delete_snapshot`
 
+**Your own templates** — `get_template_schema`, `check_template`,
+`publish_template`, `get_template`, `retire_template`
+
+**Building one** — `build_template`, `list_builds`, `get_build`, `watch_build`
+
 **Spending** — `get_usage`
 
 **Delegating** — `run_agent`, registered only when a model key is present:
@@ -209,6 +214,47 @@ by default — the platform drops input on that socket, so it is safe to hand to
 somebody. `control: true` returns the full-control one, which is root-equivalent
 on that machine. Neither appears in any other tool's output, deliberately: a
 tool result lands in a model's context and from there in whatever captured it.
+
+**Retiring a template cannot be undone, and takes more than it looks.**
+`retire_template` without a `version` retires **every** version of the name —
+that is what retiring a template means, and it is deliberately not
+`get_template`'s "the newest". A retired ref is then refused for ever, identical
+bytes included, so the version you retire can never be published again. What it
+does *not* touch is any computer: a computer is built from the image the ref
+resolved to and holds no reference to the document, so anything already running,
+stopped or suspended keeps working. The tool says all of this in its own
+description, carries `destructiveHint`, and requires `confirm: true` — the same
+gate `delete_computer`, `restore_snapshot` and `delete_snapshot` take. It is
+strictly less recoverable than any of them: a deleted snapshot's name can be
+used again, a retired ref never can.
+
+An empty `version` is refused here rather than sent. That spelling — which a
+model is more likely than a program to produce for an optional argument — read as
+"no version was named" on the platform and retired an entire template. The
+platform answers `400` for it now; this server will not send one at all.
+
+**A build is minutes, and `watch_build` is how you follow one.** `build_template`
+returns immediately with a job; watching it streams the platform's own progress,
+emitting both a progress notification and a log line for each step, so a long
+build is visibly alive rather than indistinguishable from a hang.
+
+**Set `resetTimeoutOnProgress` if you intend to watch a real build.** The MCP
+default request timeout is 60 seconds and only a progress notification can reset
+it — but the SDK resets it only for a caller that passed that option, so a client
+which merely accepts progress is still cancelled a minute into a fifteen-minute
+build. `get_build` is the answer for a client that cannot hold a request open:
+it reads once and returns. A build that *failed* is a normal answer from
+`watch_build`, not an error — it names the step that stopped it, which is the
+thing to fix. An `error` event is the *stream* failing and says nothing about the
+build, and the tool says so rather than letting a model rewrite a document that
+is fine.
+
+What you build is **not launchable yet**: the fleet does not advertise a family
+it built rather than shipped, so a create naming such a ref is still refused.
+`publish_template` says the same thing where it matters — publishing and being
+launchable are different questions, and its result no longer ends on a flat
+"launch it with `create_computer`" that a document declaring `spec.build` would
+have led straight into a refusal on.
 
 ## Running it as a service
 

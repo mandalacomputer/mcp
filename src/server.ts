@@ -5,6 +5,7 @@ import { registerComputers } from './tools/computers.js';
 import { registerGuest } from './tools/guest.js';
 import { registerInput } from './tools/input.js';
 import { registerSnapshots } from './tools/snapshots.js';
+import { registerTemplates } from './tools/templates.js';
 import type { ToolOptions } from './tools/types.js';
 
 export const SERVER_NAME = 'mandala-computer';
@@ -81,6 +82,7 @@ export function createServer(cfg: ServerConfig): McpServer {
   registerInput(server, session, opts);
   registerGuest(server, session, opts);
   registerSnapshots(server, session, opts);
+  registerTemplates(server, session, opts);
   registerAgent(server, session, opts);
 
   return server;
