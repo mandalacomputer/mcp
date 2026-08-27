@@ -1,5 +1,10 @@
 import { z } from 'zod';
-import { CancelledError, isTransientForPoll, MoveRequiredError } from '../errors.js';
+import {
+  CancelledError,
+  isTransientForPoll,
+  MoveRequiredError,
+  RateLimitError,
+} from '../errors.js';
 import {
   type Computer,
   describe,
@@ -38,6 +43,26 @@ const sleep = (ms: number, signal?: AbortSignal) =>
     }
     signal?.addEventListener('abort', done, { once: true });
   });
+
+/** How long these loops leave between polls. */
+const POLL_MS = 2_000;
+
+/**
+ * The same interval, unless the platform asked for longer.
+ *
+ * A 429 is the one failure that says how long to wait, and
+ * {@link isTransientForPoll} now polls through it — so a loop that ignored
+ * `Retry-After` and asked again in two seconds would be spending a rate limit
+ * to discover it was still rate limited. The floor stays {@link POLL_MS}: the
+ * header can say zero, and a poll loop with no interval is a request storm.
+ *
+ * Only reached from a failed poll, which is why it takes the error rather than
+ * living in {@link sleep}: an ordinary turn has nothing to honour.
+ */
+const pollDelay = (err: unknown): number =>
+  err instanceof RateLimitError && err.retryAfterMs !== undefined
+    ? Math.max(POLL_MS, err.retryAfterMs)
+    : POLL_MS;
 
 /**
  * The answer to a wait the caller ended.
@@ -611,7 +636,7 @@ export const registerComputers: Registrar = (server, session, opts) => {
             if (err instanceof CancelledError) {
               if (untilDeadline.aborted) break;
               blocked = err.message;
-              await sleep(2000, signal);
+              await sleep(POLL_MS, signal);
               continue;
             }
             // The poll reads the control plane's own table, so the statuses
@@ -627,7 +652,7 @@ export const registerComputers: Registrar = (server, session, opts) => {
               );
             }
             blocked = err instanceof Error ? err.message : String(err);
-            await sleep(2000, signal);
+            await sleep(pollDelay(err), signal);
             continue;
           }
           blocked = undefined;
@@ -643,7 +668,7 @@ export const registerComputers: Registrar = (server, session, opts) => {
           }
           last = mine;
           if (!mine.live) return finishedMove(id, mine);
-          await sleep(2000, signal);
+          await sleep(POLL_MS, signal);
         }
         return refused(
           blocked
@@ -773,12 +798,12 @@ export const registerComputers: Registrar = (server, session, opts) => {
                 break;
               }
               blocked = err.message;
-              await sleep(2000, signal);
+              await sleep(POLL_MS, signal);
               continue;
             }
             if (!isTransientForPoll(err)) throw err;
             blocked = err instanceof Error ? err.message : String(err);
-            await sleep(2000, signal);
+            await sleep(pollDelay(err), signal);
             continue;
           }
           blocked = undefined;
@@ -840,13 +865,17 @@ export const registerComputers: Registrar = (server, session, opts) => {
                   break;
                 }
                 blocked = err.message;
-                await sleep(2000, signal);
+                await sleep(POLL_MS, signal);
                 continue;
               }
               if (!isTransientForPoll(err)) throw err;
+              // The guest probe's own failure decides this turn's interval, for
+              // pollDelay's reason. The ordinary path below keeps POLL_MS.
+              await sleep(pollDelay(err), signal);
+              continue;
             }
           }
-          await sleep(2000, signal);
+          await sleep(POLL_MS, signal);
         }
         // Also a refusal: the deadline passed without the condition being met,
         // which is the same shape of answer as a cancellation and not the same

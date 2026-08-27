@@ -21,6 +21,7 @@ export {
   PermissionDeniedError,
   PlanLimitError,
   RangeNotSatisfiableError,
+  RateLimitError,
   UnavailableError,
 } from './errors.js';
 export { type HttpConfig, runHttp } from './http.js';
