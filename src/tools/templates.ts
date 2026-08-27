@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { guarded, incompleteWarning, json, refused, said } from '../format.js';
+import { guarded, json, refused, said } from '../format.js';
 import * as P from '../paths.js';
 import type { Registrar } from './types.js';
 
@@ -200,22 +200,22 @@ export const registerTemplates: Registrar = (server, session) => {
     {
       title: 'List builds',
       description:
-        'Every build this account has started that the fleet still holds a record of, newest first. A build lives on the hypervisor that ran it, so this asks all of them — if one cannot be reached the answer says it is short rather than pretending the missing builds never existed.',
+        'Every build this account has started that the fleet still holds a record of, newest first. A build lives on the hypervisor that ran it, so this asks all of them — and if one cannot be reached the platform refuses rather than answering short, so an empty or small list is the truth rather than an outage.',
       inputSchema: {},
       annotations: { readOnlyHint: true },
     },
     (_args, extra) =>
       guarded(async () => {
-        // `listing`, not `json`, because this route fans out across the fleet
-        // and does NOT fail closed the way the computer and snapshot listings do
-        // (adversarial review, OPL-3835). lib/hvproxy answers a short build list
-        // with a 200 and X-GC-Incomplete — there is no `allow_partial` to opt
-        // into and no 503 to stop you — so a client reading the body alone
-        // reports a hypervisor being away as an account with fewer builds. A
-        // model that cannot see a running build starts another one.
-        const { items, incomplete } = await session.api
+        // `json`, not `listing`. This route fans out, and like every other
+        // fan-out on the v1 surface it FAILS CLOSED: `forward` in lib/surface
+        // applies its strict-inventory check to every route generically, so a
+        // response carrying X-GC-Incomplete becomes a 503 before this server
+        // sees it. A short list cannot arrive, so there is no header here worth
+        // reading — an earlier version of this tool read one on the strength of
+        // a review that had looked at lib/hvproxy and not at the tier above it.
+        const items = await session.api
           .with(extra.signal)
-          .listing<Record<string, unknown>[]>(P.BUILDS);
+          .json<Record<string, unknown>[]>('GET', P.BUILDS);
         if (!Array.isArray(items)) {
           const got = items === undefined ? 'no body at all' : typeof items;
           return refused(
@@ -223,8 +223,7 @@ export const registerTemplates: Registrar = (server, session) => {
             items,
           );
         }
-        const warning = incompleteWarning('builds', incomplete);
-        return warning ? said(warning.trim(), items) : json(items);
+        return json(items);
       }),
   );
 

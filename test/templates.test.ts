@@ -341,35 +341,41 @@ describe('a stream that stops is not a build that finished', () => {
 
 describe('a short build listing', () => {
   /**
-   * `GET /builds` fans out across the fleet and does NOT fail closed the way the
-   * computer and snapshot listings do: lib/hvproxy answers a short list with a
-   * 200 and X-GC-Incomplete, with no `allow_partial` to opt into and no 503 to
-   * stop you. Read through `json`, the header was discarded and a hypervisor
-   * being away looked like an account with fewer builds — and a model that
-   * cannot see a running build starts another one.
+   * It never reaches this server as a short list, and that is the point.
+   *
+   * lib/hvproxy does set X-GC-Incomplete on one, but `forward` in lib/surface
+   * applies its strict-inventory check to every v1 route generically — so the
+   * response is a 503 before this server sees it. An earlier version of this
+   * tool read the header, on the strength of a review that had looked at
+   * lib/hvproxy and not at the tier above it.
    */
-  it('says the list is short rather than presenting it as complete', async () => {
+  it('arrives as a refusal, so the list a model sees is the truth', async () => {
     const real = globalThis.fetch;
     globalThis.fetch = (async () =>
-      new Response(JSON.stringify([{ id: 'bld-1', status: 'running' }]), {
-        status: 200,
-        headers: { 'Content-Type': 'application/json', 'X-GC-Incomplete': '0' },
-      })) as typeof fetch;
+      new Response(
+        JSON.stringify({
+          error:
+            'Right now a hypervisor cannot be reached, so this list would be incomplete. ' +
+            'Retry, or pass allow_partial=1 to accept a partial answer.',
+        }),
+        {
+          status: 503,
+          headers: { 'Content-Type': 'application/json', 'X-GC-Incomplete': '0' },
+        },
+      )) as typeof fetch;
     const { call, close } = await connect();
     const res = await call('list_builds');
     globalThis.fetch = real;
 
-    expect(textOf(res)).toMatch(/INCOMPLETE/);
-    expect(textOf(res)).toMatch(/Do not treat anything absent from it as deleted/);
-    // The rows still come back — a short list is short, not useless.
-    expect(textOf(res)).toMatch(/bld-1/);
+    expect(res.isError).toBe(true);
+    expect(textOf(res)).toMatch(/would be incomplete/);
     await close();
   });
 
-  it('says nothing when the fleet answered in full', async () => {
+  it('is an ordinary list when the fleet answered in full', async () => {
     const { call, close } = await connect();
     const res = await call('list_builds');
-    expect(textOf(res)).not.toMatch(/INCOMPLETE/);
+    expect(res.isError).toBeFalsy();
     expect(textOf(res)).toMatch(/bld-1/);
     await close();
   });
