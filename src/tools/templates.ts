@@ -76,7 +76,7 @@ export const registerTemplates: Registrar = (server, session) => {
         // it actually got is the list of problems it asked for.
         return body.valid
           ? said(
-              'The document is valid — against the schema. Publishing can still refuse it for something only your account decides: the namespace, the family, your plan, or a ref already taken. `doc_digest` identifies the document and changes with any edit at all. `build_digest` covers only what decides the image, so comparing it against a previous check tells you whether an edit means a rebuild — but it is present ONLY for a document with no `spec.from`, and a document that declares build steps must have one, so a buildable document gets `build_digest_needs` instead, naming the parent whose digest would be required.',
+              'The document is valid — against the schema. Publishing can still refuse it for something only your account decides: the namespace, the family, your plan, or a ref already taken. `doc_digest` identifies the document and changes with anything that changes what it MEANS — a label included. Comments, key order, indentation and YAML-versus-JSON do not reach it: the digest is over the canonical re-marshalling of the parsed document, not over your file. `build_digest` covers only what decides the image, so comparing it against a previous check tells you whether an edit means a rebuild — but it is present ONLY for a document with no `spec.from`, and a document that declares build steps must have one, so a buildable document gets `build_digest_needs` instead, naming the parent whose digest would be required.',
               body,
             )
           : said(
@@ -264,11 +264,33 @@ export const registerTemplates: Registrar = (server, session) => {
         // "get_build_progress" differing by a word is how a model picks the
         // wrong one. Two requests inside one call is the cheaper trade.
         const api = session.api.with(extra.signal);
-        const [job, progress] = await Promise.all([
+        // allSettled, not all: the two legs are INDEPENDENT fleet walks — the job
+        // read forwards through hvAny, the progress read is a local handler that
+        // does its own — so one can fail while the other succeeds, and
+        // Promise.all threw the good half away. Progress is the half a model
+        // calls this for after a build nobody watched (the status, the phase, the
+        // failed step), so it is required and the job read is best effort: a
+        // fleet hiccup costs `ref` and the timestamps rather than the whole
+        // answer (/code-review, OPL-3835).
+        const [jobRead, progressRead] = await Promise.allSettled([
           api.json<Record<string, unknown>>('GET', P.build(build_id)),
           api.json<Record<string, unknown>>('GET', P.buildAction(build_id, 'progress')),
         ]);
-        return json({ ...job, ...progress });
+        if (progressRead.status === 'rejected') throw progressRead.reason;
+        const progress = progressRead.value;
+        const job = jobRead.status === 'fulfilled' ? jobRead.value : undefined;
+        // The two reads land at different instants, so a build that finishes
+        // between them would otherwise merge into a record contradicting itself:
+        // `status: running` beside a populated `finished_at`, or `succeeded` with
+        // none. Progress owns `status` and `done` because that is what a model
+        // branches on, so the job's `finished_at` is dropped whenever progress
+        // says the build has not finished.
+        const merged: Record<string, unknown> = { ...job, ...progress };
+        if (job && progress.done !== true) delete merged.finished_at;
+        if (!job) {
+          merged.partial = 'the build record could not be read; ref and timestamps are missing';
+        }
+        return json(merged);
       }),
   );
 
@@ -315,17 +337,21 @@ export const registerTemplates: Registrar = (server, session) => {
           last = ev.data;
           const line =
             `${ev.data.phase ?? '?'} ${ev.data.step ?? 0}/${ev.data.of ?? 0} ${ev.data.note ?? ''}`.trim();
-          // A PROGRESS notification, not only a logging one, and this is what
-          // makes the tool usable at all (/code-review, OPL-3835). The MCP SDK's
-          // default request timeout is 60 seconds and only `notifications/progress`
-          // resets it — `_onprogress` in shared/protocol.js is bound to that
-          // schema alone. sendLoggingMessage sends `notifications/message`, which
-          // no client treats as a keepalive. So a build the platform is willing
-          // to stream for fifty minutes, and which build_template tells the model
-          // takes "roughly fifteen", was cancelled at sixty seconds on a default
-          // client and came back as a cancellation rather than an outcome —
-          // precisely the "indistinguishable from a hang" this tool exists to
-          // remove.
+          // A PROGRESS notification, not only a logging one, because it is the
+          // only frame that CAN hold a long request open: `_onprogress` in the
+          // SDK's shared/protocol.js resets a pending request's timer, and
+          // `notifications/message` — what sendLoggingMessage emits — never
+          // touches it.
+          //
+          // IT IS NOT SUFFICIENT ON ITS OWN, and the first version of this
+          // comment claimed it was (/code-review, OPL-3835). protocol.js reads
+          // `options?.resetTimeoutOnProgress ?? false`, so the reset happens only
+          // for a client that asked for it when it made the call. One that mints
+          // a progressToken and leaves that option alone is still cancelled at
+          // the 60s default on a build that takes fifteen minutes. What this does
+          // is make the keepalive AVAILABLE — without it no client could hold the
+          // request open at all; with it, one that opts in can. The rest is the
+          // client's to set, and get_build is the answer for a client that cannot.
           if (progressToken !== undefined) {
             sent += 1;
             await extra
@@ -336,10 +362,12 @@ export const registerTemplates: Registrar = (server, session) => {
                   // `of` is the step count, which is 0 until the build reaches
                   // its first step — sent only once it means something, since a
                   // total of 0 renders as a finished bar.
-                  progress: typeof ev.data.step === 'number' ? ev.data.step : sent,
-                  ...(typeof ev.data.of === 'number' && ev.data.of > 0
-                    ? { total: ev.data.of }
-                    : {}),
+                  // The event COUNT, not the step index. The SDK's ProgressSchema
+                  // asks that this increase every time, and `step` is 0 for every
+                  // pre-step phase — planning, staging, the multi-gigabyte base
+                  // copy — and stays 0 for the whole life of a document with no
+                  // build steps, so successive frames repeated `progress: 0`.
+                  progress: sent,
                   message: line,
                 },
               })

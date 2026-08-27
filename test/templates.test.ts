@@ -445,3 +445,87 @@ describe('what /code-review found', () => {
     await close();
   });
 });
+
+describe('what the second review pass found', () => {
+  const answer = (body: unknown, status = 200) =>
+    new Response(JSON.stringify(body), {
+      status,
+      headers: { 'Content-Type': 'application/json' },
+    });
+
+  /**
+   * A partial answer is still an answer.
+   *
+   * The two legs are independent fleet walks, so one can fail while the other
+   * succeeds. Promise.all threw the good half away — and the half it threw away
+   * is the one a model calls get_build for after a build nobody watched.
+   */
+  it('still answers when the job record cannot be read', async () => {
+    const real = globalThis.fetch;
+    globalThis.fetch = (async (input: string | URL) => {
+      const path = new URL(String(input)).pathname;
+      if (path.endsWith('/progress')) {
+        return answer({ id: 'bld-1', status: 'failed', phase: 'failed', error: 'apt died' });
+      }
+      return answer({ error: 'no hypervisor could answer' }, 503);
+    }) as typeof fetch;
+    const { call, close } = await connect();
+    const res = await call('get_build', { build_id: 'bld-1' });
+    globalThis.fetch = real;
+
+    expect(res.isError).toBeFalsy();
+    expect(textOf(res)).toMatch(/apt died/);
+    expect(textOf(res)).toMatch(/could not be read/);
+    await close();
+  });
+
+  /**
+   * The two reads race, so a build that finishes between them merged into a
+   * record contradicting itself: `done: false` beside a populated finished_at.
+   */
+  it('does not report a finish time for a build progress says is running', async () => {
+    const real = globalThis.fetch;
+    globalThis.fetch = (async (input: string | URL) => {
+      const path = new URL(String(input)).pathname;
+      return path.endsWith('/progress')
+        ? answer({ id: 'bld-1', status: 'running', done: false, phase: 'copying' })
+        : answer({
+            id: 'bld-1',
+            ref: 'acc-1/devbox@1.0.0',
+            status: 'succeeded',
+            started_at: '2026-08-26T12:00:00.000Z',
+            finished_at: '2026-08-26T12:15:00.000Z',
+          });
+    }) as typeof fetch;
+    const { call, close } = await connect();
+    const res = await call('get_build', { build_id: 'bld-1' });
+    globalThis.fetch = real;
+
+    const body = JSON.parse(textOf(res));
+    expect(body.done).toBe(false);
+    expect(body.finished_at).toBeUndefined();
+    // The half that does not race is kept.
+    expect(body.ref).toBe('acc-1/devbox@1.0.0');
+    expect(body.started_at).toBe('2026-08-26T12:00:00.000Z');
+    await close();
+  });
+
+  /**
+   * The SDK's ProgressSchema asks that `progress` increase every time. `step` is
+   * 0 for every pre-step phase and for the whole life of a document with no
+   * build steps, so successive frames repeated `progress: 0`.
+   */
+  it('sends a progress value that increases', async () => {
+    const { client, close } = await connect();
+    const seen: number[] = [];
+    await client.callTool({ name: 'watch_build', arguments: { build_id: 'bld-1' } }, undefined, {
+      onprogress: (p) => {
+        seen.push((p as { progress: number }).progress);
+      },
+    });
+    expect(seen.length).toBeGreaterThan(1);
+    expect(seen).toEqual([...seen].sort((a, b) => a - b));
+    expect(new Set(seen).size).toBe(seen.length);
+    await close();
+  });
+});

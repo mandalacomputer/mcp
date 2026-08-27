@@ -234,9 +234,16 @@ model is more likely than a program to produce for an optional argument — read
 platform answers `400` for it now; this server will not send one at all.
 
 **A build is minutes, and `watch_build` is how you follow one.** `build_template`
-returns immediately with a job; watching it streams the platform's own progress
-and logs each step as it arrives, so a long build is visibly alive rather than
-indistinguishable from a hang. A build that *failed* is a normal answer from
+returns immediately with a job; watching it streams the platform's own progress,
+emitting both a progress notification and a log line for each step, so a long
+build is visibly alive rather than indistinguishable from a hang.
+
+**Set `resetTimeoutOnProgress` if you intend to watch a real build.** The MCP
+default request timeout is 60 seconds and only a progress notification can reset
+it — but the SDK resets it only for a caller that passed that option, so a client
+which merely accepts progress is still cancelled a minute into a fifteen-minute
+build. `get_build` is the answer for a client that cannot hold a request open:
+it reads once and returns. A build that *failed* is a normal answer from
 `watch_build`, not an error — it names the step that stopped it, which is the
 thing to fix. An `error` event is the *stream* failing and says nothing about the
 build, and the tool says so rather than letting a model rewrite a document that
