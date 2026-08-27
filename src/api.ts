@@ -3,6 +3,7 @@ import {
   type APIError,
   CancelledError,
   ConnectivityError,
+  ConnectivityInterruptedError,
   errorForStatus,
   MandalaError,
   RangeNotSatisfiableError,
@@ -288,8 +289,21 @@ export class Api {
       }
       // Rewritten, because the raw one names the host and the failure a model
       // can act on is "the platform is not reachable", not a DNS error string.
-      throw new ConnectivityError(
-        `could not reach ${this.#base.origin}: ${cause instanceof Error ? cause.message : String(cause)}`,
+      //
+      // Two classes, because a rejected fetch is two different outcomes wearing
+      // one shape. A refused socket means nothing was dispatched and a create
+      // may be replayed; a socket that died with the request already on the
+      // wire means the platform may have acted and the answer was lost. The
+      // second says so, and the wording follows the class rather than the other
+      // way round (OPL-3855).
+      const detail = cause instanceof Error ? cause.message : String(cause);
+      if (neverDispatched(cause)) {
+        throw new ConnectivityError(`could not reach ${this.#base.origin}: ${detail}`);
+      }
+      throw new ConnectivityInterruptedError(
+        `${method} /${path.replace(/^\/+/, '')} to ${this.#base.origin} failed after the request ` +
+          `was sent: ${detail}. It may have been received, so treat anything it would have ` +
+          'changed as unknown rather than undone.',
       );
     }
     if (!resp.ok) throw await this.#error(resp, method, path, signal);
@@ -643,15 +657,159 @@ function isCancellation(_cause: unknown, signal?: AbortSignal): boolean {
   return Boolean(signal?.aborted);
 }
 
-/** An undici / fetch abort that is not the caller's signal. */
-function isTransportAbort(cause: unknown): boolean {
+/**
+ * Every error under one, including the ones a fetch hides two levels down.
+ *
+ * A rejected fetch is a `TypeError: fetch failed` whose `cause` is what
+ * actually went wrong, and on a dual-stack host that cause is an
+ * `AggregateError` holding one attempt per address. Neither the top error nor
+ * its immediate cause carries the code the classifiers below read, so both
+ * links have to be followed. Bounded, because a cause chain is user-reachable
+ * data and nothing here needs to be robust to a cycle.
+ */
+function* causes(err: unknown, depth = 0): Generator<Record<string, unknown>> {
+  if (!err || typeof err !== 'object' || depth > 5) return;
+  const e = err as Record<string, unknown>;
+  yield e;
+  yield* causes(e.cause, depth + 1);
+  if (Array.isArray(e.errors)) {
+    for (const inner of e.errors) yield* causes(inner, depth + 1);
+  }
+}
+
+/**
+ * TLS failures that can only happen before the handshake finishes.
+ *
+ * NAMED IN FULL, with no prefix test, and that is the correction worth
+ * recording. This started as `ERR_SSL_` and `ERR_TLS_` prefixes, and NEITHER
+ * prefix means "handshake". Node spells every OpenSSL reason `ERR_SSL_`,
+ * including the fatal alerts a peer can send on any record — a TLS-terminating
+ * proxy that dies mid-response answers `ERR_SSL_TLSV1_ALERT_INTERNAL_ERROR`,
+ * and a corrupted record answers `ERR_SSL_SSLV3_ALERT_BAD_RECORD_MAC`. Both
+ * arrive with the request long since on the wire. `ERR_TLS_` is narrower and
+ * still not safe: `ERR_TLS_RENEGOTIATION_DISABLED` is by definition
+ * mid-connection. A prefix that admits those puts a possibly-dispatched
+ * failure into the class that says nothing was sent, which is the one mistake
+ * this whole function exists to avoid.
+ *
+ * So: an explicit set, holding certificate verification results (OpenSSL's,
+ * which carry no prefix), the protocol mismatches that can only be diagnosed
+ * from the first record, and the two Node codes that are genuinely handshake
+ * events. Add to it when a new one turns up. A missing entry costs an embedder
+ * one blind retry it could have made; a wrong entry costs a second billable
+ * computer, so the set stays short on purpose.
+ */
+const TLS_CODES = new Set([
+  // Certificate verification, from OpenSSL. All of these end the handshake.
+  'CERT_HAS_EXPIRED',
+  'CERT_NOT_YET_VALID',
+  'CERT_REVOKED',
+  'CERT_SIGNATURE_FAILURE',
+  'DEPTH_ZERO_SELF_SIGNED_CERT',
+  'HOSTNAME_MISMATCH',
+  'SELF_SIGNED_CERT_IN_CHAIN',
+  'UNABLE_TO_GET_ISSUER_CERT',
+  'UNABLE_TO_GET_ISSUER_CERT_LOCALLY',
+  'UNABLE_TO_VERIFY_LEAF_SIGNATURE',
+  // Node's own TLS layer, for the two events that are the handshake itself.
+  'ERR_TLS_CERT_ALTNAME_INVALID',
+  'ERR_TLS_HANDSHAKE_TIMEOUT',
+  // Protocol mismatches, diagnosable only from the first record on the wire.
+  // `ERR_SSL_WRONG_VERSION_NUMBER` is what https onto a plaintext port gives.
+  'ERR_SSL_NO_CIPHERS_AVAILABLE',
+  'ERR_SSL_NO_PROTOCOLS_AVAILABLE',
+  'ERR_SSL_NO_SHARED_CIPHER',
+  'ERR_SSL_PACKET_LENGTH_TOO_LONG',
+  'ERR_SSL_UNKNOWN_PROTOCOL',
+  'ERR_SSL_UNSUPPORTED_PROTOCOL',
+  'ERR_SSL_VERSION_TOO_LOW',
+  'ERR_SSL_WRONG_VERSION_NUMBER',
+]);
+
+/**
+ * Can this rejection be shown to have happened BEFORE the request was written?
+ *
+ * The one question that decides whether {@link ConnectivityError} or
+ * {@link ConnectivityInterruptedError} comes out of `#fetch`, and therefore
+ * whether `isTransient` tells an embedder a create is safe to replay.
+ *
+ * FAIL CLOSED, which is the whole design. The two wrong answers do not cost the
+ * same: calling a connect failure a possible dispatch costs one retry that a
+ * caller could have made blind, and calling a lost response a connect failure
+ * costs a second billable computer. So this is an ALLOW-LIST of causes that can
+ * only arise from the connector, and everything else — anything unrecognised,
+ * anything new undici invents — is treated as possibly dispatched.
+ *
+ * The discriminator is the syscall, not the errno, and that distinction earns
+ * its place. `ECONNRESET` alone is ambiguous: it is what a TLS handshake
+ * against a non-TLS port produces (`syscall: 'read'`, connect phase) and also
+ * what a peer resetting a live connection produces (post-dispatch). `connect`
+ * and `getaddrinfo`, by contrast, happen once and only before the request
+ * exists. undici's own post-dispatch failures are unmistakable in the other
+ * direction — `SocketError`/`UND_ERR_SOCKET`, `HTTPParserError`, the two
+ * timeout classes — and none of them match anything here.
+ *
+ * The allow-list is matched in full rather than by prefix, for the reason
+ * {@link TLS_CODES} sets out: the obvious prefixes admit failures that happen
+ * after the handshake, and one of those in this branch is exactly the bug this
+ * function was written to prevent.
+ *
+ * Measured against undici 6 on Node 26, 2026-08-27: refused → `ECONNREFUSED`
+ * with `syscall: 'connect'`; DNS → `ENOTFOUND` with `syscall: 'getaddrinfo'`;
+ * dual-stack refusal → the same, inside an `AggregateError`; unroutable →
+ * `UND_ERR_CONNECT_TIMEOUT`; TLS against a plaintext port →
+ * `ERR_SSL_WRONG_VERSION_NUMBER`. Post-dispatch: a socket closed after the
+ * request → `UND_ERR_SOCKET`, a garbage response → `HPE_INVALID_CONSTANT`, no
+ * response → `UND_ERR_HEADERS_TIMEOUT`.
+ */
+function neverDispatched(err: unknown): boolean {
+  for (const cause of causes(err)) {
+    const code = typeof cause.code === 'string' ? cause.code : '';
+    const syscall = cause.syscall;
+    if (syscall === 'connect' || syscall === 'getaddrinfo' || syscall === 'lookup') return true;
+    if (code === 'UND_ERR_CONNECT_TIMEOUT') return true;
+    if (TLS_CODES.has(code)) return true;
+  }
+  return false;
+}
+
+/** Errnos a live connection dies with, once the request is already on it. */
+const SOCKET_ERRNOS = new Set(['ECONNRESET', 'ECONNABORTED', 'EPIPE', 'ENOTCONN', 'ETIMEDOUT']);
+
+/**
+ * A transport failure while reading a body, as opposed to a bug in this file.
+ *
+ * Only reached from {@link readBody}, so the phase is not in question — the
+ * response headers already arrived. What is in question is whether the throw
+ * came from the connection or from us: `#decode` and `sse` raise
+ * {@link MandalaError} for a body that arrived and made no sense, and wrapping
+ * one of those as a connectivity failure would send a poll loop round again on
+ * a defect.
+ *
+ * The names were here first and are undici's aborts and idle timeouts. The two
+ * tests below them close the case that used to fall straight through: a socket
+ * that dies mid-body surfaces from `fetch` as `TypeError: terminated` — a name
+ * this list does not have and never will — carrying a `SocketError` as its
+ * cause. That reached `throw cause` and came out as a bare `TypeError`, which
+ * is neither transient nor pollable, so a wait loop died on a blip it existed
+ * to ride out.
+ */
+function isTransportFailure(cause: unknown): boolean {
   const name = (cause as { name?: string })?.name;
-  return (
+  if (
     name === 'AbortError' ||
     name === 'TimeoutError' ||
     name === 'BodyTimeoutError' ||
     name === 'HeadersTimeoutError'
-  );
+  ) {
+    return true;
+  }
+  for (const inner of causes(cause)) {
+    const code = typeof inner.code === 'string' ? inner.code : '';
+    if (code.startsWith('UND_ERR_')) return true;
+    if (SOCKET_ERRNOS.has(code)) return true;
+  }
+  return false;
 }
 
 /** The same cancellation semantics for response bodies as for response headers. */
@@ -667,11 +825,16 @@ async function readBody<T>(
     if (isCancellation(cause, signal)) {
       throw cancellationError(method, path, 'while reading the platform response');
     }
-    if (isTransportAbort(cause)) {
-      throw new ConnectivityError(
+    // Always the post-dispatch class. Getting here means the response headers
+    // arrived, so the platform received the request and acted on it; what was
+    // lost is the answer. That is precisely the case `isTransient` must say no
+    // to and the poll predicate must ride out (OPL-3855).
+    if (isTransportFailure(cause)) {
+      throw new ConnectivityInterruptedError(
         `could not finish reading ${method} /${path.replace(/^\/+/, '')}: ${
           cause instanceof Error ? cause.message : String(cause)
-        }`,
+        }. The request was received, so treat anything it would have changed as ` +
+          'unknown rather than undone.',
       );
     }
     throw cause;
