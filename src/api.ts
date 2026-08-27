@@ -1,4 +1,4 @@
-import { Agent, type Dispatcher } from 'undici';
+import { Agent, type Dispatcher, fetch as undiciFetch } from 'undici';
 import {
   type APIError,
   CancelledError,
@@ -96,6 +96,45 @@ const PLATFORM_DISPATCHER = new Agent({
   headersTimeout: PLATFORM_HEADERS_TIMEOUT_MS,
   bodyTimeout: PLATFORM_BODY_TIMEOUT_MS,
 });
+
+/**
+ * `globalThis.fetch` as it was before anything replaced it.
+ *
+ * Captured so {@link platformFetch} can tell "nobody has touched this" from "a
+ * test or an embedder installed their own", which are the two cases that need
+ * opposite answers below.
+ */
+const NATIVE_FETCH = globalThis.fetch;
+
+/**
+ * The fetch a platform request actually goes through, and why it is not simply
+ * `fetch`.
+ *
+ * The dispatcher above is an Agent from the `undici` PACKAGE, and Node's
+ * built-in fetch is a DIFFERENT COPY of undici — the one bundled with the
+ * runtime. Handing one's Agent to the other's fetch works only while the two
+ * agree on the internal handler interface, and they have stopped agreeing:
+ * Node 26 bundles undici 8.9, whose fetch passes a handler that undici 6's
+ * Agent rejects outright with `invalid onError method`. That surfaces here as
+ * `fetch failed`, which this class then wraps as "could not reach
+ * app.mandala.computer" — so on Node 26 every call this server makes reported
+ * the platform as down, before a packet was sent.
+ *
+ * NOT FIXABLE BY A VERSION BUMP, which is the thing worth writing down: npm's
+ * newest undici is 7.x and Node 26 bundles 8.x, so no dependency this package
+ * can declare matches what the runtime carries — and even if one did, matching
+ * Node 26 would mean mismatching Node 20, which `engines` still admits. Two
+ * undicis is the bug; using one of them for both halves is the fix.
+ *
+ * So the request goes through undici's OWN fetch, which understands its own
+ * Agent on every Node. The global is still preferred when something has
+ * replaced it: that is how the tests stand a stub in front of the platform, and
+ * an embedder that installs an instrumented fetch means it to be used.
+ */
+export const platformFetch = (): typeof globalThis.fetch =>
+  globalThis.fetch === NATIVE_FETCH
+    ? (undiciFetch as unknown as typeof globalThis.fetch)
+    : globalThis.fetch;
 
 /** One server-sent event off the agent route. */
 export type SSEEvent = { event: string; data: unknown };
@@ -233,7 +272,7 @@ export class Api {
         signal,
         dispatcher: PLATFORM_DISPATCHER,
       };
-      resp = await fetch(this.#url(path, opts.query), init);
+      resp = await platformFetch()(this.#url(path, opts.query), init);
     } catch (cause) {
       // Cancellation first, because it is not a connectivity failure and the
       // wrap below cannot tell the difference. An aborted fetch rejects with a
