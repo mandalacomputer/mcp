@@ -251,6 +251,10 @@ is fine.
 
 What you build is **not launchable yet**: the fleet does not advertise a family
 it built rather than shipped, so a create naming such a ref is still refused.
+`publish_template` says the same thing where it matters — publishing and being
+launchable are different questions, and its result no longer ends on a flat
+"launch it with `create_computer`" that a document declaring `spec.build` would
+have led straight into a refusal on.
 
 ## Running it as a service
 

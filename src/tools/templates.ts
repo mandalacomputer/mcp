@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { CancelledError, isTransientForPoll } from '../errors.js';
 import { guarded, json, refused, said } from '../format.js';
 import * as P from '../paths.js';
 import type { Registrar } from './types.js';
@@ -70,6 +71,18 @@ export const registerTemplates: Registrar = (server, session) => {
           .json<Record<string, unknown>>('POST', P.TEMPLATE_VALIDATE, {
             raw: P.templateDocument(document),
           });
+        // `valid` READ AS A BOOLEAN, not for truthiness (adversarial review,
+        // OPL-3835). `json<T>` is a cast and checks nothing at run time, so a
+        // body answering `{"valid": "false"}` — a proxy stringifying, a field
+        // that changes type — is truthy, and this tool then reported a document
+        // the platform had just rejected as valid. The one answer a check tool
+        // must never get wrong is "yes".
+        if (typeof body.valid !== 'boolean') {
+          return refused(
+            'POST /templates/validate answered without a boolean `valid`, so this says NOTHING about the document — do not publish on the strength of it. Check it again.',
+            body,
+          );
+        }
         // NOT `refused` for an invalid document. That is the answer to the
         // question this tool asks — the platform says so with a 200 — and
         // marking it isError would tell the model its request failed when what
@@ -106,8 +119,30 @@ export const registerTemplates: Registrar = (server, session) => {
           .json<Record<string, unknown>>('POST', P.TEMPLATES, {
             raw: P.templateDocument(document),
           });
+        // The ref, checked rather than interpolated. This is a WRITE, so a
+        // malformed 2xx is the one answer that cannot be shrugged off:
+        // `Published undefined` reads as a success and names a ref nothing can
+        // resolve, and a model that responds by bumping `metadata.version` and
+        // publishing again has claimed two refs for one document — neither of
+        // which it can take back (adversarial review, OPL-3835).
+        if (typeof body.ref !== 'string' || !body.ref.trim()) {
+          return refused(
+            'POST /templates answered without a `ref`, so this server cannot say what was stored. THE PUBLISH MAY HAVE SUCCEEDED — read the name with get_template before publishing again, because a ref is immutable and a second version claims a second ref.',
+            body,
+          );
+        }
+        // What it takes to LAUNCH the thing, rather than the flat "Launch it
+        // with create_computer" this used to end on. That sentence contradicted
+        // build_template's own description two tools down: a document declaring
+        // `spec.build` names a family the fleet does not advertise, so following
+        // this line led straight into a refusal the server already knew about
+        // (adversarial review, OPL-3835). Publishing and being launchable are
+        // different questions and this says so, without claiming to know which
+        // of the two this document is — the store answers the first, and only
+        // the document says whether it declares build steps.
         return said(
-          `Published ${body.ref}. Launch it with create_computer, passing that ref as \`template\` — a published template is named by its ref and by nothing else, so its short name still means one of ours.`,
+          `Published ${body.ref}. A published template is named by its ref and by nothing else, so its short name still means one of ours. ` +
+            'WHETHER IT LAUNCHES depends on the document: pass the ref to create_computer as `template` if it layers onto a family the fleet ships, but one declaring `spec.build` steps names a family that has to be built first — that is build_template — and the fleet does not yet advertise a family it built rather than shipped, so a create naming such a ref is still refused.',
           body,
         );
       }),
@@ -161,8 +196,20 @@ export const registerTemplates: Registrar = (server, session) => {
           .json<Record<string, unknown>>('DELETE', P.templateRef(namespace, name), {
             query: P.templateVersionQuery(version),
           });
-        const gone = Array.isArray(body.retired) ? body.retired : [];
-        const left = Array.isArray(body.versions) ? body.versions : [];
+        // The one unreadable response in this module that must not be smoothed
+        // over. `Array.isArray(body.retired) ? … : []` turned a body this
+        // server could not read into "Retired 0 version(s)" — a confident report
+        // that nothing happened, about an irreversible DELETE the platform
+        // answered 2xx to and which may well have just taken every version of
+        // the name (adversarial review, OPL-3835).
+        if (!Array.isArray(body.retired) || !Array.isArray(body.versions)) {
+          return refused(
+            'The retire answered without the `retired` and `versions` lists, so this server cannot say what went. THE RETIRE MAY HAVE HAPPENED, and it cannot be undone — read the name with get_template before concluding anything, and do not repeat the call on the assumption that nothing was taken.',
+            body,
+          );
+        }
+        const gone = body.retired;
+        const left = body.versions;
         return said(
           `Retired ${gone.length} version(s): ${gone.join(', ')}. ` +
             (left.length
@@ -201,6 +248,15 @@ export const registerTemplates: Registrar = (server, session) => {
             raw: P.templateDocument(document),
             query: P.buildQuery(no_reuse),
           });
+        // The id, checked: it is the only handle on a job that outlives this
+        // request, and `Build undefined started` sends a model to watch_build
+        // with a build_id it cannot have (adversarial review, OPL-3835).
+        if (typeof body.id !== 'string' || !body.id.trim()) {
+          return refused(
+            'POST /builds answered without an `id`, so there is no handle to follow this build with. THE BUILD MAY HAVE STARTED — call list_builds to find it rather than building again, since a build is minutes of work on a hypervisor that runs one at a time.',
+            body,
+          );
+        }
         return said(
           `Build ${body.id} started for ${body.ref}. It is not finished — call watch_build with that id, or get_build to check once.`,
           body,
@@ -226,17 +282,37 @@ export const registerTemplates: Registrar = (server, session) => {
         // sees it. A short list cannot arrive, so there is no header here worth
         // reading — an earlier version of this tool read one on the strength of
         // a review that had looked at lib/hvproxy and not at the tier above it.
-        const items = await session.api
-          .with(extra.signal)
-          .json<Record<string, unknown>[]>('GET', P.BUILDS);
+        const items = await session.api.with(extra.signal).json<unknown>('GET', P.BUILDS);
         if (!Array.isArray(items)) {
-          const got = items === undefined ? 'no body at all' : typeof items;
+          const got =
+            items === undefined ? 'no body at all' : items === null ? 'null' : typeof items;
           return refused(
             `GET /builds answered with ${got}, not a list of builds. This is not an empty list — do not conclude anything about what exists from it.`,
             items,
           );
         }
-        return json(items);
+        // Each ROW checked too, which list_computers and list_snapshots do and
+        // this one did not (adversarial review, OPL-3835). `Array.isArray`
+        // alone passed `[null]` and `["bad projection"]` through as an
+        // inventory, and a model reading a build row that is a string gets
+        // `undefined` for every field it asks about with nothing saying the row
+        // was never a build.
+        const malformed = items.filter(
+          (item) => item === null || typeof item !== 'object' || Array.isArray(item),
+        ).length;
+        const builds = items.filter(
+          (item): item is Record<string, unknown> =>
+            item !== null && typeof item === 'object' && !Array.isArray(item),
+        );
+        if (!malformed) return json(builds);
+        const warning = `WARNING: ignored ${malformed} malformed build entr${malformed === 1 ? 'y' : 'ies'} from the platform.`;
+        if (!builds.length) {
+          return refused(
+            `${warning} No valid builds remained. This is not an empty build list — do not conclude anything about what exists from it.`,
+            items,
+          );
+        }
+        return said(warning, builds);
       }),
   );
 
@@ -278,13 +354,50 @@ export const registerTemplates: Registrar = (server, session) => {
         ]);
         if (progressRead.status === 'rejected') throw progressRead.reason;
         const progress = progressRead.value;
-        const job = jobRead.status === 'fulfilled' ? jobRead.value : undefined;
+        // Best effort means AVAILABILITY, not everything (adversarial review,
+        // OPL-3835). `status === 'fulfilled' ? … : undefined` swallowed the
+        // rejection whatever it was, so a 401, a 403, a 404 or the caller's own
+        // cancellation came back as a successful partial answer with a note
+        // about the fleet — the shape a caller reading `isError` to decide
+        // whether it may act on the result cannot see through. Only the
+        // statuses that clear on their own are worth losing `ref` and the
+        // timestamps for; the rest are decisions, and a decision suppressed is a
+        // decision the model never learns about.
+        //
+        // `isTransientForPoll` rather than a list here, because it is the same
+        // question the wait loops in computers.ts ask and this is the same kind
+        // of call: a read, where replaying costs nothing, so a 52x during an
+        // outage counts as a hiccup too. It says no to CancelledError, which is
+        // the one that must never be suppressed — nobody is waiting for this
+        // answer.
+        if (jobRead.status === 'rejected' && !isTransientForPoll(jobRead.reason)) {
+          throw jobRead.reason;
+        }
+        let job = jobRead.status === 'fulfilled' ? jobRead.value : undefined;
         // The two reads land at different instants, so a build that finishes
-        // between them would otherwise merge into a record contradicting itself:
-        // `status: running` beside a populated `finished_at`, or `succeeded` with
-        // none. Progress owns `status` and `done` because that is what a model
-        // branches on, so the job's `finished_at` is dropped whenever progress
-        // says the build has not finished.
+        // between them would otherwise merge into a record contradicting itself.
+        // Progress owns `status` and `done` because that is what a model
+        // branches on.
+        //
+        // BOTH ORDERS, and the first fix only had one of them (adversarial
+        // review, OPL-3835). Job-then-finish-then-progress gives `running`
+        // beside a populated `finished_at`, which the delete below handles.
+        // Progress-then-finish-then-job gives the mirror image — `succeeded`,
+        // `done: true`, and no finish time at all, a build that completed
+        // without ever ending — and that one cannot be fixed by dropping a
+        // field, because the field that is missing is the true one. So the job
+        // record is read again: one extra request, only inside the race window,
+        // and by the time it is made the record it asks for has settled.
+        if (job && progress.done === true && job.finished_at === undefined) {
+          try {
+            job = await api.json<Record<string, unknown>>('GET', P.build(build_id));
+          } catch (err) {
+            // The first read already succeeded, so a second failure costs the
+            // reconciliation rather than the call. Except a cancellation, which
+            // means there is nobody left to answer.
+            if (err instanceof CancelledError) throw err;
+          }
+        }
         const merged: Record<string, unknown> = { ...job, ...progress };
         if (job && progress.done !== true) delete merged.finished_at;
         if (!job) {
@@ -333,7 +446,31 @@ export const registerTemplates: Registrar = (server, session) => {
           }
           if (ev.event !== 'progress' && ev.event !== 'done') continue;
           if (!isRecord(ev.data)) continue;
-          if (ev.event === 'done') sawDone = true;
+          // An event about ANOTHER build is not this build's news. The stream is
+          // per-build so this should never arrive, but `id` is one of the three
+          // fields both of the platform's build projectors carry, so checking it
+          // is free — and a misrouted frame reported as this build's outcome is
+          // the kind of wrong answer nobody could spot afterwards.
+          if (typeof ev.data.id === 'string' && ev.data.id !== build_id) continue;
+          if (ev.event === 'done') {
+            // A `done` is terminal only if it SAYS SO (adversarial review,
+            // OPL-3835). `isRecord` alone called `event: done\ndata: {}`
+            // well-formed, set the flag, and answered `Build bld-1 undefined.`;
+            // it accepted `{status: "running", done: false}` as a completed
+            // watch too, which is the very misreport `sawDone` was added to
+            // prevent, reached from the other side.
+            //
+            // `done: true` and a status that is a non-empty string, rather than
+            // a list of the statuses a build may end in. The platform owns that
+            // vocabulary — `succeeded` and `failed` are the two this server has
+            // seen and a cancelled build would be a third — so an enum here
+            // would refuse a real outcome the first time one was added, while
+            // these two facts are exactly what the sentence at the end reads.
+            if (ev.data.done !== true || typeof ev.data.status !== 'string' || !ev.data.status) {
+              continue;
+            }
+            sawDone = true;
+          }
           last = ev.data;
           const line =
             `${ev.data.phase ?? '?'} ${ev.data.step ?? 0}/${ev.data.of ?? 0} ${ev.data.note ?? ''}`.trim();

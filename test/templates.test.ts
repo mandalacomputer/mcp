@@ -529,3 +529,292 @@ describe('what the second review pass found', () => {
     await close();
   });
 });
+
+// --- what the codex adversarial review found (OPL-3835) -------------------
+
+describe('what the codex adversarial review found', () => {
+  const answer = (body: unknown, status = 200) =>
+    new Response(JSON.stringify(body), {
+      status,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  const stream = (body: string) =>
+    (async () =>
+      new Response(body, {
+        status: 200,
+        headers: { 'Content-Type': 'text/event-stream' },
+      })) as typeof fetch;
+
+  /**
+   * Best effort on the job read meant AVAILABILITY, and the first version meant
+   * everything. A 403 alongside a progress read that happened to succeed came
+   * back as a successful partial answer with a note about the fleet — so a
+   * caller reading `isError` to decide whether it may act never learned that
+   * the platform had refused it.
+   */
+  it('does not turn a refusal on the job record into a partial success', async () => {
+    const real = globalThis.fetch;
+    globalThis.fetch = (async (input: string | URL) =>
+      new URL(String(input)).pathname.endsWith('/progress')
+        ? answer({ id: 'bld-1', status: 'running', done: false, phase: 'copying' })
+        : answer({ error: 'your key may not read builds' }, 403)) as typeof fetch;
+    const { call, close } = await connect();
+    const res = await call('get_build', { build_id: 'bld-1' });
+    globalThis.fetch = real;
+
+    expect(res.isError).toBe(true);
+    expect(textOf(res)).toMatch(/may not read builds/);
+    // Emphatically NOT the fleet-hiccup wording: nothing here is passing.
+    expect(textOf(res)).not.toMatch(/could not be read/);
+    await close();
+  });
+
+  /** A 503 is still a hiccup, and still costs `ref` rather than the answer. */
+  it('still degrades to a partial answer when the fleet is the problem', async () => {
+    const real = globalThis.fetch;
+    globalThis.fetch = (async (input: string | URL) =>
+      new URL(String(input)).pathname.endsWith('/progress')
+        ? answer({ id: 'bld-1', status: 'failed', done: true, error: 'apt died' })
+        : answer({ error: 'no hypervisor could answer' }, 503)) as typeof fetch;
+    const { call, close } = await connect();
+    const res = await call('get_build', { build_id: 'bld-1' });
+    globalThis.fetch = real;
+
+    expect(res.isError).toBeFalsy();
+    expect(textOf(res)).toMatch(/could not be read/);
+    await close();
+  });
+
+  /**
+   * The other order of the same race. The job record read before the build
+   * finished carries no `finished_at`; progress read just after it carries
+   * `done: true` — and the merge reported a build that completed without ever
+   * ending. Dropping a field cannot fix this one, because the field that is
+   * missing is the true one.
+   */
+  it('re-reads the job record when progress is done but the record has no finish time', async () => {
+    const real = globalThis.fetch;
+    let jobReads = 0;
+    globalThis.fetch = (async (input: string | URL) => {
+      if (new URL(String(input)).pathname.endsWith('/progress')) {
+        return answer({ id: 'bld-1', status: 'succeeded', done: true, phase: 'published' });
+      }
+      jobReads += 1;
+      // The first read is the one that raced; by the second the record has
+      // settled.
+      return answer({
+        id: 'bld-1',
+        ref: 'acc-1/devbox@1.0.0',
+        status: jobReads === 1 ? 'running' : 'succeeded',
+        started_at: '2026-08-26T12:00:00.000Z',
+        ...(jobReads === 1 ? {} : { finished_at: '2026-08-26T12:15:00.000Z' }),
+      });
+    }) as typeof fetch;
+    const { call, close } = await connect();
+    const res = await call('get_build', { build_id: 'bld-1' });
+    globalThis.fetch = real;
+
+    const body = JSON.parse(textOf(res));
+    expect(jobReads).toBe(2);
+    expect(body.done).toBe(true);
+    expect(body.status).toBe('succeeded');
+    expect(body.finished_at).toBe('2026-08-26T12:15:00.000Z');
+    await close();
+  });
+
+  /**
+   * And it costs nothing when there was no race: the extra read is conditional
+   * on the contradiction, not on the build having finished.
+   */
+  it('reads the job record once when the two answers already agree', async () => {
+    const real = globalThis.fetch;
+    let jobReads = 0;
+    globalThis.fetch = (async (input: string | URL) => {
+      if (new URL(String(input)).pathname.endsWith('/progress')) {
+        return answer({ id: 'bld-1', status: 'succeeded', done: true, phase: 'published' });
+      }
+      jobReads += 1;
+      return answer({
+        id: 'bld-1',
+        ref: 'acc-1/devbox@1.0.0',
+        status: 'succeeded',
+        started_at: '2026-08-26T12:00:00.000Z',
+        finished_at: '2026-08-26T12:15:00.000Z',
+      });
+    }) as typeof fetch;
+    const { call, close } = await connect();
+    const res = await call('get_build', { build_id: 'bld-1' });
+    globalThis.fetch = real;
+
+    expect(jobReads).toBe(1);
+    expect(JSON.parse(textOf(res)).finished_at).toBe('2026-08-26T12:15:00.000Z');
+    await close();
+  });
+
+  /**
+   * `event: done` with an empty object passed `isRecord`, set the flag, and was
+   * answered as `Build bld-1 undefined.` — a completed watch reported for a
+   * stream that said nothing about how the build ended.
+   */
+  it('refuses a done event that carries no status', async () => {
+    const real = globalThis.fetch;
+    globalThis.fetch = stream(
+      `event: progress\ndata: ${JSON.stringify({ id: 'bld-1', status: 'running' })}\n\n` +
+        'event: done\ndata: {}\n\n',
+    );
+    const { call, close } = await connect();
+    const res = await call('watch_build', { build_id: 'bld-1' });
+    globalThis.fetch = real;
+
+    expect(res.isError).toBe(true);
+    expect(textOf(res)).toMatch(/ended before the build did/);
+    expect(textOf(res)).not.toMatch(/undefined/);
+    await close();
+  });
+
+  /** And one that says outright that the build has not finished. */
+  it('refuses a done event that says the build is still running', async () => {
+    const real = globalThis.fetch;
+    globalThis.fetch = stream(
+      `event: done\ndata: ${JSON.stringify({ id: 'bld-1', status: 'running', done: false })}\n\n`,
+    );
+    const { call, close } = await connect();
+    const res = await call('watch_build', { build_id: 'bld-1' });
+    globalThis.fetch = real;
+
+    expect(res.isError).toBe(true);
+    expect(textOf(res)).toMatch(/get_build/);
+    await close();
+  });
+
+  it('ignores an event about a different build', async () => {
+    const real = globalThis.fetch;
+    globalThis.fetch = stream(
+      `event: done\ndata: ${JSON.stringify({ id: 'bld-2', status: 'succeeded', done: true })}\n\n`,
+    );
+    const { call, close } = await connect();
+    const res = await call('watch_build', { build_id: 'bld-1' });
+    globalThis.fetch = real;
+
+    expect(res.isError).toBe(true);
+    expect(textOf(res)).toMatch(/without sending anything/);
+    await close();
+  });
+
+  /**
+   * `Array.isArray` on the envelope alone let `[null]` and a row that is a
+   * string through as an inventory — the one listing on this surface that did
+   * not check its rows the way list_computers and list_snapshots do.
+   */
+  it('drops malformed build rows and says how many', async () => {
+    const real = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      answer([{ id: 'bld-1', status: 'running' }, null, 'bad projection'])) as typeof fetch;
+    const { call, close } = await connect();
+    const res = await call('list_builds');
+    globalThis.fetch = real;
+
+    expect(res.isError).toBeFalsy();
+    expect(textOf(res)).toMatch(/ignored 2 malformed build entries/);
+    expect(textOf(res)).toMatch(/bld-1/);
+    await close();
+  });
+
+  it('refuses when no valid build row remained', async () => {
+    const real = globalThis.fetch;
+    globalThis.fetch = (async () => answer([null, 'bad projection'])) as typeof fetch;
+    const { call, close } = await connect();
+    const res = await call('list_builds');
+    globalThis.fetch = real;
+
+    expect(res.isError).toBe(true);
+    expect(textOf(res)).toMatch(/not an empty build list/);
+    await close();
+  });
+
+  /**
+   * A cast is not a check. `{"valid": "false"}` is truthy, and reporting a
+   * document the platform had just rejected as valid is the one answer a check
+   * tool must never get wrong.
+   */
+  it('will not call a document valid on a non-boolean `valid`', async () => {
+    const real = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      answer({ valid: 'false', problems: ['spec.os is required'] })) as typeof fetch;
+    const { call, close } = await connect();
+    const res = await call('check_template', { document: 'apiVersion: mandala/v1' });
+    globalThis.fetch = real;
+
+    expect(res.isError).toBe(true);
+    expect(textOf(res)).toMatch(/says NOTHING about the document/);
+    await close();
+  });
+
+  /** A write whose answer cannot be read is a write whose outcome is unknown. */
+  it('says a publish may have succeeded when the response carries no ref', async () => {
+    const real = globalThis.fetch;
+    globalThis.fetch = (async () => answer({}, 201)) as typeof fetch;
+    const { call, close } = await connect();
+    const res = await call('publish_template', { document: 'apiVersion: mandala/v1' });
+    globalThis.fetch = real;
+
+    expect(res.isError).toBe(true);
+    expect(textOf(res)).toMatch(/MAY HAVE SUCCEEDED/);
+    expect(textOf(res)).not.toMatch(/Published undefined/);
+    await close();
+  });
+
+  /**
+   * "Retired 0 version(s)" was a confident report that nothing happened, about
+   * an irreversible DELETE the platform had answered 2xx to.
+   */
+  it('does not report an unreadable retire as nothing retired', async () => {
+    const real = globalThis.fetch;
+    globalThis.fetch = (async () => answer({ ok: true })) as typeof fetch;
+    const { call, close } = await connect();
+    const res = await call('retire_template', {
+      namespace: 'acc-1',
+      name: 'devbox',
+      confirm: true,
+    });
+    globalThis.fetch = real;
+
+    expect(res.isError).toBe(true);
+    expect(textOf(res)).toMatch(/MAY HAVE HAPPENED/);
+    expect(textOf(res)).not.toMatch(/Retired 0 version/);
+    await close();
+  });
+
+  it('says a build may have started when the response carries no id', async () => {
+    const real = globalThis.fetch;
+    globalThis.fetch = (async () => answer({ ref: 'acc-1/devbox@1.0.0' }, 202)) as typeof fetch;
+    const { call, close } = await connect();
+    const res = await call('build_template', { document: 'apiVersion: mandala/v1' });
+    globalThis.fetch = real;
+
+    expect(res.isError).toBe(true);
+    expect(textOf(res)).toMatch(/MAY HAVE STARTED/);
+    expect(textOf(res)).toMatch(/list_builds/);
+    await close();
+  });
+
+  /**
+   * The publish result used to end on a flat "Launch it with create_computer",
+   * which contradicted build_template's own description two tools down: a
+   * document declaring `spec.build` names a family the fleet does not
+   * advertise, so following that line led straight into a refusal this server
+   * already knew about.
+   */
+  it('does not promise a launch the build tools say will be refused', async () => {
+    const { call, close } = await connect();
+    const res = await call('publish_template', { document: 'apiVersion: mandala/v1' });
+    const said = textOf(res);
+
+    expect(said).toMatch(/acc-1\/devbox@1\.0\.0/);
+    expect(said).not.toMatch(/Launch it with create_computer/);
+    expect(said).toMatch(/spec\.build/);
+    expect(said).toMatch(/build_template/);
+    expect(said).toMatch(/built rather than shipped/);
+    await close();
+  });
+});
