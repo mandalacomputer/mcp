@@ -20,6 +20,30 @@ import { connect, installFakePlatform, type Recorded } from './harness.js';
  */
 const EXERCISE: Record<string, Record<string, unknown>[]> = {
   list_templates: [{}],
+  // The document format, and the store on top of it (platform OPL-3568,
+  // OPL-3789, OPL-3830). Both spellings of the ref tools, because `version` is a
+  // parameter like any other and a call that never sends one is the gap the
+  // parameter half of this test exists to see.
+  get_template_schema: [{}],
+  check_template: [{ document: 'apiVersion: mandala/v1' }],
+  publish_template: [{ document: 'apiVersion: mandala/v1' }],
+  get_template: [
+    { namespace: 'acc-1', name: 'devbox' },
+    { namespace: 'acc-1', name: 'devbox', version: '1.0.0' },
+  ],
+  retire_template: [
+    { namespace: 'acc-1', name: 'devbox', version: '1.0.0' },
+    { namespace: 'acc-1', name: 'devbox' },
+  ],
+  // Compiling one (platform OPL-3791, OPL-3794). `no_reuse` on one of the two,
+  // for the same reason.
+  build_template: [
+    { document: 'apiVersion: mandala/v1' },
+    { document: 'apiVersion: mandala/v1', no_reuse: true },
+  ],
+  list_builds: [{}],
+  get_build: [{ build_id: 'bld-1' }],
+  watch_build: [{ build_id: 'bld-1' }],
   list_sizes: [{}],
   list_computers: [{}, { allow_partial: true }],
   get_computer: [{}],

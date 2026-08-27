@@ -20,6 +20,18 @@ export const V1_ROUTES: Route[] = [
   // Schema, and a check of a document against it that stores nothing.
   r('GET', 'templates/schema'),
   r('POST', 'templates/validate'),
+  // The store (platform OPL-3789, OPL-3830): publish a document under a ref of
+  // your own, read one back, retire one.
+  r('POST', 'templates'),
+  r('GET', 'templates/:namespace/:name'),
+  r('DELETE', 'templates/:namespace/:name'),
+  // Compiling a document into an image (platform OPL-3791, OPL-3794). The job,
+  // its record, and the two halves of watching it — a poll and a stream.
+  r('POST', 'builds'),
+  r('GET', 'builds'),
+  r('GET', 'builds/:id'),
+  r('GET', 'builds/:id/progress'),
+  r('GET', 'builds/:id/events'),
   r('GET', 'sizes'),
 
   r('GET', 'computers'),
@@ -113,6 +125,20 @@ export const PARAMETERS: ReadonlyMap<string, readonly string[]> = new Map([
   // it contributes nothing here.
   ['GET templates/schema', []],
   ['POST templates/validate', []],
+  // The publish and the build take their document the same way, raw, so they
+  // contribute no body fields either.
+  ['POST templates', []],
+  // `version` on both halves of the ref route, and the two mean different things
+  // by omission: the newest on a read, every version on a retire. An EMPTY one
+  // is refused by this server before it is sent — see paths.templateVersionQuery,
+  // and the platform defect it exists to be on the right side of.
+  ['GET templates/:namespace/:name', ['query:version']],
+  ['DELETE templates/:namespace/:name', ['query:version']],
+  ['POST builds', ['query:no_reuse']],
+  ['GET builds', []],
+  ['GET builds/:id', []],
+  ['GET builds/:id/progress', []],
+  ['GET builds/:id/events', []],
   ['GET sizes', []],
 
   ['GET computers', ['query:allow_partial']],
@@ -282,13 +308,22 @@ export const UNIMPLEMENTED = new Set([
   // pointed somewhere; it is nothing at all to an MCP client, which has neither
   // a base URL to redirect nor a reason to prefer the vocabulary.
   'POST chat/completions',
-  // The template document routes (platform OPL-3568). Pinned rather than given
-  // tools because there is nothing yet to point them at: no route publishes a
-  // document, so a tool that validated one would check a file this server gives
-  // the model no way to use. They become worth a tool with publish and
-  // launch-by-ref, and until then the gap stays a line somebody has to delete.
-  'GET templates/schema',
-  'POST templates/validate',
+  // DECISION. `GET builds/:id` answers the job record — id, ref, status, the two
+  // timestamps. `GET builds/:id/progress` answers all of that AND which step of
+  // how many is running, because the platform restates `status` on it precisely
+  // so that one poll answers both questions. So `get_build` reads progress, and
+  // this route would be a second tool that returns strictly less.
+  //
+  // Not a gap: an MCP client pays for every tool in the model's context before
+  // any of them is called, and two tools whose names differ by a word and whose
+  // answers differ by a subset is how a model picks the wrong one. The SDKs keep
+  // both, because a program choosing between them costs nothing.
+  'GET builds/:id',
+  // The two template document routes were pinned here, behind a comment saying
+  // they "become worth a tool with publish and launch-by-ref". Publish shipped
+  // in platform OPL-3789 and launch-by-ref in OPL-3788, so the line became
+  // somebody's to delete and this is it (OPL-3835). Nothing has replaced them:
+  // every route this server can reach, it calls.
 ]);
 
 /**
@@ -304,9 +339,20 @@ export function patternFor(path: string): string {
   return parts
     .map((seg, i) => {
       const parent = parts[i - 1];
-      if (parent === 'computers' || parent === 'snapshots') return ':id';
+      if (parent === 'computers' || parent === 'snapshots' || parent === 'builds') return ':id';
       if (i === 3 && parts[0] === 'computers' && parts[2] === 'windows') return ':window';
       if (i === 3 && parts[0] === 'computers' && parts[2] === 'exec') return ':pid';
+      // A template ref's two halves, pinned to a THREE-segment path under
+      // `templates` — which is what keeps the two-segment literals,
+      // `templates/schema` and `templates/validate`, reducing to themselves. The
+      // platform pins them the same way; a mirror that reduced them differently
+      // would compare two tables and call them equal. Two placeholders and not
+      // one, because a namespace is an account id and a name is not.
+      // Written as two branches on the exact index, not `i === 1 ? … : …`,
+      // which also fires at i === 0 and reduced the literal `templates` itself
+      // to `:name`.
+      if (parts[0] === 'templates' && parts.length === 3 && i === 1) return ':namespace';
+      if (parts[0] === 'templates' && parts.length === 3 && i === 2) return ':name';
       return seg;
     })
     .join('/');
