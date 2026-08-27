@@ -14,7 +14,16 @@ jobs:
         # The floor is what package.json declares, and the ceiling is what an
         # `npx` on a current machine will actually use. A server people install
         # with npx is one whose Node range has to be true rather than aspirational.
-        node: ['20', '22', '24']
+        #
+        # 26 is here because the ceiling being one major short was not a
+        # theoretical gap. OPL-3842 made every request this server sends fail on
+        # Node 26 — an undici Agent handed to a fetch from a different copy of
+        # undici, which the runtime's own bundled 8.x rejects before opening a
+        # socket — and nothing caught it: the matrix stopped at 24, and the suite
+        # stands its own function in `globalThis.fetch` everywhere and so never
+        # reaches the built-in one at all. A Node this server has never been run
+        # on is a Node it can be wholly broken on with every check green.
+        node: ['20', '22', '24', '26']
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
