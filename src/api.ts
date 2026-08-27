@@ -678,22 +678,52 @@ function* causes(err: unknown, depth = 0): Generator<Record<string, unknown>> {
 }
 
 /**
- * Certificate and handshake failures, which all happen before a byte is sent.
+ * TLS failures that can only happen before the handshake finishes.
  *
- * A set rather than a prefix test on `ERR_`, because `ERR_` is also how Node
- * spells failures that have nothing to do with the connection. The two
- * prefixes below are OpenSSL's and Node's TLS layer's; the bare names are
- * OpenSSL verification results, which carry no prefix at all. Add to it when a
- * new one turns up — the cost of a missing entry is a connect failure read as
- * a possible dispatch, which is the safe direction.
+ * NAMED IN FULL, with no prefix test, and that is the correction worth
+ * recording. This started as `ERR_SSL_` and `ERR_TLS_` prefixes, and NEITHER
+ * prefix means "handshake". Node spells every OpenSSL reason `ERR_SSL_`,
+ * including the fatal alerts a peer can send on any record — a TLS-terminating
+ * proxy that dies mid-response answers `ERR_SSL_TLSV1_ALERT_INTERNAL_ERROR`,
+ * and a corrupted record answers `ERR_SSL_SSLV3_ALERT_BAD_RECORD_MAC`. Both
+ * arrive with the request long since on the wire. `ERR_TLS_` is narrower and
+ * still not safe: `ERR_TLS_RENEGOTIATION_DISABLED` is by definition
+ * mid-connection. A prefix that admits those puts a possibly-dispatched
+ * failure into the class that says nothing was sent, which is the one mistake
+ * this whole function exists to avoid.
+ *
+ * So: an explicit set, holding certificate verification results (OpenSSL's,
+ * which carry no prefix), the protocol mismatches that can only be diagnosed
+ * from the first record, and the two Node codes that are genuinely handshake
+ * events. Add to it when a new one turns up. A missing entry costs an embedder
+ * one blind retry it could have made; a wrong entry costs a second billable
+ * computer, so the set stays short on purpose.
  */
 const TLS_CODES = new Set([
+  // Certificate verification, from OpenSSL. All of these end the handshake.
   'CERT_HAS_EXPIRED',
   'CERT_NOT_YET_VALID',
+  'CERT_REVOKED',
+  'CERT_SIGNATURE_FAILURE',
   'DEPTH_ZERO_SELF_SIGNED_CERT',
+  'HOSTNAME_MISMATCH',
   'SELF_SIGNED_CERT_IN_CHAIN',
+  'UNABLE_TO_GET_ISSUER_CERT',
   'UNABLE_TO_GET_ISSUER_CERT_LOCALLY',
   'UNABLE_TO_VERIFY_LEAF_SIGNATURE',
+  // Node's own TLS layer, for the two events that are the handshake itself.
+  'ERR_TLS_CERT_ALTNAME_INVALID',
+  'ERR_TLS_HANDSHAKE_TIMEOUT',
+  // Protocol mismatches, diagnosable only from the first record on the wire.
+  // `ERR_SSL_WRONG_VERSION_NUMBER` is what https onto a plaintext port gives.
+  'ERR_SSL_NO_CIPHERS_AVAILABLE',
+  'ERR_SSL_NO_PROTOCOLS_AVAILABLE',
+  'ERR_SSL_NO_SHARED_CIPHER',
+  'ERR_SSL_PACKET_LENGTH_TOO_LONG',
+  'ERR_SSL_UNKNOWN_PROTOCOL',
+  'ERR_SSL_UNSUPPORTED_PROTOCOL',
+  'ERR_SSL_VERSION_TOO_LOW',
+  'ERR_SSL_WRONG_VERSION_NUMBER',
 ]);
 
 /**
@@ -719,6 +749,11 @@ const TLS_CODES = new Set([
  * direction — `SocketError`/`UND_ERR_SOCKET`, `HTTPParserError`, the two
  * timeout classes — and none of them match anything here.
  *
+ * The allow-list is matched in full rather than by prefix, for the reason
+ * {@link TLS_CODES} sets out: the obvious prefixes admit failures that happen
+ * after the handshake, and one of those in this branch is exactly the bug this
+ * function was written to prevent.
+ *
  * Measured against undici 6 on Node 26, 2026-08-27: refused → `ECONNREFUSED`
  * with `syscall: 'connect'`; DNS → `ENOTFOUND` with `syscall: 'getaddrinfo'`;
  * dual-stack refusal → the same, inside an `AggregateError`; unroutable →
@@ -733,9 +768,7 @@ function neverDispatched(err: unknown): boolean {
     const syscall = cause.syscall;
     if (syscall === 'connect' || syscall === 'getaddrinfo' || syscall === 'lookup') return true;
     if (code === 'UND_ERR_CONNECT_TIMEOUT') return true;
-    if (code.startsWith('ERR_TLS_') || code.startsWith('ERR_SSL_') || TLS_CODES.has(code)) {
-      return true;
-    }
+    if (TLS_CODES.has(code)) return true;
   }
   return false;
 }

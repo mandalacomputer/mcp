@@ -2644,20 +2644,68 @@ describe('a connection failure after the request was sent (OPL-3855)', () => {
   it('says the request never left only when it can prove that', async () => {
     // A closed port and a name that does not resolve. Nothing was written, so
     // replaying even a create is safe and the public predicate may say so.
-    const probe = createSocketServer();
-    await new Promise<void>((resolve) => probe.listen(0, '127.0.0.1', resolve));
-    const { port } = probe.address() as AddressInfo;
-    await new Promise<void>((resolve) => probe.close(() => resolve()));
-
-    for (const url of [
-      `http://127.0.0.1:${port}/api/v1`,
-      'http://no-such-host-xyzzy.invalid/api/v1',
-    ]) {
+    //
+    // Port 2 rather than an ephemeral one bound and closed here: the OS is free
+    // to hand a just-released ephemeral port to another listener, and this suite
+    // runs files concurrently with test/http.test.ts binding dozens of them — a
+    // collision would dispatch the request and fail below, pointing at the
+    // classifier rather than at the port. Not port 1, which fetch refuses
+    // outright as a bad port, so it never reaches a connect to be refused.
+    for (const url of ['http://127.0.0.1:2/api/v1', 'http://no-such-host-xyzzy.invalid/api/v1']) {
       const err = await failureFrom(url);
       expect(err).toBeInstanceOf(ConnectivityError);
       expect(err).not.toBeInstanceOf(ConnectivityInterruptedError);
       expect(isTransient(err)).toBe(true);
       expect(isTransientForPoll(err)).toBe(true);
+    }
+  });
+
+  it('does not read a TLS alert after the handshake as a connect failure', async () => {
+    // The prefix that used to be here — `ERR_SSL_` — is how Node spells every
+    // OpenSSL reason, fatal alerts included, and an alert can arrive on any
+    // record. A TLS-terminating proxy that dies while the response is being
+    // read answers one of these with the request long since on the wire, so the
+    // prefix put a possibly-dispatched failure into the class that says nothing
+    // was sent. That is the bug this whole file is about, reintroduced by the
+    // first fix for it.
+    const real = globalThis.fetch;
+    try {
+      for (const code of [
+        'ERR_SSL_TLSV1_ALERT_INTERNAL_ERROR',
+        'ERR_SSL_SSLV3_ALERT_BAD_RECORD_MAC',
+        'ERR_SSL_DECRYPTION_FAILED_OR_BAD_RECORD_MAC',
+        // Node's own prefix is no safer, which is why neither survived:
+        // renegotiation is by definition mid-connection.
+        'ERR_TLS_RENEGOTIATION_DISABLED',
+      ]) {
+        globalThis.fetch = (async () => {
+          throw Object.assign(new TypeError('fetch failed'), {
+            cause: Object.assign(new Error(code), { code }),
+          });
+        }) as typeof fetch;
+        const err = await new Api('com_test', BASE)
+          .json('GET', 'computers')
+          .catch((e: unknown) => e);
+        expect(err, code).toBeInstanceOf(ConnectivityInterruptedError);
+        expect(isTransient(err), code).toBe(false);
+      }
+      // And the handshake codes that ARE named still answer the other way, so
+      // this is a narrowing rather than a surrender.
+      for (const code of ['ERR_SSL_WRONG_VERSION_NUMBER', 'CERT_HAS_EXPIRED']) {
+        globalThis.fetch = (async () => {
+          throw Object.assign(new TypeError('fetch failed'), {
+            cause: Object.assign(new Error(code), { code }),
+          });
+        }) as typeof fetch;
+        const err = await new Api('com_test', BASE)
+          .json('GET', 'computers')
+          .catch((e: unknown) => e);
+        expect(err, code).toBeInstanceOf(ConnectivityError);
+        expect(err, code).not.toBeInstanceOf(ConnectivityInterruptedError);
+        expect(isTransient(err), code).toBe(true);
+      }
+    } finally {
+      globalThis.fetch = real;
     }
   });
 
