@@ -9,6 +9,18 @@
  */
 
 export const TEMPLATES = 'templates';
+/** The JSON Schema for a `mandala/v1` document (platform OPL-3568). */
+export const TEMPLATE_SCHEMA = 'templates/schema';
+/** Check a document without publishing it. Side-effect free, and claims no ref. */
+export const TEMPLATE_VALIDATE = 'templates/validate';
+/**
+ * Every build this account has started (platform OPL-3791).
+ *
+ * A collection, like {@link MOVES} and for the same reason: a build is a job
+ * rather than a property of a computer, and it outlives the request that
+ * started it.
+ */
+export const BUILDS = 'builds';
 export const SIZES = 'sizes';
 export const COMPUTERS = 'computers';
 export const SNAPSHOTS = 'snapshots';
@@ -106,6 +118,79 @@ export const execHandle = (id: string, pid: number) => {
 /** One window on the desktop (OPL-3583). The id is `0x2600003`-shaped. */
 export const window_ = (id: string, windowId: string) =>
   `${computer(id)}/windows/${segment('window_id', windowId)}`;
+
+/**
+ * One published template, by the two halves of its ref (platform OPL-3789).
+ *
+ * Two segments and not one, because that is the shape of the route: the
+ * platform reduces `templates/<a>/<b>` to `templates/:namespace/:name`, so a
+ * ref handed over whole — `acc-1/devbox@1.0.0` — would be percent-encoded into
+ * one segment and reach a route that does not exist. The version is a QUERY
+ * parameter on this path, not part of it; see {@link templateVersionQuery}.
+ */
+export const templateRef = (namespace: string, name: string) =>
+  `${TEMPLATES}/${segment('namespace', namespace)}/${segment('name', name)}`;
+
+/** MAJOR.MINOR.PATCH, no leading zeros — the platform's own version grammar. */
+const VERSION = /^(0|[1-9]\d{0,8})\.(0|[1-9]\d{0,8})\.(0|[1-9]\d{0,8})$/;
+
+/**
+ * The `version` query parameter, refused when it is not a version.
+ *
+ * Absence and emptiness have to be different things here, and a model is the
+ * caller most likely to conflate them. The platform answers 400 for a version
+ * that is empty or malformed rather than defaulting, and that refusal exists
+ * because of a real defect: `?version=` read as "no version was named" and
+ * retired an entire template, irreversibly.
+ *
+ * This server cannot send that. `undefined` omits the parameter — which on a
+ * retire means EVERY version — and anything else has to be a version. A model
+ * that passes an empty string is told what a version looks like, before
+ * anything is deleted.
+ */
+export function templateVersionQuery(version?: string): Record<string, string> {
+  if (version === undefined) return {};
+  if (!VERSION.test(version)) {
+    throw new Error(
+      `version must be MAJOR.MINOR.PATCH with no leading zeros (got ${JSON.stringify(version)}). ` +
+        `Omit it entirely to name the whole template.`,
+    );
+  }
+  return { version };
+}
+
+/**
+ * The document a publish, a validate or a build sends.
+ *
+ * Raw bytes, not a JSON envelope: the platform reads JSON or YAML off the body
+ * itself, so a wrapper would be a document the validator never sees — and one
+ * that parses, so the failure would be a complaint about the wrapper's fields.
+ */
+export function templateDocument(document: string): Uint8Array {
+  if (typeof document !== 'string' || !document.trim()) {
+    throw new Error('document must be a non-empty template document, as JSON or YAML');
+  }
+  return new TextEncoder().encode(document);
+}
+
+export const build = (id: string) => `${BUILDS}/${segment('build_id', id)}`;
+
+/** progress | events */
+export const buildAction = (id: string, action: string) => `${build(id)}/${action}`;
+
+/**
+ * `no_reuse`, sent only when it is asked for.
+ *
+ * Omitted rather than sent as `false`, and the reason is the documented schema
+ * rather than a claim about the parser: lib/apidoc gives this parameter
+ * `enum: ['true']`, so `true` is the only value the reference admits.
+ *
+ * This said the platform reads the key's PRESENCE, which is false —
+ * server/buildjob.go reads `Get("no_reuse") == "true"`. The request was right
+ * either way; the stated reason was not (/code-review, OPL-3835).
+ */
+export const buildQuery = (noReuse?: boolean): Record<string, string> =>
+  noReuse ? { no_reuse: 'true' } : {};
 
 export const snapshot = (id: string) => `snapshots/${segment('snapshot_id', id)}`;
 

@@ -136,6 +136,72 @@ export function installFakePlatform(): { calls: Recorded[]; restore: () => void 
   };
 }
 
+/**
+ * One published template, in the platform's own spelling (platform OPL-3789).
+ *
+ * `document` as an OBJECT, not the canonical string the store keeps: the
+ * platform parses it back on the way out, so a fixture holding the string would
+ * let a tool that forgot to expect an object pass.
+ */
+const PUBLISHED_TEMPLATE = {
+  ref: 'acc-1/devbox@1.0.0',
+  doc_digest: 'sha256:aaaa',
+  document: { apiVersion: 'mandala/v1', kind: 'Template' },
+  template: { name: 'devbox', label: 'My desktop', os: 'linux', cpu: 2, ram_mb: 4096, disk_gb: 30 },
+  versions: ['1.0.0'],
+  published_at: '2026-08-26T12:00:00.000Z',
+};
+
+/**
+ * What a retire took away (platform OPL-3830).
+ *
+ * `templates` and `refs_claimed` deliberately differ: a retired ref still
+ * counts, and a fixture where the two agreed would let a tool that read one
+ * field for both pass.
+ */
+const RETIRED_TEMPLATES = {
+  retired: ['acc-1/devbox@1.0.0'],
+  retired_at: '2026-08-26T13:00:00.000Z',
+  versions: [],
+  templates: 0,
+  refs_claimed: 1,
+};
+
+const TEMPLATE_CHECK = {
+  valid: true,
+  ref: 'acc-1/devbox@1.0.0',
+  doc_digest: 'sha256:aaaa',
+  build_digest: 'sha256:bbbb',
+};
+
+const TEMPLATE_BUILD = {
+  id: 'bld-1',
+  ref: 'acc-1/devbox@1.0.0',
+  status: 'running',
+  started_at: '2026-08-26T12:00:00.000Z',
+};
+
+const BUILD_PROGRESS = {
+  id: 'bld-1',
+  status: 'succeeded',
+  done: true,
+  phase: 'published',
+  step: 2,
+  of: 2,
+  steps: [
+    { n: 1, kind: 'apt', label: 'ripgrep', status: 'done' },
+    { n: 2, kind: 'finish', label: 'cleanup', status: 'done' },
+  ],
+  note: '',
+  error: '',
+  updated_at: '2026-08-26T12:15:00.000Z',
+};
+
+/** A build's event stream: one `progress` that is news, then the `done`. */
+const BUILD_STREAM =
+  `event: progress\ndata: ${JSON.stringify({ ...BUILD_PROGRESS, done: false, status: 'running', phase: 'copying' })}\n\n` +
+  `event: done\ndata: ${JSON.stringify(BUILD_PROGRESS)}\n\n`;
+
 function respond(method: string, path: string, headers: Record<string, string>): Response {
   const json = (v: unknown, status = 200) =>
     new Response(JSON.stringify(v), { status, headers: { 'Content-Type': 'application/json' } });
@@ -170,7 +236,28 @@ function respond(method: string, path: string, headers: Record<string, string>):
   if (/\/windows\/[^/]+$/.test(path))
     return json({ ok: true, window: { id: '0x2600003', x: 305 } });
   if (path.endsWith('/schedule')) return json({ enabled: true, hour: 4, minute: 0, tz: 'UTC' });
-  if (path.endsWith('/templates')) return json([{ name: 'base', os: 'linux', cpu: 2 }]);
+  if (path === '/templates/schema') return json({ $id: `${BASE}/templates/schema` });
+  if (path === '/templates/validate') return json(TEMPLATE_CHECK);
+  if (path === '/builds/bld-1/events') {
+    return new Response(BUILD_STREAM, { headers: { 'Content-Type': 'text/event-stream' } });
+  }
+  if (path.endsWith('/progress')) return json(BUILD_PROGRESS);
+  if (path === '/builds')
+    return json(method === 'GET' ? [TEMPLATE_BUILD] : TEMPLATE_BUILD, method === 'GET' ? 200 : 202);
+  if (/^\/builds\/[^/]+$/.test(path)) return json(TEMPLATE_BUILD);
+  // The store's ref route is THREE segments and is therefore not `/templates`.
+  // DELETE and GET answer different shapes, which is the point: a retire has no
+  // document left to hand back.
+  if (/^\/templates\/[^/]+\/[^/]+$/.test(path)) {
+    return json(method === 'DELETE' ? RETIRED_TEMPLATES : PUBLISHED_TEMPLATE);
+  }
+  // A publish is a POST to the collection and answers with the one template it
+  // stored, the same way the snapshot POST below does.
+  if (path.endsWith('/templates')) {
+    return method === 'GET'
+      ? json([{ name: 'base', os: 'linux', cpu: 2 }])
+      : json(PUBLISHED_TEMPLATE, 201);
+  }
   if (path.endsWith('/sizes'))
     return json([
       {
