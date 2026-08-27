@@ -1318,6 +1318,43 @@ describe('wait failures that are worth another poll', () => {
     for (const status of [301, 302, 303, 307, 308]) {
       expect(isTransientForPoll(errorForStatus(status, `HTTP ${status}`))).toBe(false);
     }
+    // And 5xx has an UPPER bound too. The HTTP parser under fetch accepts any
+    // three digits, so a broken origin can answer 700 — which `>= 500` alone
+    // called a passing moment and polled until the caller's deadline.
+    for (const status of [600, 700, 999]) {
+      expect(isTransientForPoll(errorForStatus(status, `HTTP ${status}`))).toBe(false);
+    }
+  });
+
+  it.each([
+    // header, expected retryAfterMs
+    ['12', 12_000],
+    ['0', 0],
+    // The one that mattered. 2147484 seconds is under a month and a perfectly
+    // ordinary thing for a platform to ask for, and 2147484000ms does not fit
+    // the 32-bit signed int Node stores a timer in — so setTimeout warns and
+    // fires at 1ms. Honouring the header verbatim was therefore the way to
+    // retry a month-long rate limit immediately, and keep doing it until the
+    // caller's deadline (Codex adversarial review).
+    ['2147484', 2_147_483_647],
+    ['99999999999', 2_147_483_647],
+  ])('caps Retry-After: %s so a timer cannot wrap to 1ms', async (header, expected) => {
+    const real = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      new Response('{"error":"slow down"}', {
+        status: 429,
+        headers: { 'Content-Type': 'application/json', 'Retry-After': header },
+      })) as typeof fetch;
+    try {
+      const err = await new Api('com_test', BASE).json('GET', 'computers').catch((e) => e);
+      expect(err).toBeInstanceOf(RateLimitError);
+      expect((err as RateLimitError).retryAfterMs).toBe(expected);
+      // And whatever it is, a sleep can hold it: the cap is exactly the largest
+      // delay setTimeout takes without wrapping.
+      expect((err as RateLimitError).retryAfterMs).toBeLessThanOrEqual(2_147_483_647);
+    } finally {
+      globalThis.fetch = real;
+    }
   });
 
   it('does not poll through anything that is not a failed request', () => {
