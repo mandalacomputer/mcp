@@ -6,6 +6,7 @@ import {
   errorForStatus,
   MandalaError,
   RangeNotSatisfiableError,
+  RateLimitError,
 } from './errors.js';
 
 export const DEFAULT_BASE_URL = 'https://app.mandala.computer/api/v1';
@@ -355,6 +356,19 @@ export class Api {
     if (resp.status === 416) {
       const total = parseContentRange(resp.headers.get('content-range'))?.total;
       return new RangeNotSatisfiableError(message, resp.status, body, total);
+    }
+    // The other one, for the same reason: `Retry-After` is a header, and it is
+    // the platform saying how long to wait rather than leaving the wait tools
+    // to guess. Built here while the response is still in hand; the BY_STATUS
+    // entry covers a 429 reaching errorForStatus from anywhere else, without
+    // the number.
+    if (resp.status === 429) {
+      return new RateLimitError(
+        message,
+        resp.status,
+        body,
+        retryAfterMs(resp.headers.get('retry-after')),
+      );
     }
     return errorForStatus(resp.status, message, body);
   }
@@ -715,6 +729,46 @@ function parseContentRange(
   // every caller that trusts this.
   if (start !== undefined && end !== undefined && end < start) return undefined;
   return { start, end, total: num(m[3]) };
+}
+
+/**
+ * The longest delay `setTimeout` takes without wrapping.
+ *
+ * Node stores it in a 32-bit signed int, and a larger one does NOT clamp — it
+ * warns and fires at 1ms instead, which is the opposite of every use of this
+ * number. About 24.9 days.
+ */
+const MAX_TIMER_MS = 2_147_483_647;
+
+/**
+ * A `Retry-After` header, in milliseconds from now.
+ *
+ * Both spellings the header has: delta-seconds, and an HTTP date. A date in the
+ * past is zero rather than negative, because the only consumer is a sleep.
+ *
+ * CAPPED at {@link MAX_TIMER_MS}, and that is the whole reason this is not four
+ * lines. `Retry-After: 2147484` is a valid header — under a month — and it is
+ * 2147484000ms, which does not fit a 32-bit signed int, so Node fires the timer
+ * at 1ms. A poll loop then retries a rate limit it was told to leave alone for
+ * weeks, immediately and for the rest of its deadline: the exact opposite of
+ * what the header asked for, reached by honouring it. The TypeScript SDK's
+ * `retryAfterMs` has carried this cap since it was written; this copy was made
+ * without it (Codex adversarial review, OPL-3724).
+ *
+ * A malformed value is nothing rather than a throw, for parseContentRange's
+ * reason — it is metadata about a refusal that already arrived, and the poll
+ * loops have their own interval to fall back on. Note that a NEGATIVE
+ * delta-seconds is not malformed enough to stop there: `Date.parse('-5')` is a
+ * date in 2001, so it falls through to the branch below and lands on 0, which
+ * is the same answer a date in the past gets and is why nothing worse happens.
+ */
+function retryAfterMs(header: string | null): number | undefined {
+  if (!header) return undefined;
+  const seconds = Number(header);
+  if (Number.isFinite(seconds) && seconds >= 0) return Math.min(seconds * 1_000, MAX_TIMER_MS);
+  const at = Date.parse(header);
+  if (!Number.isFinite(at)) return undefined;
+  return Math.min(Math.max(at - Date.now(), 0), MAX_TIMER_MS);
 }
 
 /** A trustworthy response length, when fetch has not transparently decoded it. */
