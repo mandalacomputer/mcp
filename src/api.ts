@@ -3,6 +3,7 @@ import {
   type APIError,
   CancelledError,
   ConnectivityError,
+  ConnectivityInterruptedError,
   errorForStatus,
   MandalaError,
   RangeNotSatisfiableError,
@@ -288,8 +289,21 @@ export class Api {
       }
       // Rewritten, because the raw one names the host and the failure a model
       // can act on is "the platform is not reachable", not a DNS error string.
-      throw new ConnectivityError(
-        `could not reach ${this.#base.origin}: ${cause instanceof Error ? cause.message : String(cause)}`,
+      //
+      // Two classes, because a rejected fetch is two different outcomes wearing
+      // one shape. A refused socket means nothing was dispatched and a create
+      // may be replayed; a socket that died with the request already on the
+      // wire means the platform may have acted and the answer was lost. The
+      // second says so, and the wording follows the class rather than the other
+      // way round (OPL-3855).
+      const detail = cause instanceof Error ? cause.message : String(cause);
+      if (neverDispatched(cause)) {
+        throw new ConnectivityError(`could not reach ${this.#base.origin}: ${detail}`);
+      }
+      throw new ConnectivityInterruptedError(
+        `${method} /${path.replace(/^\/+/, '')} to ${this.#base.origin} failed after the request ` +
+          `was sent: ${detail}. It may have been received, so treat anything it would have ` +
+          'changed as unknown rather than undone.',
       );
     }
     if (!resp.ok) throw await this.#error(resp, method, path, signal);
@@ -643,15 +657,126 @@ function isCancellation(_cause: unknown, signal?: AbortSignal): boolean {
   return Boolean(signal?.aborted);
 }
 
-/** An undici / fetch abort that is not the caller's signal. */
-function isTransportAbort(cause: unknown): boolean {
+/**
+ * Every error under one, including the ones a fetch hides two levels down.
+ *
+ * A rejected fetch is a `TypeError: fetch failed` whose `cause` is what
+ * actually went wrong, and on a dual-stack host that cause is an
+ * `AggregateError` holding one attempt per address. Neither the top error nor
+ * its immediate cause carries the code the classifiers below read, so both
+ * links have to be followed. Bounded, because a cause chain is user-reachable
+ * data and nothing here needs to be robust to a cycle.
+ */
+function* causes(err: unknown, depth = 0): Generator<Record<string, unknown>> {
+  if (!err || typeof err !== 'object' || depth > 5) return;
+  const e = err as Record<string, unknown>;
+  yield e;
+  yield* causes(e.cause, depth + 1);
+  if (Array.isArray(e.errors)) {
+    for (const inner of e.errors) yield* causes(inner, depth + 1);
+  }
+}
+
+/**
+ * Certificate and handshake failures, which all happen before a byte is sent.
+ *
+ * A set rather than a prefix test on `ERR_`, because `ERR_` is also how Node
+ * spells failures that have nothing to do with the connection. The two
+ * prefixes below are OpenSSL's and Node's TLS layer's; the bare names are
+ * OpenSSL verification results, which carry no prefix at all. Add to it when a
+ * new one turns up — the cost of a missing entry is a connect failure read as
+ * a possible dispatch, which is the safe direction.
+ */
+const TLS_CODES = new Set([
+  'CERT_HAS_EXPIRED',
+  'CERT_NOT_YET_VALID',
+  'DEPTH_ZERO_SELF_SIGNED_CERT',
+  'SELF_SIGNED_CERT_IN_CHAIN',
+  'UNABLE_TO_GET_ISSUER_CERT_LOCALLY',
+  'UNABLE_TO_VERIFY_LEAF_SIGNATURE',
+]);
+
+/**
+ * Can this rejection be shown to have happened BEFORE the request was written?
+ *
+ * The one question that decides whether {@link ConnectivityError} or
+ * {@link ConnectivityInterruptedError} comes out of `#fetch`, and therefore
+ * whether `isTransient` tells an embedder a create is safe to replay.
+ *
+ * FAIL CLOSED, which is the whole design. The two wrong answers do not cost the
+ * same: calling a connect failure a possible dispatch costs one retry that a
+ * caller could have made blind, and calling a lost response a connect failure
+ * costs a second billable computer. So this is an ALLOW-LIST of causes that can
+ * only arise from the connector, and everything else — anything unrecognised,
+ * anything new undici invents — is treated as possibly dispatched.
+ *
+ * The discriminator is the syscall, not the errno, and that distinction earns
+ * its place. `ECONNRESET` alone is ambiguous: it is what a TLS handshake
+ * against a non-TLS port produces (`syscall: 'read'`, connect phase) and also
+ * what a peer resetting a live connection produces (post-dispatch). `connect`
+ * and `getaddrinfo`, by contrast, happen once and only before the request
+ * exists. undici's own post-dispatch failures are unmistakable in the other
+ * direction — `SocketError`/`UND_ERR_SOCKET`, `HTTPParserError`, the two
+ * timeout classes — and none of them match anything here.
+ *
+ * Measured against undici 6 on Node 26, 2026-08-27: refused → `ECONNREFUSED`
+ * with `syscall: 'connect'`; DNS → `ENOTFOUND` with `syscall: 'getaddrinfo'`;
+ * dual-stack refusal → the same, inside an `AggregateError`; unroutable →
+ * `UND_ERR_CONNECT_TIMEOUT`; TLS against a plaintext port →
+ * `ERR_SSL_WRONG_VERSION_NUMBER`. Post-dispatch: a socket closed after the
+ * request → `UND_ERR_SOCKET`, a garbage response → `HPE_INVALID_CONSTANT`, no
+ * response → `UND_ERR_HEADERS_TIMEOUT`.
+ */
+function neverDispatched(err: unknown): boolean {
+  for (const cause of causes(err)) {
+    const code = typeof cause.code === 'string' ? cause.code : '';
+    const syscall = cause.syscall;
+    if (syscall === 'connect' || syscall === 'getaddrinfo' || syscall === 'lookup') return true;
+    if (code === 'UND_ERR_CONNECT_TIMEOUT') return true;
+    if (code.startsWith('ERR_TLS_') || code.startsWith('ERR_SSL_') || TLS_CODES.has(code)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/** Errnos a live connection dies with, once the request is already on it. */
+const SOCKET_ERRNOS = new Set(['ECONNRESET', 'ECONNABORTED', 'EPIPE', 'ENOTCONN', 'ETIMEDOUT']);
+
+/**
+ * A transport failure while reading a body, as opposed to a bug in this file.
+ *
+ * Only reached from {@link readBody}, so the phase is not in question — the
+ * response headers already arrived. What is in question is whether the throw
+ * came from the connection or from us: `#decode` and `sse` raise
+ * {@link MandalaError} for a body that arrived and made no sense, and wrapping
+ * one of those as a connectivity failure would send a poll loop round again on
+ * a defect.
+ *
+ * The names were here first and are undici's aborts and idle timeouts. The two
+ * tests below them close the case that used to fall straight through: a socket
+ * that dies mid-body surfaces from `fetch` as `TypeError: terminated` — a name
+ * this list does not have and never will — carrying a `SocketError` as its
+ * cause. That reached `throw cause` and came out as a bare `TypeError`, which
+ * is neither transient nor pollable, so a wait loop died on a blip it existed
+ * to ride out.
+ */
+function isTransportFailure(cause: unknown): boolean {
   const name = (cause as { name?: string })?.name;
-  return (
+  if (
     name === 'AbortError' ||
     name === 'TimeoutError' ||
     name === 'BodyTimeoutError' ||
     name === 'HeadersTimeoutError'
-  );
+  ) {
+    return true;
+  }
+  for (const inner of causes(cause)) {
+    const code = typeof inner.code === 'string' ? inner.code : '';
+    if (code.startsWith('UND_ERR_')) return true;
+    if (SOCKET_ERRNOS.has(code)) return true;
+  }
+  return false;
 }
 
 /** The same cancellation semantics for response bodies as for response headers. */
@@ -667,11 +792,16 @@ async function readBody<T>(
     if (isCancellation(cause, signal)) {
       throw cancellationError(method, path, 'while reading the platform response');
     }
-    if (isTransportAbort(cause)) {
-      throw new ConnectivityError(
+    // Always the post-dispatch class. Getting here means the response headers
+    // arrived, so the platform received the request and acted on it; what was
+    // lost is the answer. That is precisely the case `isTransient` must say no
+    // to and the poll predicate must ride out (OPL-3855).
+    if (isTransportFailure(cause)) {
+      throw new ConnectivityInterruptedError(
         `could not finish reading ${method} /${path.replace(/^\/+/, '')}: ${
           cause instanceof Error ? cause.message : String(cause)
-        }`,
+        }. The request was received, so treat anything it would have changed as ` +
+          'unknown rather than undone.',
       );
     }
     throw cause;
