@@ -16,6 +16,7 @@ import {
   filenameFrom,
   PLATFORM_BODY_TIMEOUT_MS,
   PLATFORM_HEADERS_TIMEOUT_MS,
+  platformFetch,
 } from '../src/api.js';
 import {
   isEntrypoint,
@@ -74,6 +75,42 @@ describe('platform response deadlines', () => {
       expect(PLATFORM_HEADERS_TIMEOUT_MS).toBeGreaterThan(300_000);
       expect(PLATFORM_BODY_TIMEOUT_MS).toBe(0);
       expect(dispatcher).toBeTruthy();
+    } finally {
+      globalThis.fetch = real;
+    }
+  });
+
+  /**
+   * Two undicis, and the Agent above belongs to only one of them.
+   *
+   * The dispatcher is an Agent from the `undici` PACKAGE; Node's built-in fetch
+   * is a different COPY of undici, the one bundled with the runtime. Handing
+   * one's Agent to the other's fetch works only while the two agree on an
+   * internal handler interface, and they have stopped: Node 26 bundles undici
+   * 8.9, whose fetch rejects an undici 6 Agent with `invalid onError method`.
+   * The Api class wraps that as "could not reach app.mandala.computer", so on
+   * Node 26 every call this server made reported the platform as down before a
+   * packet was sent — and no test could see it, because every test in this repo
+   * stands its own function in `globalThis.fetch` and never reaches the built-in
+   * one at all.
+   *
+   * No version bump reaches it either: npm's newest undici is 7.x against the
+   * runtime's 8.x, and a dependency chosen to match Node 26 would mismatch the
+   * Node 20 `engines` still admits. So the pin is the shape of the fix rather
+   * than a request — the untouched global is NOT what a platform request goes
+   * through, and a replaced one is.
+   */
+  it('does not hand the undici package’s Agent to the runtime’s own fetch', () => {
+    const real = globalThis.fetch;
+    try {
+      // Nothing has replaced it: the request goes through undici's own fetch,
+      // which is the only one that understands the Agent it is given.
+      expect(platformFetch()).not.toBe(globalThis.fetch);
+      // And a replacement is honoured — which is what every stub in this file
+      // relies on, and what an embedder installing an instrumented fetch means.
+      const stub = (async () => new Response('{}')) as typeof fetch;
+      globalThis.fetch = stub;
+      expect(platformFetch()).toBe(stub);
     } finally {
       globalThis.fetch = real;
     }
