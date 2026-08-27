@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { guarded, json, refused, said } from '../format.js';
+import { guarded, incompleteWarning, json, refused, said } from '../format.js';
 import * as P from '../paths.js';
 import type { Registrar } from './types.js';
 
@@ -200,12 +200,32 @@ export const registerTemplates: Registrar = (server, session) => {
     {
       title: 'List builds',
       description:
-        'Every build this account has started that the fleet still holds a record of, newest first.',
+        'Every build this account has started that the fleet still holds a record of, newest first. A build lives on the hypervisor that ran it, so this asks all of them — if one cannot be reached the answer says it is short rather than pretending the missing builds never existed.',
       inputSchema: {},
       annotations: { readOnlyHint: true },
     },
     (_args, extra) =>
-      guarded(async () => json(await session.api.with(extra.signal).json('GET', P.BUILDS))),
+      guarded(async () => {
+        // `listing`, not `json`, because this route fans out across the fleet
+        // and does NOT fail closed the way the computer and snapshot listings do
+        // (adversarial review, OPL-3835). lib/hvproxy answers a short build list
+        // with a 200 and X-GC-Incomplete — there is no `allow_partial` to opt
+        // into and no 503 to stop you — so a client reading the body alone
+        // reports a hypervisor being away as an account with fewer builds. A
+        // model that cannot see a running build starts another one.
+        const { items, incomplete } = await session.api
+          .with(extra.signal)
+          .listing<Record<string, unknown>[]>(P.BUILDS);
+        if (!Array.isArray(items)) {
+          const got = items === undefined ? 'no body at all' : typeof items;
+          return refused(
+            `GET /builds answered with ${got}, not a list of builds. This is not an empty list — do not conclude anything about what exists from it.`,
+            items,
+          );
+        }
+        const warning = incompleteWarning('builds', incomplete);
+        return warning ? said(warning.trim(), items) : json(items);
+      }),
   );
 
   server.registerTool(
@@ -235,6 +255,14 @@ export const registerTemplates: Registrar = (server, session) => {
     ({ build_id }, extra) =>
       guarded(async () => {
         let last: Record<string, unknown> | undefined;
+        // Whether a well-formed `done` actually arrived, as against whether any
+        // event did (adversarial review, OPL-3835). Without it a stream that
+        // reached EOF after a `progress` — a proxy cutting it, a host going away
+        // — fell out of the loop with `last` set and was reported through
+        // `said(...)` as a finished build whose status happened to be `running`.
+        // A tool whose whole promise is "watch until it finishes" must not
+        // answer that way when it did not.
+        let sawDone = false;
         for await (const ev of session.api.sse('GET', P.buildAction(build_id, 'events'), {
           signal: extra.signal,
         })) {
@@ -249,6 +277,7 @@ export const registerTemplates: Registrar = (server, session) => {
           }
           if (ev.event !== 'progress' && ev.event !== 'done') continue;
           if (!isRecord(ev.data)) continue;
+          if (ev.event === 'done') sawDone = true;
           last = ev.data;
           await server.server
             .sendLoggingMessage({
@@ -258,9 +287,20 @@ export const registerTemplates: Registrar = (server, session) => {
             .catch(() => {});
           if (ev.event === 'done') break;
         }
-        if (!last) {
+        // `|| !last` as well, which is unreachable — a `done` sets both in the
+        // same breath — and is what lets the compiler narrow `last` below.
+        if (!sawDone || !last) {
+          // Both halves of the same failure, and both are refusals: the stream
+          // is the platform's contract that `done` is the last event, so one
+          // that ends without a well-formed one has been CUT rather than
+          // completed. Saying so points the model at the poll that can still
+          // answer, instead of letting it act on a status that was true
+          // whenever the connection died.
           return refused(
-            `The event stream for ${build_id} ended without sending anything. Call get_build for the outcome.`,
+            last
+              ? `The event stream for ${build_id} ended before the build did. This is the stream failing, not the build — it is probably still running. Call get_build for where it has got to.`
+              : `The event stream for ${build_id} ended without sending anything. Call get_build for the outcome.`,
+            last,
           );
         }
         // Not `refused` for a failed build. It is an outcome with a remedy —

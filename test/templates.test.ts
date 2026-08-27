@@ -280,3 +280,97 @@ describe('building', () => {
     await close();
   });
 });
+
+// --- what an adversarial review found (OPL-3835) --------------------------
+
+describe('a stream that stops is not a build that finished', () => {
+  const stream = (body: string) =>
+    (async () =>
+      new Response(body, {
+        status: 200,
+        headers: { 'Content-Type': 'text/event-stream' },
+      })) as typeof fetch;
+
+  /**
+   * The tool's whole promise is "watch until it finishes".
+   *
+   * A stream cut after a `progress` — a proxy, a host going away — fell out of
+   * the loop with `last` set, and was reported through `said(...)` as a finished
+   * build whose status happened to be `running`. A model reading that acts on a
+   * status that was true whenever the connection died.
+   */
+  it('refuses when the stream ends after a progress, without a done', async () => {
+    const real = globalThis.fetch;
+    globalThis.fetch = stream(
+      `event: progress\ndata: ${JSON.stringify({ id: 'bld-1', status: 'running', phase: 'copying', step: 1, of: 2 })}\n\n`,
+    );
+    const { call, close } = await connect();
+    const res = await call('watch_build', { build_id: 'bld-1' });
+    globalThis.fetch = real;
+
+    expect(res.isError).toBe(true);
+    expect(textOf(res)).toMatch(/ended before the build did/);
+    expect(textOf(res)).toMatch(/still running/);
+    expect(textOf(res)).toMatch(/get_build/);
+    await close();
+  });
+
+  it('refuses when the final event is malformed rather than reporting the last progress', async () => {
+    const real = globalThis.fetch;
+    globalThis.fetch = stream(
+      `event: progress\ndata: ${JSON.stringify({ id: 'bld-1', status: 'running' })}\n\n` +
+        'event: done\ndata: "not a record"\n\n',
+    );
+    const { call, close } = await connect();
+    const res = await call('watch_build', { build_id: 'bld-1' });
+    globalThis.fetch = real;
+
+    expect(res.isError).toBe(true);
+    expect(textOf(res)).toMatch(/ended before the build did/);
+    await close();
+  });
+
+  it('still reports a well-formed done as the answer', async () => {
+    const { call, close } = await connect();
+    const res = await call('watch_build', { build_id: 'bld-1' });
+    expect(res.isError).toBeFalsy();
+    expect(textOf(res)).toMatch(/succeeded/);
+    await close();
+  });
+});
+
+describe('a short build listing', () => {
+  /**
+   * `GET /builds` fans out across the fleet and does NOT fail closed the way the
+   * computer and snapshot listings do: lib/hvproxy answers a short list with a
+   * 200 and X-GC-Incomplete, with no `allow_partial` to opt into and no 503 to
+   * stop you. Read through `json`, the header was discarded and a hypervisor
+   * being away looked like an account with fewer builds — and a model that
+   * cannot see a running build starts another one.
+   */
+  it('says the list is short rather than presenting it as complete', async () => {
+    const real = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify([{ id: 'bld-1', status: 'running' }]), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json', 'X-GC-Incomplete': '0' },
+      })) as typeof fetch;
+    const { call, close } = await connect();
+    const res = await call('list_builds');
+    globalThis.fetch = real;
+
+    expect(textOf(res)).toMatch(/INCOMPLETE/);
+    expect(textOf(res)).toMatch(/Do not treat anything absent from it as deleted/);
+    // The rows still come back — a short list is short, not useless.
+    expect(textOf(res)).toMatch(/bld-1/);
+    await close();
+  });
+
+  it('says nothing when the fleet answered in full', async () => {
+    const { call, close } = await connect();
+    const res = await call('list_builds');
+    expect(textOf(res)).not.toMatch(/INCOMPLETE/);
+    expect(textOf(res)).toMatch(/bld-1/);
+    await close();
+  });
+});
