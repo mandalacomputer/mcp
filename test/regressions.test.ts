@@ -2817,6 +2817,16 @@ describe('the tools our own prose tells a model to call', () => {
   // neither starts with a verb we thought to enumerate. So the net is cast wide
   // and the non-tool wire identifiers we legitimately write are named here,
   // where adding one is a deliberate line in a diff rather than a silence.
+  //
+  // EVERY ENTRY MUST BE A WIRE IDENTIFIER — a parameter, a response field, a
+  // header — and never a tool. That is a rule for the reader, because no test
+  // can enforce it: `take_snapshot` sat on this list whitelisting the exact
+  // phantom name the commit above had just deleted from `get_desktop_url`, and
+  // an attempt to catch that automatically foundered on `view_token` and
+  // `clipboard_channel`, which are genuine platform fields this server never
+  // spells in its own source either. Absence from `src/` does not separate the
+  // two. So: before adding a line here, say which field it is. If you cannot
+  // name one, it is a tool that does not exist and the fix is in the prose.
   const IDENTIFIER = /\b[a-z][a-z0-9]*(?:_[a-z0-9]+)+\b/g;
   const NOT_TOOLS = new Set([
     // Parameters and response fields we name in prose, on purpose.
@@ -2846,14 +2856,23 @@ describe('the tools our own prose tells a model to call', () => {
     'cheapest_plan',
     'from_x',
     'from_y',
-    'take_snapshot',
   ]);
 
   it('names only tools that exist', async () => {
-    const { client, call, close } = await connect();
+    // WITH a model key, which is not a detail. `run_agent` is registered only
+    // when one is present, so a keyless server hides both its own description
+    // and its name — and a scan run that way would have called a mention of
+    // `run_agent` in somebody else's description a phantom tool. The registry
+    // has to be the widest one this server can have.
+    const { client, call, close } = await connect({ modelKey: 'sk-test' });
     const registered = new Set((await client.listTools()).tools.map((t) => t.name));
+    expect(registered.has('run_agent'), 'the keyed server registers run_agent').toBe(true);
 
     const prose: { where: string; text: string }[] = [];
+    // The server's own instructions, which are prose a model reads BEFORE any
+    // tool description and which name eight tools. They were outside the scan
+    // entirely — the largest single piece of tool-naming text we ship.
+    prose.push({ where: 'server instructions', text: client.getInstructions() ?? '' });
     for (const t of (await client.listTools()).tools) {
       prose.push({ where: `${t.name} description`, text: t.description ?? '' });
       for (const [arg, schema] of Object.entries(t.inputSchema.properties ?? {})) {

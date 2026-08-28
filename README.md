@@ -175,8 +175,8 @@ application that failed to start from one that has not painted yet. Match on
 **The clipboard is two tools, not a shell recipe.** `read_clipboard` and
 `write_clipboard` reach the desktop's `CLIPBOARD` selection — what Ctrl-C writes
 and Ctrl-V pastes — on every Linux computer with a desktop, with no reboot and
-no particular image. Pair `write_clipboard` with `press_key` `ctrl+v` to get the
-text into whatever has focus. Do not reach for `xclip` through `exec` instead:
+no particular image. Pair `write_clipboard` with `press_key` and `keys: ["ctrl","v"]` — two key
+names, not the string `"ctrl+v"` — to get the text into whatever has focus. Do not reach for `xclip` through `exec` instead:
 `exec` runs a login shell, so the guest user's profile prints onto the same
 output your command does and corrupts a read you are trying to parse, and a
 write that way needs a resident holder, a redirect, base64 and a polling loop.
