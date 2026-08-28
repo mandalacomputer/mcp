@@ -319,6 +319,21 @@ describe('the clipboard', () => {
   });
   afterEach(() => platform.restore());
 
+  it('states the xclip image requirement everywhere it recommends the tools', async () => {
+    const { client, call, close } = await connect({ computerId: 'vm-1' });
+    const tools = new Map((await client.listTools()).tools.map((tool) => [tool.name, tool]));
+    const guidance = [
+      tools.get('read_clipboard')?.description,
+      tools.get('write_clipboard')?.description,
+      textOf(await call('get_desktop_url', { control: true })),
+    ];
+    for (const text of guidance) {
+      expect(text).toMatch(/image.+xclip|xclip.+image/);
+      expect(text).toContain('400');
+    }
+    await close();
+  });
+
   it('reads the selection and hands back the text', async () => {
     const { call, close } = await connect({ computerId: 'vm-1' });
     const res = await call('read_clipboard', {});
