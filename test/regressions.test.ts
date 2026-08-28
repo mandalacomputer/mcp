@@ -2811,8 +2811,43 @@ describe('the tools our own prose tells a model to call', () => {
   // has to be a tool we register. The pattern is anchored on the verbs the
   // registry actually uses, which is what keeps `computer_id`, `allow_partial`
   // and `view_url` out of it while `run_command` lands squarely in.
-  const TOOLISH =
-    /\b(?:get|list|create|delete|stop|start|restart|suspend|update|move|clone|exec|run|wait|read|write|open|press|type|click|scroll|drag|build|check|publish|retire|watch|restore|snapshot|cursor|mouse|window)_[a-z_]+\b/g;
+  // Every snake_case identifier, not a verb allowlist. The allowlist was the
+  // second version of this test and it was wrong in the way allowlists are:
+  // `execute_command` and `invoke_tool` are exactly the shape of the bug and
+  // neither starts with a verb we thought to enumerate. So the net is cast wide
+  // and the non-tool wire identifiers we legitimately write are named here,
+  // where adding one is a deliberate line in a diff rather than a silence.
+  const IDENTIFIER = /\b[a-z][a-z0-9]*(?:_[a-z0-9]+)+\b/g;
+  const NOT_TOOLS = new Set([
+    // Parameters and response fields we name in prose, on purpose.
+    'computer_id',
+    'allow_partial',
+    'ram_mb',
+    'disk_gb',
+    'idle_suspend_min',
+    'timeout_s',
+    'snapshot_id',
+    'template_id',
+    'build_id',
+    'workspace_id',
+    'exit_code',
+    'view_url',
+    'view_token',
+    'embed_url',
+    'terminal_url',
+    'created_at',
+    'started_at',
+    'finished_at',
+    'build_failed',
+    'snapshot_schedule',
+    'idle_console',
+    'boot_capture',
+    'clipboard_channel',
+    'cheapest_plan',
+    'from_x',
+    'from_y',
+    'take_snapshot',
+  ]);
 
   it('names only tools that exist', async () => {
     const { client, call, close } = await connect();
@@ -2836,8 +2871,9 @@ describe('the tools our own prose tells a model to call', () => {
 
     const wrong: string[] = [];
     for (const { where, text } of prose) {
-      for (const name of text.match(TOOLISH) ?? []) {
-        if (!registered.has(name)) wrong.push(`${where} names \`${name}\``);
+      for (const name of text.match(IDENTIFIER) ?? []) {
+        if (registered.has(name) || NOT_TOOLS.has(name)) continue;
+        wrong.push(`${where} names \`${name}\``);
       }
     }
     expect(wrong, 'text that tells a model to call something we do not register').toEqual([]);

@@ -937,7 +937,8 @@ export const registerComputers: Registrar = (server, session, opts) => {
         return control
           ? said(
               'Full control — keyboard and pointer. Treat this link as a password for that ' +
-                'desktop; it ends when the computer restarts.\n\n' +
+                'desktop. restart_computer ends it — and ONLY restart_computer: a stop and a start ' +
+                'leave it working, so a restart is what revokes one that has leaked.\n\n' +
                 'TO MOVE TEXT, use `exec` with desktop: true. That is the route that needs nothing of ' +
                 'the hardware, works on every Linux computer with a display and `xclip`, and reports ' +
                 'its own failures — prefer it, and do not start by asking a person to paste into the ' +
@@ -973,10 +974,14 @@ export const registerComputers: Registrar = (server, session, opts) => {
                 'and paste on its own. That is the transport being open, not a guarantee: the FIRST ' +
                 'paste of a session is often dropped, because the guest PULLS the text and vdagent may ' +
                 "not own the selection yet, and a browser refuses to hand over the guest's clipboard " +
-                'unless it has focus and permission. So if you cold-start a computer for this, the ' +
-                'order is stop_computer, start_computer, wait_for_computer until the guest is up, then ' +
-                'get_desktop_url AGAIN — the credentials in this link do not survive it — and test ' +
-                'with a sentinel string rather than with text you cannot afford to lose.',
+                'unless it has focus and permission. A client that does not negotiate the extended ' +
+                'clipboard pseudo-encoding gets nothing whatever the guest has. So if you cold-start a ' +
+                'computer for this, the order is stop_computer, start_computer, then wait_for_computer ' +
+                'until the guest is up — and test with a sentinel string rather than with text you ' +
+                'cannot afford to lose. This link keeps working across that: stop and start do NOT ' +
+                'reissue the credentials, and restart_computer is the only thing that does, so use ' +
+                'restart_computer on a stopped computer when you want the cold boot AND a fresh ' +
+                'credential, and get_desktop_url again afterwards to read it.',
               links,
             )
           : said(
