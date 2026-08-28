@@ -346,34 +346,94 @@ describe('a stream that stops is not a build that finished', () => {
 
 describe('a short build listing', () => {
   /**
-   * It never reaches this server as a short list, and that is the point.
+   * The fleet with a host down, answered strictly or not depending on the flag.
    *
-   * lib/hvproxy does set X-GC-Incomplete on one, but `forward` in lib/surface
-   * applies its strict-inventory check to every v1 route generically — so the
-   * response is a 503 before this server sees it. An earlier version of this
-   * tool read the header, on the strength of a review that had looked at
-   * lib/hvproxy and not at the tier above it.
+   * `rows` is what a build listing looks like when it is short: fewer rows and
+   * NOTHING marking what is gone. The platform keeps no record of which
+   * hypervisor ran which build, so there is nothing to append and the count in
+   * the header is always `0`. Computers and snapshots CAN append an
+   * `{ id, unreachable: true }` stub per row they could not reach — but only
+   * for a key that spans the account, since the placement cache those ids come
+   * out of has no workspace column. See list_computers, which says the same.
+   */
+  const fleetPartlyDown = (rows: unknown[] = [{ id: 'bld-1', status: 'running' }]) => {
+    const real = globalThis.fetch;
+    globalThis.fetch = (async (input: string | URL | Request) => {
+      const url = new URL(typeof input === 'string' ? input : input.toString());
+      const short = { 'Content-Type': 'application/json', 'X-GC-Incomplete': '0' };
+      if (!url.searchParams.get('allow_partial')) {
+        return new Response(
+          JSON.stringify({
+            error:
+              'Right now a hypervisor cannot be reached, so this list would be incomplete. ' +
+              'Retry, or pass allow_partial=1 to accept a partial answer.',
+          }),
+          { status: 503, headers: short },
+        );
+      }
+      return new Response(JSON.stringify(rows), { headers: short });
+    }) as typeof fetch;
+    return () => {
+      globalThis.fetch = real;
+    };
+  };
+
+  /**
+   * The DEFAULT is still the refusal, and that is the point: a model that asked
+   * no question about partial answers is not handed a list that has quietly
+   * lost a hypervisor's worth of builds.
    */
   it('arrives as a refusal, so the list a model sees is the truth', async () => {
-    const real = globalThis.fetch;
-    globalThis.fetch = (async () =>
-      new Response(
-        JSON.stringify({
-          error:
-            'Right now a hypervisor cannot be reached, so this list would be incomplete. ' +
-            'Retry, or pass allow_partial=1 to accept a partial answer.',
-        }),
-        {
-          status: 503,
-          headers: { 'Content-Type': 'application/json', 'X-GC-Incomplete': '0' },
-        },
-      )) as typeof fetch;
+    const restore = fleetPartlyDown();
     const { call, close } = await connect();
     const res = await call('list_builds');
-    globalThis.fetch = real;
+    restore();
 
     expect(res.isError).toBe(true);
     expect(textOf(res)).toMatch(/would be incomplete/);
+    await close();
+  });
+
+  /**
+   * OPL-3840. The remedy the refusal names is now one this server can take.
+   *
+   * The platform read `allow_partial` on this route from the day it started
+   * fanning out — `allowsPartial` reads the query string of whatever request it
+   * is handed — but did not document it, so test/allowlist could not carry the
+   * parameter and this tool could not send it. A build listing was therefore
+   * strictly less available than a computer listing.
+   */
+  it('is the short answer, said to be short, when the model opts in', async () => {
+    const restore = fleetPartlyDown();
+    const { call, close } = await connect();
+    const res = await call('list_builds', { allow_partial: true });
+    restore();
+
+    expect(res.isError).toBeFalsy();
+    // In prose and FIRST, like the other two listings: a model reads the top of
+    // the answer, and the rows themselves say nothing here at all.
+    expect(textOf(res).startsWith('INCOMPLETE')).toBe(true);
+    expect(textOf(res)).toMatch(/bld-1/);
+    await close();
+  });
+
+  /**
+   * The empty case is the dangerous one, and more so here than for computers.
+   *
+   * With no rows and no stub rows there is nothing whatever in the payload to
+   * suggest a hypervisor is away — an outage and an account that has never
+   * built anything are the same bytes. Only the header tells them apart, and
+   * only if this tool says so in words.
+   */
+  it('does not report an outage as an account with no builds', async () => {
+    const restore = fleetPartlyDown([]);
+    const { call, close } = await connect();
+    const res = await call('list_builds', { allow_partial: true });
+    restore();
+
+    expect(res.isError).toBeFalsy();
+    expect(textOf(res)).toMatch(/INCOMPLETE/);
+    expect(textOf(res)).toMatch(/NOT "no builds"/);
     await close();
   });
 
@@ -382,6 +442,9 @@ describe('a short build listing', () => {
     const res = await call('list_builds');
     expect(res.isError).toBeFalsy();
     expect(textOf(res)).toMatch(/bld-1/);
+    // And says nothing about incompleteness, which is the half a warning that
+    // fires on every listing would destroy.
+    expect(textOf(res)).not.toMatch(/INCOMPLETE/);
     await close();
   });
 });

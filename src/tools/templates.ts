@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { CancelledError, isTransientForPoll } from '../errors.js';
-import { guarded, json, refused, said } from '../format.js';
+import { guarded, incompleteWarning, json, refused, said } from '../format.js';
 import * as P from '../paths.js';
 import type { Registrar } from './types.js';
 
@@ -269,20 +269,35 @@ export const registerTemplates: Registrar = (server, session) => {
     {
       title: 'List builds',
       description:
-        'Every build this account has started that the fleet still holds a record of, newest first. A build lives on the hypervisor that ran it, so this asks all of them — and if one cannot be reached the platform refuses rather than answering short, so an empty or small list is the truth rather than an outage.',
-      inputSchema: {},
+        'Every build this account has started that the fleet still holds a record of, newest first. A build lives on the hypervisor that ran it, so this asks all of them — and WITHOUT allow_partial, one that cannot be reached makes the platform refuse rather than answer short, so an empty or small list is the truth rather than an outage. Pass allow_partial and that stops being so: you get the short answer, opening with an INCOMPLETE line, and nothing else in the result says how much is missing.',
+      inputSchema: {
+        allow_partial: z
+          .boolean()
+          .optional()
+          .describe(
+            'Accept a short list when a hypervisor cannot be reached, instead of the 503 the platform answers by default. Nothing in the rows will say the answer was partial — a short build list has no marker in it at all, so the INCOMPLETE line is the whole of the evidence. Read it before concluding anything about what this account has built.',
+          ),
+      },
       annotations: { readOnlyHint: true },
     },
-    (_args, extra) =>
+    ({ allow_partial }, extra) =>
       guarded(async () => {
-        // `json`, not `listing`. This route fans out, and like every other
-        // fan-out on the v1 surface it FAILS CLOSED: `forward` in lib/surface
-        // applies its strict-inventory check to every route generically, so a
-        // response carrying X-GC-Incomplete becomes a 503 before this server
-        // sees it. A short list cannot arrive, so there is no header here worth
-        // reading — an earlier version of this tool read one on the strength of
-        // a review that had looked at lib/hvproxy and not at the tier above it.
-        const items = await session.api.with(extra.signal).json<unknown>('GET', P.BUILDS);
+        // `listing`, not `json` (OPL-3840). This route fans out, and like every
+        // other fan-out on the v1 surface it FAILS CLOSED: `forward` in
+        // lib/surface turns a response carrying X-GC-Incomplete into a 503. So
+        // without the flag a short list still cannot arrive — but WITH it one
+        // can, and then the header is the only news there is.
+        //
+        // The platform read `allow_partial` here from the day this route
+        // started fanning out and did not DOCUMENT it until OPL-3840, which is
+        // why this tool sent nothing and why the comment that stood here said a
+        // short list could not arrive at all. What that cost was a build
+        // listing being strictly less available than a computer listing.
+        const { items, incomplete } = await session.api
+          .with(extra.signal)
+          .listing<unknown>(P.BUILDS, {
+            query: { allow_partial: allow_partial ? 1 : undefined },
+          });
         if (!Array.isArray(items)) {
           const got =
             items === undefined ? 'no body at all' : items === null ? 'null' : typeof items;
@@ -304,15 +319,32 @@ export const registerTemplates: Registrar = (server, session) => {
           (item): item is Record<string, unknown> =>
             item !== null && typeof item === 'object' && !Array.isArray(item),
         );
-        if (!malformed) return json(builds);
-        const warning = `WARNING: ignored ${malformed} malformed build entr${malformed === 1 ? 'y' : 'ies'} from the platform.`;
-        if (!builds.length) {
+        const warning =
+          incompleteWarning('builds', incomplete) +
+          (malformed
+            ? `WARNING: ignored ${malformed} malformed build entr${malformed === 1 ? 'y' : 'ies'} from the platform.\n\n`
+            : '');
+        if (!builds.length && malformed) {
           return refused(
-            `${warning} No valid builds remained. This is not an empty build list — do not conclude anything about what exists from it.`,
+            `${warning}No valid builds remained. This is not an empty build list — do not conclude anything about what exists from it.`,
             items,
           );
         }
-        return said(warning, builds);
+        // `json`, with nothing to say, ONLY when there is nothing to say. The
+        // fast path used to be `if (!malformed) return json(builds)`, which
+        // returns bare data — so a warning added above it would have been
+        // dropped on exactly the answers that most needed it.
+        if (!warning) return json(builds);
+        // An empty answer from a fleet that could not all be asked is not an
+        // empty account, and the two are told apart here rather than left to
+        // the model: with no rows and no stub rows there is nothing at all in
+        // the payload to suggest a hypervisor is away.
+        if (!builds.length) {
+          return said(
+            `${warning}No builds came back from the part of the fleet that answered. This is NOT "no builds" — retry in a moment for a complete answer.`,
+          );
+        }
+        return said(`${warning}${builds.length} build(s).`, builds);
       }),
   );
 
