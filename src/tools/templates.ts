@@ -269,13 +269,13 @@ export const registerTemplates: Registrar = (server, session) => {
     {
       title: 'List builds',
       description:
-        'Every build this account has started that the fleet still holds a record of, newest first. A build lives on the hypervisor that ran it, so this asks all of them — and if one cannot be reached the platform refuses rather than answering short, so an empty or small list is the truth rather than an outage. Pass allow_partial to take the short answer instead; it then says it is short.',
+        'Every build this account has started that the fleet still holds a record of, newest first. A build lives on the hypervisor that ran it, so this asks all of them — and WITHOUT allow_partial, one that cannot be reached makes the platform refuse rather than answer short, so an empty or small list is the truth rather than an outage. Pass allow_partial and that stops being so: you get the short answer, opening with an INCOMPLETE line, and nothing else in the result says how much is missing.',
       inputSchema: {
         allow_partial: z
           .boolean()
           .optional()
           .describe(
-            'Accept a short list when a hypervisor cannot be reached, instead of the 503 the platform answers by default. A short BUILD list is short in a way the other listings are not: no row marks what is missing, so the INCOMPLETE line is the only thing that says the answer was partial.',
+            'Accept a short list when a hypervisor cannot be reached, instead of the 503 the platform answers by default. Nothing in the rows will say the answer was partial — a short build list has no marker in it at all, so the INCOMPLETE line is the whole of the evidence. Read it before concluding anything about what this account has built.',
           ),
       },
       annotations: { readOnlyHint: true },

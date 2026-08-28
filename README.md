@@ -199,11 +199,17 @@ things. `allow_partial: true` accepts the incomplete answer instead — and when
 it does, the result opens with an `INCOMPLETE:` line saying so, because a short
 list reads exactly like the missing things were deleted.
 
-`list_builds` is the one where that line is all you get. The other two append a
-row marked `unreachable` for each thing they could not reach, so a short answer
-shows in the rows; the platform keeps no record of which hypervisor ran which
-build, so a short build listing simply has fewer rows and an unknown number
-missing.
+`list_builds` is the one where that line is always all you get. The platform
+keeps no record of which hypervisor ran which build, so a short build listing
+simply has fewer rows, an unknown number missing and nothing marking the gap.
+
+The other two append a row marked `unreachable` for each thing they could not
+reach — but only for a key that spans the account. A WORKSPACE-SCOPED key gets
+no marked rows either, because naming the missing ids would mean reading them
+out of a placement cache that has no workspace column, and handing a confined
+credential ids from the workspaces it is confined away from. For such a key all
+three listings are the `INCOMPLETE:` line and nothing else, which is why that
+line is written first and in prose.
 
 **Snapshots mid-deletion are billed but hidden.** A deletion that began and did
 not finish still holds objects and still counts against storage, and the default

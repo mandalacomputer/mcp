@@ -349,10 +349,12 @@ describe('a short build listing', () => {
    * The fleet with a host down, answered strictly or not depending on the flag.
    *
    * `rows` is what a build listing looks like when it is short: fewer rows and
-   * NOTHING marking what is gone. Computers and snapshots append an
-   * `{ id, unreachable: true }` stub per row they could not reach; the platform
-   * keeps no record of which hypervisor ran which build, so there is nothing to
-   * append and the count in the header is always `0`.
+   * NOTHING marking what is gone. The platform keeps no record of which
+   * hypervisor ran which build, so there is nothing to append and the count in
+   * the header is always `0`. Computers and snapshots CAN append an
+   * `{ id, unreachable: true }` stub per row they could not reach — but only
+   * for a key that spans the account, since the placement cache those ids come
+   * out of has no workspace column. See list_computers, which says the same.
    */
   const fleetPartlyDown = (rows: unknown[] = [{ id: 'bld-1', status: 'running' }]) => {
     const real = globalThis.fetch;
