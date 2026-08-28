@@ -192,12 +192,18 @@ decision that was never about it. `delete_computer` will not purge without one,
 and the platform makes `expect` optional only for callers that had no way to
 read the holdings.
 
-**A short list is refused, not silently served.** `list_computers` and
-`list_snapshots` fan out across hypervisors, and if one cannot be reached the
-platform answers 503 rather than a list that is quietly missing things.
-`allow_partial: true` accepts the incomplete answer instead — and when it does,
-the result opens with an `INCOMPLETE:` line saying so, because a short list
-reads exactly like the missing things were deleted.
+**A short list is refused, not silently served.** `list_computers`,
+`list_snapshots` and `list_builds` fan out across hypervisors, and if one cannot
+be reached the platform answers 503 rather than a list that is quietly missing
+things. `allow_partial: true` accepts the incomplete answer instead — and when
+it does, the result opens with an `INCOMPLETE:` line saying so, because a short
+list reads exactly like the missing things were deleted.
+
+`list_builds` is the one where that line is all you get. The other two append a
+row marked `unreachable` for each thing they could not reach, so a short answer
+shows in the rows; the platform keeps no record of which hypervisor ran which
+build, so a short build listing simply has fewer rows and an unknown number
+missing.
 
 **Snapshots mid-deletion are billed but hidden.** A deletion that began and did
 not finish still holds objects and still counts against storage, and the default

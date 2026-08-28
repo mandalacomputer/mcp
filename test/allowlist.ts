@@ -135,7 +135,10 @@ export const PARAMETERS: ReadonlyMap<string, readonly string[]> = new Map([
   ['GET templates/:namespace/:name', ['query:version']],
   ['DELETE templates/:namespace/:name', ['query:version']],
   ['POST builds', ['query:no_reuse']],
-  ['GET builds', []],
+  // The third fan-out listing, and the last to be able to say so: the platform
+  // has answered 503 on this route since it started merging across the fleet,
+  // and only documented the way out of it in OPL-3840.
+  ['GET builds', ['query:allow_partial']],
   ['GET builds/:id', []],
   ['GET builds/:id/progress', []],
   ['GET builds/:id/events', []],
