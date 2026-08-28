@@ -937,26 +937,29 @@ export const registerComputers: Registrar = (server, session, opts) => {
         return control
           ? said(
               'Full control — keyboard and pointer. Treat this link as a password for that ' +
-                'desktop. restart_computer ends it — and ONLY restart_computer: a stop and a start ' +
-                'leave it working, so a restart is what revokes one that has leaked.\n\n' +
+                'desktop. Of the tools here, restart_computer is the only one that ends it: a stop ' +
+                'and a start leave it working, so a restart is what revokes one that has leaked.\n\n' +
                 'TO MOVE TEXT, use `exec` with desktop: true. That is the route that needs nothing of ' +
-                'the hardware, works on every Linux computer with a display and `xclip`, and reports ' +
-                'its own failures — prefer it, and do not start by asking a person to paste into the ' +
-                'desktop. It is refused outright on Windows. Reading is ' +
-                '`xclip -o -selection clipboard`. A write needs BOTH setsid, so the holder outlives the ' +
-                'command (an X selection belongs to a live process), and the output redirected, or the ' +
-                'resident xclip holds the pipe the guest agent is reading and the command runs to its ' +
-                'full timeout before answering. Send the text base64 rather than quoted — an apostrophe ' +
-                'in what you are pasting would end the shell word:\n\n' +
+                'the hardware and works on every Linux computer with a display and `xclip` — prefer it, ' +
+                'and do not start by asking a person to paste into the desktop. It is refused ' +
+                'outright on Windows. Reading is ' +
+                '`xclip -o -selection clipboard`. A write has to leave xclip RESIDENT, because an X ' +
+                'selection belongs to a live process, and has to REDIRECT its output — that second ' +
+                'one is the load-bearing half: an xclip left on the pipe the guest agent is reading ' +
+                'holds that pipe open and the command runs to its full timeout before answering. ' +
+                'setsid is the belt to that redirection, and the platform probes for it rather than ' +
+                'requiring it. Send the text base64 rather than quoted — an apostrophe in what you ' +
+                'are pasting would end the shell word:\n\n' +
                 "`printf %s '<BASE64>' | base64 -d | setsid xclip -selection clipboard >/dev/null 2>&1 &`\n\n" +
                 'QUOTED EXACTLY AS SHOWN: GNU base64 wraps at 76 columns, and inside the quotes those ' +
                 'newlines are harmless (base64 -d takes them) while UNQUOTED one of them would end the ' +
                 'pipeline and leave an empty clipboard behind a command that answered 200. Then POLL ' +
                 '`xclip -o -selection clipboard` until it matches what you sent, giving up after a few ' +
-                'seconds. Being granted a selection is asynchronous, so an immediate read returns the ' +
-                "PREVIOUS clipboard — and the redirection swallows xclip's own errors, so a guest with " +
-                'no xclip and no display answers 200 and changes nothing. The poll is the only thing ' +
-                'that catches that.\n\n' +
+                'seconds. Being granted a selection is asynchronous, so an immediate read can still be ' +
+                'the PREVIOUS clipboard — and detaching xclip gives up its exit status while the ' +
+                'redirection swallows its errors, so a guest with no xclip and no display can answer ' +
+                '200 having changed nothing. The read-back is the ONLY thing that establishes the ' +
+                'write, and a mismatch can equally mean something else owns the selection.\n\n' +
                 'The socket carries the clipboard as well, on SOME computers, and nothing here tells ' +
                 'you which: there is no capability field, and a failed attempt does not distinguish an ' +
                 'absent channel from a browser that refused the paste. It needs a Linux guest, the ' +
@@ -968,11 +971,11 @@ export const registerComputers: Registrar = (server, session, opts) => {
                 'capture it came from, so one that had the channel can come back without it. The agent ' +
                 'comes from the IMAGE: a current image ships it and starts it unaided, an older one ' +
                 'does not, and a computer keeps the image it was created from — installing the package ' +
-                'into a guest that is already logged in leaves THAT session unbridged until it logs in ' +
-                'again. Windows guests never have it, whatever the hardware says.\n\n' +
+                'into a guest that is already logged in may leave THAT session unbridged until it logs ' +
+                'in again, since the per-session half is started by the desktop autostart. Windows guests never have it, whatever the hardware says.\n\n' +
                 'Where all of it holds, RFB extended cut text is available and a noVNC client can copy ' +
                 'and paste on its own. That is the transport being open, not a guarantee: the FIRST ' +
-                'paste of a session is often dropped, because the guest PULLS the text and vdagent may ' +
+                'paste of a session can be dropped, because the guest PULLS the text and vdagent may ' +
                 "not own the selection yet, and a browser refuses to hand over the guest's clipboard " +
                 'unless it has focus and permission. A client that does not negotiate the extended ' +
                 'clipboard pseudo-encoding gets nothing whatever the guest has. So if you cold-start a ' +
@@ -981,16 +984,18 @@ export const registerComputers: Registrar = (server, session, opts) => {
                 'cannot afford to lose. This link keeps working across that: stop and start do NOT ' +
                 'reissue the credentials, and restart_computer is the only thing that does, so use ' +
                 'restart_computer on a stopped computer when you want the cold boot AND a fresh ' +
-                'credential, and get_desktop_url again afterwards to read it.',
+                'credential, and get_desktop_url again afterwards to read it — it is refused while a ' +
+                'session is suspended, and a computer starting for the FIRST time may load the boot ' +
+                'capture it was created from instead, which carries that capture topology.',
               links,
             )
           : said(
               'Watch-only. The platform drops input on this socket, so it is safe to hand to ' +
                 "somebody. The guest's clipboard does not come back over it either, and that is " +
                 'enforced rather than asked for: the daemon takes the clipboard capability out of the ' +
-                'connection as it is negotiated, so a patched client gains nothing by asking. Whatever ' +
-                'the person using the desktop copies, a password included, stays invisible to whoever ' +
-                'holds this link.',
+                'connection as it is negotiated, so a patched client gains nothing by asking. What the ' +
+                'person at the desktop COPIES does not reach whoever holds this link — though the ' +
+                'screen still does, so a password visible on it is not protected by this.',
               links,
             );
       }),
