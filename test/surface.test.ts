@@ -41,7 +41,10 @@ const EXERCISE: Record<string, Record<string, unknown>[]> = {
     { document: 'apiVersion: mandala/v1' },
     { document: 'apiVersion: mandala/v1', no_reuse: true },
   ],
-  list_builds: [{}],
+  // Both spellings, the way list_computers below is exercised: a build listing
+  // fails closed on a degraded fleet like every other fan-out, and OPL-3840 is
+  // what made the way out of it something a client can send.
+  list_builds: [{}, { allow_partial: true }],
   get_build: [{ build_id: 'bld-1' }],
   watch_build: [{ build_id: 'bld-1' }],
   list_sizes: [{}],
