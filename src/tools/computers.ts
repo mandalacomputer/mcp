@@ -939,27 +939,16 @@ export const registerComputers: Registrar = (server, session, opts) => {
               'Full control — keyboard and pointer. Treat this link as a password for that ' +
                 'desktop. Of the tools here, restart_computer is the only one that ends it: a stop ' +
                 'and a start leave it working, so a restart is what revokes one that has leaked.\n\n' +
-                'TO MOVE TEXT, use `exec` with desktop: true. That is the route that needs nothing of ' +
-                'the hardware and works on every Linux computer with a display and `xclip` — prefer it, ' +
-                'and do not start by asking a person to paste into the desktop. It is refused ' +
-                'outright on Windows. Reading is ' +
-                '`xclip -o -selection clipboard`. A write has to leave xclip RESIDENT, because an X ' +
-                'selection belongs to a live process, and has to REDIRECT its output — that second ' +
-                'one is the load-bearing half: an xclip left on the pipe the guest agent is reading ' +
-                'holds that pipe open and the command runs to its full timeout before answering. ' +
-                'setsid is the belt to that redirection, and the platform probes for it rather than ' +
-                'requiring it. Send the text base64 rather than quoted — an apostrophe in what you ' +
-                'are pasting would end the shell word:\n\n' +
-                "`printf %s '<BASE64>' | base64 -d | setsid xclip -selection clipboard >/dev/null 2>&1 &`\n\n" +
-                'QUOTED EXACTLY AS SHOWN: GNU base64 wraps at 76 columns, and inside the quotes those ' +
-                'newlines are harmless (base64 -d takes them) while UNQUOTED one of them would end the ' +
-                'pipeline and leave an empty clipboard behind a command that answered 200. Then POLL ' +
-                '`xclip -o -selection clipboard` until it matches what you sent, giving up after a few ' +
-                'seconds. Being granted a selection is asynchronous, so an immediate read can still be ' +
-                'the PREVIOUS clipboard — and detaching xclip gives up its exit status while the ' +
-                'redirection swallows its errors, so a guest with no xclip and no display can answer ' +
-                '200 having changed nothing. The read-back is the ONLY thing that establishes the ' +
-                'write, and a mismatch can equally mean something else owns the selection.\n\n' +
+                'TO MOVE TEXT, use read_clipboard and write_clipboard. They need nothing of the ' +
+                'hardware and work on every Linux computer with a desktop — prefer them, and do not ' +
+                'start by asking a person to paste into the desktop. They are refused outright on ' +
+                'Windows. Do NOT reach for xclip through exec instead: exec runs a login shell, so ' +
+                "the guest user's profile prints onto the same output your command does, ahead of it, " +
+                'which corrupts a read you are trying to parse; and a write through exec has to leave ' +
+                'xclip resident, redirect its output, travel base64 to survive an apostrophe, and then ' +
+                'be polled for, because being granted an X selection is asynchronous and a detached ' +
+                'xclip gives up its exit status. write_clipboard does all of that in one call and ' +
+                'confirms the selection was taken before it answers.\n\n' +
                 'The socket carries the clipboard as well, on SOME computers, and nothing here tells ' +
                 'you which: there is no capability field, and a failed attempt does not distinguish an ' +
                 'absent channel from a browser that refused the paste. It needs a Linux guest, the ' +

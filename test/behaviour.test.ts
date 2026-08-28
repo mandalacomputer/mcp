@@ -311,3 +311,81 @@ describe('failures', () => {
     expect(textOf(res)).toContain('background');
   });
 });
+
+describe('the clipboard', () => {
+  let platform: ReturnType<typeof installFakePlatform>;
+  beforeEach(() => {
+    platform = installFakePlatform();
+  });
+  afterEach(() => platform.restore());
+
+  it('reads the selection and hands back the text', async () => {
+    const { call, close } = await connect({ computerId: 'vm-1' });
+    const res = await call('read_clipboard', {});
+    expect(res.isError).toBeFalsy();
+    expect(textOf(res)).toContain('on the clipboard');
+    const read = platform.calls.at(-1);
+    expect([read?.method, read?.path]).toEqual(['GET', '/computers/vm-1/clipboard']);
+    await close();
+  });
+
+  it('writes the one field the platform decodes', async () => {
+    const { call, close } = await connect({ computerId: 'vm-1' });
+    const res = await call('write_clipboard', { text: 'hello' });
+    expect(res.isError).toBeFalsy();
+    const wrote = platform.calls.at(-1);
+    expect([wrote?.method, wrote?.path]).toEqual(['PUT', '/computers/vm-1/clipboard']);
+    expect(wrote?.body).toEqual({ text: 'hello' });
+    await close();
+  });
+
+  it('refuses what the platform would refuse, without spending the call', async () => {
+    // Asserted as NO REQUEST at all. A refusal that still sent it would have
+    // spent the round trip the local check exists to save — and the NUL one
+    // would have spent it on a write that lands and is then reported as having
+    // failed, because the platform confirms through a command substitution and
+    // a shell truncates one at the first NUL.
+    const { call, close } = await connect({ computerId: 'vm-1' });
+    const before = platform.calls.length;
+    for (const text of ['', 'a\0b', 'x'.repeat(64 * 1024 + 1)]) {
+      const res = await call('write_clipboard', { text });
+      expect(res.isError, `write_clipboard accepted ${JSON.stringify(text.slice(0, 8))}`).toBe(
+        true,
+      );
+    }
+    expect(platform.calls.length).toBe(before);
+    await close();
+  });
+
+  it('counts its cap in bytes, so an emoji costs four', async () => {
+    // A `text.length` check would pass four times the legal payload to an
+    // execve that answers E2BIG.
+    const { call, close } = await connect({ computerId: 'vm-1' });
+    expect(
+      (await call('write_clipboard', { text: '\u{1F600}'.repeat(16 * 1024) })).isError,
+    ).toBeFalsy();
+    expect(
+      (await call('write_clipboard', { text: '\u{1F600}'.repeat(16 * 1024 + 1) })).isError,
+    ).toBe(true);
+    await close();
+  });
+
+  it('refuses a read that came back with no text rather than saying "undefined"', async () => {
+    // `String(undefined)` is a four-word clipboard nobody copied, and a model
+    // handed it goes on to paste it.
+    const { call, close } = await connect({ computerId: 'vm-1' });
+    const real = globalThis.fetch;
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(typeof input === 'string' ? input : input.toString());
+      if (url.pathname.endsWith('/clipboard')) {
+        return new Response('{}', { headers: { 'Content-Type': 'application/json' } });
+      }
+      return real(input as never, init);
+    }) as typeof fetch;
+    const res = await call('read_clipboard', {});
+    globalThis.fetch = real;
+    expect(res.isError).toBe(true);
+    expect(textOf(res)).toContain('no text in it');
+    await close();
+  });
+});

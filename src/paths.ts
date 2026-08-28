@@ -497,6 +497,50 @@ export function windowBody(args: {
 }
 
 /**
+ * The most text `PUT /computers/{id}/clipboard` carries INTO a guest, in bytes.
+ *
+ * Mirrored so a request that can only fail is not made. NOT machine-checked —
+ * `scripts/check-surface.mjs` reads the platform's `web/lib`, and this number
+ * lives in its `server/clipboard.go` as `clipboardWriteMax`. It is not
+ * arbitrary: the platform puts the text inside one argument of one command,
+ * Linux caps a single argv string at 128 KiB, and two layers of base64 stand
+ * between the text and that ceiling, so each byte costs about 1.8 of it. Past
+ * the cap `execve` fails with E2BIG rather than truncating.
+ *
+ * The READ cap is 128 KiB, a different bound on a different channel, and is
+ * deliberately not mirrored: nothing here can meet it, since that text comes
+ * from the guest.
+ */
+export const MAX_CLIPBOARD_BYTES = 64 * 1024;
+
+/**
+ * The body for a clipboard write, checked before it costs a round trip.
+ *
+ * Three refusals, each of which the platform also makes. The NUL is the one
+ * worth explaining: the platform confirms a write by reading the selection back
+ * through a command substitution, and a shell truncates that at the first NUL —
+ * so the write would land, the read-back would disagree, and the answer would be
+ * a 409 inviting a retry at something that had already worked.
+ *
+ * The cap is counted in UTF-8 BYTES rather than characters. An emoji is four of
+ * them, so a `text.length` check would pass four times the legal payload to an
+ * execve that answers E2BIG.
+ */
+export function clipboardBody(text: string): Json {
+  if (!text) throw new Error('there is no text to put on the clipboard');
+  if (text.includes('\0')) {
+    throw new Error('that text has a NUL byte in it, which a clipboard cannot carry');
+  }
+  const bytes = new TextEncoder().encode(text).length;
+  if (bytes > MAX_CLIPBOARD_BYTES) {
+    throw new Error(
+      `that is ${bytes} bytes of text; the clipboard takes at most ${MAX_CLIPBOARD_BYTES}`,
+    );
+  }
+  return { text };
+}
+
+/**
  * The body for a capture: what to include, and what to call it.
  *
  * An args object rather than the bare boolean it was, matching `createBody` and

@@ -262,6 +262,57 @@ export const registerGuest: Registrar = (server, session) => {
   );
 
   server.registerTool(
+    'read_clipboard',
+    {
+      title: "Read the desktop's clipboard",
+      description:
+        "What is on the computer's desktop clipboard right now — the CLIPBOARD selection, which is what Ctrl-C writes and Ctrl-V pastes. Use this rather than running xclip through exec: exec runs a login shell, so anything the guest user's profile prints lands on the same output ahead of your command's, which corrupts a read you are trying to parse. This does not share that stream. It works on every Linux computer with a desktop — no reboot and no particular image — and is refused on Windows. It is a READ, not a subscription: nothing notices a copy in the guest on its own. It also does not wake a suspended computer, so a stopped or suspended one is refused rather than started; start_computer first if you need it. At most 128 KiB comes back, and more than that is refused rather than cut short.",
+      inputSchema: { ...idArg },
+      annotations: { readOnlyHint: true },
+    },
+    ({ computer_id }, extra) =>
+      guarded(async () => {
+        const id = session.resolve(computer_id);
+        const res = await session.api
+          .with(extra.signal)
+          .json<{ text?: unknown }>('GET', P.computerAction(id, 'clipboard'));
+        // Checked rather than rendered. `String(undefined)` is "undefined" — a
+        // clipboard nobody copied, which a model would go on to paste.
+        if (typeof res?.text !== 'string') {
+          return refused(
+            'The clipboard read came back with no text in it. Nothing was read; try again, and if it keeps happening the computer may not have a desktop session up yet.',
+          );
+        }
+        return res.text === ''
+          ? said('The desktop clipboard is empty.')
+          : said('On the desktop clipboard:', { text: res.text });
+      }),
+  );
+
+  server.registerTool(
+    'write_clipboard',
+    {
+      title: "Put text on the desktop's clipboard",
+      description:
+        'Puts text on the computer\u2019s desktop clipboard, ready to paste. This leaves it on the clipboard and touches nothing on screen — follow it with press_key ctrl+v to get the text into whatever has focus. Use this rather than the setsid/xclip/base64 recipe through exec: it is one call, it is confirmed, and it cannot be broken by a quote in the text. Unlike read_clipboard this DRIVES the computer, so a suspended one is resumed to serve it and that resume is charged. At most 64 KiB of text goes in — half what comes out, because the text crosses to the guest inside a single command argument. Refused on Windows. The platform confirms the write by reading the selection back before it answers, so a success here means the desktop is holding your text rather than that a command ran; a refusal saying the desktop did not take it means something else claimed the clipboard in that instant, and retrying works.',
+      inputSchema: {
+        ...idArg,
+        text: z.string().describe('The text to put on the clipboard. At most 64 KiB of UTF-8.'),
+      },
+    },
+    ({ computer_id, text }, extra) =>
+      guarded(async () => {
+        const id = session.resolve(computer_id);
+        await session.api
+          .with(extra.signal)
+          .json('PUT', P.computerAction(id, 'clipboard'), { body: P.clipboardBody(text) });
+        return said(
+          'On the desktop clipboard, and the desktop has taken it. Press ctrl+v to paste it into whatever has focus.',
+        );
+      }),
+  );
+
+  server.registerTool(
     'write_file',
     {
       title: 'Put a file into the guest',
