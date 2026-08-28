@@ -2793,3 +2793,54 @@ describe('a connection failure after the request was sent (OPL-3855)', () => {
     expect(isTransientForPoll(new ConnectivityInterruptedError('lost'))).toBe(true);
   });
 });
+
+describe('the tools our own prose tells a model to call', () => {
+  let platform: ReturnType<typeof installFakePlatform>;
+  beforeEach(() => {
+    platform = installFakePlatform();
+  });
+  afterEach(() => platform.restore());
+
+  // OPL-3869. `get_desktop_url` spent its whole life telling the agent to move
+  // text with `run_command`, and there has never been a tool by that name — the
+  // command tool is `exec`. Nothing caught it because a description is a
+  // string, and a string that names a tool is indistinguishable from a string
+  // that does not until a model tries to call it and gets nothing back.
+  //
+  // So: every tool-shaped identifier we write, in a description or in an answer,
+  // has to be a tool we register. The pattern is anchored on the verbs the
+  // registry actually uses, which is what keeps `computer_id`, `allow_partial`
+  // and `view_url` out of it while `run_command` lands squarely in.
+  const TOOLISH =
+    /\b(?:get|list|create|delete|stop|start|restart|suspend|update|move|clone|exec|run|wait|read|write|open|press|type|click|scroll|drag|build|check|publish|retire|watch|restore|snapshot|cursor|mouse|window)_[a-z_]+\b/g;
+
+  it('names only tools that exist', async () => {
+    const { client, call, close } = await connect();
+    const registered = new Set((await client.listTools()).tools.map((t) => t.name));
+
+    const prose: { where: string; text: string }[] = [];
+    for (const t of (await client.listTools()).tools) {
+      prose.push({ where: `${t.name} description`, text: t.description ?? '' });
+      for (const [arg, schema] of Object.entries(t.inputSchema.properties ?? {})) {
+        const d = (schema as { description?: string }).description;
+        if (d) prose.push({ where: `${t.name}.${arg} description`, text: d });
+      }
+    }
+    // The answers too, not only the schema. The bug was in an answer.
+    for (const args of [{}, { control: true }]) {
+      prose.push({
+        where: `get_desktop_url(${JSON.stringify(args)}) answer`,
+        text: said(await call('get_desktop_url', args)),
+      });
+    }
+
+    const wrong: string[] = [];
+    for (const { where, text } of prose) {
+      for (const name of text.match(TOOLISH) ?? []) {
+        if (!registered.has(name)) wrong.push(`${where} names \`${name}\``);
+      }
+    }
+    expect(wrong, 'text that tells a model to call something we do not register').toEqual([]);
+    await close();
+  });
+});

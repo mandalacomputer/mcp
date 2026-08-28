@@ -936,37 +936,47 @@ export const registerComputers: Registrar = (server, session, opts) => {
         }
         return control
           ? said(
-              'Full control — keyboard and pointer. The CLIPBOARD crosses this socket on a LINUX ' +
-                'computer whose QEMU has the vdagent channel and whose image carries the agent, and not ' +
-                'otherwise — so do not build on it if your work has to run on any computer. The two ' +
-                'halves are acquired SEPARATELY and a computer needs both. The channel comes from a COLD ' +
-                'start: stop the computer and start it again, or restart one that is already stopped, ' +
-                'which starts it. Restarting a RUNNING computer does NOT do it — that resets the guest ' +
-                'rather than rebuilding the machine QEMU was given. The agent is `spice-vdagent` inside ' +
-                'the guest and comes from the IMAGE, and a computer keeps the image it was created from, ' +
-                'so an older computer needs the package installed in the guest — you have root there — ' +
-                'or replacing with a newly created one. Windows guests never have it, whatever the ' +
-                'hardware says. Where both are present, ordinary copy and paste in a noVNC client works ' +
-                'in both directions and nothing below is needed. Where either is absent a paste reaches ' +
-                'QEMU and stops, silently, with no error to catch — and NO FIELD TELLS YOU WHICH YOU ' +
-                'HAVE, so the only way to know is to try it or to use the route below.\n\n' +
-                'run_command with desktop: true is the route to build on if you only want to write it ' +
-                'once, because it needs nothing of the hardware — but it is not universal either: it ' +
-                "drives the guest's own desktop session, so it needs a Linux guest with a display and " +
-                '`xclip`, and it is refused outright on Windows. Reading is ' +
+              'Full control — keyboard and pointer. Treat this link as a password for that ' +
+                'desktop; it ends when the computer restarts.\n\n' +
+                'TO MOVE TEXT, use `exec` with desktop: true. That is the route that needs nothing of ' +
+                'the hardware, works on every Linux computer with a display and `xclip`, and reports ' +
+                'its own failures — prefer it, and do not start by asking a person to paste into the ' +
+                'desktop. It is refused outright on Windows. Reading is ' +
                 '`xclip -o -selection clipboard`. A write needs BOTH setsid, so the holder outlives the ' +
                 'command (an X selection belongs to a live process), and the output redirected, or the ' +
                 'resident xclip holds the pipe the guest agent is reading and the command runs to its ' +
                 'full timeout before answering. Send the text base64 rather than quoted — an apostrophe ' +
-                'in what you are pasting would end the shell word — and poll rather than reading ' +
-                'straight back, because being granted a selection is asynchronous and the next read can ' +
-                'still be the old clipboard — bounded, a few seconds, since the redirection also swallows ' +
-                "xclip's own errors and a guest without it never changes the selection at all. Quote the " +
-                'base64 exactly as shown: GNU base64 wraps at 76 columns, and inside the quotes those ' +
+                'in what you are pasting would end the shell word:\n\n' +
+                "`printf %s '<BASE64>' | base64 -d | setsid xclip -selection clipboard >/dev/null 2>&1 &`\n\n" +
+                'QUOTED EXACTLY AS SHOWN: GNU base64 wraps at 76 columns, and inside the quotes those ' +
                 'newlines are harmless (base64 -d takes them) while UNQUOTED one of them would end the ' +
-                'pipeline and leave an empty clipboard behind a command that answered 200. ' +
-                "`printf %s '<BASE64>' | base64 -d | setsid xclip -selection clipboard >/dev/null 2>&1 &`. " +
-                'Treat this link as a password for that desktop; it ends when the computer restarts.',
+                'pipeline and leave an empty clipboard behind a command that answered 200. Then POLL ' +
+                '`xclip -o -selection clipboard` until it matches what you sent, giving up after a few ' +
+                'seconds. Being granted a selection is asynchronous, so an immediate read returns the ' +
+                "PREVIOUS clipboard — and the redirection swallows xclip's own errors, so a guest with " +
+                'no xclip and no display answers 200 and changes nothing. The poll is the only thing ' +
+                'that catches that.\n\n' +
+                'The socket carries the clipboard as well, on SOME computers, and nothing here tells ' +
+                'you which: there is no capability field, and a failed attempt does not distinguish an ' +
+                'absent channel from a browser that refused the paste. It needs a Linux guest, the ' +
+                'QEMU vdagent channel, and spice-vdagent RUNNING in the guest session. The channel ' +
+                'comes from a COLD start — stop_computer then start_computer, or restart_computer on a ' +
+                'computer that is already stopped, which starts it; restart_computer on a RUNNING one ' +
+                'does not do it, because that resets the guest rather than rebuilding the machine QEMU ' +
+                'was given, and a resumed or snapshot-restored session keeps the topology of the ' +
+                'capture it came from, so one that had the channel can come back without it. The agent ' +
+                'comes from the IMAGE: a current image ships it and starts it unaided, an older one ' +
+                'does not, and a computer keeps the image it was created from — installing the package ' +
+                'into a guest that is already logged in leaves THAT session unbridged until it logs in ' +
+                'again. Windows guests never have it, whatever the hardware says.\n\n' +
+                'Where all of it holds, RFB extended cut text is available and a noVNC client can copy ' +
+                'and paste on its own. That is the transport being open, not a guarantee: the FIRST ' +
+                'paste of a session is often dropped, because the guest PULLS the text and vdagent may ' +
+                "not own the selection yet, and a browser refuses to hand over the guest's clipboard " +
+                'unless it has focus and permission. So if you cold-start a computer for this, the ' +
+                'order is stop_computer, start_computer, wait_for_computer until the guest is up, then ' +
+                'get_desktop_url AGAIN — the credentials in this link do not survive it — and test ' +
+                'with a sentinel string rather than with text you cannot afford to lose.',
               links,
             )
           : said(
