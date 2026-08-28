@@ -936,27 +936,46 @@ export const registerComputers: Registrar = (server, session, opts) => {
         }
         return control
           ? said(
-              'Full control — keyboard and pointer, but NOT the clipboard: the platform does not run the ' +
-                'channel QEMU carries VNC cut text on, so text pasted into this socket is dropped silently ' +
-                'and telling somebody to paste into it does not work. Move text with run_command and ' +
-                'desktop: true instead. Reading is `xclip -o -selection clipboard`. A write needs BOTH ' +
-                'setsid, so the holder outlives the command (an X selection belongs to a live process), ' +
-                'and the output redirected, or the resident xclip holds the pipe the guest agent is ' +
-                'reading and the command runs to its full timeout before answering. Send the text base64 ' +
-                'rather than quoted — an apostrophe in what you are pasting would end the shell word — ' +
-                'and poll rather than reading straight back, because being granted a selection is ' +
-                'asynchronous and the next read can still be the old clipboard — bounded, a few seconds, ' +
-                "since the redirection also swallows xclip's own errors and a guest without it never " +
-                'changes the selection at all. Quote the base64 exactly as shown: GNU base64 wraps at 76 ' +
-                'columns, and inside the quotes those newlines are harmless (base64 -d takes them) while ' +
-                'UNQUOTED one of them would end the pipeline and leave an empty clipboard behind a ' +
-                'command that answered 200. ' +
+              'Full control — keyboard and pointer. The CLIPBOARD crosses this socket on a LINUX ' +
+                'computer whose QEMU has the vdagent channel and whose image carries the agent, and not ' +
+                'otherwise — so do not build on it if your work has to run on any computer. The two ' +
+                'halves are acquired SEPARATELY and a computer needs both. The channel comes from a COLD ' +
+                'start: stop the computer and start it again, or restart one that is already stopped, ' +
+                'which starts it. Restarting a RUNNING computer does NOT do it — that resets the guest ' +
+                'rather than rebuilding the machine QEMU was given. The agent is `spice-vdagent` inside ' +
+                'the guest and comes from the IMAGE, and a computer keeps the image it was created from, ' +
+                'so an older computer needs the package installed in the guest — you have root there — ' +
+                'or replacing with a newly created one. Windows guests never have it, whatever the ' +
+                'hardware says. Where both are present, ordinary copy and paste in a noVNC client works ' +
+                'in both directions and nothing below is needed. Where either is absent a paste reaches ' +
+                'QEMU and stops, silently, with no error to catch — and NO FIELD TELLS YOU WHICH YOU ' +
+                'HAVE, so the only way to know is to try it or to use the route below.\n\n' +
+                'run_command with desktop: true is the route to build on if you only want to write it ' +
+                'once, because it needs nothing of the hardware — but it is not universal either: it ' +
+                "drives the guest's own desktop session, so it needs a Linux guest with a display and " +
+                '`xclip`, and it is refused outright on Windows. Reading is ' +
+                '`xclip -o -selection clipboard`. A write needs BOTH setsid, so the holder outlives the ' +
+                'command (an X selection belongs to a live process), and the output redirected, or the ' +
+                'resident xclip holds the pipe the guest agent is reading and the command runs to its ' +
+                'full timeout before answering. Send the text base64 rather than quoted — an apostrophe ' +
+                'in what you are pasting would end the shell word — and poll rather than reading ' +
+                'straight back, because being granted a selection is asynchronous and the next read can ' +
+                'still be the old clipboard — bounded, a few seconds, since the redirection also swallows ' +
+                "xclip's own errors and a guest without it never changes the selection at all. Quote the " +
+                'base64 exactly as shown: GNU base64 wraps at 76 columns, and inside the quotes those ' +
+                'newlines are harmless (base64 -d takes them) while UNQUOTED one of them would end the ' +
+                'pipeline and leave an empty clipboard behind a command that answered 200. ' +
                 "`printf %s '<BASE64>' | base64 -d | setsid xclip -selection clipboard >/dev/null 2>&1 &`. " +
                 'Treat this link as a password for that desktop; it ends when the computer restarts.',
               links,
             )
           : said(
-              'Watch-only. The platform drops input on this socket, so it is safe to hand to somebody.',
+              'Watch-only. The platform drops input on this socket, so it is safe to hand to ' +
+                "somebody. The guest's clipboard does not come back over it either, and that is " +
+                'enforced rather than asked for: the daemon takes the clipboard capability out of the ' +
+                'connection as it is negotiated, so a patched client gains nothing by asking. Whatever ' +
+                'the person using the desktop copies, a password included, stays invisible to whoever ' +
+                'holds this link.',
               links,
             );
       }),
