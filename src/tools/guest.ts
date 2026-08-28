@@ -307,7 +307,9 @@ export const registerGuest: Registrar = (server, session) => {
           .with(extra.signal)
           .json('PUT', P.computerAction(id, 'clipboard'), { body: P.clipboardBody(text) });
         return said(
-          'On the desktop clipboard, and the desktop has taken it. Press ctrl+v to paste it into whatever has focus.',
+          'On the desktop clipboard, and the desktop has taken it. To paste it into whatever has focus, ' +
+            'call press_key with keys ["ctrl","v"] — two key NAMES, not the one string "ctrl+v" that ' +
+            'press_key refuses as an unknown key.',
         );
       }),
   );

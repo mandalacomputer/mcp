@@ -75,6 +75,16 @@ export function usageQuery(from?: string, to?: string): Record<string, string> |
     }
     query[name] = value;
   }
+  // `to` alone is measured from the start of the CURRENT billing period, not
+  // from the start of the one `to` falls in, so it answers a window the caller
+  // did not ask for rather than failing. Both descriptions say this is refused;
+  // this is where it is refused.
+  if (to !== undefined && from === undefined) {
+    throw new Error(
+      'to on its own is measured from the current billing period rather than from the period it ' +
+        'names — send from as well to ask about a window that has closed, or omit both for this period',
+    );
+  }
   return Object.keys(query).length ? query : undefined;
 }
 

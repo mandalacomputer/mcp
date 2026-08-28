@@ -5,3 +5,6 @@ dist/
 .env
 .env.*
 coverage/
+
+# Reports written by the /grok-bug-hunt skill.
+.grok-bug-hunt/

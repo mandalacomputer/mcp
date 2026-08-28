@@ -94,10 +94,24 @@ type Move = {
   finished_at?: string;
 };
 
-const movesOf = (body: unknown): Move[] => {
+/**
+ * The moves table, or `undefined` when the platform did not send one.
+ *
+ * An envelope without a `moves` array is not an account with no moves in it,
+ * and that difference is the whole reason this returns `undefined` rather than
+ * `[]`. Both callers below read emptiness as a fact about the account: one
+ * reports a quiet account, the other concludes the computer was deleted and
+ * stops watching a move that is still running. An unreadable body establishes
+ * neither.
+ */
+const movesOf = (body: unknown): Move[] | undefined => {
   const list = (body as { moves?: unknown } | null)?.moves;
-  return Array.isArray(list) ? (list as Move[]) : [];
+  return Array.isArray(list) ? (list as Move[]) : undefined;
 };
+
+/** What arrived where a list was expected, for a refusal that names it. */
+const shapeOf = (v: unknown): string =>
+  v === undefined ? 'no body at all' : v === null ? 'null' : typeof v;
 
 /**
  * The resize refusal that is an OFFER, turned into a next step (OPL-3775).
@@ -628,9 +642,11 @@ export const registerComputers: Registrar = (server, session, opts) => {
               last,
             );
           }
-          let mine: Move | undefined;
+          let table: Move[] | undefined;
+          let raw: unknown;
           try {
-            mine = movesOf(await api.json('GET', P.MOVES)).find((m) => m.computer_id === id);
+            raw = await api.json('GET', P.MOVES);
+            table = movesOf(raw);
           } catch (err) {
             if (extra.signal?.aborted) continue;
             if (err instanceof CancelledError) {
@@ -655,7 +671,17 @@ export const registerComputers: Registrar = (server, session, opts) => {
             await sleep(pollDelay(err), signal);
             continue;
           }
+          // A table that is not a list is the platform failing to answer, not
+          // an answer that the move is gone. It rides out the same way a poll
+          // that threw does, so the deadline's sentence says the platform could
+          // not be asked rather than claiming a deletion nothing established.
+          if (!table) {
+            blocked = `GET /moves answered with ${shapeOf((raw as { moves?: unknown } | null)?.moves)}, not a list of moves`;
+            await sleep(POLL_MS, signal);
+            continue;
+          }
           blocked = undefined;
+          const mine = table.find((m) => m.computer_id === id);
           // A move that is no longer listed is one the platform reaped, and it
           // reaps for one reason: the computer was deleted. Not a state to keep
           // polling for.
@@ -688,10 +714,18 @@ export const registerComputers: Registrar = (server, session, opts) => {
       description:
         'Every move on this account: the ones running and the ones that finished in the last day. Read this after move_computer if the wait ran out, and read it when a move is refused because another computer on the account is already being moved — only one runs at a time, and this says which one and how far along. `live` is the flag to poll on.',
       inputSchema: {},
+      annotations: { readOnlyHint: true },
     },
     (_args, extra) =>
       guarded(async () => {
-        const moves = movesOf(await session.api.with(extra.signal).json('GET', P.MOVES));
+        const body = await session.api.with(extra.signal).json('GET', P.MOVES);
+        const moves = movesOf(body);
+        if (!moves) {
+          return refused(
+            `GET /moves answered with ${shapeOf((body as { moves?: unknown } | null)?.moves)}, not a list of moves. This is not an account with no moves on it — a move you started may still be running.`,
+            body,
+          );
+        }
         if (!moves.length) return said('No moves on this account.', []);
         return said(moves.map(moveLine).join('\n'), moves);
       }),
@@ -724,6 +758,18 @@ export const registerComputers: Registrar = (server, session, opts) => {
         const body = (await session.api
           .with(extra.signal)
           .json('GET', P.USAGE, { query: P.usageQuery(from, to) })) as Usage;
+        // `0 vCPU-hours` is a bill, and a missing totals object is not one. The
+        // fields inside it still default — a meter that sent no `disk_gb_months`
+        // is saying zero — but the object holding them has to have arrived, or
+        // this answers with a figure nobody metered in the shape of one somebody
+        // did, on the one call whose output is compared against an invoice.
+        const totals = body?.usage;
+        if (totals === null || typeof totals !== 'object' || Array.isArray(totals)) {
+          return refused(
+            `GET /usage answered with ${shapeOf(totals)} where the totals object goes, so there are no figures to report. This is NOT an account that used nothing.`,
+            body,
+          );
+        }
         return said(usageLine(body), body);
       }),
   );
