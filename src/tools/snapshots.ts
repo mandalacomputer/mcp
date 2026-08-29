@@ -308,7 +308,7 @@ export const registerSnapshots: Registrar = (server, session, opts) => {
     {
       title: 'Read how long automatic snapshots are kept',
       description:
-        "The plan's retention window — the other half of `snapshot_schedule`, which says when snapshots are taken and deliberately has no field for how long they survive. Read it before promising anyone that a backup will still be there, and before taking a snapshot you mean to keep. Takes no arguments: the window belongs to the ACCOUNT, not to a computer, though each computer keeps its own set under it. ONLY AUTOMATIC SNAPSHOTS ARE AGED OUT — one you took yourself with take_snapshot is never removed automatically, which is how you keep something past the window.",
+        "The plan's retention window — the other half of `snapshot_schedule`, which says when snapshots are taken and deliberately has no field for how long they survive. Read it before promising anyone that a backup will still be there, and before taking a snapshot you mean to keep. Takes no arguments: the window belongs to the ACCOUNT, not to a computer, though each computer keeps its own set under it. ONLY AUTOMATIC SNAPSHOTS ARE AGED OUT — one you took yourself with `create_snapshot` is never removed automatically, which is how you keep something past the window.",
       inputSchema: {},
       annotations: { readOnlyHint: true },
     },

@@ -19,13 +19,86 @@ export class MandalaError extends Error {
 
 export class APIError extends MandalaError {
   override name = 'APIError';
+  /**
+   * The platform's own word for what KIND of refusal this is, where it sent
+   * one: `contention`, `starting`, `unavailable` or `unsupported` (OPL-3898).
+   * `undefined` for most errors, and always will be — the platform is explicit
+   * that an absent value means unclassified rather than "none of the four".
+   *
+   * Read on the base class rather than on the one 409 it was filed for, because
+   * the platform keys it on the ERROR and not on the route: the same sentinel is
+   * reached from several endpoints, and `unavailable` arrives as a 400 as well
+   * as a 409 — whoever loses the race to the running check hears the same fact
+   * the caller who arrived a moment earlier heard.
+   */
+  readonly reason?: string;
   constructor(
     message: string,
     readonly status: number,
     readonly body?: unknown,
   ) {
     super(message);
+    this.reason = refusalReason(body);
   }
+}
+
+/**
+ * The two answers `reason` can carry, as sets rather than as types.
+ *
+ * Kept as data deliberately. The platform states that a fifth word may be added
+ * and that a client must read one it does not recognise as "no answer given" —
+ * an allow-list of classes would make the next word a breaking change, and the
+ * same word arrives on more than one status, so a subclass of any one of them
+ * could not carry it. Both memberships are tested rather than one being inferred
+ * from the other, which is what makes an unknown word fall through to the type
+ * answer instead of reading as permanent. Mirrors `_REASON_CLEARS` and
+ * `_REASON_PERMANENT` in mandala-computer-python's `_exceptions.py`.
+ */
+const REASON_CLEARS: ReadonlySet<string> = new Set(['contention', 'starting']);
+const REASON_PERMANENT: ReadonlySet<string> = new Set(['unavailable', 'unsupported']);
+
+/**
+ * What to tell a model about a refusal the platform classified, or `undefined`.
+ *
+ * The word itself is for a program, and the client here is a language model that
+ * cannot switch on a JSON key it never sees: {@link failed} renders an error as
+ * one sentence. So the classification travels as the clause it means, and the
+ * loop OPL-3898 was filed about — a blanket retry against a computer that is
+ * simply stopped — is the one these sentences exist to stop.
+ *
+ * Deliberately silent about anything else. A word this version does not know is
+ * not described at all, because inventing advice for it is the mistake the
+ * platform's "absent means unclassified" contract exists to prevent.
+ */
+export function reasonAdvice(reason: string | undefined): string | undefined {
+  switch (reason) {
+    case 'contention':
+      return 'something was in flight; the same call works once it finishes, so this one is worth sending again';
+    case 'starting':
+      return 'the guest agent is still inside its boot window, so this is worth sending again in a moment';
+    case 'unavailable':
+      return 'the computer is not running, and this does NOT clear by waiting — start_computer is the fix, and retrying without it spends a turn every time';
+    case 'unsupported':
+      return 'this computer cannot do it at all, so do not retry it — the answer is the same forever';
+    default:
+      return undefined;
+  }
+}
+
+/**
+ * The platform's one-word classification off a refusal body, or `undefined`.
+ *
+ * Shape-checked in the manner of {@link moveOffer} and for its reason: this
+ * decides a retry policy, so a body with a `reason` that is not a string has to
+ * read as "no answer given" and fall back to what this server did before the key
+ * existed. Any string is kept, including one this version has never heard of —
+ * the callers compare against the sets above, because the sets are the contract
+ * and the raw word belongs to whoever is embedding this.
+ */
+function refusalReason(body: unknown): string | undefined {
+  if (!body || typeof body !== 'object') return undefined;
+  const reason = (body as { reason?: unknown }).reason;
+  return typeof reason === 'string' ? reason : undefined;
 }
 
 /** 401 — the key is missing, malformed, or revoked. */
@@ -67,8 +140,12 @@ export class NotFoundError extends APIError {
  *
  * Only the refusal that could be acted on has been given a class of its own so
  * far, because a type is worth adding where a caller can DO something different
- * with it. The rest stay here and the message is what distinguishes them, which
- * is what the platform's own reference now says to read.
+ * with it. The rest stay here and are told apart by {@link APIError.reason},
+ * which is the word the platform added for that purpose (OPL-3898) and the one
+ * its own reference now says to switch on — never the sentence, which is prose
+ * written for a person and rewritten whenever a better one is. Where no word was
+ * sent this class means what it always did, and that fallback is the contract
+ * rather than a gap: not every refusal here has an answer yet.
  */
 export class ConflictError extends APIError {
   override name = 'ConflictError';
@@ -649,6 +726,16 @@ export function errorForStatus(status: number, message: string, body?: unknown):
  * are a passing state, and the move offer is a decision that no retry changes,
  * which is why the check below leads with the type rather than the number. If a
  * second such refusal earns a class, it belongs on that line too.
+ *
+ * One 409 could not be given a class and could not be seen from here at all: a
+ * clipboard read or write against a computer that is STOPPED does not clear on
+ * its own — a start is the fix, not another attempt — and nothing in the body
+ * told it apart from a conflict that is merely passing. The advice was to read
+ * the message, which is prose the platform is free to reword and exactly the
+ * matching OPL-3724 got three clients out of. The platform now says which kind
+ * it is, so {@link APIError.reason} is consulted BEFORE the types below, and an
+ * absent word — or one this version does not know — leaves the type answer
+ * standing unchanged (OPL-3898).
  */
 export function isTransient(err: unknown): boolean {
   // A move offer is a 409 and is NOT transient — it is a decision about the
@@ -661,6 +748,15 @@ export function isTransient(err: unknown): boolean {
   // is safe to replay blind. Same shape as the line above and the same reason:
   // a subclass of a branch below that would otherwise say yes (OPL-3855).
   if (err instanceof ConnectivityInterruptedError) return false;
+  // The platform's own word, ahead of the types below, because it is the more
+  // specific answer and it is the one that tells the 409 that never clears from
+  // the two that do (OPL-3898). Only an APIError carries a shape-checked one:
+  // an arbitrary exception may happen to have a `reason` property, and that is
+  // neither this protocol nor retry advice.
+  if (err instanceof APIError && err.reason !== undefined) {
+    if (REASON_CLEARS.has(err.reason)) return true;
+    if (REASON_PERMANENT.has(err.reason)) return false;
+  }
   return (
     err instanceof ConflictError ||
     err instanceof RateLimitError ||
@@ -745,6 +841,16 @@ export function isTransient(err: unknown): boolean {
  *   give-up that named nothing about the redirect. The mandala-computer-python
  *   SDK found that one; this is the same rule, and it is why all three now say
  *   `>= 500`.
+ *
+ * {@link APIError.reason} is deliberately NOT consulted here, and that is the
+ * one place this predicate and {@link isTransient} part company (OPL-3898).
+ * `unavailable` means the computer is not running, which is a permanent answer
+ * to whoever asked — and a poll under a deadline is the one caller for whom it
+ * may not be, since a computer coming up passes through it. The same generosity
+ * as every unmapped 5xx below, for the same reason: this only ever replays a
+ * read, and the loops above return a refusal of their own the moment the status
+ * they are watching says stopped or suspended. mandala-computer-python's
+ * `_is_transient_for_poll` draws the line in the same place.
  *
  * Everything at 5xx polls through, 502 and 520-523 included: they mean the
  * outcome is unknown, and a read whose outcome is unknown can simply be read
