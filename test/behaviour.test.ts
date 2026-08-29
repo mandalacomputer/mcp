@@ -311,3 +311,121 @@ describe('failures', () => {
     expect(textOf(res)).toContain('background');
   });
 });
+
+describe('the clipboard', () => {
+  let platform: ReturnType<typeof installFakePlatform>;
+  beforeEach(() => {
+    platform = installFakePlatform();
+  });
+  afterEach(() => platform.restore());
+
+  it('states the xclip image requirement everywhere it recommends the tools', async () => {
+    const { client, call, close } = await connect({ computerId: 'vm-1' });
+    const tools = new Map((await client.listTools()).tools.map((tool) => [tool.name, tool]));
+    const guidance = [
+      tools.get('read_clipboard')?.description,
+      tools.get('write_clipboard')?.description,
+      textOf(await call('get_desktop_url', { control: true })),
+    ];
+    for (const text of guidance) {
+      expect(text).toMatch(/image.+xclip|xclip.+image/);
+      expect(text).toContain('400');
+    }
+    await close();
+  });
+
+  it('reads the selection and hands back the text', async () => {
+    const { call, close } = await connect({ computerId: 'vm-1' });
+    const res = await call('read_clipboard', {});
+    expect(res.isError).toBeFalsy();
+    expect(textOf(res)).toContain('on the clipboard');
+    const read = platform.calls.at(-1);
+    expect([read?.method, read?.path]).toEqual(['GET', '/computers/vm-1/clipboard']);
+    await close();
+  });
+
+  it('writes the one field the platform decodes', async () => {
+    const { call, close } = await connect({ computerId: 'vm-1' });
+    const res = await call('write_clipboard', { text: 'hello' });
+    expect(res.isError).toBeFalsy();
+    const wrote = platform.calls.at(-1);
+    expect([wrote?.method, wrote?.path]).toEqual(['PUT', '/computers/vm-1/clipboard']);
+    expect(wrote?.body).toEqual({ text: 'hello' });
+    await close();
+  });
+
+  it('refuses what the platform would refuse, without spending the call', async () => {
+    // Asserted as NO REQUEST at all. A refusal that still sent it would have
+    // spent the round trip the local check exists to save — and the NUL one
+    // would have spent it on a write that lands and is then reported as having
+    // failed, because the platform confirms through a command substitution and
+    // a shell truncates one at the first NUL.
+    const { call, close } = await connect({ computerId: 'vm-1' });
+    const before = platform.calls.length;
+    for (const text of ['', 'a\0b', 'x'.repeat(64 * 1024 + 1)]) {
+      const res = await call('write_clipboard', { text });
+      expect(res.isError, `write_clipboard accepted ${JSON.stringify(text.slice(0, 8))}`).toBe(
+        true,
+      );
+    }
+    expect(platform.calls.length).toBe(before);
+    await close();
+  });
+
+  it('refuses half a character rather than pasting a replacement for it', async () => {
+    // The one refusal here that is NOT the platform's, and the reason it has to
+    // be this server's: nothing downstream objects. JSON.stringify escapes the
+    // lone code unit, Go decodes it to U+FFFD, and the desktop ends up holding a
+    // replacement character where the caller's text was — a write that succeeds
+    // with text nobody sent. A lone surrogate is what a string cut through the
+    // middle of an emoji is made of, which is not an exotic way to arrive here.
+    const { call, close } = await connect({ computerId: 'vm-1' });
+    const before = platform.calls.length;
+    // A high surrogate, a low one, and one of each in the wrong order — the
+    // last because a pair is only a pair in that order, and a scan that tested
+    // membership rather than sequence would call it well-formed.
+    for (const text of ['\ud800', 'a\udc00b', '\udfff\ud800']) {
+      const res = await call('write_clipboard', { text });
+      expect(res.isError, `write_clipboard accepted ${JSON.stringify(text)}`).toBe(true);
+      expect(textOf(res)).toMatch(/unpaired surrogate/);
+    }
+    expect(platform.calls.length).toBe(before);
+    // And the pair those halves come from still goes through: refusing the
+    // whole emoji would be the same defect from the other side.
+    expect((await call('write_clipboard', { text: '😀' })).isError).toBeFalsy();
+    expect(platform.calls.at(-1)?.body).toEqual({ text: '\u{1F600}' });
+    await close();
+  });
+
+  it('counts its cap in bytes, so an emoji costs four', async () => {
+    // A `text.length` check would pass four times the legal payload to an
+    // execve that answers E2BIG.
+    const { call, close } = await connect({ computerId: 'vm-1' });
+    expect(
+      (await call('write_clipboard', { text: '\u{1F600}'.repeat(16 * 1024) })).isError,
+    ).toBeFalsy();
+    expect(
+      (await call('write_clipboard', { text: '\u{1F600}'.repeat(16 * 1024 + 1) })).isError,
+    ).toBe(true);
+    await close();
+  });
+
+  it('refuses a read that came back with no text rather than saying "undefined"', async () => {
+    // `String(undefined)` is a four-word clipboard nobody copied, and a model
+    // handed it goes on to paste it.
+    const { call, close } = await connect({ computerId: 'vm-1' });
+    const real = globalThis.fetch;
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(typeof input === 'string' ? input : input.toString());
+      if (url.pathname.endsWith('/clipboard')) {
+        return new Response('{}', { headers: { 'Content-Type': 'application/json' } });
+      }
+      return real(input as never, init);
+    }) as typeof fetch;
+    const res = await call('read_clipboard', {});
+    globalThis.fetch = real;
+    expect(res.isError).toBe(true);
+    expect(textOf(res)).toContain('no text in it');
+    await close();
+  });
+});
