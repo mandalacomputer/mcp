@@ -372,6 +372,31 @@ describe('the clipboard', () => {
     await close();
   });
 
+  it('refuses half a character rather than pasting a replacement for it', async () => {
+    // The one refusal here that is NOT the platform's, and the reason it has to
+    // be this server's: nothing downstream objects. JSON.stringify escapes the
+    // lone code unit, Go decodes it to U+FFFD, and the desktop ends up holding a
+    // replacement character where the caller's text was — a write that succeeds
+    // with text nobody sent. A lone surrogate is what a string cut through the
+    // middle of an emoji is made of, which is not an exotic way to arrive here.
+    const { call, close } = await connect({ computerId: 'vm-1' });
+    const before = platform.calls.length;
+    // A high surrogate, a low one, and one of each in the wrong order — the
+    // last because a pair is only a pair in that order, and a scan that tested
+    // membership rather than sequence would call it well-formed.
+    for (const text of ['\ud800', 'a\udc00b', '\udfff\ud800']) {
+      const res = await call('write_clipboard', { text });
+      expect(res.isError, `write_clipboard accepted ${JSON.stringify(text)}`).toBe(true);
+      expect(textOf(res)).toMatch(/unpaired surrogate/);
+    }
+    expect(platform.calls.length).toBe(before);
+    // And the pair those halves come from still goes through: refusing the
+    // whole emoji would be the same defect from the other side.
+    expect((await call('write_clipboard', { text: '😀' })).isError).toBeFalsy();
+    expect(platform.calls.at(-1)?.body).toEqual({ text: '\u{1F600}' });
+    await close();
+  });
+
   it('counts its cap in bytes, so an emoji costs four', async () => {
     // A `text.length` check would pass four times the legal payload to an
     // execve that answers E2BIG.

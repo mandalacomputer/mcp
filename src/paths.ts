@@ -524,13 +524,35 @@ export function windowBody(args: {
 export const MAX_CLIPBOARD_BYTES = 64 * 1024;
 
 /**
+ * Said in full, because the model reading it did not choose those bytes on
+ * purpose and cannot see them: a lone surrogate arrives from a string that was
+ * cut in the middle of an emoji, or from JSON that carried one escaped.
+ */
+const surrogateRefusal =
+  'that text has an unpaired surrogate in it — half of a character, usually from a string cut ' +
+  'through the middle of an emoji. It is not valid UTF-8, and sending it would put a replacement ' +
+  'character on the desktop rather than what you meant, so nothing was written. Send the whole ' +
+  'character, or cut the text on a character boundary.';
+
+/**
  * The body for a clipboard write, checked before it costs a round trip.
  *
- * Three refusals, each of which the platform also makes. The NUL is the one
- * worth explaining: the platform confirms a write by reading the selection back
- * through a command substitution, and a shell truncates that at the first NUL —
- * so the write would land, the read-back would disagree, and the answer would be
- * a 409 inviting a retry at something that had already worked.
+ * Two of these refusals are the platform's own, mirrored so a call that can only
+ * fail is not spent. The NUL is the one worth explaining: the platform confirms
+ * a write by reading the selection back through a command substitution, and a
+ * shell truncates that at the first NUL — so the write would land, the read-back
+ * would disagree, and the answer would be a 409 inviting a retry at something
+ * that had already worked.
+ *
+ * The UNPAIRED SURROGATE is not the platform's, and that is exactly why it is
+ * here. Nothing refuses it anywhere on the path: `JSON.stringify` escapes the
+ * lone code unit, Go's `encoding/json` decodes it to U+FFFD, and the desktop
+ * ends up holding a replacement character where a caller's text was. A write
+ * that succeeds with different text than was asked for is worse than one that
+ * fails, and this is the last place that can tell the difference — `TextEncoder`
+ * below has already made the substitution, which is why the scan runs before it.
+ * The other two clients refuse it too (mandala-computer-typescript's
+ * `clipboardBody`, and mandala-computer-python, where `str.encode` raises).
  *
  * The cap is counted in UTF-8 BYTES rather than characters. An emoji is four of
  * them, so a `text.length` check would pass four times the legal payload to an
@@ -540,6 +562,22 @@ export function clipboardBody(text: string): Json {
   if (!text) throw new Error('there is no text to put on the clipboard');
   if (text.includes('\0')) {
     throw new Error('that text has a NUL byte in it, which a clipboard cannot carry');
+  }
+  // Walked in UTF-16 code units, because that is what the flaw is made of: a
+  // high surrogate is legal where a low one follows it and is half a character
+  // anywhere else. `for...of` would not do — it yields the lone surrogate as a
+  // string and hides which half it was.
+  for (let i = 0; i < text.length; i++) {
+    const unit = text.charCodeAt(i);
+    if (unit >= 0xd800 && unit <= 0xdbff) {
+      const next = text.charCodeAt(i + 1);
+      if (next >= 0xdc00 && next <= 0xdfff) {
+        i++;
+        continue;
+      }
+      throw new Error(surrogateRefusal);
+    }
+    if (unit >= 0xdc00 && unit <= 0xdfff) throw new Error(surrogateRefusal);
   }
   const bytes = new TextEncoder().encode(text).length;
   if (bytes > MAX_CLIPBOARD_BYTES) {
