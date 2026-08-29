@@ -3311,32 +3311,41 @@ describe('a window action whose outcome came back unknown', () => {
   it.each([
     'the guest agent accepted the action and did not report back',
     'the guest did not answer in time; the window action may have completed',
-  ])('adds the next step when a structured response says: %s', async (error) => {
-    // The platform's own timeout sentence is structured too, so a body cannot
-    // by itself mean that this handler has nothing to add. These sentences
-    // positively say the action crossed the acceptance boundary and therefore
-    // confirm the unknown outcome rather than contradicting it. The second is
-    // the current platform's exact wire message.
+    'gateway timeout',
+    'the action might already have run',
+  ])(
+    'adds the next step when a structured response leaves dispatch possible: %s',
+    async (error) => {
+      // The platform's own timeout sentence is structured too, so a body cannot
+      // by itself mean that this handler has nothing to add. Positive acceptance,
+      // a generic gateway timeout and an unfamiliar rewording are all unsafe to
+      // replay; only explicit proof of non-dispatch can settle the outcome. The
+      // second sentence is the current platform's exact wire message.
+      answering(504, { error });
+      const { call, close } = await connect();
+      const text = said(await call('window_action', { window_id: '0x2600003', action: 'close' }));
+      await close();
+
+      expect(text).toContain(error);
+      expect(text).toContain('UNKNOWN');
+      expect(text).toContain('list_windows');
+    },
+  );
+
+  it.each([
+    'upstream unavailable before dispatch',
+    'the window action was not dispatched',
+    'the request has not been dispatched',
+  ])('leaves an explicit non-dispatch response authoritative: %s', async (error) => {
+    // A gateway that rejected the request before dispatch knows the outcome is
+    // not unknown. Prefixing this sentence and then forbidding a retry would
+    // make the tool contradict the one hop that can settle that question.
     answering(504, { error });
     const { call, close } = await connect();
     const text = said(await call('window_action', { window_id: '0x2600003', action: 'close' }));
     await close();
 
-    expect(text).toContain(error);
-    expect(text).toContain('UNKNOWN');
-    expect(text).toContain('list_windows');
-  });
-
-  it('leaves a structured response that says dispatch never happened authoritative', async () => {
-    // A gateway that rejected the request before dispatch knows the outcome is
-    // not unknown. Prefixing this sentence and then forbidding a retry would
-    // make the tool contradict the one hop that can settle that question.
-    answering(504, { error: 'upstream unavailable before dispatch' });
-    const { call, close } = await connect();
-    const text = said(await call('window_action', { window_id: '0x2600003', action: 'close' }));
-    await close();
-
-    expect(text).toBe('upstream unavailable before dispatch (HTTP 504)');
+    expect(text).toBe(`${error} (HTTP 504)`);
     expect(text).not.toContain('UNKNOWN');
     expect(text).not.toContain('list_windows');
     expect(text).not.toContain('Do not send this call again');
