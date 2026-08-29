@@ -1,7 +1,12 @@
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
 import type { Bytes } from '../api.js';
-import { ConflictError, RangeNotSatisfiableError } from '../errors.js';
+import {
+  ConflictError,
+  GatewayTimeoutError,
+  platformSaid,
+  RangeNotSatisfiableError,
+} from '../errors.js';
 import { guarded, image, json, MAX_INLINE_IMAGE_BYTES, refused, said, text } from '../format.js';
 import * as P from '../paths.js';
 import type { Registrar } from './types.js';
@@ -127,6 +132,64 @@ const backgroundFull = (err: ConflictError, held: number) =>
       `earlier exec returned, with exec_poll to see which are still running. If they are builds or installs ` +
       `rather than servers, one of them finishes by itself and its slot comes back a moment later.`,
   );
+
+/**
+ * A window action that timed out on the way back, turned into the next step it
+ * needs — which is a READ, and never this call again (OPL-3910).
+ *
+ * The platform documents a 504 on `POST /computers/{id}/windows/{window}` and
+ * says what it means: the guest accepted the action and did not report the
+ * result before the deadline, so the route answers without a `reason` on
+ * purpose, because the action may already have happened and an uncertain
+ * outcome is not permission to repeat it (platform OPL-3898).
+ *
+ * Substituted rather than appended, which is the opposite of what
+ * {@link backgroundFull} does, and for a reason that only applies here. A 504
+ * whose response named nothing gets its message written by
+ * `errorForStatus`, and that message ends "the same call again is the
+ * move" — true for the reads and creates it was written for, false on a route
+ * whose actions are applied once. Printing it above a paragraph that says the
+ * reverse would leave the model to pick, so {@link platformSaid} asks whether a
+ * hop that actually knew this request said something. Its sentence is kept,
+ * but merely naming a timeout does not prove what happened at the dispatch
+ * boundary. Only a response that explicitly says the request or action was not
+ * dispatched settles the outcome; every other structured gateway timeout, and
+ * one with no sentence at all, gets the unknown-outcome advice below.
+ *
+ * The whole class rather than the one status. A 524 is the same event reached
+ * from the proxy's ceiling instead of from the guest's silence, and it carries
+ * the stronger version of the same fact — the platform very likely has the
+ * request and is still working on it. Either way the outcome is unknown and
+ * `list_windows` is what settles it.
+ *
+ * `close` gets its own sentence because it is the only action here that cannot
+ * be undone. The others are untidy on a repeat: a second `move` puts the frame
+ * where it already is.
+ */
+const WINDOW_ACTION_NOT_DISPATCHED =
+  /^\s*(?:(?:upstream|gateway|service)(?: was)? unavailable before dispatch|(?:the )?(?:request|(?:window )?action|command) (?:(?:was (?:not|never)|has not been|never) dispatched|did not (?:get dispatched|reach the guest))|nothing (?:was|got) dispatched)[.!]?\s*$/i;
+
+const windowOutcomeMayBeUnknown = (err: GatewayTimeoutError) => {
+  const named = platformSaid(err.body);
+  return named === undefined || !WINDOW_ACTION_NOT_DISPATCHED.test(named);
+};
+
+const windowOutcomeUnknown = (err: GatewayTimeoutError, action: string, windowId: string) => {
+  const named = platformSaid(err.body);
+  return refused(
+    `${named ? `${named}\n\n` : ''}The ${action} on ${windowId} did not report a result before the ` +
+      `deadline (HTTP ${err.status}). That is not a refusal and it is not a report that nothing ` +
+      `happened: the guest may have taken the action and lost the race to say so, so the outcome is ` +
+      `UNKNOWN and the ${action} may already have been applied. Do not send this call again to find ` +
+      `out — call list_windows, which says what the desktop is actually like now. ` +
+      (action === 'close'
+        ? `A close least of all: there is no undo for a window that was holding unsaved work, and a ` +
+          `window id is not reserved forever — the X server can hand the same id to something else — ` +
+          `so a second close is not safely a no-op on a window that has already gone.`
+        : `A repeated ${action} is untidy rather than destructive, but it still answers with a guess ` +
+          `where a read answers with the window.`),
+  );
+};
 
 export const registerGuest: Registrar = (server, session) => {
   server.registerTool(
@@ -323,7 +386,7 @@ export const registerGuest: Registrar = (server, session) => {
     {
       title: 'Act on a window',
       description:
-        'Focus, raise, minimize, maximize, unmaximize, close, move or resize one window. The reply is the window afterwards, not an acknowledgement — the window manager places the frame and applications snap to their own grid, so a move to 300,200 routinely lands at 305,229. Believe the response, not the request. Prefer focus over raise: raising without focusing gives a window that is visibly in front and silently not receiving keystrokes.',
+        'Focus, raise, minimize, maximize, unmaximize, close, move or resize one window. The reply is the window afterwards, not an acknowledgement — the window manager places the frame and applications snap to their own grid, so a move to 300,200 routinely lands at 305,229. Believe the response, not the request. Prefer focus over raise: raising without focusing gives a window that is visibly in front and silently not receiving keystrokes. A 504 is neither a refusal nor a report that nothing happened unless its structured response explicitly says the request was not dispatched: an absent or ambiguous explanation leaves the action possibly already applied. An uncertain outcome is not permission to repeat it — the next call is list_windows, which says what the desktop is now, not this one again. Least of all for close, which cannot be undone.',
       inputSchema: {
         ...idArg,
         window_id: z.string().describe('From list_windows, e.g. "0x2600003".'),
@@ -337,9 +400,22 @@ export const registerGuest: Registrar = (server, session) => {
     ({ computer_id, window_id, action, x, y, width, height }, extra) =>
       guarded(async () => {
         const id = session.resolve(computer_id);
-        const res = await session.api.with(extra.signal).json('POST', P.window_(id, window_id), {
-          body: P.windowBody({ action, x, y, width, height }),
-        });
+        let res: unknown;
+        try {
+          res = await session.api.with(extra.signal).json('POST', P.window_(id, window_id), {
+            body: P.windowBody({ action, x, y, width, height }),
+          });
+        } catch (err) {
+          // The failure whose advice has to arrive WITH it (OPL-3910). A
+          // description is read once, at the top of a session, and the turn
+          // that meets a 504 is not that turn — so the one refusal on this
+          // route that must not be retried says so where it happens, the way
+          // exec's full slot table does above.
+          if (err instanceof GatewayTimeoutError && windowOutcomeMayBeUnknown(err)) {
+            return windowOutcomeUnknown(err, action, window_id);
+          }
+          throw err;
+        }
         return said(`${action} on ${window_id}. This is the window as it now is:`, res);
       }),
   );
