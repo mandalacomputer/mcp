@@ -1,7 +1,7 @@
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
 import type { Bytes } from '../api.js';
-import { RangeNotSatisfiableError } from '../errors.js';
+import { ConflictError, RangeNotSatisfiableError } from '../errors.js';
 import { guarded, image, json, MAX_INLINE_IMAGE_BYTES, refused, said, text } from '../format.js';
 import * as P from '../paths.js';
 import type { Registrar } from './types.js';
@@ -61,13 +61,80 @@ const absolutePath = (what: string) =>
     .startsWith('/', `${what} must be an absolute path starting with /`)
     .describe(`Absolute path ${what === 'cwd' ? 'to run in' : 'inside the guest'}.`);
 
+/**
+ * The refusal that means a computer's background slots are all held, and the
+ * number the platform named — or `undefined` for any other conflict.
+ *
+ * A computer runs at most sixteen background commands at once (platform
+ * OPL-3584). The seventeenth is refused 409 with `this computer already has 16
+ * background commands running`, and that refusal deliberately carries NO
+ * `reason` (platform OPL-3898): the slots may be held by long-lived servers, so
+ * the platform will not advise a retry it cannot promise. An absent word falls
+ * back to the type answer, and for a 409 the type is {@link ConflictError},
+ * which {@link isTransient} calls worth retrying. So this is the one conflict
+ * where that fallback is optimistic in practice — correctly, on the platform's
+ * side, and leaving the model a sentence with no next step in it.
+ *
+ * Matched on PROSE, which is worth saying out loud, because matching on prose is
+ * what OPL-3724 got this client out of. What that decision governs is the retry
+ * PREDICATES: an exported contract, mirrored word for word by two other clients,
+ * where a reworded sentence silently changes what an embedder's program does.
+ * Neither predicate is touched here and neither knows this sentence exists. What
+ * is decided here is one tool's next-step paragraph — the platform's own message
+ * is printed in full either way, and a match that stops matching degrades to
+ * exactly the answer this route gives today.
+ *
+ * Gated as tightly as the evidence allows: a 409 and nothing else, only where
+ * this very call asked for a slot, only where the platform classified nothing —
+ * if a later version does classify this, its word wins and {@link reasonAdvice}
+ * speaks instead of the paragraph below — and only on a sentence carrying both
+ * the count and the noun phrase. The count is read back out rather than written
+ * in, so raising the cap on the platform cannot turn this into a lie.
+ */
+const BACKGROUND_SLOTS_FULL = /already has (\d+) background commands? running/i;
+
+function backgroundSlotsFull(err: unknown): number | undefined {
+  if (!(err instanceof ConflictError) || err.reason !== undefined) return undefined;
+  const held = Number(BACKGROUND_SLOTS_FULL.exec(err.message)?.[1]);
+  return Number.isSafeInteger(held) && held > 0 ? held : undefined;
+}
+
+/**
+ * That refusal, turned into a next step — the shape `moveOffered` gives the
+ * resize that needs a move (OPL-3775).
+ *
+ * The platform's sentence first and whole, because it is the one that says how
+ * many are running and on which computer. What is added is what that sentence
+ * will not say: that nothing on this side frees a slot, and the name of the tool
+ * that does. A slot is held for exactly as long as its command runs — a command
+ * that has finished is not counted, so there is nothing to reap and no poll that
+ * releases anything — and `background` is the flag this server recommends for
+ * servers, which do not exit.
+ *
+ * It stops short of "do not retry", because that would be false and this file
+ * has no way to know which it is: a build among the sixteen finishes on its own
+ * and its slot comes back moments later. It names the two situations and lets
+ * the caller say which one it is in, which is the difference between a next step
+ * and a guess.
+ */
+const backgroundFull = (err: ConflictError, held: number) =>
+  refused(
+    `${err.message}\n\nA slot is held for as long as its command runs, and all ${held} are held now. ` +
+      `Nothing on this side frees one: a command that has already finished is not counted, so there is ` +
+      `nothing to reap, and a poll reads output rather than releasing anything. If any of the ${held} are ` +
+      `servers, they do not exit on their own and another exec with background: true gets this same answer ` +
+      `for as long as they run. The way out is to stop one you no longer need — exec_kill on a pid an ` +
+      `earlier exec returned, with exec_poll to see which are still running. If they are builds or installs ` +
+      `rather than servers, one of them finishes by itself and its slot comes back a moment later.`,
+  );
+
 export const registerGuest: Registrar = (server, session) => {
   server.registerTool(
     'exec',
     {
       title: 'Run a command in the guest',
       description:
-        'Run a shell command inside the computer. Runs as root with no display by default — anything that opens a window needs desktop: true, anything slower than a few seconds needs background: true, and anything that needs an environment variable takes env rather than an assignment written into the command. Against the hosted platform, waiting here is capped at about two minutes by a proxy in front of it, not by timeout_s.',
+        'Run a shell command inside the computer. Runs as root with no display by default — anything that opens a window needs desktop: true, anything slower than a few seconds needs background: true, and anything that needs an environment variable takes env rather than an assignment written into the command. Against the hosted platform, waiting here is capped at about two minutes by a proxy in front of it, not by timeout_s. One computer runs at most sixteen background commands at once: the seventeenth is refused rather than queued, and exec_kill on a pid you already hold is what makes room.',
       inputSchema: {
         ...idArg,
         command: z.string().describe('A shell command line.'),
@@ -90,7 +157,7 @@ export const registerGuest: Registrar = (server, session) => {
           .boolean()
           .default(false)
           .describe(
-            'Return a handle immediately instead of waiting. Use for builds, installs, test suites and servers, then read output with exec_poll. Strictly better than backgrounding with "&", which throws away the exit code and the output.',
+            'Return a handle immediately instead of waiting. Use for builds, installs, test suites and servers, then read output with exec_poll. Strictly better than backgrounding with "&", which throws away the exit code and the output. A computer runs at most sixteen of these at once, and past that this is refused with a 409 saying how many are already running rather than queued. A slot is held until its command exits, which for a server is never, so the way out of that refusal is exec_kill on a pid an earlier exec returned — not another attempt.',
           ),
         cwd: absolutePath('cwd').optional(),
         env: z
@@ -104,11 +171,27 @@ export const registerGuest: Registrar = (server, session) => {
     ({ computer_id, command, timeout_s, desktop, background, cwd, env }, extra) =>
       guarded(async () => {
         const id = session.resolve(computer_id);
-        const res = await session.api
-          .with(extra.signal)
-          .json<Record<string, unknown>>('POST', P.computerAction(id, 'exec'), {
-            body: P.execBody({ command, timeout_s, desktop, background, cwd, env }),
-          });
+        let res: Record<string, unknown>;
+        try {
+          res = await session.api
+            .with(extra.signal)
+            .json<Record<string, unknown>>('POST', P.computerAction(id, 'exec'), {
+              body: P.execBody({ command, timeout_s, desktop, background, cwd, env }),
+            });
+        } catch (err) {
+          // The one refusal on this route whose next step is a different tool
+          // (OPL-3909). Caught here rather than in `failed`, for the reason
+          // `moveOffered` is caught in update_computer: the answer names
+          // exec_kill, and the error class — shared with every embedder and
+          // with two other clients — has no business knowing a tool name.
+          //
+          // Only when this call asked for a slot. The refusal cannot be reached
+          // any other way, so the guard costs nothing and makes a false match on
+          // a foreground conflict impossible rather than merely unlikely.
+          const held = background ? backgroundSlotsFull(err) : undefined;
+          if (held !== undefined) return backgroundFull(err as ConflictError, held);
+          throw err;
+        }
         if (background) {
           // A pid is the whole product of a background exec: without one there
           // is nothing to poll and nothing to kill. Reported as a success, "pid
@@ -134,7 +217,7 @@ export const registerGuest: Registrar = (server, session) => {
     {
       title: 'Read a background command',
       description:
-        'What a backgrounded command has printed since the last time you asked, and whether it has finished. The output is a cursor, not a buffer: each poll gives you only the new bytes, so two readers on one pid split the output between them rather than each seeing all of it.',
+        "What a backgrounded command has printed since the last time you asked, and whether it has finished. The output is a cursor, not a buffer: each poll gives you only the new bytes, so two readers on one pid split the output between them rather than each seeing all of it. Finishing is also what releases a computer's background slot, so this is how you tell which of your handles still hold one — the poll itself frees nothing.",
       inputSchema: {
         ...idArg,
         pid: pidSchema,
@@ -165,7 +248,7 @@ export const registerGuest: Registrar = (server, session) => {
     {
       title: 'Stop a background command',
       description:
-        'Kill a backgrounded command and everything it started. Answers with its final state, including whatever it printed that you had not read.',
+        'Kill a backgrounded command and everything it started. Answers with its final state, including whatever it printed that you had not read. Also how you make room when a computer is already running its maximum of sixteen background commands: the slot comes back with the command.',
       inputSchema: { ...idArg, pid: pidSchema },
       annotations: { destructiveHint: true },
     },
