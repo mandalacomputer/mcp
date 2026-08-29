@@ -736,6 +736,19 @@ export function errorForStatus(status: number, message: string, body?: unknown):
  * it is, so {@link APIError.reason} is consulted BEFORE the types below, and an
  * absent word — or one this version does not know — leaves the type answer
  * standing unchanged (OPL-3898).
+ *
+ * One refusal is known to sit on the wrong side of that fallback, and it stays
+ * there deliberately (OPL-3909). A computer runs at most sixteen background
+ * commands, and the request for a seventeenth is refused 409 with no `reason` —
+ * correctly, since the slots may be held by servers and the platform will not
+ * advise a retry it cannot promise. The type answer therefore stands, and it
+ * says yes to something that may never clear. The alternative is to read the
+ * platform's sentence, which is the exported-contract version of the mistake
+ * OPL-3724 removed from three clients: a predicate that changes its answer when
+ * somebody rewords a message. So the next step is given where the sentence can
+ * be read safely — in `exec`, which knows it asked for a slot and which prints
+ * the platform's own words either way — and this predicate is left honest about
+ * what it can and cannot tell apart.
  */
 export function isTransient(err: unknown): boolean {
   // A move offer is a 409 and is NOT transient — it is a decision about the
