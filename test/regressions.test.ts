@@ -2880,8 +2880,13 @@ describe('the tools our own prose tells a model to call', () => {
         if (d) prose.push({ where: `${t.name}.${arg} description`, text: d });
       }
     }
-    // The answers too, not only the schema. The bug was in an answer.
-    for (const args of [{}, { control: true }]) {
+    // The answers too, not only the schema. The bug was in an answer — and
+    // `get_desktop_url` has TWO of them behind the platform's clipboard field
+    // (OPL-3870), so the bridged fixture is asked for as well. The branch it
+    // reaches is the one that names no cold-boot recipe; the branch the default
+    // computer reaches names five tools, and a scan that saw only one of the
+    // two would be blind to whichever it missed.
+    for (const args of [{}, { control: true }, { computer_id: 'vm-bridged', control: true }]) {
       prose.push({
         where: `get_desktop_url(${JSON.stringify(args)}) answer`,
         text: said(await call('get_desktop_url', args)),
@@ -2896,6 +2901,206 @@ describe('the tools our own prose tells a model to call', () => {
       }
     }
     expect(wrong, 'text that tells a model to call something we do not register').toEqual([]);
+    await close();
+  });
+});
+
+describe('a refusal the platform put a word on', () => {
+  // OPL-3898, and the case it was filed for is the clipboard's. A read or a
+  // write against a computer that is STOPPED answers 409, and so does a write
+  // that lost the X selection for an instant. One is fixed by sending the same
+  // request again and the other only by starting the computer, and until the
+  // platform added `reason` the two differed by a sentence it is free to
+  // reword — so `isTransient` said yes to both and a generic retry loop spun
+  // against a stopped machine until somebody's deadline.
+  it('is told apart by the word and not by the sentence', () => {
+    const stopped = errorForStatus(409, 'this computer is not running, so it has no clipboard', {
+      error: 'this computer is not running, so it has no clipboard',
+      reason: 'unavailable',
+    });
+    const taken = errorForStatus(409, 'the desktop did not take the text', {
+      error: 'the desktop did not take the text (something else claimed its clipboard); try again',
+      reason: 'contention',
+    });
+    // Both 409s, both ConflictError, and the answer differs — which is the
+    // whole point. Before this, the type was all there was to go on.
+    expect(stopped).toBeInstanceOf(ConflictError);
+    expect(taken).toBeInstanceOf(ConflictError);
+    expect((stopped as APIError).reason).toBe('unavailable');
+    expect(isTransient(stopped)).toBe(false);
+    expect(isTransient(taken)).toBe(true);
+  });
+
+  it('is read off a 400 as readily as off a 409', () => {
+    // `unavailable` arrives on both: whoever loses the race to the running
+    // check hears the same fact the caller a moment earlier heard, answered
+    // 400. Reading the word only on ConflictError would have classified the
+    // one and not the other, and a status is not what this is a property of.
+    const underfoot = errorForStatus(400, 'the computer stopped underfoot', {
+      error: 'the computer stopped underfoot',
+      reason: 'unavailable',
+    });
+    const windows = errorForStatus(400, 'the clipboard is not supported on Windows computers', {
+      error: 'the clipboard is not supported on Windows computers',
+      reason: 'unsupported',
+    });
+    expect((underfoot as APIError).reason).toBe('unavailable');
+    expect((windows as APIError).reason).toBe('unsupported');
+    expect(isTransient(underfoot)).toBe(false);
+    expect(isTransient(windows)).toBe(false);
+  });
+
+  it('leaves a fifth word, and a malformed one, to the answer we had before', () => {
+    // The platform states that an unrecognised value means "no classification
+    // given" — which is what makes adding a word later safe. Both memberships
+    // are tested rather than one being inferred from the other, so a word this
+    // version has never heard of falls through to the type instead of reading
+    // as permanent and stopping a retry that would have worked.
+    const fifth = errorForStatus(409, 'something new', {
+      error: 'something new',
+      reason: 'wedged',
+    });
+    expect((fifth as APIError).reason).toBe('wedged');
+    expect(isTransient(fifth)).toBe(true);
+    // Shape-checked like the move offer, and for its reason: this decides a
+    // retry policy, so a `reason` that is not a string has to read as nothing
+    // said rather than as a refusal that never clears.
+    const wrongType = errorForStatus(409, 'x', { error: 'x', reason: 5 });
+    expect((wrongType as APIError).reason).toBeUndefined();
+    expect(isTransient(wrongType)).toBe(true);
+    const unclassified = errorForStatus(409, 'x', { error: 'x' });
+    expect((unclassified as APIError).reason).toBeUndefined();
+    expect(isTransient(unclassified)).toBe(true);
+  });
+
+  it('is still polled through, because a poll is the one caller it may clear for', () => {
+    // The deliberate divergence between the two predicates. `unavailable` is a
+    // permanent answer to whoever asked — and a computer coming up passes
+    // through it, so the wait loops, which only ever replay a read under a
+    // deadline the caller set, keep riding it out. They return a refusal of
+    // their own the moment the status they are watching says stopped.
+    const stopped = errorForStatus(409, 'this computer is not running', {
+      error: 'this computer is not running',
+      reason: 'unavailable',
+    });
+    expect(isTransient(stopped)).toBe(false);
+    expect(isTransientForPoll(stopped)).toBe(true);
+  });
+
+  it('reaches the model as the sentence it means', async () => {
+    // The word is for a program, and the program on the other end of a tool
+    // call is a model that sees nothing but text. So the classification is
+    // rendered rather than dropped — without this, the model reads the same
+    // prose the predicate could not act on and loops on a stopped computer.
+    const real = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      new Response(
+        JSON.stringify({
+          error: 'this computer is not running, so it has no clipboard',
+          reason: 'unavailable',
+        }),
+        { status: 409, headers: { 'Content-Type': 'application/json' } },
+      )) as typeof fetch;
+    try {
+      const { call, close } = await connect();
+      const res = await call('read_clipboard', { computer_id: 'vm-1' });
+      expect(res.isError).toBe(true);
+      const text = said(res);
+      expect(text).toContain('this computer is not running, so it has no clipboard');
+      expect(text).toMatch(/does NOT clear by waiting/);
+      expect(text).toContain('start_computer');
+      await close();
+    } finally {
+      globalThis.fetch = real;
+    }
+  });
+
+  it('says nothing extra about a refusal the platform did not classify', async () => {
+    // Appended rather than substituted, and only where there is a word: most
+    // refusals have none and always will, and those have to read exactly as
+    // they did before this existed.
+    const real = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify({ error: "the guest's desktop is not answering yet" }), {
+        status: 409,
+        headers: { 'Content-Type': 'application/json' },
+      })) as typeof fetch;
+    try {
+      const { call, close } = await connect();
+      const res = await call('read_clipboard', { computer_id: 'vm-1' });
+      expect(said(res)).toBe("the guest's desktop is not answering yet (HTTP 409)");
+      await close();
+    } finally {
+      globalThis.fetch = real;
+    }
+  });
+});
+
+describe("the desktop socket's clipboard, as the platform now reports it", () => {
+  // OPL-3870. This answer used to say "there is no capability field, and a
+  // failed attempt does not distinguish an absent channel from a browser that
+  // refused the paste" — instruction handed to an agent whose honest form was
+  // "try it and see". The platform resolves all three terms it could not see
+  // — the vdagent channel, whether the image was verified to carry the agent,
+  // and the guest's OS — into one boolean on the body this tool already reads.
+  const real = globalThis.fetch;
+  const computerWith = (vnc: Record<string, unknown>) =>
+    (globalThis.fetch = (async () =>
+      new Response(JSON.stringify({ id: 'vm-1', status: 'running', os: 'linux', vnc }), {
+        headers: { 'Content-Type': 'application/json' },
+      })) as typeof fetch);
+  afterEach(() => {
+    globalThis.fetch = real;
+  });
+
+  it('says the clipboard crosses the socket where the platform says it was provisioned', async () => {
+    computerWith({ url: 'wss://app.test/vnc?token=SECRET', clipboard: true });
+    const { call, close } = await connect();
+    const text = said(await call('get_desktop_url', { control: true }));
+    expect(text).toMatch(/CLIPBOARD CROSSES THIS SOCKET/);
+    // Provisioning rather than a live check, which is the caveat a caller acts
+    // on: root in that guest can stop the agent afterwards and this does not
+    // move, so the endpoints stay the fallback.
+    expect(text).toMatch(/PROVISIONED/);
+    expect(text).toContain('read_clipboard');
+    // And no cold-boot recipe, which is advice for the other branch entirely.
+    expect(text).not.toMatch(/stop_computer/);
+    await close();
+  });
+
+  it('says it does not, and which half to go and get, where the platform says false', async () => {
+    computerWith({ url: 'wss://app.test/vnc?token=SECRET', clipboard: false });
+    const { call, close } = await connect();
+    const text = said(await call('get_desktop_url', { control: true }));
+    expect(text).toMatch(/DOES NOT CROSS THIS SOCKET/);
+    expect(text).toContain('stop_computer');
+    expect(text).toContain('write_clipboard');
+    await close();
+  });
+
+  it('reads an absent field as false rather than as unknown', async () => {
+    // The two ways to be wrong are not symmetric. A false about a working
+    // bridge costs the model nothing, since the clipboard tools work there
+    // too; a true about an absent one is the silently dropped paste the field
+    // exists to end. mandala-computer-python defaults it the same way.
+    computerWith({ url: 'wss://app.test/vnc?token=SECRET' });
+    const { call, close } = await connect();
+    const text = said(await call('get_desktop_url', { control: true }));
+    expect(text).toMatch(/DOES NOT CROSS THIS SOCKET/);
+    // And never the sentence this ticket was raised over.
+    expect(text).not.toMatch(/no capability field/i);
+    await close();
+  });
+
+  it('does not let a non-string URL through as a link', async () => {
+    // `vnc` carries a boolean now, so the object is no longer one type. A
+    // number where a URL goes has to read as an absent link rather than be
+    // handed on as one and printed under a sentence promising full control.
+    computerWith({ url: 42, clipboard: true });
+    const { call, close } = await connect();
+    const res = await call('get_desktop_url', { control: true });
+    expect(res.isError).toBe(true);
+    expect(said(res)).toMatch(/no control URL/i);
     await close();
   });
 });

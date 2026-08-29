@@ -956,7 +956,7 @@ export const registerComputers: Registrar = (server, session, opts) => {
       guarded(async () => {
         const id = session.resolve(computer_id);
         const c = unwrapComputer(await session.api.with(extra.signal).json('GET', P.computer(id)));
-        const vnc = c.vnc as Record<string, string> | undefined;
+        const vnc = c.vnc as Record<string, unknown> | undefined;
         if (!vnc) {
           // `refused`: the caller asked for a URL and there is none. Said as a
           // success, an orchestrator reading `isError` cannot tell a link from
@@ -972,14 +972,67 @@ export const registerComputers: Registrar = (server, session, opts) => {
         // straight over would print `{}` underneath a sentence promising full
         // control of the machine — the reader is told a link was given and
         // shown nothing to reconcile that against.
+        // Read as strings rather than trusted as them. `vnc` carries a boolean
+        // now (`clipboard`, below), so the object is no longer one type — and a
+        // number or an object arriving where a URL goes has to read as an absent
+        // link rather than be handed on as one, which is what the check below
+        // decides.
+        const link = (v: unknown) => (typeof v === 'string' && v ? v : undefined);
         const links = control
-          ? { url: vnc.url }
-          : { view_url: vnc.view_url, embed_url: vnc.embed_url };
+          ? { url: link(vnc.url) }
+          : { view_url: link(vnc.view_url), embed_url: link(vnc.embed_url) };
         if (!Object.values(links).some(Boolean)) {
           return refused(
             `The platform is holding desktop credentials for ${id} but sent no ${control ? 'control' : 'watch-only'} URL among them. ${control ? 'Ask without control: true for the watch-only link.' : 'Try again in a moment, or ask with control: true.'}`,
           );
         }
+        // Whether the CLIPBOARD crosses this socket, which the platform now
+        // answers (OPL-3870). Three terms this server cannot see — the vdagent
+        // channel QEMU was given at its last cold boot, whether the image the
+        // computer was built from was verified to carry the agent, and the
+        // guest's OS — resolved into one boolean on the same body the links
+        // came from, so it costs no second call and no cache.
+        //
+        // Absent reads as false, deliberately, and not as "unknown": the two
+        // ways to be wrong are not symmetric. A false about a working bridge
+        // costs the model nothing, since read_clipboard and write_clipboard work
+        // there too, while a true about an absent one is the silently dropped
+        // paste the field exists to end. mandala-computer-python's `VncConnect`
+        // defaults it the same way and for the same reason.
+        const bridged = vnc.clipboard === true;
+        const socket = bridged
+          ? 'THE CLIPBOARD CROSSES THIS SOCKET on this computer — the platform says so, so a noVNC ' +
+            'client that negotiates the extended cut text pseudo-encoding copies and pastes over this ' +
+            'link on its own and nothing here has to be called. That is the transport being OPEN ' +
+            'rather than a paste being guaranteed: the FIRST paste of a session is often dropped, ' +
+            'because the guest PULLS the text and the agent inside it may not own the selection yet — ' +
+            "send it again — and a browser will not hand the guest's clipboard back without focus and " +
+            'permission. It is also what was PROVISIONED rather than a live check. Somebody with root ' +
+            'in that guest can stop or remove the agent afterwards and this answer does not move, so ' +
+            'treat it as stale after anything that modified the guest, and fall back to read_clipboard ' +
+            'and write_clipboard — which work there too, and do not fight over the selection, because ' +
+            'they write the same one the agent then offers onward.'
+          : 'THE CLIPBOARD DOES NOT CROSS THIS SOCKET on this computer — the platform says so. Text ' +
+            'pasted into it reaches QEMU and stops, silently, with nothing to catch, so do not ask a ' +
+            'person to paste into this desktop. read_clipboard and write_clipboard are the answer and ' +
+            'need none of the hardware. If you want the socket half anyway, it has two halves and they ' +
+            'are acquired separately. The CHANNEL comes from a COLD start — stop_computer then ' +
+            'start_computer, or restart_computer on a computer that is already stopped, which starts ' +
+            'it; restart_computer on a RUNNING one does NOT do it, because that resets the guest ' +
+            'rather than rebuilding the machine QEMU was given, and a resumed or snapshot-restored ' +
+            'session keeps the topology of the capture it came from. The AGENT comes from the IMAGE ' +
+            'the computer was created from, and nothing moves an existing computer onto a newer one: ' +
+            'installing spice-vdagent in the guest may make a paste work but does not change this ' +
+            'answer, an image the platform has not verified reads the same way even where the agent is ' +
+            'present, and a Windows guest never has it whatever the hardware says. So if you cold-start ' +
+            'for this, the order is stop_computer, start_computer, wait_for_computer until the guest is ' +
+            'up, then get_desktop_url again to read the new answer — and test with a sentinel string ' +
+            'rather than with text you cannot afford to lose. This link keeps working across that: a ' +
+            'stop and a start do NOT reissue the credentials, and restart_computer is the only thing ' +
+            'that does, so use restart_computer on a stopped computer when you want the cold boot AND ' +
+            'a fresh credential. It is refused while a session is suspended, and a computer starting ' +
+            'for the FIRST time may load the boot capture it was created from instead, which carries ' +
+            'that capture topology.';
         return control
           ? said(
               'Full control — keyboard and pointer. Treat this link as a password for that ' +
@@ -997,33 +1050,7 @@ export const registerComputers: Registrar = (server, session, opts) => {
                 'be polled for, because being granted an X selection is asynchronous and a detached ' +
                 'xclip gives up its exit status. write_clipboard does all of that in one call and ' +
                 'confirms the selection was taken before it answers.\n\n' +
-                'The socket carries the clipboard as well, on SOME computers, and nothing here tells ' +
-                'you which: there is no capability field, and a failed attempt does not distinguish an ' +
-                'absent channel from a browser that refused the paste. It needs a Linux guest, the ' +
-                'QEMU vdagent channel, and spice-vdagent RUNNING in the guest session. The channel ' +
-                'comes from a COLD start — stop_computer then start_computer, or restart_computer on a ' +
-                'computer that is already stopped, which starts it; restart_computer on a RUNNING one ' +
-                'does not do it, because that resets the guest rather than rebuilding the machine QEMU ' +
-                'was given, and a resumed or snapshot-restored session keeps the topology of the ' +
-                'capture it came from, so one that had the channel can come back without it. The agent ' +
-                'comes from the IMAGE: a current image ships it and starts it unaided, an older one ' +
-                'does not, and a computer keeps the image it was created from — installing the package ' +
-                'into a guest that is already logged in may leave THAT session unbridged until it logs ' +
-                'in again, since the per-session half is started by the desktop autostart. Windows guests never have it, whatever the hardware says.\n\n' +
-                'Where all of it holds, RFB extended cut text is available and a noVNC client can copy ' +
-                'and paste on its own. That is the transport being open, not a guarantee: the FIRST ' +
-                'paste of a session can be dropped, because the guest PULLS the text and vdagent may ' +
-                "not own the selection yet, and a browser refuses to hand over the guest's clipboard " +
-                'unless it has focus and permission. A client that does not negotiate the extended ' +
-                'clipboard pseudo-encoding gets nothing whatever the guest has. So if you cold-start a ' +
-                'computer for this, the order is stop_computer, start_computer, then wait_for_computer ' +
-                'until the guest is up — and test with a sentinel string rather than with text you ' +
-                'cannot afford to lose. This link keeps working across that: stop and start do NOT ' +
-                'reissue the credentials, and restart_computer is the only thing that does, so use ' +
-                'restart_computer on a stopped computer when you want the cold boot AND a fresh ' +
-                'credential, and get_desktop_url again afterwards to read it — it is refused while a ' +
-                'session is suspended, and a computer starting for the FIRST time may load the boot ' +
-                'capture it was created from instead, which carries that capture topology.',
+                socket,
               links,
             )
           : said(
@@ -1032,7 +1059,11 @@ export const registerComputers: Registrar = (server, session, opts) => {
                 'enforced rather than asked for: the daemon takes the clipboard capability out of the ' +
                 'connection as it is negotiated, so a patched client gains nothing by asking. What the ' +
                 'person at the desktop COPIES does not reach whoever holds this link — though the ' +
-                'screen still does, so a password visible on it is not protected by this.',
+                'screen still does, so a password visible on it is not protected by this. The ' +
+                "platform's own clipboard answer for a watch-only link is therefore always no, " +
+                'whatever the computer itself can do: it describes the socket you were handed rather ' +
+                'than the machine, so ask with control: true before concluding anything about the ' +
+                'computer.',
               links,
             );
       }),

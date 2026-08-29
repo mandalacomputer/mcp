@@ -27,7 +27,28 @@ const COMPUTER = {
     url: 'wss://app.test/vnc?token=SECRET-CONTROL',
     view_url: 'wss://app.test/vnc?token=view-only',
     embed_url: 'https://app.test/embed/vm-1',
+    // Present and false, the way the platform sends it (OPL-3870): a computer
+    // whose QEMU has no vdagent channel, or whose image was never verified to
+    // carry the agent. Absent would be a different fixture — this server reads
+    // that as false too, and one that is never sent cannot show that the field
+    // is read at all.
+    clipboard: false,
   },
+};
+
+/**
+ * The same computer with the clipboard bridge provisioned.
+ *
+ * A second fixture rather than a flag on the first, because `get_desktop_url`
+ * answers two quite different paragraphs off this one boolean and only one of
+ * them can be reached per response. The prose scan needs both: the branch this
+ * fixture reaches is the shorter one, and the branch the default reaches names
+ * five tools it must not get wrong.
+ */
+const BRIDGED_COMPUTER = {
+  ...COMPUTER,
+  id: 'vm-bridged',
+  vnc: { ...COMPUTER.vnc, clipboard: true },
 };
 
 /**
@@ -292,6 +313,8 @@ function respond(method: string, path: string, headers: Record<string, string>):
   if (path === '/snapshots') return json([SNAPSHOT]);
   if (path.endsWith('/snapshots')) return json(method === 'GET' ? HOLDINGS : SNAPSHOT);
   if (path.endsWith('/computers')) return json(method === 'GET' ? [COMPUTER] : COMPUTER);
+  // Before the catch-all, which answers COMPUTER for every id there is.
+  if (path === '/computers/vm-bridged') return json(BRIDGED_COMPUTER);
   return json(COMPUTER);
 }
 
