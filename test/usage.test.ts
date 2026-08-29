@@ -80,6 +80,37 @@ describe('get_usage', () => {
     expect(textOf(res)).toContain('time zone');
     expect(platform.calls.some((c) => c.path === '/usage')).toBe(false);
   });
+
+  it('refuses a report with no totals object rather than billing it as zero', async () => {
+    // `0 vCPU-hours` is a figure somebody metered. A report that arrived
+    // without the object holding the figures is not that, and the two read
+    // identically once `?? 0` has been applied to each field in turn.
+    const restore = globalThis.fetch;
+    globalThis.fetch = answering({ usage: undefined });
+    try {
+      const { call, close } = await connect();
+      const res = await call('get_usage', {});
+      await close();
+
+      expect(res.isError).toBe(true);
+      expect(textOf(res)).toContain('NOT an account that used nothing');
+      expect(textOf(res)).not.toContain('0 vCPU-hours');
+    } finally {
+      globalThis.fetch = restore;
+    }
+  });
+
+  it('refuses `to` without `from`, which both descriptions promise', async () => {
+    // `to` alone is measured from the CURRENT billing period rather than from
+    // the period it names, so it answers a different window instead of failing.
+    const { call, close } = await connect();
+    const res = await call('get_usage', { to: '2026-08-01T00:00:00Z' });
+    await close();
+
+    expect(res.isError).toBe(true);
+    expect(textOf(res)).toContain('to on its own');
+    expect(platform.calls.some((c) => c.path === '/usage')).toBe(false);
+  });
 });
 
 describe('the shortfalls', () => {

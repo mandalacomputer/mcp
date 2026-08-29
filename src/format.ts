@@ -1,5 +1,5 @@
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
-import { MandalaError } from './errors.js';
+import { APIError, MandalaError, reasonAdvice } from './errors.js';
 
 /** A plain text result. */
 export const text = (s: string): CallToolResult => ({ content: [{ type: 'text', text: s }] });
@@ -69,9 +69,21 @@ export function failed(err: unknown): CallToolResult {
   const status = (err as { status?: number })?.status;
   const withStatus =
     status && message !== `HTTP ${status}` ? `${message} (HTTP ${status})` : message;
+  // The platform's classification of the refusal, as the sentence it means
+  // (OPL-3898). `reason` is one word beside `error`, put there for a program to
+  // switch on — and the program on the other end of this tool is a model that
+  // sees nothing but the text below. Without this, the only thing distinguishing
+  // "something held the clipboard for an instant" from "the computer is stopped"
+  // is prose the platform is free to reword, and the model that reads the two
+  // the same way retries the second until its turn budget runs out.
+  //
+  // Appended rather than substituted: the sentence is what says WHICH computer
+  // and which state, and the word says only what kind. An unclassified refusal —
+  // most of them, and always will be — reads exactly as it did before.
+  const advice = err instanceof APIError ? reasonAdvice(err.reason) : undefined;
   return {
     isError: true,
-    content: [{ type: 'text', text: withStatus }],
+    content: [{ type: 'text', text: advice ? `${withStatus} — ${advice}` : withStatus }],
   };
 }
 

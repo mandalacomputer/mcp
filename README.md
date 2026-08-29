@@ -78,7 +78,8 @@ entirely.
 `scroll`, `drag`, `move_mouse`, `mouse_button`, `cursor_position`, `wait`
 
 **Inside the guest** — `exec`, `exec_poll`, `exec_kill`, `open_url`,
-`list_windows`, `window_action`, `read_file`, `write_file`
+`list_windows`, `window_action`, `read_clipboard`, `write_clipboard`,
+`read_file`, `write_file`
 
 **Snapshots** — `list_snapshots`, `snapshot_holdings`, `create_snapshot`,
 `restore_snapshot`, `clone_snapshot`, `snapshot_schedule`, `get_retention`,
@@ -170,6 +171,21 @@ reached without the proxy in front of it does not have one.
 **`list_windows` sees what a screenshot cannot.** It is how you tell an
 application that failed to start from one that has not painted yet. Match on
 `class` (the application), not `title` (whatever page it is showing).
+
+**The clipboard is two tools, not a shell recipe.** `read_clipboard` and
+`write_clipboard` reach the desktop's `CLIPBOARD` selection — what Ctrl-C writes
+and Ctrl-V pastes — on Linux computers whose desktop image includes `xclip`.
+An older or custom image without `xclip` gets a permanent 400 from both tools;
+changing the computer's runtime state or retrying cannot fix that image dependency.
+Pair `write_clipboard` with `press_key` and `keys: ["ctrl","v"]` — two key
+names, not the string `"ctrl+v"` — to get the text into whatever has focus. Do not reach for `xclip` through `exec` instead:
+`exec` runs a login shell, so the guest user's profile prints onto the same
+output your command does and corrupts a read you are trying to parse, and a
+write that way needs a resident holder, a redirect, base64 and a polling loop.
+The write here is confirmed by the platform reading the selection back before it
+answers. 64 KiB in, 128 KiB out, and the read is refused rather than truncated
+past its cap. `write_clipboard` resumes a suspended computer; `read_clipboard`
+does not.
 
 **Computers suspend themselves.** After 30 minutes untouched, by default. Input,
 `exec` and file transfers count as use and resume it automatically;

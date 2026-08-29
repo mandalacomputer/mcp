@@ -263,4 +263,26 @@ describe('list_moves', () => {
     expect(textOf(res)).toContain('vm-1');
     expect(textOf(res)).toContain('done');
   });
+
+  it('refuses an unreadable table rather than reporting a quiet account', async () => {
+    // An envelope with no `moves` array is the platform failing to answer, and
+    // reading it as `[]` says the opposite of what is known: that nothing is
+    // running. A move the caller started may well be.
+    const restore = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify({}), {
+        headers: { 'Content-Type': 'application/json' },
+      })) as typeof fetch;
+    try {
+      const { call, close } = await connect();
+      const res = await call('list_moves', {});
+      await close();
+
+      expect(res.isError).toBe(true);
+      expect(textOf(res)).toContain('not a list of moves');
+      expect(textOf(res)).not.toContain('No moves on this account');
+    } finally {
+      globalThis.fetch = restore;
+    }
+  });
 });

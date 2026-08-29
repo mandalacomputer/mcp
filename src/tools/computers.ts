@@ -94,10 +94,24 @@ type Move = {
   finished_at?: string;
 };
 
-const movesOf = (body: unknown): Move[] => {
+/**
+ * The moves table, or `undefined` when the platform did not send one.
+ *
+ * An envelope without a `moves` array is not an account with no moves in it,
+ * and that difference is the whole reason this returns `undefined` rather than
+ * `[]`. Both callers below read emptiness as a fact about the account: one
+ * reports a quiet account, the other concludes the computer was deleted and
+ * stops watching a move that is still running. An unreadable body establishes
+ * neither.
+ */
+const movesOf = (body: unknown): Move[] | undefined => {
   const list = (body as { moves?: unknown } | null)?.moves;
-  return Array.isArray(list) ? (list as Move[]) : [];
+  return Array.isArray(list) ? (list as Move[]) : undefined;
 };
+
+/** What arrived where a list was expected, for a refusal that names it. */
+const shapeOf = (v: unknown): string =>
+  v === undefined ? 'no body at all' : v === null ? 'null' : typeof v;
 
 /**
  * The resize refusal that is an OFFER, turned into a next step (OPL-3775).
@@ -628,9 +642,11 @@ export const registerComputers: Registrar = (server, session, opts) => {
               last,
             );
           }
-          let mine: Move | undefined;
+          let table: Move[] | undefined;
+          let raw: unknown;
           try {
-            mine = movesOf(await api.json('GET', P.MOVES)).find((m) => m.computer_id === id);
+            raw = await api.json('GET', P.MOVES);
+            table = movesOf(raw);
           } catch (err) {
             if (extra.signal?.aborted) continue;
             if (err instanceof CancelledError) {
@@ -655,7 +671,17 @@ export const registerComputers: Registrar = (server, session, opts) => {
             await sleep(pollDelay(err), signal);
             continue;
           }
+          // A table that is not a list is the platform failing to answer, not
+          // an answer that the move is gone. It rides out the same way a poll
+          // that threw does, so the deadline's sentence says the platform could
+          // not be asked rather than claiming a deletion nothing established.
+          if (!table) {
+            blocked = `GET /moves answered with ${shapeOf((raw as { moves?: unknown } | null)?.moves)}, not a list of moves`;
+            await sleep(POLL_MS, signal);
+            continue;
+          }
           blocked = undefined;
+          const mine = table.find((m) => m.computer_id === id);
           // A move that is no longer listed is one the platform reaped, and it
           // reaps for one reason: the computer was deleted. Not a state to keep
           // polling for.
@@ -688,10 +714,18 @@ export const registerComputers: Registrar = (server, session, opts) => {
       description:
         'Every move on this account: the ones running and the ones that finished in the last day. Read this after move_computer if the wait ran out, and read it when a move is refused because another computer on the account is already being moved — only one runs at a time, and this says which one and how far along. `live` is the flag to poll on.',
       inputSchema: {},
+      annotations: { readOnlyHint: true },
     },
     (_args, extra) =>
       guarded(async () => {
-        const moves = movesOf(await session.api.with(extra.signal).json('GET', P.MOVES));
+        const body = await session.api.with(extra.signal).json('GET', P.MOVES);
+        const moves = movesOf(body);
+        if (!moves) {
+          return refused(
+            `GET /moves answered with ${shapeOf((body as { moves?: unknown } | null)?.moves)}, not a list of moves. This is not an account with no moves on it — a move you started may still be running.`,
+            body,
+          );
+        }
         if (!moves.length) return said('No moves on this account.', []);
         return said(moves.map(moveLine).join('\n'), moves);
       }),
@@ -724,6 +758,18 @@ export const registerComputers: Registrar = (server, session, opts) => {
         const body = (await session.api
           .with(extra.signal)
           .json('GET', P.USAGE, { query: P.usageQuery(from, to) })) as Usage;
+        // `0 vCPU-hours` is a bill, and a missing totals object is not one. The
+        // fields inside it still default — a meter that sent no `disk_gb_months`
+        // is saying zero — but the object holding them has to have arrived, or
+        // this answers with a figure nobody metered in the shape of one somebody
+        // did, on the one call whose output is compared against an invoice.
+        const totals = body?.usage;
+        if (totals === null || typeof totals !== 'object' || Array.isArray(totals)) {
+          return refused(
+            `GET /usage answered with ${shapeOf(totals)} where the totals object goes, so there are no figures to report. This is NOT an account that used nothing.`,
+            body,
+          );
+        }
         return said(usageLine(body), body);
       }),
   );
@@ -910,7 +956,7 @@ export const registerComputers: Registrar = (server, session, opts) => {
       guarded(async () => {
         const id = session.resolve(computer_id);
         const c = unwrapComputer(await session.api.with(extra.signal).json('GET', P.computer(id)));
-        const vnc = c.vnc as Record<string, string> | undefined;
+        const vnc = c.vnc as Record<string, unknown> | undefined;
         if (!vnc) {
           // `refused`: the caller asked for a URL and there is none. Said as a
           // success, an orchestrator reading `isError` cannot tell a link from
@@ -926,37 +972,98 @@ export const registerComputers: Registrar = (server, session, opts) => {
         // straight over would print `{}` underneath a sentence promising full
         // control of the machine — the reader is told a link was given and
         // shown nothing to reconcile that against.
+        // Read as strings rather than trusted as them. `vnc` carries a boolean
+        // now (`clipboard`, below), so the object is no longer one type — and a
+        // number or an object arriving where a URL goes has to read as an absent
+        // link rather than be handed on as one, which is what the check below
+        // decides.
+        const link = (v: unknown) => (typeof v === 'string' && v ? v : undefined);
         const links = control
-          ? { url: vnc.url }
-          : { view_url: vnc.view_url, embed_url: vnc.embed_url };
+          ? { url: link(vnc.url) }
+          : { view_url: link(vnc.view_url), embed_url: link(vnc.embed_url) };
         if (!Object.values(links).some(Boolean)) {
           return refused(
             `The platform is holding desktop credentials for ${id} but sent no ${control ? 'control' : 'watch-only'} URL among them. ${control ? 'Ask without control: true for the watch-only link.' : 'Try again in a moment, or ask with control: true.'}`,
           );
         }
+        // Whether the CLIPBOARD crosses this socket, which the platform now
+        // answers (OPL-3870). Three terms this server cannot see — the vdagent
+        // channel QEMU was given at its last cold boot, whether the image the
+        // computer was built from was verified to carry the agent, and the
+        // guest's OS — resolved into one boolean on the same body the links
+        // came from, so it costs no second call and no cache.
+        //
+        // Absent reads as false, deliberately, and not as "unknown": the two
+        // ways to be wrong are not symmetric. A false about a working bridge
+        // costs the model nothing, since read_clipboard and write_clipboard work
+        // there too, while a true about an absent one is the silently dropped
+        // paste the field exists to end. mandala-computer-python's `VncConnect`
+        // defaults it the same way and for the same reason.
+        const bridged = vnc.clipboard === true;
+        const socket = bridged
+          ? 'THE CLIPBOARD CROSSES THIS SOCKET on this computer — the platform says so, so a noVNC ' +
+            'client that negotiates the extended cut text pseudo-encoding copies and pastes over this ' +
+            'link on its own and nothing here has to be called. That is the transport being OPEN ' +
+            'rather than a paste being guaranteed: the FIRST paste of a session is often dropped, ' +
+            'because the guest PULLS the text and the agent inside it may not own the selection yet — ' +
+            "send it again — and a browser will not hand the guest's clipboard back without focus and " +
+            'permission. It is also what was PROVISIONED rather than a live check. Somebody with root ' +
+            'in that guest can stop or remove the agent afterwards and this answer does not move, so ' +
+            'treat it as stale after anything that modified the guest, and fall back to read_clipboard ' +
+            'and write_clipboard — which work there too, and do not fight over the selection, because ' +
+            'they write the same one the agent then offers onward.'
+          : 'THE CLIPBOARD DOES NOT CROSS THIS SOCKET on this computer — the platform says so. Text ' +
+            'pasted into it reaches QEMU and stops, silently, with nothing to catch, so do not ask a ' +
+            'person to paste into this desktop. read_clipboard and write_clipboard are the answer and ' +
+            'need none of the hardware. If you want the socket half anyway, it has two halves and they ' +
+            'are acquired separately. The CHANNEL comes from a COLD start — stop_computer then ' +
+            'start_computer, or restart_computer on a computer that is already stopped, which starts ' +
+            'it; restart_computer on a RUNNING one does NOT do it, because that resets the guest ' +
+            'rather than rebuilding the machine QEMU was given, and a resumed or snapshot-restored ' +
+            'session keeps the topology of the capture it came from. The AGENT comes from the IMAGE ' +
+            'the computer was created from, and nothing moves an existing computer onto a newer one: ' +
+            'installing spice-vdagent in the guest may make a paste work but does not change this ' +
+            'answer, an image the platform has not verified reads the same way even where the agent is ' +
+            'present, and a Windows guest never has it whatever the hardware says. So if you cold-start ' +
+            'for this, the order is stop_computer, start_computer, wait_for_computer until the guest is ' +
+            'up, then get_desktop_url again to read the new answer — and test with a sentinel string ' +
+            'rather than with text you cannot afford to lose. This link keeps working across that: a ' +
+            'stop and a start do NOT reissue the credentials, and restart_computer is the only thing ' +
+            'that does, so use restart_computer on a stopped computer when you want the cold boot AND ' +
+            'a fresh credential. It is refused while a session is suspended, and a computer starting ' +
+            'for the FIRST time may load the boot capture it was created from instead, which carries ' +
+            'that capture topology.';
         return control
           ? said(
-              'Full control — keyboard and pointer, but NOT the clipboard: the platform does not run the ' +
-                'channel QEMU carries VNC cut text on, so text pasted into this socket is dropped silently ' +
-                'and telling somebody to paste into it does not work. Move text with run_command and ' +
-                'desktop: true instead. Reading is `xclip -o -selection clipboard`. A write needs BOTH ' +
-                'setsid, so the holder outlives the command (an X selection belongs to a live process), ' +
-                'and the output redirected, or the resident xclip holds the pipe the guest agent is ' +
-                'reading and the command runs to its full timeout before answering. Send the text base64 ' +
-                'rather than quoted — an apostrophe in what you are pasting would end the shell word — ' +
-                'and poll rather than reading straight back, because being granted a selection is ' +
-                'asynchronous and the next read can still be the old clipboard — bounded, a few seconds, ' +
-                "since the redirection also swallows xclip's own errors and a guest without it never " +
-                'changes the selection at all. Quote the base64 exactly as shown: GNU base64 wraps at 76 ' +
-                'columns, and inside the quotes those newlines are harmless (base64 -d takes them) while ' +
-                'UNQUOTED one of them would end the pipeline and leave an empty clipboard behind a ' +
-                'command that answered 200. ' +
-                "`printf %s '<BASE64>' | base64 -d | setsid xclip -selection clipboard >/dev/null 2>&1 &`. " +
-                'Treat this link as a password for that desktop; it ends when the computer restarts.',
+              'Full control — keyboard and pointer. Treat this link as a password for that ' +
+                'desktop. Of the tools here, restart_computer is the only one that ends it: a stop ' +
+                'and a start leave it working, so a restart is what revokes one that has leaked.\n\n' +
+                'TO MOVE TEXT, use read_clipboard and write_clipboard. They need nothing of the ' +
+                'hardware, but they require a Linux desktop image with xclip installed. An older or ' +
+                'custom image without xclip gets a permanent 400 from both tools; changing runtime ' +
+                'state or retrying cannot fix that image dependency. Where it is present, prefer the ' +
+                'tools, and do not start by asking a person to paste into the desktop. They are ' +
+                'refused outright on Windows. Do NOT reach for xclip through exec instead: exec runs a login shell, so ' +
+                "the guest user's profile prints onto the same output your command does, ahead of it, " +
+                'which corrupts a read you are trying to parse; and a write through exec has to leave ' +
+                'xclip resident, redirect its output, travel base64 to survive an apostrophe, and then ' +
+                'be polled for, because being granted an X selection is asynchronous and a detached ' +
+                'xclip gives up its exit status. write_clipboard does all of that in one call and ' +
+                'confirms the selection was taken before it answers.\n\n' +
+                socket,
               links,
             )
           : said(
-              'Watch-only. The platform drops input on this socket, so it is safe to hand to somebody.',
+              'Watch-only. The platform drops input on this socket, so it is safe to hand to ' +
+                "somebody. The guest's clipboard does not come back over it either, and that is " +
+                'enforced rather than asked for: the daemon takes the clipboard capability out of the ' +
+                'connection as it is negotiated, so a patched client gains nothing by asking. What the ' +
+                'person at the desktop COPIES does not reach whoever holds this link — though the ' +
+                'screen still does, so a password visible on it is not protected by this. The ' +
+                "platform's own clipboard answer for a watch-only link is therefore always no, " +
+                'whatever the computer itself can do: it describes the socket you were handed rather ' +
+                'than the machine, so ask with control: true before concluding anything about the ' +
+                'computer.',
               links,
             );
       }),
