@@ -29,7 +29,7 @@ How to work with one:
 Things that are true here and are not obvious:
 
 - exec runs as root with NO display. A GUI application started without desktop: true cannot draw. open_url is the reliable way to put a web page on the screen.
-- Anything slower than a few seconds wants exec with background: true — a build or an install run in the foreground comes back as a timeout with the work still going and its output unreadable.
+- Anything slower than a few seconds wants exec with background: true — a build or an install run in the foreground comes back as a timeout with the work still going and its output unreadable. Sixteen of them run at once per computer, and a slot is held until its command exits; exec_kill on a pid you no longer need is what frees one.
 - list_windows tells you what is on the screen as data. It is how you distinguish an application that failed to start from one that has not painted yet, which a screenshot alone cannot do.
 - A computer suspends itself when nobody uses it — 30 minutes by default. Input, exec and file transfers all count as use and resume it. Screenshots deliberately do not, so a loop that only watches can see its own machine go down.
 - A 409 is not one thing, and retrying blindly is how a turn gets burned. Most describe a passing state and clear on their own: a guest still booting, a guest agent busy with another call. Some describe a DECISION about what you asked for — a size the host cannot run, a computer that has to be stopped first — and those answer the same way forever; the message says which, and usually says what to do instead. A 400 never clears.
