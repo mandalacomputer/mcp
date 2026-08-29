@@ -3104,3 +3104,138 @@ describe("the desktop socket's clipboard, as the platform now reports it", () =>
     await close();
   });
 });
+
+describe('a computer whose background slots are all held', () => {
+  // OPL-3909. A computer runs at most sixteen background commands (platform
+  // OPL-3584), and the seventeenth is refused 409 with no `reason` on it —
+  // deliberately, because the slots may be held by servers and the platform
+  // will not advise a retry it cannot promise (platform OPL-3898). This client
+  // then said nothing about any of it: `background` recommends the flag for
+  // exactly the workload that accumulates handles, no description mentioned a
+  // ceiling, and `isTransient` fell back to the type answer for a 409 — which
+  // is yes. A host application looping on that predicate spun against a full
+  // slot table while the model read a sentence with no next step in it.
+  //
+  // What is pinned here is the seam. The refusal becomes a next step that names
+  // the tool which frees a slot; the two predicates are untouched and still
+  // answer by type and by the platform's word; and every other conflict on this
+  // route reads exactly as it did before, because the match is on prose and
+  // prose is what OPL-3724 got this client out of everywhere it decides a
+  // program's behaviour.
+  const real = globalThis.fetch;
+  const conflict = (body: Record<string, unknown>) =>
+    (globalThis.fetch = (async () =>
+      new Response(JSON.stringify(body), {
+        status: 409,
+        headers: { 'Content-Type': 'application/json' },
+      })) as typeof fetch);
+  afterEach(() => {
+    globalThis.fetch = real;
+  });
+
+  it('is answered with the tool that frees a slot, not with another attempt', async () => {
+    conflict({ error: 'this computer already has 16 background commands running' });
+    const { call, close } = await connect();
+    const res = await call('exec', { command: 'npm run dev', background: true });
+    await close();
+
+    expect(res.isError).toBe(true);
+    const text = said(res);
+    // The platform's own sentence survives whole: it is the one that says how
+    // many are running and on which computer.
+    expect(text).toContain('this computer already has 16 background commands running');
+    // And the two things that sentence does not say.
+    expect(text).toContain('exec_kill');
+    expect(text).toContain('16 are held now');
+    // Stopping short of "never retry", which would be false: a build among the
+    // sixteen finishes on its own. The answer names both situations.
+    expect(text).toMatch(/servers, they do not exit/);
+    expect(text).toMatch(/builds or installs/);
+  });
+
+  it('reads the cap back off the message rather than writing sixteen into it', async () => {
+    // The count is the platform's, so raising the cap there cannot turn this
+    // paragraph into a lie about how many are running.
+    conflict({ error: 'this computer already has 32 background commands running' });
+    const { call, close } = await connect();
+    const text = said(await call('exec', { command: 'sleep 600', background: true }));
+    await close();
+    expect(text).toContain('all 32 are held now');
+    expect(text).not.toContain('16');
+  });
+
+  it('leaves every other conflict on this route exactly as it was', async () => {
+    // The guard against the failure mode of matching prose. A guest agent busy
+    // with another call is the ordinary 409 here, it clears on its own, and
+    // dressing it up as a full slot table would send the model to kill a
+    // command that is not the problem.
+    conflict({ error: 'the guest agent is busy with another call' });
+    const { call, close } = await connect();
+    const text = said(await call('exec', { command: 'true', background: true }));
+    await close();
+    expect(text).toBe('the guest agent is busy with another call (HTTP 409)');
+    expect(text).not.toContain('exec_kill');
+  });
+
+  it('defers to the platform if a later version does classify this refusal', async () => {
+    // The word is the channel built for deciding this, and it wins. A future
+    // platform that says `contention` here knows something this file does not,
+    // and two answers arriving at once — one of them guessed off a sentence —
+    // is worse than the one that was designed.
+    conflict({
+      error: 'this computer already has 16 background commands running',
+      reason: 'contention',
+    });
+    const { call, close } = await connect();
+    const text = said(await call('exec', { command: 'sleep 600', background: true }));
+    await close();
+    expect(text).toContain('worth sending again');
+    expect(text).not.toContain('exec_kill');
+  });
+
+  it('does not read a foreground conflict as a full slot table', async () => {
+    // The refusal is only reachable by asking for a slot, so a foreground exec
+    // that somehow met this sentence is a platform this client does not
+    // understand — and the conservative answer there is the one it gave before.
+    conflict({ error: 'this computer already has 16 background commands running' });
+    const { call, close } = await connect();
+    const text = said(await call('exec', { command: 'true' }));
+    await close();
+    expect(text).not.toContain('exec_kill');
+  });
+
+  it('says the cap in the descriptions a model reads before it calls anything', async () => {
+    // The other half of the ticket, and the half that prevents the refusal
+    // rather than explaining it. `background` is recommended for servers, which
+    // is the workload that fills the table, so the ceiling belongs beside that
+    // recommendation and not only in the error.
+    const { client, close } = await connect();
+    const tools = new Map((await client.listTools()).tools.map((t) => [t.name, t]));
+    await close();
+
+    const exec = tools.get('exec');
+    expect(exec?.description).toMatch(/sixteen background commands/);
+    const background = exec?.inputSchema.properties?.background as { description?: string };
+    expect(background.description).toMatch(/sixteen/);
+    expect(background.description).toContain('exec_kill');
+    // And the two tools that hold the other end of a handle say what a slot is
+    // and what returns one.
+    expect(tools.get('exec_kill')?.description).toMatch(/sixteen background commands/);
+    expect(tools.get('exec_poll')?.description).toMatch(/releases[\s\S]*background slot/);
+  });
+
+  it('leaves the exported retry predicates answering by type and by word', () => {
+    // The line this change does not cross. `isTransient` is a contract with
+    // embedders, mirrored word for word by two other clients, and teaching it
+    // this sentence is the OPL-3724 mistake with a wider blast radius. It still
+    // says yes, honestly, and the next step lives in the tool that can print
+    // the platform's words beside it.
+    const full = errorForStatus(409, 'this computer already has 16 background commands running', {
+      error: 'this computer already has 16 background commands running',
+    });
+    expect(full).toBeInstanceOf(ConflictError);
+    expect((full as APIError).reason).toBeUndefined();
+    expect(isTransient(full)).toBe(true);
+    expect(isTransientForPoll(full)).toBe(true);
+  });
+});
