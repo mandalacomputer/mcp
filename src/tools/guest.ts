@@ -150,9 +150,10 @@ const backgroundFull = (err: ConflictError, held: number) =>
  * move" — true for the reads and creates it was written for, false on a route
  * whose actions are applied once. Printing it above a paragraph that says the
  * reverse would leave the model to pick, so {@link platformSaid} asks whether a
- * hop that actually knew this request said something: if one did, its sentence
- * leads, because it knows more than this file; if none did, the generic tail is
- * dropped instead of contradicted.
+ * hop that actually knew this request said something. A named response is
+ * authoritative and falls through untouched unless its own sentence says the
+ * action was accepted or may have completed. Only that positive signal, or no
+ * structured sentence at all, permits the unknown-outcome advice below.
  *
  * The whole class rather than the one status. A 524 is the same event reached
  * from the proxy's ceiling instead of from the guest's silence, and it carries
@@ -164,6 +165,14 @@ const backgroundFull = (err: ConflictError, held: number) =>
  * be undone. The others are untidy on a repeat: a second `move` puts the frame
  * where it already is.
  */
+const WINDOW_ACTION_ACCEPTED =
+  /\b(?:(?:guest(?: agent)?) accepted (?:the )?(?:window )?action|(?:window )?action (?:was|has been) accepted|(?:window )?action may have (?:completed|happened|been applied))\b/i;
+
+const windowOutcomeMayBeUnknown = (err: GatewayTimeoutError) => {
+  const named = platformSaid(err.body);
+  return named === undefined || WINDOW_ACTION_ACCEPTED.test(named);
+};
+
 const windowOutcomeUnknown = (err: GatewayTimeoutError, action: string, windowId: string) => {
   const named = platformSaid(err.body);
   return refused(
@@ -376,7 +385,7 @@ export const registerGuest: Registrar = (server, session) => {
     {
       title: 'Act on a window',
       description:
-        'Focus, raise, minimize, maximize, unmaximize, close, move or resize one window. The reply is the window afterwards, not an acknowledgement — the window manager places the frame and applications snap to their own grid, so a move to 300,200 routinely lands at 305,229. Believe the response, not the request. Prefer focus over raise: raising without focusing gives a window that is visibly in front and silently not receiving keystrokes. A 504 here is neither a refusal nor a report that nothing happened: if the guest takes the action and does not report the result before the deadline, that is what you get, and the action may already have been applied. An uncertain outcome is not permission to repeat it — the next call is list_windows, which says what the desktop is now, not this one again. Least of all for close, which cannot be undone.',
+        'Focus, raise, minimize, maximize, unmaximize, close, move or resize one window. The reply is the window afterwards, not an acknowledgement — the window manager places the frame and applications snap to their own grid, so a move to 300,200 routinely lands at 305,229. Believe the response, not the request. Prefer focus over raise: raising without focusing gives a window that is visibly in front and silently not receiving keystrokes. A 504 with no structured explanation, or one saying the guest accepted the action, is neither a refusal nor a report that nothing happened: the action may already have been applied. An uncertain outcome is not permission to repeat it — the next call is list_windows, which says what the desktop is now, not this one again. Least of all for close, which cannot be undone. A structured gateway response that names a different outcome remains authoritative.',
       inputSchema: {
         ...idArg,
         window_id: z.string().describe('From list_windows, e.g. "0x2600003".'),
@@ -401,7 +410,7 @@ export const registerGuest: Registrar = (server, session) => {
           // that meets a 504 is not that turn — so the one refusal on this
           // route that must not be retried says so where it happens, the way
           // exec's full slot table does above.
-          if (err instanceof GatewayTimeoutError) {
+          if (err instanceof GatewayTimeoutError && windowOutcomeMayBeUnknown(err)) {
             return windowOutcomeUnknown(err, action, window_id);
           }
           throw err;

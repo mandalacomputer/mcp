@@ -3308,18 +3308,38 @@ describe('a window action whose outcome came back unknown', () => {
     expect(resizing).not.toContain('no undo');
   });
 
-  it('keeps the sentence of any hop that actually knew this request', async () => {
-    // The substitution is only of prose this file wrote. A 504 carrying a
-    // structured message came from something that saw the request — including a
-    // gateway in front of a self-hosted MANDALA_BASE_URL — and that outranks
-    // anything written here.
-    answering(504, { error: 'the guest agent accepted the action and did not report back' });
+  it.each([
+    'the guest agent accepted the action and did not report back',
+    'the guest did not answer in time; the window action may have completed',
+  ])('adds the next step when a structured response says: %s', async (error) => {
+    // The platform's own timeout sentence is structured too, so a body cannot
+    // by itself mean that this handler has nothing to add. These sentences
+    // positively say the action crossed the acceptance boundary and therefore
+    // confirm the unknown outcome rather than contradicting it. The second is
+    // the current platform's exact wire message.
+    answering(504, { error });
     const { call, close } = await connect();
     const text = said(await call('window_action', { window_id: '0x2600003', action: 'close' }));
     await close();
 
-    expect(text).toContain('the guest agent accepted the action and did not report back');
+    expect(text).toContain(error);
+    expect(text).toContain('UNKNOWN');
     expect(text).toContain('list_windows');
+  });
+
+  it('leaves a structured response that says dispatch never happened authoritative', async () => {
+    // A gateway that rejected the request before dispatch knows the outcome is
+    // not unknown. Prefixing this sentence and then forbidding a retry would
+    // make the tool contradict the one hop that can settle that question.
+    answering(504, { error: 'upstream unavailable before dispatch' });
+    const { call, close } = await connect();
+    const text = said(await call('window_action', { window_id: '0x2600003', action: 'close' }));
+    await close();
+
+    expect(text).toBe('upstream unavailable before dispatch (HTTP 504)');
+    expect(text).not.toContain('UNKNOWN');
+    expect(text).not.toContain('list_windows');
+    expect(text).not.toContain('Do not send this call again');
   });
 
   it('covers the ceiling as well as the deadline, because both leave it unknown', async () => {
