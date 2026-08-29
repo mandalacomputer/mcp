@@ -42,6 +42,7 @@ import {
   OriginResponseError,
   OriginTLSError,
   OriginUnreachableError,
+  platformSaid,
   RangeNotSatisfiableError,
   RateLimitError,
   UnavailableError,
@@ -3237,5 +3238,151 @@ describe('a computer whose background slots are all held', () => {
     expect((full as APIError).reason).toBeUndefined();
     expect(isTransient(full)).toBe(true);
     expect(isTransientForPoll(full)).toBe(true);
+  });
+});
+
+describe('a window action whose outcome came back unknown', () => {
+  // OPL-3910. The platform gives `POST /computers/:id/windows/:window` a 504
+  // and the sentence that goes with it: if the guest accepts the action and does
+  // not report the result before the deadline, the route answers 504 with no
+  // `reason` on purpose, because the action may already have happened and an
+  // uncertain outcome is not permission to repeat it (platform OPL-3898).
+  //
+  // Nothing in this server retries this route — `isTransientForPoll` rides a 504
+  // out, but only the wait loops ask it, and they replay reads. The exposure is
+  // the MODEL: it met a timeout under a message ending "the same call again is
+  // the move", written for the reads and creates that wording is true of. For a
+  // `move` a second attempt is untidy; for a `close` it is destructive, and
+  // there is no undo for a document that was holding unsaved work.
+  const real = globalThis.fetch;
+  const answering = (status: number, body?: Record<string, unknown>) =>
+    (globalThis.fetch = (async () =>
+      new Response(body === undefined ? null : JSON.stringify(body), {
+        status,
+        headers: body === undefined ? undefined : { 'Content-Type': 'application/json' },
+      })) as typeof fetch);
+  afterEach(() => {
+    globalThis.fetch = real;
+  });
+
+  it('is answered with a read, and never with the same call again', async () => {
+    answering(504);
+    const { call, close } = await connect();
+    const res = await call('window_action', {
+      window_id: '0x2600003',
+      action: 'move',
+      x: 10,
+      y: 20,
+    });
+    await close();
+
+    expect(res.isError).toBe(true);
+    const text = said(res);
+    expect(text).toContain('UNKNOWN');
+    expect(text).toContain('may already have been applied');
+    expect(text).toContain('list_windows');
+    // And not the generic 504 tail, which is the sentence this route cannot
+    // afford: it is written for callers whose request is safe to replay.
+    expect(text).not.toContain('the same call again is the move');
+  });
+
+  it('says the destructive thing about close and not about the rest', async () => {
+    answering(504);
+    const { call, close } = await connect();
+    const closing = said(await call('window_action', { window_id: '0x2600003', action: 'close' }));
+    const resizing = said(
+      await call('window_action', {
+        window_id: '0x2600003',
+        action: 'resize',
+        width: 640,
+        height: 480,
+      }),
+    );
+    await close();
+
+    expect(closing).toContain('no undo');
+    expect(closing).toMatch(/window id is not reserved forever/);
+    // The others are untidy on a repeat, and saying otherwise would train the
+    // model to distrust an answer that is usually harmless.
+    expect(resizing).toContain('untidy rather than destructive');
+    expect(resizing).not.toContain('no undo');
+  });
+
+  it('keeps the sentence of any hop that actually knew this request', async () => {
+    // The substitution is only of prose this file wrote. A 504 carrying a
+    // structured message came from something that saw the request — including a
+    // gateway in front of a self-hosted MANDALA_BASE_URL — and that outranks
+    // anything written here.
+    answering(504, { error: 'the guest agent accepted the action and did not report back' });
+    const { call, close } = await connect();
+    const text = said(await call('window_action', { window_id: '0x2600003', action: 'close' }));
+    await close();
+
+    expect(text).toContain('the guest agent accepted the action and did not report back');
+    expect(text).toContain('list_windows');
+  });
+
+  it('covers the ceiling as well as the deadline, because both leave it unknown', async () => {
+    // A 524 is the same event reached from the proxy's two-minute ceiling
+    // instead of from the guest's silence, and it carries the stronger form of
+    // the same fact: the platform very likely has the request and is working on
+    // it. Repeating a close through one is the worse version of the same bug.
+    answering(524);
+    const { call, close } = await connect();
+    const text = said(await call('window_action', { window_id: '0x2600003', action: 'close' }));
+    await close();
+
+    expect(text).toContain('HTTP 524');
+    expect(text).toContain('list_windows');
+    // The 524 tail is about foreground exec and a timeout_s this route does not
+    // take, so it goes with the rest of the substituted prose.
+    expect(text).not.toContain('timeout_s');
+  });
+
+  it('leaves every other failure on this route exactly as it was', async () => {
+    answering(409, { error: 'the guest agent is busy with another call' });
+    const { call, close } = await connect();
+    const text = said(await call('window_action', { window_id: '0x2600003', action: 'focus' }));
+    await close();
+    expect(text).toBe('the guest agent is busy with another call (HTTP 409)');
+    expect(text).not.toContain('list_windows');
+  });
+
+  it('says it in the description too, where a model reads it before it calls', async () => {
+    // The error arrives once and is read once; the description is what shapes
+    // the call that does not need to fail first.
+    const { client, close } = await connect();
+    const tools = new Map((await client.listTools()).tools.map((t) => [t.name, t]));
+    await close();
+    const d = tools.get('window_action')?.description ?? '';
+    expect(d).toMatch(/504/);
+    expect(d).toContain('list_windows');
+    expect(d).toMatch(/not permission to repeat it/);
+  });
+
+  it('asks the body, not the message, whether a hop said anything', () => {
+    // What `platformSaid` is for. By the time the error exists the message may
+    // have been written by this file, so asking it to vouch for itself would
+    // answer yes to prose the tool is trying to replace.
+    const bare = errorForStatus(504, 'HTTP 504', undefined);
+    expect(bare).toBeInstanceOf(GatewayTimeoutError);
+    expect(bare.message).not.toBe('HTTP 504');
+    expect(platformSaid(bare.body)).toBeUndefined();
+    const named = errorForStatus(504, 'upstream gave up', { error: 'upstream gave up' });
+    expect(platformSaid(named.body)).toBe('upstream gave up');
+    // Shape-checked like every other body read here: a non-string reads as
+    // nothing said rather than being printed as a sentence.
+    expect(platformSaid({ error: 5 })).toBeUndefined();
+    expect(platformSaid({ error: '' })).toBeUndefined();
+    expect(platformSaid('a string body')).toBeUndefined();
+  });
+
+  it('leaves the exported retry predicates untouched', () => {
+    // The seam, again. A 504 is not transient for an embedder wrapping a create
+    // and still is for a wait loop replaying a read — this ticket changes one
+    // tool's answer and neither predicate.
+    const timeout = errorForStatus(504, 'HTTP 504', undefined);
+    expect(isTransient(timeout)).toBe(false);
+    expect(isTransientForPoll(timeout)).toBe(true);
   });
 });
