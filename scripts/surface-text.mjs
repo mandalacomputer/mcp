@@ -67,6 +67,16 @@ function unescaped(text) {
       i += 2;
     } else if (next === 'u' && text[i + 1] === '{') {
       const end = text.indexOf('}', i + 2);
+      // `indexOf` answers -1 for a `\u{` that is never closed, and `i = -1`
+      // sends the loop back to the start of the string to meet the same escape
+      // again — a hang, not a bad character. The source this reads is compiled
+      // TypeScript, so an unclosed escape is this scanner being wrong about
+      // where a literal ended; say so rather than spin.
+      if (end === -1) {
+        throw new Error(
+          `unterminated \\u{ escape in ${JSON.stringify(text.slice(0, 60))} — the literal was read wrong`,
+        );
+      }
       out += String.fromCodePoint(Number.parseInt(text.slice(i + 2, end), 16));
       i = end;
     } else if (next === 'u') {

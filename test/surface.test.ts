@@ -121,6 +121,8 @@ const EXERCISE: Record<string, Record<string, unknown>[]> = {
     { window_id: '0x2600003', action: 'move', x: 10, y: 20 },
     { window_id: '0x2600003', action: 'resize', width: 640, height: 480 },
   ],
+  read_clipboard: [{}],
+  write_clipboard: [{ text: 'on the clipboard' }],
   write_file: [{ path: '/home/user/a.txt', content: 'hello' }],
   // The offset is the parameter, and it is the whole of OPL-3740: without an
   // argument that turns into a Range this route is reachable and a file over
