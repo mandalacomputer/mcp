@@ -630,9 +630,31 @@ const ORIGIN_TLS_MESSAGE =
  * front of a MANDALA_BASE_URL this server has never seen.
  */
 function platformNamed(body: unknown): boolean {
-  if (!body || typeof body !== 'object') return false;
+  return platformSaid(body) !== undefined;
+}
+
+/**
+ * The sentence a response carried in its own words, or `undefined` for one that
+ * carried none — the same test {@link platformNamed} asks, with the answer kept.
+ *
+ * Exported for the one caller that has to print a message the substitutions
+ * above would otherwise have written for it. A tool whose route contradicts the
+ * generic wording for a status — `window_action` and a 504, where
+ * {@link GatewayTimeoutError}'s tail says the same call again is the move and on
+ * that route it is not — cannot append its own paragraph under prose that says
+ * the opposite. It needs to know whether the sentence in `message` came from a
+ * hop that knew this request, in which case it is worth repeating, or from this
+ * file, in which case it is worth replacing (OPL-3910).
+ *
+ * Reads the BODY rather than the message, deliberately. By the time an error
+ * exists the two may differ — that is what the substitutions are — so asking the
+ * message whether it is the platform's would be asking the answer to vouch for
+ * itself.
+ */
+export function platformSaid(body: unknown): string | undefined {
+  if (!body || typeof body !== 'object') return undefined;
   const err = (body as { error?: unknown }).error;
-  return typeof err === 'string' && err.length > 0;
+  return typeof err === 'string' && err.length > 0 ? err : undefined;
 }
 
 /** Build the error for a status, with the platform's own message when it sent one. */
