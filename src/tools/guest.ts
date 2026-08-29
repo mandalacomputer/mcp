@@ -167,7 +167,7 @@ const backgroundFull = (err: ConflictError, held: number) =>
  * where it already is.
  */
 const WINDOW_ACTION_NOT_DISPATCHED =
-  /\b(?:before dispatch|(?:the )?(?:request|(?:window )?action|command) (?:(?:was (?:not|never)|has not been|never) dispatched|did not (?:get dispatched|reach the guest))|nothing (?:was|got) dispatched)\b/i;
+  /^\s*(?:(?:upstream|gateway|service)(?: was)? unavailable before dispatch|(?:the )?(?:request|(?:window )?action|command) (?:(?:was (?:not|never)|has not been|never) dispatched|did not (?:get dispatched|reach the guest))|nothing (?:was|got) dispatched)[.!]?\s*$/i;
 
 const windowOutcomeMayBeUnknown = (err: GatewayTimeoutError) => {
   const named = platformSaid(err.body);

@@ -3313,14 +3313,18 @@ describe('a window action whose outcome came back unknown', () => {
     'the guest did not answer in time; the window action may have completed',
     'gateway timeout',
     'the action might already have run',
+    'timed out before dispatch could be confirmed',
+    'could not confirm that the request was not dispatched',
   ])(
     'adds the next step when a structured response leaves dispatch possible: %s',
     async (error) => {
       // The platform's own timeout sentence is structured too, so a body cannot
       // by itself mean that this handler has nothing to add. Positive acceptance,
-      // a generic gateway timeout and an unfamiliar rewording are all unsafe to
-      // replay; only explicit proof of non-dispatch can settle the outcome. The
-      // second sentence is the current platform's exact wire message.
+      // a generic gateway timeout, an unfamiliar rewording and a sentence that
+      // merely contains "before dispatch", or quotes non-dispatch as something
+      // unconfirmed, are all unsafe to replay. Only a complete explicit
+      // assertion of non-dispatch can settle the outcome. The second sentence
+      // is the current platform's exact wire message.
       answering(504, { error });
       const { call, close } = await connect();
       const text = said(await call('window_action', { window_id: '0x2600003', action: 'close' }));
