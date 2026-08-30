@@ -39,26 +39,14 @@ jobs:
       # is one nobody finds out about until they install it.
       - run: node dist/cli.js --help
 
-  surface:
-    # Diffs the mirrored allowlist against the platform's real V1_ROUTES. Its own
-    # job because it needs the platform repo, which is private: on a fork, or
-    # without the token, the checkout is skipped and the script says so and
-    # passes rather than failing over something the contributor cannot fix.
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-      - name: Check out the platform
-        id: platform
-        continue-on-error: true
-        uses: actions/checkout@v4
-        with:
-          repository: b-open-io/gorillacloud
-          path: platform
-          token: ${{ secrets.PLATFORM_REPO_TOKEN }}
-      - name: Compare the allowlist
-        env:
-          MANDALA_PLATFORM_REPO: ${{ github.workspace }}/platform
-        run: node scripts/check-surface.mjs
+  # There is no `surface:` job here any more. It checked the platform out and
+  # ran scripts/check-surface.mjs, and for the whole of its life PLATFORM_REPO_TOKEN
+  # was never set on this repository — so the checkout failed, continue-on-error
+  # swallowed it, and every run printed the script's skip and passed. A green
+  # job comparing nothing, which is the same bug as the mirror it was watching.
+  #
+  # The diff is enforced in the platform's CI instead, which checks this repo
+  # out beside itself and runs this same script (OPL-3916). That is where the
+  # secret belongs — one there that reads three SDKs, rather than a key to the
+  # platform inside three repos — and where the output belongs, since what it
+  # prints is routes and parameters that have not shipped yet.
