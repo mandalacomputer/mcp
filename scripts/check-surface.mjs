@@ -20,9 +20,18 @@
  *
  * Exits 0 and says so when the platform repo is not there. That is the ordinary
  * case in CI on this repository, and failing over it would make the check
- * something people learn to ignore. Where it matters is on a machine that has
- * both, and in any job that checks out both — which is where a route or a
- * parameter added upstream should stop being invisible.
+ * something people learn to ignore.
+ *
+ * Where it is enforced is the platform's own CI, which checks this repo out
+ * beside itself and runs this script against it (OPL-3916). This repository had
+ * a job of its own that did the reverse, and it never once ran: the token it
+ * needed was never set, so every run printed the skip above and passed. Beyond
+ * that, what this prints is routes and parameters that have not shipped yet,
+ * and this repository's Actions logs are world-readable the day it goes public,
+ * where the platform's are not.
+ *
+ * So on a machine that has both this is what catches drift before a push, and
+ * everywhere else it is what the platform runs.
  */
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
