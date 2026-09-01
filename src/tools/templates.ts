@@ -35,7 +35,14 @@ const versionArg = z
     'A specific MAJOR.MINOR.PATCH. Send it or omit it entirely — an empty string is refused, because omitting it does not mean the same thing on both tools.',
   );
 
-export const registerTemplates: Registrar = (server, session) => {
+export const registerTemplates: Registrar = (server, session, opts) => {
+  // What to call the thing that launches a template, when there IS one.
+  //
+  // `create_computer` is not registered under MANDALA_NO_LIFECYCLE, and a name
+  // in a neighbouring tool's description is the same idea by a different route
+  // as a tool in the list: the model reads it and tries it. The server
+  // instructions were already parameterised on this; the descriptions were not.
+  const launcher = opts.lifecycle ? 'create_computer' : 'whatever creates computers on this setup';
   server.registerTool(
     'get_template_schema',
     {
@@ -104,7 +111,8 @@ export const registerTemplates: Registrar = (server, session) => {
     {
       title: 'Publish a template document',
       description:
-        'Store a document under a ref of your own, so create_computer can launch it by name. THE NAMESPACE IS YOUR ACCOUNT: `metadata.namespace` has to be your account id, and anything else is refused rather than rewritten — `system` included. A REF IS IMMUTABLE: publishing the identical document again succeeds and changes nothing, but publishing a DIFFERENT document under the same ref is refused, and the fix is to bump `metadata.version`. What counts as different is the digest, so a changed label is a change. Check the document first — a mistake published under a version can never be corrected under that version.',
+        `Store a document under a ref of your own, so ${launcher} can launch it by name. ` +
+        'THE NAMESPACE IS YOUR ACCOUNT: `metadata.namespace` has to be your account id, and anything else is refused rather than rewritten — `system` included. A REF IS IMMUTABLE: publishing the identical document again succeeds and changes nothing, but publishing a DIFFERENT document under the same ref is refused, and the fix is to bump `metadata.version`. What counts as different is the digest, so a changed label is a change. Check the document first — a mistake published under a version can never be corrected under that version.',
       inputSchema: {
         document: z
           .string()
@@ -142,7 +150,8 @@ export const registerTemplates: Registrar = (server, session) => {
         // the document says whether it declares build steps.
         return said(
           `Published ${body.ref}. A published template is named by its ref and by nothing else, so its short name still means one of ours. ` +
-            'WHETHER IT LAUNCHES depends on the document: pass the ref to create_computer as `template` if it layers onto a family the fleet ships, but one declaring `spec.build` steps names a family that has to be built first — that is build_template — and the fleet does not yet advertise a family it built rather than shipped, so a create naming such a ref is still refused.',
+            `WHETHER IT LAUNCHES depends on the document: pass the ref to ${launcher} as ` +
+            '`template` if it layers onto a family the fleet ships, but one declaring `spec.build` steps names a family that has to be built first — that is build_template — and the fleet does not yet advertise a family it built rather than shipped, so a create naming such a ref is still refused.',
           body,
         );
       }),

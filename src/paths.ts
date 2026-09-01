@@ -268,6 +268,21 @@ export function execBody(args: {
   cwd?: string;
   env?: Record<string, string>;
 }): Json {
+  // A NUL ends a C string, and the command is the one field on this route that
+  // reaches the guest without anything checking it. `execEnv` below refuses one
+  // for this exact reason, and the platform refuses one in `cwd` and in every
+  // file path — `validGuestPath` rejects the whole control range — but its only
+  // test on `command` is that it is not empty (server/api.go). So a command
+  // carrying a NUL is truncated at the guest's argv boundary: a shorter command
+  // than the caller wrote runs, and its exit code is reported as an ordinary
+  // success. The same shape as the surrogate refusals — a call that works and
+  // does something other than what was asked.
+  if (args.command.includes('\0')) {
+    throw new Error(
+      'command must not contain a NUL: a NUL ends a C string, so the guest would run only the part ' +
+        'in front of it and report that as a success.',
+    );
+  }
   const body: Json = { command: args.command };
   if (args.timeout_s !== undefined) body.timeout_s = args.timeout_s;
   // Omitted rather than sent empty: the platform's default is the system
@@ -435,7 +450,38 @@ export function scrollBody(args: {
   return body;
 }
 
-export const typeBody = (text: string): Json => ({ action: 'type', text });
+/**
+ * Text typed at the keyboard, checked the way the clipboard's is.
+ *
+ * The same silent corruption {@link clipboardBody} refuses and `write_file`
+ * refuses, on the third path that carries a caller's own characters into the
+ * guest: `JSON.stringify` escapes a lone surrogate and Go's `encoding/json`
+ * decodes it to U+FFFD.
+ *
+ * What happens NEXT is this route's own, and it is worth stating precisely
+ * rather than borrowing the clipboard's sentence. The platform's `type` handler
+ * walks runes and looks each one up in `charKeys` — a printable-ASCII map — and
+ * `continue`s past anything it does not find (server/input.go). So the
+ * replacement character is not typed onto the desktop; it is DROPPED, and the
+ * tool goes on to report `Typed N character(s).` counting the character that
+ * never arrived. Either way the screen does not hold what the caller asked for
+ * and the answer says it does, which is the thing worth refusing. NOT extended
+ * to a NUL for the same reason: the platform skips an unmappable rune rather
+ * than truncating the string at it, so a NUL is no more special there than any
+ * other unmappable character, and singling it out would be a rule about one
+ * codepoint dressed as a rule about corruption (/code-review, OPL-4244).
+ */
+export function typeBody(text: string): Json {
+  if (hasUnpairedSurrogate(text)) throw new Error(typedSurrogateRefusal);
+  return { action: 'type', text };
+}
+
+const typedSurrogateRefusal =
+  'that text has an unpaired surrogate in it — half of a character, usually from a string cut ' +
+  'through the middle of an emoji. It is not valid UTF-8: it reaches the guest as a replacement ' +
+  'character, which is not a key the desktop can type, so it would be dropped and the count ' +
+  'reported back would include it. Nothing was typed. Send the whole character, or cut the text ' +
+  'on a character boundary.';
 
 export function keyBody(keys: string[], holdSeconds?: number): Json {
   if (!keys.length) throw new Error('press_key needs at least one key');
