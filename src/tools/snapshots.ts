@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { NotFoundError } from '../errors.js';
 import {
   describe,
   guarded,
@@ -51,6 +52,15 @@ const retentionLine = (r: unknown): string => {
 };
 
 export const registerSnapshots: Registrar = (server, session, opts) => {
+  // The lifecycle tools these descriptions point at, named only where they are
+  // registered. Under MANDALA_NO_LIFECYCLE, delete_computer, clone_snapshot and
+  // delete_snapshot are withheld — and a name in a surviving tool's description
+  // is the same idea by a different route as a name in the tool list: the model
+  // reads it and tries it. The server instructions were already parameterised on
+  // this; these were not.
+  const purgeWith = opts.lifecycle
+    ? 'Read this before purging snapshots with delete_computer: the fingerprint is what binds the purge to the snapshots you were shown, so one that arrived after you looked cannot be swept up in it.'
+    : 'The fingerprint binds a purge to the snapshots you were shown, so one that arrived after you looked cannot be swept up in it. This server cannot purge them — it was started with the lifecycle tools withheld — so the count and the size are all this answers.';
   server.registerTool(
     'list_snapshots',
     {
@@ -175,8 +185,7 @@ export const registerSnapshots: Registrar = (server, session, opts) => {
     'snapshot_holdings',
     {
       title: 'What a computer would leave behind',
-      description:
-        'How many snapshots a computer has, what they weigh, and the fingerprint that names that exact set. Read this before purging snapshots with delete_computer: the fingerprint is what binds the purge to the snapshots you were shown, so one that arrived after you looked cannot be swept up in it.',
+      description: `How many snapshots a computer has, what they weigh, and the fingerprint that names that exact set. ${purgeWith}`,
       inputSchema: { ...idArg },
       annotations: { readOnlyHint: true },
     },
@@ -194,9 +203,11 @@ export const registerSnapshots: Registrar = (server, session, opts) => {
           typeof held.size_bytes === 'number'
             ? `${(held.size_bytes / 1e9).toFixed(2)} GB`
             : 'an unknown total size';
-        const next = held.fingerprint
-          ? 'To delete them along with the computer, pass this fingerprint to delete_computer as `expect`.'
-          : 'The platform did not provide a fingerprint, so they cannot be safely purged with delete_computer; retry snapshot_holdings.';
+        const next = !opts.lifecycle
+          ? 'This server cannot purge them — it was started with the lifecycle tools withheld.'
+          : held.fingerprint
+            ? 'To delete them along with the computer, pass this fingerprint to delete_computer as `expect`.'
+            : 'The platform did not provide a fingerprint, so they cannot be safely purged with delete_computer; retry snapshot_holdings.';
         return said(`${id} holds ${count}, ${size}. ${next}`, held);
       }),
   );
@@ -213,7 +224,15 @@ export const registerSnapshots: Registrar = (server, session, opts) => {
           .string()
           .optional()
           .describe(
-            'What this capture is of: "before the upgrade", "clean install", "reproduces the bug". It is the only place the reason for taking it can be written down — restore_snapshot, clone_snapshot and delete_snapshot all take an id, so a set of captures of one computer is otherwise told apart by timestamp alone, and the wrong guess on the last of those is unrecoverable. Omit it and the platform names the snapshot after the computer and the time, which says when but never why.',
+            // Two sentences rather than a name substituted into one. The
+            // three-tool list carries "all take an id" and "the last of
+            // those" — grammar and a referent that both break when the list
+            // is one item, and the unrecoverable-wrong-guess warning is about
+            // delete_snapshot, which is not registered here to warn about
+            // (/code-review, OPL-4244).
+            opts.lifecycle
+              ? 'What this capture is of: "before the upgrade", "clean install", "reproduces the bug". It is the only place the reason for taking it can be written down — restore_snapshot, clone_snapshot and delete_snapshot all take an id, so a set of captures of one computer is otherwise told apart by timestamp alone, and the wrong guess on the last of those is unrecoverable. Omit it and the platform names the snapshot after the computer and the time, which says when but never why.'
+              : 'What this capture is of: "before the upgrade", "clean install", "reproduces the bug". It is the only place the reason for taking it can be written down — restore_snapshot takes an id and nothing else, so a set of captures of one computer is otherwise told apart by timestamp alone, and restoring the wrong one overwrites a disk. Omit it and the platform names the snapshot after the computer and the time, which says when but never why.',
           ),
         memory: z
           .boolean()
@@ -246,8 +265,7 @@ export const registerSnapshots: Registrar = (server, session, opts) => {
     'restore_snapshot',
     {
       title: 'Restore a snapshot',
-      description:
-        'Put a snapshot back onto the computer it came from, discarding everything on that disk since. Refused on an orphaned snapshot — clone_snapshot is what works there. It leaves the computer RUNNING whatever state it was in: restoring a stopped one boots it, which is a start like any other and is charged. A disk snapshot comes back to a fresh boot, a memory one to the captured session, and either way a suspended session the computer was holding is discarded with the disk it was saved against.',
+      description: `Put a snapshot back onto the computer it came from, discarding everything on that disk since. Refused on an orphaned snapshot${opts.lifecycle ? ' — clone_snapshot is what works there' : ', and this server cannot fork one either: it was started with the lifecycle tools withheld'}. It leaves the computer RUNNING whatever state it was in: restoring a stopped one boots it, which is a start like any other and is charged. A disk snapshot comes back to a fresh boot, a memory one to the captured session, and either way a suspended session the computer was holding is discarded with the disk it was saved against.`,
       inputSchema: {
         snapshot_id: z.string(),
         confirm: z
@@ -394,7 +412,31 @@ export const registerSnapshots: Registrar = (server, session, opts) => {
     },
     ({ snapshot_id }, extra) =>
       guarded(async () => {
-        await session.api.with(extra.signal).send('DELETE', P.snapshot(snapshot_id));
+        try {
+          await session.api.with(extra.signal).send('DELETE', P.snapshot(snapshot_id));
+        } catch (err) {
+          // A 404 means the snapshot is not there, which is the state this call
+          // was asking for. `idempotentHint` above invites a client to retry a
+          // lost 2xx, and `#fetch` throws on every non-OK — so that invited
+          // retry came back `isError` saying the delete had FAILED, about bytes
+          // the first attempt had already destroyed. delete_computer carries the
+          // same hint and special-cases 404 for exactly this reason; this is
+          // that handler, one route over.
+          if (!(err instanceof NotFoundError)) throw err;
+          // Not reported as "Deleted", for delete_computer's reason: a 404 is
+          // equally the answer for an id that was never on this account, and
+          // "deleted" said over a typo leaves a caller believing a snapshot is
+          // gone while the real one is still held and still billed. Both
+          // readings are named, and the one call that settles which is named
+          // with them.
+          return said(
+            `Nothing was deleted: the platform has no snapshot with the id ${snapshot_id} on this account. ` +
+              'Either it was already destroyed — if this is a retry, the first call is the one that did it — ' +
+              'or the id is not one on this account, in which case NO snapshot of yours has been touched and ' +
+              'a real one may still be held under the id you meant. list_snapshots says which of the two ' +
+              'this is.',
+          );
+        }
         return said(`Deleted snapshot ${snapshot_id}.`);
       }),
   );

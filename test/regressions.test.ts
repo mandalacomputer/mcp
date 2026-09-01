@@ -64,7 +64,7 @@ import * as P from '../src/paths.js';
 import { windowBody } from '../src/paths.js';
 import { SERVER_VERSION } from '../src/server.js';
 import { Session } from '../src/session.js';
-import { BASE, connect, download, installFakePlatform } from './harness.js';
+import { BASE, connect, download, FakeSocket, fakeEvents, installFakePlatform } from './harness.js';
 
 /** Everything a tool said, as one string. */
 const said = (res: CallToolResult) =>
@@ -3896,4 +3896,440 @@ describe('a Host allowlist written as an IPv6 address', () => {
   it('gives a bracketed entry with no port its ported spelling too', () => {
     expect(hostSpellings('[::1]', 3000)).toEqual(['[::1]', '[::1]:3000']);
   });
+});
+
+// --- second adversarial hunt (OPL-4244) -----------------------------------
+
+describe('an event stream that stopped with events still in it', () => {
+  it('hands over what was buffered instead of dropping it with the subscription', async () => {
+    // The designed weather for this: listening is not using, so a computer
+    // nobody touches suspends underneath its own open stream. The gate that
+    // reports the stop used to run ahead of every read, so a process.exited
+    // that had already arrived went into `drop` unread and the caller got a
+    // bare refusal.
+    const platform = installFakePlatform();
+    const events = fakeEvents();
+    const { call, close } = await connect({ webSocket: events.factory });
+    try {
+      await call('poll_events', {});
+      events.last().send({
+        type: 'process.exited',
+        cursor: 'cur-1',
+        data: { pid: 4242, exit_code: 0 },
+      });
+      await new Promise((r) => setTimeout(r, 20));
+
+      // The computer suspends, so the reconnect settles rather than retrying.
+      const real = globalThis.fetch;
+      globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+        const url = new URL(String(input));
+        if (url.pathname.endsWith('/computers/vm-1')) {
+          return new Response(JSON.stringify({ id: 'vm-1', status: 'suspended' }), {
+            headers: { 'Content-Type': 'application/json' },
+          });
+        }
+        return real(input as never, init);
+      }) as typeof fetch;
+      events.last().close();
+      await new Promise((r) => setTimeout(r, 1600));
+      globalThis.fetch = real;
+
+      const res = await call('poll_events', {});
+      // Still a refusal — the stream really has stopped and the cause needs
+      // fixing — but the event is in the answer rather than lost with the ring.
+      expect(res.isError).toBe(true);
+      expect(said(res)).toMatch(/suspended/);
+      expect(said(res)).toMatch(/had already arrived before it stopped/);
+      expect(said(res)).toMatch(/process\.exited/);
+      expect(said(res)).toMatch(/4242/);
+    } finally {
+      await close();
+      platform.restore();
+    }
+  }, 20000);
+});
+
+describe('a stopped stream holding more than one batch', () => {
+  it('keeps the buffer until it is drained rather than dropping the rest with it', async () => {
+    // The drain fixed the first-batch loss and, dropping on the first call,
+    // moved the rest of it: the read is bounded by the caller's `limit` while
+    // the ring holds up to MAX_BUFFERED, so 5 unread events with limit 2 became
+    // 2 delivered and 3 discarded — under a sentence calling them the last this
+    // stream has and a more_waiting that said otherwise.
+    const platform = installFakePlatform();
+    const events = fakeEvents();
+    const { call, close } = await connect({ webSocket: events.factory });
+    try {
+      await call('poll_events', {});
+      for (let i = 1; i <= 5; i++) {
+        events.last().send({ type: 'process.exited', cursor: `cur-${i}`, data: { pid: i } });
+      }
+      await new Promise((r) => setTimeout(r, 20));
+
+      const real = globalThis.fetch;
+      globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+        const url = new URL(String(input));
+        if (url.pathname.endsWith('/computers/vm-1')) {
+          return new Response(JSON.stringify({ id: 'vm-1', status: 'suspended' }), {
+            headers: { 'Content-Type': 'application/json' },
+          });
+        }
+        return real(input as never, init);
+      }) as typeof fetch;
+      events.last().close();
+      await new Promise((r) => setTimeout(r, 1600));
+      globalThis.fetch = real;
+
+      // First call: two of the five, and it must not claim they are the last.
+      const first = await call('poll_events', { limit: 2 });
+      expect(first.isError).toBe(true);
+      expect(said(first)).toMatch(/still held here/);
+      expect(said(first)).not.toMatch(/the last this stream has/);
+      expect(said(first)).toMatch(/"pid": 1/);
+      expect(said(first)).toMatch(/"pid": 2/);
+
+      // The rest survive, rather than having gone with the subscription.
+      const second = await call('poll_events', { limit: 2 });
+      expect(said(second)).toMatch(/"pid": 3/);
+      expect(said(second)).toMatch(/"pid": 4/);
+      const third = await call('poll_events', { limit: 2 });
+      expect(said(third)).toMatch(/"pid": 5/);
+      // Now the ring is empty, so this one is the last and says so.
+      expect(said(third)).toMatch(/the last this stream has/);
+    } finally {
+      await close();
+      platform.restore();
+    }
+  }, 20000);
+});
+
+describe('wait_for_event and the deadline it was given', () => {
+  it('bounds the attach with timeout_s rather than spending ATTACH_MS in front of it', async () => {
+    // A socket that opens and never sends `hello`. The attach used to be its
+    // own 20-second budget, armed BEFORE timeout_s — so timeout_s: 1 answered
+    // after twenty seconds, and timeout_s: 55 could run past the sixty most
+    // MCP clients allow a request, which is what MAX_WAIT_S exists to prevent.
+    const platform = installFakePlatform();
+    const factory = (url: string) => {
+      const socket = new FakeSocket(url);
+      setTimeout(() => socket.open(), 0);
+      return socket;
+    };
+    const { call, close } = await connect({ webSocket: factory });
+    try {
+      const started = Date.now();
+      const res = await call('wait_for_event', { timeout_s: 2 });
+      const elapsed = Date.now() - started;
+      expect(elapsed).toBeLessThan(10_000);
+      expect(res.isError).toBe(true);
+      expect(said(res)).toMatch(/Could not open the event stream/);
+      // And it says what it actually spent, not a constant it no longer used.
+      expect(said(res)).not.toMatch(/in 20s/);
+    } finally {
+      await close();
+      platform.restore();
+    }
+  }, 30000);
+
+  it('leaves a subscription that is still connecting alone rather than dropping it', async () => {
+    // `#url()` treats `starting` as weather and keeps backing off. Dropping the
+    // subscription here threw that progress away on every call, so the
+    // create-then-wait flow the README advertises never got further.
+    const platform = installFakePlatform();
+    const events = fakeEvents(null);
+    const { call, close } = await connect({ webSocket: events.factory });
+    try {
+      const res = await call('wait_for_event', { timeout_s: 1 });
+      expect(res.isError).toBe(true);
+      expect(said(res)).toMatch(/still coming up/);
+      // The socket the first call opened is still the live one: nothing was
+      // torn down and reopened underneath it.
+      const opened = events.sockets.length;
+      await call('wait_for_event', { timeout_s: 1 });
+      expect(events.sockets.length).toBe(opened);
+      expect(events.last().closed).toBe(false);
+    } finally {
+      await close();
+      platform.restore();
+    }
+  }, 30000);
+});
+
+describe('an origin-only base URL', () => {
+  it('joins the path with one slash rather than two', () => {
+    // `pathname.replace(/\/+$/, '')` leaves `''`, which the WHATWG setter puts
+    // straight back as `/` — so the join wrote `https://host//computers`, a
+    // different path to any router that normalises and a 404 to one that does
+    // not. Invisible on the default base, which carries `/api/v1`.
+    const calls: string[] = [];
+    const real = globalThis.fetch;
+    globalThis.fetch = (async (input: string | URL | Request) => {
+      calls.push(String(input));
+      return new Response('{}', { headers: { 'Content-Type': 'application/json' } });
+    }) as typeof fetch;
+    try {
+      for (const base of ['https://gateway.example.com', 'https://gateway.example.com/']) {
+        calls.length = 0;
+        void new Api('com_test', base).json('GET', 'computers');
+        expect(calls[0]).toBe('https://gateway.example.com/computers');
+      }
+    } finally {
+      globalThis.fetch = real;
+    }
+  });
+
+  it('still carries a base that has a path of its own', () => {
+    const calls: string[] = [];
+    const real = globalThis.fetch;
+    globalThis.fetch = (async (input: string | URL | Request) => {
+      calls.push(String(input));
+      return new Response('{}', { headers: { 'Content-Type': 'application/json' } });
+    }) as typeof fetch;
+    try {
+      void new Api('com_test', 'https://app.mandala.computer/api/v1').json('GET', 'computers');
+      expect(calls[0]).toBe('https://app.mandala.computer/api/v1/computers');
+    } finally {
+      globalThis.fetch = real;
+    }
+  });
+});
+
+describe('text typed at the keyboard', () => {
+  it('refuses an unpaired surrogate rather than typing U+FFFD and reporting success', async () => {
+    // The third path that carries a caller's own characters into the guest.
+    // clipboardBody and write_file have refused this since they were written:
+    // Go's encoding/json decodes a lone surrogate to U+FFFD, so the desktop is
+    // typed a replacement character where the caller's text was.
+    const platform = installFakePlatform();
+    const { call, close } = await connect();
+    try {
+      const res = await call('type_text', { text: 'hello \ud800 there' });
+      expect(res.isError).toBe(true);
+      expect(said(res)).toMatch(/unpaired surrogate/);
+      expect(said(res)).toMatch(/Nothing was typed/);
+      expect(platform.calls.some((c) => c.path.endsWith('/input'))).toBe(false);
+    } finally {
+      await close();
+      platform.restore();
+    }
+  });
+
+  it('still types a whole astral character', () => {
+    expect(P.typeBody('a 😀 b')).toEqual({ action: 'type', text: 'a 😀 b' });
+  });
+});
+
+describe('a command with a NUL in it', () => {
+  it('is refused rather than truncated at the guest and reported as a success', () => {
+    // The platform refuses a NUL in `cwd` and in every file path —
+    // validGuestPath rejects the whole control range — and checks `command`
+    // only for emptiness. So a NUL there truncates the command at the guest's
+    // argv boundary: a shorter command runs and its exit code is reported as an
+    // ordinary success. execEnv has refused the same byte since it was written.
+    expect(() => P.execBody({ command: 'echo hello\0rm -rf /' })).toThrow(/NUL/);
+    expect(P.execBody({ command: 'echo hello' })).toEqual({ command: 'echo hello' });
+  });
+});
+
+describe('the two event tools and what their annotations claim', () => {
+  it('does not call a consuming read read-only', async () => {
+    // exec_poll deliberately carries no readOnlyHint because a poll advances a
+    // cursor, and a client that treats the hint as licence to retry drops
+    // whatever the first attempt consumed. `sub.read()` is the same mechanics
+    // with a ring in this session instead of a cursor in the guest.
+    const platform = installFakePlatform();
+    const { client, close } = await connect();
+    try {
+      const { tools } = await client.listTools();
+      for (const name of ['poll_events', 'wait_for_event']) {
+        const tool = tools.find((t) => t.name === name);
+        expect(tool, name).toBeDefined();
+        expect(tool?.annotations?.readOnlyHint, name).toBeFalsy();
+      }
+    } finally {
+      await close();
+      platform.restore();
+    }
+  });
+});
+
+describe('delete_snapshot answering 404', () => {
+  it('does not report the retry it invites as a failure', async () => {
+    // idempotentHint invites a client to retry a lost 2xx, and every non-OK
+    // throws — so that invited retry came back isError saying the delete had
+    // FAILED, about bytes the first attempt had already destroyed.
+    // delete_computer carries the same hint and handles 404 for this reason.
+    const real = globalThis.fetch;
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(String(input));
+      if ((init?.method ?? 'GET') === 'DELETE' && url.pathname.includes('/snapshots/')) {
+        return new Response(JSON.stringify({ error: 'no such snapshot' }), {
+          status: 404,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      return new Response('{}', { headers: { 'Content-Type': 'application/json' } });
+    }) as typeof fetch;
+    try {
+      const { call, close } = await connect();
+      const res = await call('delete_snapshot', { snapshot_id: 'snap-1', confirm: true });
+      expect(res.isError).toBeFalsy();
+      // And it does not claim a deletion either: a 404 is equally the answer
+      // for an id that was never on this account.
+      expect(said(res)).toMatch(/Nothing was deleted/);
+      expect(said(res)).toMatch(/list_snapshots/);
+      await close();
+    } finally {
+      globalThis.fetch = real;
+    }
+  });
+});
+
+describe('a server with the lifecycle tools withheld', () => {
+  it('names no tool it did not register, in a description or in an answer', async () => {
+    // The instructions were parameterised on `lifecycle` because a tool a model
+    // can see is a tool it will try — and a name in a surviving neighbour's
+    // description is the same idea by a different route. The phantom-tool scan
+    // only ever ran with lifecycle ON, where every name was legal.
+    const platform = installFakePlatform();
+    const { client, call, close } = await connect({ lifecycle: false });
+    try {
+      const { tools } = await client.listTools();
+      const registered = new Set(tools.map((t) => t.name));
+      const withheld = [
+        'create_computer',
+        'clone_computer',
+        'clone_snapshot',
+        'delete_computer',
+        'delete_snapshot',
+      ];
+      for (const gone of withheld) expect(registered.has(gone), gone).toBe(false);
+
+      for (const tool of tools) {
+        const prose = `${tool.description ?? ''} ${JSON.stringify(tool.inputSchema)}`;
+        for (const gone of withheld) {
+          expect(prose.includes(gone), `${tool.name} names ${gone}`).toBe(false);
+        }
+      }
+
+      // And at run time, which is where an empty account used to be handed
+      // `create_computer` in a sentence.
+      const real = globalThis.fetch;
+      globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+        const url = new URL(String(input));
+        if (url.pathname.endsWith('/api/v1/computers')) {
+          return new Response('[]', { headers: { 'Content-Type': 'application/json' } });
+        }
+        return real(input as never, init);
+      }) as typeof fetch;
+      const empty = await call('list_computers', {});
+      globalThis.fetch = real;
+      expect(said(empty)).not.toMatch(/create_computer/);
+
+      const holdings = await call('snapshot_holdings', {});
+      expect(said(holdings)).not.toMatch(/delete_computer/);
+    } finally {
+      await close();
+      platform.restore();
+    }
+  });
+
+  it('still names them when the lifecycle tools are there', async () => {
+    const platform = installFakePlatform();
+    const { client, close } = await connect();
+    try {
+      const { tools } = await client.listTools();
+      const sizes = tools.find((t) => t.name === 'list_sizes');
+      expect(sizes?.description).toMatch(/create_computer/);
+      await close();
+    } finally {
+      platform.restore();
+    }
+  });
+});
+
+describe('an explicit empty --port', () => {
+  it('is refused rather than falling through to PORT', () => {
+    // `str()` was fixed so `--key=` and `--base-url=` do not defer to the
+    // environment the usage text promises they override. `port()` still used
+    // `given || fromEnv`, so the clearest way to say "not the environment's
+    // port" silently deferred to it.
+    const before = process.env.PORT;
+    process.env.PORT = '8080';
+    try {
+      const flags = parse(['--http', '--port=']);
+      expect(flags.port).toBe('');
+      expect(() => port(flags.port as string)).toThrow(/--port needs a number/);
+      // An absent flag still reads the environment, which is the documented order.
+      expect(port(undefined)).toBe(8080);
+    } finally {
+      if (before === undefined) delete process.env.PORT;
+      else process.env.PORT = before;
+    }
+  });
+});
+
+describe('a stdio server whose client closed the pipe', () => {
+  it('closes the session, and its event sockets, on stdin EOF', async () => {
+    // The SDK's StdioServerTransport.start() registers `data` and `error` on
+    // stdin and nothing else, so EOF never called close(), never fired the
+    // server's onclose, and never ran the events.closeAll() createServer hangs
+    // there. What was left behind held a websocket to the platform and the
+    // user's API key, and an open socket keeps the event loop alive by itself:
+    // measured against the built CLI, a child was still running and still
+    // holding its socket ten seconds after its stdin closed.
+    const { Readable, Writable } = await import('node:stream');
+    const stdin = new Readable({ read() {} });
+    const stdout = new Writable({
+      write(_chunk, _enc, cb) {
+        cb();
+      },
+    });
+    const realIn = Object.getOwnPropertyDescriptor(process, 'stdin');
+    const realOut = Object.getOwnPropertyDescriptor(process, 'stdout');
+    Object.defineProperty(process, 'stdin', { value: stdin, configurable: true });
+    Object.defineProperty(process, 'stdout', { value: stdout, configurable: true });
+    const platform = installFakePlatform();
+    const events = fakeEvents();
+    try {
+      const { runStdio } = await import('../src/stdio.js');
+      await runStdio({
+        apiKey: 'com_test',
+        baseUrl: BASE,
+        computerId: 'vm-1',
+        webSocket: events.factory,
+      });
+      const send = (msg: unknown) => stdin.push(`${JSON.stringify(msg)}\n`);
+      send({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'initialize',
+        params: {
+          protocolVersion: '2024-11-05',
+          capabilities: {},
+          clientInfo: { name: 't', version: '0' },
+        },
+      });
+      send({ jsonrpc: '2.0', method: 'notifications/initialized' });
+      // poll_events is what opens the socket that outlives the call.
+      send({
+        jsonrpc: '2.0',
+        id: 2,
+        method: 'tools/call',
+        params: { name: 'poll_events', arguments: {} },
+      });
+      await new Promise((r) => setTimeout(r, 300));
+      expect(events.sockets.length).toBeGreaterThan(0);
+      expect(events.last().closed).toBe(false);
+
+      // The client goes away without a shutdown, which is the ordinary case.
+      stdin.push(null);
+      await new Promise((r) => setTimeout(r, 200));
+      expect(events.last().closed).toBe(true);
+    } finally {
+      platform.restore();
+      if (realIn) Object.defineProperty(process, 'stdin', realIn);
+      if (realOut) Object.defineProperty(process, 'stdout', realOut);
+    }
+  }, 20000);
 });
