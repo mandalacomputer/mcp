@@ -48,6 +48,7 @@ import {
   UnavailableError,
 } from '../src/errors.js';
 import { failed, MAX_INLINE_IMAGE_BYTES, unwrapComputer } from '../src/format.js';
+import { hostSpellings, isLoopbackHost } from '../src/http.js';
 import {
   CancelledError as PublicCancelledError,
   ConnectivityError as PublicConnectivityError,
@@ -2837,6 +2838,10 @@ describe('the tools our own prose tells a model to call', () => {
     'disk_gb',
     'idle_suspend_min',
     'timeout_s',
+    // run_agent's own loop bound, named in its description because a client
+    // that cannot hold the request open past its default timeout has to lower
+    // it. A parameter, not a tool.
+    'max_steps',
     'snapshot_id',
     'template_id',
     'build_id',
@@ -3420,5 +3425,475 @@ describe('a window action whose outcome came back unknown', () => {
     const timeout = errorForStatus(504, 'HTTP 504', undefined);
     expect(isTransient(timeout)).toBe(false);
     expect(isTransientForPoll(timeout)).toBe(true);
+  });
+});
+
+// --- grok bug hunt, OPL-4218 ---------------------------------------------
+//
+// One block per confirmed finding, in the order the ticket lists them. What is
+// pinned here is the answer a caller gets, not the shape of the fix — several
+// of these are one line, and a line is exactly the kind of thing a later
+// refactor puts back the way it was.
+
+describe('run_agent under a client that is counting the seconds', () => {
+  const stream =
+    'event: step\ndata: {"n":1,"detail":"clicked"}\n\n' +
+    'event: step\ndata: {"n":2,"detail":"typed"}\n\n' +
+    'event: done\ndata: {"stop":"end_turn","text":"Done"}\n\n';
+
+  it('sends notifications/progress, which is the only frame that holds a request open', async () => {
+    const real = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      new Response(stream, {
+        headers: { 'Content-Type': 'text/event-stream' },
+      })) as typeof fetch;
+    try {
+      const { client, close } = await connect({ modelKey: 'sk-test' });
+      const seen: { progress: number; total?: number }[] = [];
+      const res = (await client.callTool(
+        { name: 'run_agent', arguments: { prompt: 'finish' } },
+        undefined,
+        {
+          onprogress: (p) => seen.push({ progress: p.progress, total: p.total }),
+        },
+      )) as CallToolResult;
+      expect(res.isError).toBeFalsy();
+      // One per step, increasing, against the total the caller asked for —
+      // which is what the SDK's ProgressSchema requires and what a client
+      // showing a bar needs.
+      expect(seen.map((p) => p.progress)).toEqual([1, 2]);
+      expect(seen.every((p) => p.total === 20)).toBe(true);
+      await close();
+    } finally {
+      globalThis.fetch = real;
+    }
+  });
+
+  it('says in its own description that a run outlasts a default timeout', async () => {
+    const { client, close } = await connect({ modelKey: 'sk-test' });
+    const tool = (await client.listTools()).tools.find((t) => t.name === 'run_agent');
+    expect(tool?.description).toMatch(/resetTimeoutOnProgress/);
+    expect(tool?.description).toMatch(/MINUTES/);
+    await close();
+  });
+
+  it('stops at a well-formed done rather than waiting for a close that may not come', async () => {
+    const real = globalThis.fetch;
+    let cancelled = false;
+    // A stream that sends `done` and then never ends — the shape a proxy that
+    // holds the connection open produces. Before the break, the tool sat here
+    // with the answer already in hand until the client gave up on it.
+    globalThis.fetch = (async () =>
+      new Response(
+        new ReadableStream({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode(stream));
+          },
+          cancel() {
+            cancelled = true;
+          },
+        }),
+        { headers: { 'Content-Type': 'text/event-stream' } },
+      )) as typeof fetch;
+    try {
+      const { call, close } = await connect({ modelKey: 'sk-test' });
+      const res = await call('run_agent', { prompt: 'finish' });
+      expect(res.isError).toBeFalsy();
+      expect(said(res)).toMatch(/finished/);
+      expect(said(res)).toMatch(/clicked/);
+      // The break is what lets the body be released rather than read to an EOF
+      // that was never coming.
+      expect(cancelled).toBe(true);
+      await close();
+    } finally {
+      globalThis.fetch = real;
+    }
+  });
+
+  it('still steps over a null done, which is not a result', async () => {
+    const real = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      new Response(
+        'event: done\ndata: null\n\n' +
+          'event: step\ndata: {"n":1,"detail":"clicked"}\n\n' +
+          'event: done\ndata: {"stop":"end_turn","text":"Done"}\n\n',
+        { headers: { 'Content-Type': 'text/event-stream' } },
+      )) as typeof fetch;
+    try {
+      const { call, close } = await connect({ modelKey: 'sk-test' });
+      const res = await call('run_agent', { prompt: 'finish' });
+      expect(res.isError).toBeFalsy();
+      expect(said(res)).toMatch(/clicked/);
+      await close();
+    } finally {
+      globalThis.fetch = real;
+    }
+  });
+});
+
+describe('deleting a computer that is already gone', () => {
+  it('unbinds the session on a 404 rather than leaving it driving a ghost', async () => {
+    const real = globalThis.fetch;
+    globalThis.fetch = (async (_input: string | URL | Request, init?: RequestInit) => {
+      if ((init?.method ?? 'GET').toUpperCase() === 'DELETE') {
+        return new Response(JSON.stringify({ error: 'no such computer' }), {
+          status: 404,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      // Everything else answers as the live fixture would, so the tools that
+      // run after the delete have a platform to talk to.
+      return new Response(JSON.stringify({ id: 'vm-1', status: 'running' }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }) as typeof fetch;
+    try {
+      const { call, close } = await connect();
+      const res = await call('delete_computer', { computer_id: 'vm-1', confirm: true });
+      // Not an error: the state the caller asked for is the state that holds.
+      expect(res.isError).toBeFalsy();
+      // It names both readings of a 404 rather than asserting a deletion: the
+      // id may simply not be one on this account.
+      expect(said(res)).toMatch(/Nothing was deleted/i);
+      expect(said(res)).toMatch(/already destroyed/i);
+      expect(said(res)).toMatch(/not one on this account/i);
+      // And the binding is gone with it — the next call has nothing to drive
+      // and says so, rather than acting on a destroyed machine.
+      const after = await call('screenshot', {});
+      expect(said(after)).toMatch(/No computer selected/i);
+      await close();
+    } finally {
+      globalThis.fetch = real;
+    }
+  });
+});
+
+describe('a snapshot filter that is only whitespace', () => {
+  it('is refused rather than silently listing the whole account', async () => {
+    const fake = installFakePlatform();
+    try {
+      const { call, close } = await connect();
+      const res = await call('list_snapshots', { computer_id: '   ' });
+      expect(res.isError).toBe(true);
+      expect(said(res)).toMatch(/blank/i);
+      // The refusal has to name the failure it prevents, because the wrong
+      // answer here looked exactly like a correct one.
+      expect(said(res)).toMatch(/every snapshot on the account/i);
+      await close();
+    } finally {
+      fake.restore();
+    }
+  });
+
+  it('still trims a real id, which has always named the same computer', async () => {
+    const fake = installFakePlatform();
+    try {
+      const { call, close } = await connect();
+      const res = await call('list_snapshots', { computer_id: '  vm-1  ' });
+      expect(res.isError).toBeFalsy();
+      await close();
+    } finally {
+      fake.restore();
+    }
+  });
+});
+
+describe('write_file and half a character', () => {
+  it('refuses an unpaired surrogate instead of writing U+FFFD and reporting success', async () => {
+    const fake = installFakePlatform();
+    try {
+      const { call, close } = await connect();
+      const res = await call('write_file', {
+        path: '/tmp/a.txt',
+        content: 'hello \ud800 there',
+        encoding: 'utf8',
+      });
+      expect(res.isError).toBe(true);
+      expect(said(res)).toMatch(/unpaired surrogate/i);
+      expect(said(res)).toMatch(/Nothing was written/i);
+      // Nothing reached the platform — the point is that the file is untouched.
+      expect(fake.calls.some((c) => c.method === 'PUT')).toBe(false);
+      await close();
+    } finally {
+      fake.restore();
+    }
+  });
+
+  it('leaves a whole character alone, emoji included', async () => {
+    const fake = installFakePlatform();
+    try {
+      const { call, close } = await connect();
+      const res = await call('write_file', {
+        path: '/tmp/a.txt',
+        content: 'hello 😀 there',
+        encoding: 'utf8',
+      });
+      expect(res.isError).toBeFalsy();
+      await close();
+    } finally {
+      fake.restore();
+    }
+  });
+
+  it('shares one scan with the clipboard, which has always refused it', () => {
+    expect(P.hasUnpairedSurrogate('\ud800')).toBe(true);
+    expect(P.hasUnpairedSurrogate('\udc00')).toBe(true);
+    expect(P.hasUnpairedSurrogate('a\ud800b')).toBe(true);
+    expect(P.hasUnpairedSurrogate('😀')).toBe(false);
+    expect(P.hasUnpairedSurrogate('plain')).toBe(false);
+    expect(() => P.clipboardBody('\ud800')).toThrow(/unpaired surrogate/i);
+  });
+});
+
+describe('a moves table with a malformed row in it', () => {
+  it('says how many it could not read, rather than dropping them silently', async () => {
+    const real = globalThis.fetch;
+    globalThis.fetch = (async (input: string | URL | Request) => {
+      const url = new URL(typeof input === 'string' ? input : input.toString());
+      if (url.pathname.endsWith('/moves')) {
+        return new Response(
+          JSON.stringify({
+            moves: [null, { computer_id: 'vm-1', state: 'done', live: false }],
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } },
+        );
+      }
+      return new Response(JSON.stringify({ id: 'vm-1', status: 'running' }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }) as typeof fetch;
+    try {
+      const { call, close } = await connect();
+      const res = await call('list_moves', {});
+      expect(said(res)).toMatch(/ignored 1 malformed move entry/i);
+      expect(said(res)).toMatch(/vm-1/);
+      await close();
+    } finally {
+      globalThis.fetch = real;
+    }
+  });
+
+  it('refuses rather than calling a listing of nothing but bad rows an empty account', async () => {
+    const real = globalThis.fetch;
+    globalThis.fetch = (async (input: string | URL | Request) => {
+      const url = new URL(typeof input === 'string' ? input : input.toString());
+      if (url.pathname.endsWith('/moves')) {
+        return new Response(JSON.stringify({ moves: [null, 'nonsense'] }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      return new Response(JSON.stringify({ id: 'vm-1', status: 'running' }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }) as typeof fetch;
+    try {
+      const { call, close } = await connect();
+      const res = await call('list_moves', {});
+      // "No moves on this account" is an affirmative claim, and an unreadable
+      // listing does not establish it.
+      expect(res.isError).toBe(true);
+      expect(said(res)).not.toMatch(/No moves on this account/);
+      expect(said(res)).toMatch(/may still be running/i);
+      await close();
+    } finally {
+      globalThis.fetch = real;
+    }
+  });
+
+  it('drops the row rather than throwing past the refusal that says the move is still running', async () => {
+    const real = globalThis.fetch;
+    globalThis.fetch = (async (input: string | URL | Request) => {
+      const url = new URL(typeof input === 'string' ? input : input.toString());
+      if (url.pathname.endsWith('/moves')) {
+        return new Response(
+          JSON.stringify({
+            moves: [null, 'nonsense', { computer_id: 'vm-1', state: 'done', live: false }],
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } },
+        );
+      }
+      return new Response(JSON.stringify({ id: 'vm-1', status: 'running' }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }) as typeof fetch;
+    try {
+      const { call, close } = await connect();
+      const res = await call('list_moves', {});
+      // A TypeError here used to escape as a generic failure. The readable row
+      // is still readable, and it is the answer.
+      expect(said(res)).toMatch(/vm-1/);
+      await close();
+    } finally {
+      globalThis.fetch = real;
+    }
+  });
+});
+
+describe('the Host allowlist an operator actually writes', () => {
+  it('matches with and without the bound port, because the SDK compares the whole header', () => {
+    // The case that 403'd every direct client: a bare name, a non-default port.
+    expect(hostSpellings('mcp.example.com', 3000)).toEqual([
+      'mcp.example.com',
+      'mcp.example.com:3000',
+    ]);
+  });
+
+  it('leaves an entry that already names a port exactly as written', () => {
+    // That operator has said which port their callers send, and it need not be
+    // the one bound here — a proxy in front is the ordinary reason.
+    expect(hostSpellings('mcp.example.com:443', 3000)).toEqual(['mcp.example.com:443']);
+    expect(hostSpellings('[::1]:3000', 9999)).toEqual(['[::1]:3000']);
+  });
+
+  it('brackets a bare IPv6 address rather than appending a port to it', () => {
+    // `::1` + `:3000` is `::1:3000`, a string no client can ever send — and
+    // leaving `::1` alone would be a list entry matching nothing, which is the
+    // same 403 this function exists to prevent. Bracketing is the expansion.
+    expect(hostSpellings('::1', 3000)).toEqual(['[::1]', '[::1]:3000']);
+  });
+});
+
+describe('what counts as a loopback bind', () => {
+  it('takes the whole of 127.0.0.0/8 and the names for it', () => {
+    for (const h of ['localhost', 'LOCALHOST', '127.0.0.1', '127.0.0.2', '::1', '[::1]']) {
+      expect(isLoopbackHost(h), h).toBe(true);
+    }
+  });
+
+  it('takes IPv4-mapped loopback, which is a local bind by any other spelling', () => {
+    // The hole: a v6 socket carrying a v4 loopback address read as "not
+    // loopback", so no default Host allowlist and rebinding protection off.
+    for (const h of ['::ffff:127.0.0.1', '[::ffff:127.0.0.1]', '::ffff:127.0.0.1%lo']) {
+      expect(isLoopbackHost(h), h).toBe(true);
+    }
+  });
+
+  it('still refuses the binds that mean every interface', () => {
+    // Unchanged on purpose: these are an operator saying they want this
+    // reachable from elsewhere, and a default allowlist would 403 everything.
+    for (const h of ['0.0.0.0', '::', 'example.com', '10.0.0.1', '::ffff:10.0.0.1']) {
+      expect(isLoopbackHost(h), h).toBe(false);
+    }
+  });
+});
+
+describe('screenshots and the types image content may carry', () => {
+  it('refuses an SVG, which read_file has always refused', async () => {
+    const real = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      new Response('<svg xmlns="http://www.w3.org/2000/svg"><script>1</script></svg>', {
+        headers: { 'Content-Type': 'image/svg+xml' },
+      })) as typeof fetch;
+    try {
+      const { call, close } = await connect();
+      const res = await call('screenshot', {});
+      expect(res.isError).toBe(true);
+      expect(res.content.some((item) => item.type === 'image')).toBe(false);
+      expect(said(res)).toMatch(/image\/svg\+xml/);
+      await close();
+    } finally {
+      globalThis.fetch = real;
+    }
+  });
+
+  it('still hands over a raster capture', async () => {
+    const real = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      new Response(new Uint8Array([137, 80, 78, 71]), {
+        headers: { 'Content-Type': 'image/png' },
+      })) as typeof fetch;
+    try {
+      const { call, close } = await connect();
+      const res = await call('screenshot', {});
+      expect(res.isError).toBeFalsy();
+      expect(res.content.some((item) => item.type === 'image')).toBe(true);
+      await close();
+    } finally {
+      globalThis.fetch = real;
+    }
+  });
+});
+
+describe('a build whose response carries no ref', () => {
+  it('omits the clause rather than saying it started for undefined', async () => {
+    const real = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify({ id: 'bld-1' }), {
+        status: 202,
+        headers: { 'Content-Type': 'application/json' },
+      })) as typeof fetch;
+    try {
+      const { call, close } = await connect();
+      const res = await call('build_template', { document: '{"apiVersion":"mandala/v1"}' });
+      expect(said(res)).toMatch(/Build bld-1 started\./);
+      expect(said(res)).not.toMatch(/undefined/);
+      await close();
+    } finally {
+      globalThis.fetch = real;
+    }
+  });
+});
+
+describe('instructions under MANDALA_NO_LIFECYCLE', () => {
+  it('stops naming create_computer once it is no longer registered', async () => {
+    const withLifecycle = await connect({ lifecycle: true });
+    expect(withLifecycle.client.getInstructions()).toMatch(/create_computer/);
+    await withLifecycle.close();
+
+    const without = await connect({ lifecycle: false });
+    const text = without.client.getInstructions() ?? '';
+    const names = new Set((await without.client.listTools()).tools.map((t) => t.name));
+    expect(names.has('create_computer')).toBe(false);
+    // A tool a model can see is a tool it will try, and the instructions are
+    // the first thing it sees.
+    expect(text).not.toMatch(/create_computer/);
+    expect(text).toMatch(/use_computer binds/);
+    await without.close();
+  });
+});
+
+describe('a done frame that is not a result', () => {
+  it('does not end the run on a record with no stop, discarding the real one behind it', async () => {
+    const real = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      new Response(
+        'event: step\ndata: {"n":1,"detail":"clicked"}\n\n' +
+          // A record, so the old break fired here and reported "ended: unknown"
+          // for a run that had in fact succeeded one frame later.
+          'event: done\ndata: {}\n\n' +
+          'event: done\ndata: {"stop":"end_turn","text":"Done"}\n\n',
+        { headers: { 'Content-Type': 'text/event-stream' } },
+      )) as typeof fetch;
+    try {
+      const { call, close } = await connect({ modelKey: 'sk-test' });
+      const res = await call('run_agent', { prompt: 'finish' });
+      expect(res.isError).toBeFalsy();
+      expect(said(res)).toMatch(/finished/);
+      expect(said(res)).not.toMatch(/ended: unknown/);
+      await close();
+    } finally {
+      globalThis.fetch = real;
+    }
+  });
+});
+
+describe('a Host allowlist written as an IPv6 address', () => {
+  it('brackets it into the spellings a client can actually send', () => {
+    // `::1` is not a legal Host header and `::1:3000` is not a thing at all, so
+    // an unbracketed entry would sit in the list matching nothing.
+    expect(hostSpellings('::1', 3000)).toEqual(['[::1]', '[::1]:3000']);
+    expect(hostSpellings('::ffff:127.0.0.1', 3000)).toEqual([
+      '[::ffff:127.0.0.1]',
+      '[::ffff:127.0.0.1]:3000',
+    ]);
+  });
+
+  it('gives a bracketed entry with no port its ported spelling too', () => {
+    expect(hostSpellings('[::1]', 3000)).toEqual(['[::1]', '[::1]:3000']);
   });
 });
