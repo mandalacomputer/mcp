@@ -129,6 +129,12 @@ const EXERCISE: Record<string, Record<string, unknown>[]> = {
   // on a synthesized computer.ready rather than on its timeout.
   wait_for_event: [{ types: ['computer.ready'], timeout_s: 1 }],
   poll_events: [{}],
+  // A watch is a connection parameter, so this one reopens the socket before it
+  // can answer — which is a second `GET computers/:id` on the same route, and
+  // nothing new for the mirror. The fixture reports the tree armed in its
+  // opening frame, so the call reaches its wait and times out saying nothing
+  // changed, which is an answer rather than an error.
+  wait_for_file_change: [{ path: '/home/user/project', timeout_s: 1 }],
   read_clipboard: [{}],
   write_clipboard: [{ text: 'on the clipboard' }],
   write_file: [{ path: '/home/user/a.txt', content: 'hello' }],

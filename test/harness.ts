@@ -123,8 +123,20 @@ const AGENT_STREAM =
  * the tools read fields off these responses and a uniform `{}` would let a tool
  * that misreads its own route pass.
  */
-export function installFakePlatform(): { calls: Recorded[]; restore: () => void } {
+export function installFakePlatform(): {
+  calls: Recorded[];
+  restore: () => void;
+  /**
+   * What `GET computers/:id` says this computer is doing.
+   *
+   * Mutable, because a computer changing state under an open stream is a fixture
+   * rather than a fixed value: the event socket re-reads this record on every
+   * reconnect, which is how a suspend reaches a websocket client at all.
+   */
+  state: { status: string };
+} {
   const calls: Recorded[] = [];
+  const state = { status: 'running' };
   const real = globalThis.fetch;
 
   globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
@@ -150,11 +162,12 @@ export function installFakePlatform(): { calls: Recorded[]; restore: () => void 
       headers[k.toLowerCase()] = v;
     });
     calls.push({ method, path, body, query: url.searchParams, headers });
-    return respond(method, path, headers);
+    return respond(method, path, headers, state.status);
   }) as typeof fetch;
 
   return {
     calls,
+    state,
     restore: () => {
       globalThis.fetch = real;
     },
@@ -227,7 +240,12 @@ const BUILD_STREAM =
   `event: progress\ndata: ${JSON.stringify({ ...BUILD_PROGRESS, done: false, status: 'running', phase: 'copying' })}\n\n` +
   `event: done\ndata: ${JSON.stringify(BUILD_PROGRESS)}\n\n`;
 
-function respond(method: string, path: string, headers: Record<string, string>): Response {
+function respond(
+  method: string,
+  path: string,
+  headers: Record<string, string>,
+  status = 'running',
+): Response {
   const json = (v: unknown, status = 200) =>
     new Response(JSON.stringify(v), { status, headers: { 'Content-Type': 'application/json' } });
 
@@ -316,10 +334,11 @@ function respond(method: string, path: string, headers: Record<string, string>):
   if (path.endsWith('/move')) return json(MOVE_STARTED, 202);
   if (path === '/snapshots') return json([SNAPSHOT]);
   if (path.endsWith('/snapshots')) return json(method === 'GET' ? HOLDINGS : SNAPSHOT);
-  if (path.endsWith('/computers')) return json(method === 'GET' ? [COMPUTER] : COMPUTER);
+  if (path.endsWith('/computers'))
+    return json(method === 'GET' ? [{ ...COMPUTER, status }] : COMPUTER);
   // Before the catch-all, which answers COMPUTER for every id there is.
   if (path === '/computers/vm-bridged') return json(BRIDGED_COMPUTER);
-  return json(COMPUTER);
+  return json({ ...COMPUTER, status });
 }
 
 /**
@@ -386,6 +405,15 @@ const PNG_1PX =
 export class FakeSocket {
   readonly url: string;
   closed = false;
+  /**
+   * Whether this connection has sent its opening frame.
+   *
+   * Exposed because a nomination REOPENS the socket, so a test that drives
+   * frames onto "the newest socket" has to know that the newest one has
+   * greeted — otherwise it races the factory's own `setTimeout` and delivers
+   * an event to a connection the server has not been introduced to yet.
+   */
+  greeted = false;
   readonly #listeners = new Map<string, Set<(ev?: unknown) => void>>();
 
   constructor(url: string) {
@@ -395,6 +423,11 @@ export class FakeSocket {
   /** The `since` this connection asked to resume from, if any. */
   get since(): string | null {
     return new URL(this.url).searchParams.get('since');
+  }
+
+  /** The trees this connection nominated, in the order it wrote them. */
+  get watches(): string[] {
+    return new URL(this.url).searchParams.getAll('watch');
   }
 
   // The overloads the server's structural `EventSocket` asks for, over one
@@ -449,6 +482,11 @@ export const HELLO = {
     'window.focused',
     'window.blurred',
     'clipboard.changed',
+    // On every Linux computer with a terminal channel, including the images too
+    // old to carry the X bindings the desktop watcher needs — which is the
+    // third case in the platform's capability list (OPL-3927). The default
+    // fixture is a fully capable computer, so it has both halves.
+    'file.changed',
     'process.exited',
     'computer.ready',
     'computer.idle',
@@ -467,7 +505,19 @@ export const HELLO = {
  * delivered synchronously would arrive before anything was listening, which is
  * a race no real socket can produce and every test would then be written around.
  */
-export function fakeEvents(hello: Record<string, unknown> | null = {}) {
+export function fakeEvents(
+  hello: Record<string, unknown> | null = {},
+  /**
+   * Whether a nominated tree comes back already armed.
+   *
+   * `true` by default because that is the shape most tests are not about — a
+   * tree somebody has watched before, which the host reports as live in the
+   * opening frame with no event to follow. The arming path is its own fixture:
+   * pass `false` and drive `{watch, armed: true}` onto the socket by hand,
+   * which is what the guest actually does.
+   */
+  armed = true,
+) {
   const sockets: FakeSocket[] = [];
   const factory = (url: string) => {
     const socket = new FakeSocket(url);
@@ -476,7 +526,16 @@ export function fakeEvents(hello: Record<string, unknown> | null = {}) {
       setTimeout(() => {
         if (socket.closed) return;
         socket.open();
-        socket.send({ ...HELLO, ...hello });
+        // Echoed back the way the host echoes it: `watching` is ABSENT when
+        // nothing was nominated, and present as `{path, armed}` when something
+        // was. A fake that always sent the field would hide the case this
+        // server has to tell apart — a host that ignored the nomination.
+        const watches = socket.watches;
+        const watching = watches.length
+          ? { watching: watches.map((path) => ({ path, armed })) }
+          : {};
+        socket.send({ ...HELLO, ...watching, ...hello });
+        socket.greeted = true;
       }, 0);
     }
     return socket;
