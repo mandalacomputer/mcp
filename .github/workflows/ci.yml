@@ -7,7 +7,31 @@ on:
 
 jobs:
   check:
-    runs-on: ubuntu-latest
+    # Self-hosted, not ubuntu-latest -- a cost decision with an expiry date, not
+    # an architecture one.
+    #
+    # This repository is private, so every GitHub-hosted job is metered against
+    # the org's free-plan allowance, and billing rounds each job up to a whole
+    # minute. The matrix is what makes that bite: four jobs per run, each far
+    # shorter than the minute it is billed at. On the pool they are free.
+    #
+    # `portable` is a capability label carried by runner instances on both an
+    # x64 host and an arm64 host, so a job lands on whichever is idle and either
+    # host can be down without stalling CI. It is not an arch label: `runs-on`
+    # is a strict filter with no priority ordering, so pinning to one
+    # architecture would mean queueing for 24h rather than failing over.
+    #
+    # Floating is safe because nothing here escapes the runner: this workflow
+    # builds and tests, and publishing happens elsewhere. Node ships linux-arm64
+    # for every version in the matrix, so nothing is emulated.
+    #
+    # REVERT WHEN THIS REPO GOES PUBLIC. GitHub-hosted minutes are free and
+    # unlimited for public repositories, and hosted runners are strictly better
+    # for a matrix: its jobs run genuinely in parallel there, where the pool has
+    # two instances for this repo and serialises them. Set
+    # `runs-on: ubuntu-latest` back and delete the HOME isolation step, which
+    # only exists because the pool's instances share a HOME.
+    runs-on: [self-hosted, linux, portable]
     strategy:
       fail-fast: false
       matrix:
@@ -26,6 +50,16 @@ jobs:
         node: ['20', '22', '24', '26']
     steps:
       - uses: actions/checkout@v4
+      # The pool's instances share one `actions` HOME, so they share ~/.npm with
+      # every other repo's runner on the box. Give each instance its own;
+      # RUNNER_NAME is unique per instance and an instance runs one job at a
+      # time, so this serialises access while staying warm across runs. The
+      # `cache: npm` above then fills a directory nothing else is writing to.
+      - name: Isolate HOME per runner instance
+        run: |
+          h="$HOME/runner-home-$RUNNER_NAME"
+          mkdir -p "$h"
+          echo "HOME=$h" >> "$GITHUB_ENV"
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node }}
