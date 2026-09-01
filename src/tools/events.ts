@@ -66,16 +66,30 @@ const MAX_WAIT_S = 55;
 const ATTACH_MS = 20_000;
 
 /**
- * Wait for a subscription to say something about itself.
+ * Wait for a subscription to say something about itself, inside a budget.
  *
  * The first call on a computer has to attach before it can answer anything: a
  * poll that returned "no events" while the socket was still being opened would
  * be a model told nothing had happened, which is a different sentence from
  * "nothing has happened yet" and the one that ends a turn early.
+ *
+ * `deadline` is the CALLER's, and passing it is what keeps `ATTACH_MS` from
+ * being a second budget stacked in front of the first. Without it a
+ * `wait_for_event` spent up to twenty seconds here and only then armed its own
+ * `timeout_s`, so a call promising to come back in one second came back in
+ * twenty — and one asking for the maximum ran past the sixty most MCP clients
+ * allow a request, which is the cancellation {@link MAX_WAIT_S} exists to
+ * prevent. Whichever fires first wins; `poll_events` has no deadline of its own
+ * and keeps the handshake budget alone.
  */
-async function attached(sub: Subscription, cancel?: AbortSignal): Promise<void> {
+async function attached(
+  sub: Subscription,
+  cancel?: AbortSignal,
+  deadline?: AbortSignal,
+): Promise<void> {
   if (sub.eventTypes || sub.state.status === 'stopped') return;
-  await sub.attached(AbortSignal.timeout(ATTACH_MS), cancel);
+  const budget = AbortSignal.timeout(ATTACH_MS);
+  await sub.attached(deadline ? AbortSignal.any([budget, deadline]) : budget, cancel);
 }
 
 /**
@@ -145,38 +159,95 @@ function body(id: string, d: Delivery): Record<string, unknown> {
 }
 
 /**
- * A subscription that has stopped, said once, with what to do about it.
+ * A subscription that has stopped, said once, with whatever it was still
+ * holding, and with what to do about it.
  *
- * Dropped as it is reported, and that is what makes the last sentence true. A
- * stopped subscription would otherwise sit in the hub until the idle sweep took
- * it, answering "suspended" for five minutes after `start_computer` had already
- * fixed it — a model told to fix something, doing so, and being told the same
- * thing again is a model that stops believing the tool. The cursor is kept, so
- * the stream that opens next resumes rather than restarts.
+ * DRAINED BEFORE THE DROP, which is the whole of the order here. A stream can
+ * stop with events still in its ring, and on this platform that is the ordinary
+ * case rather than the odd one: listening is not using, so a computer nobody
+ * touches suspends underneath its own stream, and the `process.exited` a model
+ * went away to wait for is sitting in the buffer when it does. Both gates used
+ * to run ahead of every read, so those events went into `drop` unread and the
+ * answer was a bare refusal.
+ *
+ * What made that silent rather than merely late is `resumeCursor`: it is the
+ * last cursor DELIVERED, not the last received, so the remembered position was
+ * before the unread events and the replacement stream got them back only if the
+ * platform could still replay across the stop — which is exactly what a suspend
+ * is least likely to allow. Reading here hands them over AND moves that cursor
+ * past them, so what is remembered is true whichever way the replay goes.
+ *
+ * AND THE DROP WAITS FOR AN EMPTY RING, which is the other half of the same
+ * point. The drop is what keeps a stopped subscription from answering
+ * "suspended" for five minutes after `start_computer` has already fixed it — a
+ * model told to fix something, doing so, and being told the same thing again is
+ * a model that stops believing the tool. But the drop also destroys the buffer,
+ * and this read is bounded by the caller's `limit` while the ring holds up to
+ * `MAX_BUFFERED`. Dropping on the first call therefore MOVED the loss rather
+ * than removing it: three hundred unread events became a hundred delivered and
+ * two hundred discarded, under a sentence calling them the last this stream has
+ * and a `more_waiting` that said otherwise (/code-review, OPL-4244). So the stop
+ * is reported on every call — which is true every time, and each one hands over
+ * another batch — and the subscription goes only when there is nothing left in
+ * it. A model that never calls back leaves it to the idle sweep, which is what
+ * the sweep is for.
  */
-function stopped(session: Session, id: string, reason: string) {
-  session.events.drop(id, reason, true);
+function stopped(
+  session: Session,
+  id: string,
+  reason: string,
+  sub: Subscription,
+  read: { since?: string; limit: number },
+) {
+  const d = sub.read(read);
+  const n = d.events.length;
+  const drained = !d.more;
+  if (drained) session.events.drop(id, reason, true);
+  const held = n
+    ? `${n} event${n === 1 ? '' : 's'} had already arrived before it stopped and ${n === 1 ? 'is' : 'are'} ` +
+      (drained
+        ? `below — ${n === 1 ? 'it is' : 'they are'} the last this stream has. `
+        : `below. ${d.more} more ${d.more === 1 ? 'is' : 'are'} still held here — call again for ` +
+          `${d.more === 1 ? 'it' : 'them'} before doing anything else, because they are only in this ` +
+          `session and a replay across the stop may not reach them. `)
+    : '';
   return refused(
-    `The event stream for ${id} is not running: ${reason}. Fix the cause and call again: the next ` +
-      `call opens a fresh stream and resumes from the last event you were handed, so whatever the ` +
-      `platform can still replay you will still be given, and whatever it cannot comes back as a ` +
-      `stated gap rather than as silence.`,
+    `${held}The event stream for ${id} is not running: ${reason}. Fix the cause and call again: ` +
+      (drained
+        ? `the next call opens a fresh stream and resumes from the last event you were handed, so ` +
+          `whatever the platform can still replay you will still be given, and whatever it cannot ` +
+          `comes back as a stated gap rather than as silence.`
+        : `the next call hands over what is still buffered here, and the one after the buffer is ` +
+          `empty opens a fresh stream that resumes from the last event you were handed.`),
+    n || d.loss ? body(id, d) : undefined,
   );
 }
 
 /**
- * A stream that never got as far as its opening frame.
+ * A stream that has not yet got as far as its opening frame.
  *
  * Distinct from every other answer here, because the empty list it would
  * otherwise produce is the one sentence this server must not say by accident:
  * "nothing has happened" said by something that was not listening.
+ *
+ * The subscription is deliberately NOT dropped. It used to be, and that undid
+ * the one thing `#url()` was changed to do: a computer that is `starting` or
+ * `moving` is weather rather than a refusal, so the loop backs off and keeps
+ * asking — and dropping it here threw that progress away every time, so a model
+ * following the create-then-wait flow the README advertises paid the full
+ * handshake budget again on each call and never got further. Left alone, the
+ * loop carries on between turns and the next call finds it further along; the
+ * idle sweep is what eventually takes one that never arrives.
+ *
+ * The budget is reported as what was actually spent, since it is now the
+ * caller's deadline that usually ends this rather than {@link ATTACH_MS}.
  */
-function unattached(session: Session, id: string) {
-  session.events.drop(id, 'the connection never reached its opening frame', true);
+function unattached(id: string, waitedMs: number) {
   return refused(
-    `Could not open the event stream for ${id} in ${Math.round(ATTACH_MS / 1000)}s. This is not ` +
+    `Could not open the event stream for ${id} in ${Math.max(1, Math.round(waitedMs / 1000))}s. This is not ` +
       `an answer about the computer: nothing was listening, so nothing can be said about what it ` +
-      `did. Call again — and if it keeps happening, screenshot and list_windows still work.`,
+      `did. The stream is still coming up and this server is still trying — call again, and if it ` +
+      `keeps happening, screenshot and list_windows still work.`,
   );
 }
 
@@ -231,23 +302,39 @@ export const registerEvents: Registrar = (server, session) => {
           ),
         limit: z.number().int().min(1).max(500).default(100),
       },
-      annotations: { readOnlyHint: true },
+      // Deliberately not readOnlyHint, for the reason exec_poll is not: both of
+      // these CONSUME. `sub.read()` advances the model's place in the buffer, so
+      // the events it returns are events no later call can return. Clients treat
+      // the hint as licence to call without asking and to retry a call that
+      // timed out, and a retried read silently drops whatever the first attempt
+      // had already taken — the same defect one tool over, with a ring in this
+      // session instead of a cursor in the guest. Nothing is created and nothing
+      // is destroyed, which is what made the annotation look right.
     },
     ({ computer_id, types, pid, timeout_s, since, limit }, extra) =>
       guarded(async () => {
         const id = session.resolve(computer_id);
         const sub = session.events.open(id);
-        await attached(sub, extra.signal);
+        // ONE deadline for the whole call, armed before the attach rather than
+        // after it. `timeout_s` is a promise about when this comes back, and
+        // MAX_WAIT_S sits under the 60s most MCP clients give a request — but
+        // the attach was a second budget of up to 20s stacked in front of that,
+        // so a wait could run to about 75s and be cancelled by the client, which
+        // is the exact failure the cap exists to prevent. Measured before the
+        // fix: `wait_for_event({timeout_s: 1})` answered after 20.0 seconds.
+        const deadline = AbortSignal.timeout(timeout_s * 1000);
+        const started = Date.now();
+        await attached(sub, extra.signal, deadline);
         // Re-read rather than narrowed once: a subscription can stop at any
         // point in this call, and a `state` captured before the wait is a
         // statement about a moment that has passed.
         const opening = sub.state;
-        if (opening.status === 'stopped') return stopped(session, id, opening.reason);
-        // A caller who hung up is not a stream that failed to open, and must not
-        // take the connection down with it: `unattached` drops the subscription,
-        // which would throw away a socket that was still opening.
+        if (opening.status === 'stopped') {
+          return stopped(session, id, opening.reason, sub, { since, limit });
+        }
+        // A caller who hung up is not a stream that failed to open.
         if (extra.signal?.aborted) return cancelledDuringAttach(id);
-        if (!sub.eventTypes) return unattached(session, id);
+        if (!sub.eventTypes) return unattached(id, Date.now() - started);
 
         // A `pid` on its own means the exit of THAT command. Without this the
         // filter below reads "anything that is not a process.exited passes",
@@ -301,14 +388,12 @@ export const registerEvents: Registrar = (server, session) => {
           );
         };
 
-        const started = Date.now();
         let hit = await sub.waitFor(matches, AbortSignal.abort(), undefined, since);
         if (hit === undefined) {
           const already = cannotEmit();
           if (already) return refused(already);
         }
         if (hit === undefined) {
-          const deadline = AbortSignal.timeout(timeout_s * 1000);
           // The capability question is asked on every wake rather than once
           // before the wait, because a `capabilities` frame can land inside it.
           // Such a frame wakes the waiter but is not an event, so a loop that
@@ -333,7 +418,8 @@ export const registerEvents: Registrar = (server, session) => {
             );
           }
           const now = sub.state;
-          if (now.status === 'stopped') return stopped(session, id, now.reason);
+          if (now.status === 'stopped')
+            return stopped(session, id, now.reason, sub, { since, limit });
           // Asked again, because the wait that just ended is long enough for a
           // `capabilities` frame to have arrived inside it. A withdrawal that
           // happened while parked is still the reason nothing came, and saying
@@ -413,7 +499,14 @@ export const registerEvents: Registrar = (server, session) => {
             'At most this many, oldest first. The rest stay buffered and come back on the next call — more_waiting says how many.',
           ),
       },
-      annotations: { readOnlyHint: true },
+      // Deliberately not readOnlyHint, for the reason exec_poll is not: both of
+      // these CONSUME. `sub.read()` advances the model's place in the buffer, so
+      // the events it returns are events no later call can return. Clients treat
+      // the hint as licence to call without asking and to retry a call that
+      // timed out, and a retried read silently drops whatever the first attempt
+      // had already taken — the same defect one tool over, with a ring in this
+      // session instead of a cursor in the guest. Nothing is created and nothing
+      // is destroyed, which is what made the annotation look right.
     },
     ({ computer_id, since, limit }, extra) =>
       guarded(async () => {
@@ -423,11 +516,14 @@ export const registerEvents: Registrar = (server, session) => {
         // trip for the URL and another for the handshake, and a first call that
         // answered "nothing has happened" before either had finished would be
         // saying something it does not know.
+        const started = Date.now();
         await attached(sub, extra.signal);
         const state = sub.state;
-        if (state.status === 'stopped') return stopped(session, id, state.reason);
+        if (state.status === 'stopped') {
+          return stopped(session, id, state.reason, sub, { since, limit });
+        }
         if (extra.signal?.aborted) return cancelledDuringAttach(id);
-        if (!sub.eventTypes) return unattached(session, id);
+        if (!sub.eventTypes) return unattached(id, Date.now() - started);
 
         const d = sub.read({ since, limit });
         const extras = d.loss ? await reconcile(session, id, extra.signal) : {};

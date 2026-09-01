@@ -979,11 +979,22 @@ const str = (v: unknown): string | undefined => (typeof v === 'string' && v ? v 
 const list = (v: unknown): string[] | undefined =>
   Array.isArray(v) ? v.filter((e): e is string => typeof e === 'string') : undefined;
 
-/** A pause that ends early when the stream is closed. */
+/**
+ * A pause that ends early when the stream is closed.
+ *
+ * `unref`'d for the reason the idle sweep is: a timer is not a reason for a
+ * process to stay alive. The reconnect backoff is the one timer a subscription
+ * holds while it has no socket, and a ref'd one kept an stdio server up after
+ * its client had gone. Nothing is lost by it — a client that is still attached
+ * holds stdin, which keeps the loop running on its own — and it is a backstop
+ * rather than the fix: `runStdio` closes the session on stdin EOF, and this is
+ * what covers the window where the socket is already down.
+ */
 const sleep = (ms: number, signal: AbortSignal) =>
   new Promise<void>((resolve) => {
     if (signal.aborted || ms <= 0) return resolve();
     const t = setTimeout(done, ms);
+    t.unref?.();
     function done() {
       clearTimeout(t);
       signal.removeEventListener('abort', done);

@@ -238,7 +238,16 @@ export class Api {
     // A base's own parameters are part of how it was addressed — a tenant, a
     // version — and dropping them would send the request somewhere else just as
     // surely as appending the path to them did.
-    url.pathname = `${url.pathname}/${path.replace(/^\/+/, '')}`;
+    //
+    // A root pathname contributes NOTHING rather than its slash. The constructor
+    // strips trailing slashes, but a base that is only an origin has `/` for a
+    // pathname and the WHATWG setter puts it straight back — so the join wrote
+    // `https://gateway.example.com//computers`, a double slash that is a
+    // different path to any router that normalises and a 404 to one that does
+    // not. Invisible on the default base, which carries `/api/v1`; the case it
+    // breaks is a self-hosted MANDALA_BASE_URL whose API sits at the root.
+    const base = url.pathname === '/' ? '' : url.pathname;
+    url.pathname = `${base}/${path.replace(/^\/+/, '')}`;
     for (const [k, v] of Object.entries(query ?? {})) {
       if (v !== undefined) url.searchParams.set(k, String(v));
     }

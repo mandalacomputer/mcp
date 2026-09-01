@@ -291,7 +291,8 @@ export const registerComputers: Registrar = (server, session, opts) => {
     {
       title: 'List sizes',
       description:
-        'The named sizes a computer can be launched at — each a template plus a CPU/RAM/disk shape. These are the shapes the platform keeps pre-booted, so create_computer with a `size` is typically answered in about a second where a custom shape boots cold. `allowed` says whether this account’s plan admits a row; when false, `cheapest_plan` names the plan that would.',
+        `The named sizes a computer can be launched at — each a template plus a CPU/RAM/disk shape. These are the shapes the platform keeps pre-booted, so ${opts.lifecycle ? 'create_computer with a `size`' : 'a create naming a `size`'} is typically answered in about a second where a custom shape boots cold. ` +
+        '`allowed` says whether this account’s plan admits a row; when false, `cheapest_plan` names the plan that would.',
       inputSchema: {},
       annotations: { readOnlyHint: true },
     },
@@ -383,8 +384,14 @@ export const registerComputers: Registrar = (server, session, opts) => {
               `${warning}No computers came back from the part of the fleet that answered. This is NOT an empty account — do not create a computer on the strength of it. Retry in a moment.`,
             );
           }
+          // Named only when it is there to call. Under MANDALA_NO_LIFECYCLE
+          // create_computer is not registered, and this is the one place the
+          // name reached the model at RUN time rather than in a description —
+          // an invitation, in a sentence, to call a tool that does not exist.
           return said(
-            'No computers on this account yet. create_computer makes one; list_templates says what from.',
+            opts.lifecycle
+              ? 'No computers on this account yet. create_computer makes one; list_templates says what from.'
+              : 'No computers on this account yet. This server cannot make one — it was started with the lifecycle tools withheld — so one has to be created elsewhere before there is anything here to drive.',
           );
         }
         const lines = list.map((c) => `- ${describe(c as never)}`).join('\n');
