@@ -284,10 +284,17 @@ export const registerEvents: Registrar = (server, session) => {
         const cannotEmit = (): string | undefined => {
           if (!wanted) return undefined;
           const can = sub.eventTypes;
-          if (!can || ![...wanted].every((t) => !can.includes(t))) return undefined;
+          // An EMPTY list is not a computer that can emit nothing; it is a
+          // `hello` that carried no `events` key, which `list(frame.events) ??
+          // []` renders identically. Reading it as a refusal would end a healthy
+          // wait the moment a reconnect landed on such a frame — and the
+          // `capabilities` frame that follows can restore the list, since that
+          // frame goes both ways. Unknown is not the same as none.
+          if (!can?.length) return undefined;
+          if (![...wanted].every((t) => !can.includes(t))) return undefined;
           return (
             `${id} cannot emit ${[...wanted].join(' or ')}. It reports it can emit: ` +
-            `${can.join(', ') || 'nothing'}. A guest with nowhere to run its watcher — a ` +
+            `${can.join(', ')}. A guest with nowhere to run its watcher — a ` +
             `Windows one, or a Linux one whose hardware carries no terminal channel — never ` +
             `produces the guest-reported half of this stream, so this wait could only ever ` +
             `have ended at its timeout. Use screenshot and list_windows on this computer.`

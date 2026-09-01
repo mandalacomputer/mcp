@@ -92,17 +92,24 @@ export function isLoopbackHost(host: string): boolean {
  *
  * - already carries a port — left exactly as written. That operator has said
  *   which port their callers use, and it need not be the one bound here.
- * - a BARE IPv6 address, unbracketed. Not a legal Host header, but a plausible
- *   thing to write, and `::1` + `:3000` is `::1:3000`, a string nothing can
- *   ever send. Left alone rather than turned into nonsense.
+ * - a BARE IPv6 address, unbracketed. `::1` is not a legal Host header and
+ *   `::1` + `:3000` is `::1:3000`, which nothing can send — so it is BRACKETED
+ *   into the spellings a client actually sends, rather than left as a dead
+ *   entry that matches nothing. An operator who writes the address has said
+ *   which host they mean; the brackets are notation, not a second guess.
  * - anything else — matched with and without the bound port.
  */
 export function hostSpellings(host: string, port: number): string[] {
-  // A colon after the `]`, or any colon at all in an unbracketed entry: the
-  // first two cases above, and both are left as written. What separates them
-  // matters to a reader and not to the answer.
-  const written = host.startsWith('[') ? /\]:\d+$/.test(host) : host.includes(':');
-  return written ? [host] : [host, `${host}:${port}`];
+  if (host.startsWith('[')) {
+    // Already bracketed: with a port it is exactly what a client sends, and
+    // without one it still needs the ported spelling.
+    return /\]:\d+$/.test(host) ? [host] : [host, `${host}:${port}`];
+  }
+  // Unbracketed and full of colons is a v6 literal; one colon and digits is a
+  // name that already names its port.
+  if (/:\d+$/.test(host) && host.indexOf(':') === host.lastIndexOf(':')) return [host];
+  if (host.includes(':')) return [`[${host}]`, `[${host}]:${port}`];
+  return [host, `${host}:${port}`];
 }
 
 /**
@@ -362,7 +369,15 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
       ];
     }
     if (!isLoopbackHost(cfg.host)) return undefined;
-    const names = new Set(['127.0.0.1', 'localhost', '[::1]', cfg.host.toLowerCase()]);
+    // `cfg.host` goes in as the spellings a client SENDS, which for a v6
+    // literal means bracketed. Widening isLoopbackHost to accept
+    // `::ffff:127.0.0.1` would otherwise have handed that bind a default
+    // allowlist naming only the bare form — so a client using the address it
+    // was given, `http://[::ffff:127.0.0.1]:port`, would be 403'd by
+    // protection that had not existed there before.
+    const bare = cfg.host.toLowerCase();
+    const own = bare.startsWith('[') || !bare.includes(':') ? [bare] : [`[${bare}]`];
+    const names = new Set(['127.0.0.1', 'localhost', '[::1]', ...own]);
     return [...names].flatMap((h) => [`${h}:${portNow}`, h]);
   }
 

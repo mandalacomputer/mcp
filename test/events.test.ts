@@ -801,22 +801,19 @@ describe('the socket underneath', () => {
 // --- grok bug hunt, OPL-4218 ---------------------------------------------
 
 describe('an events_url the platform sent but nothing can parse', () => {
-  it('backs off and reconnects rather than stopping the stream for good', async () => {
+  it('says so, rather than reporting the exception that used to escape', async () => {
     const real = globalThis.fetch;
-    // A relative URL: a string, so `#url()` hands it over, and not something
-    // `new URL` can take on its own. Two reads — the malformed one, then a good
-    // one — so the test can show the subscription survived to use the second.
-    let reads = 0;
+    // A relative URL: a string, so it passes the `typeof` check, and not
+    // something `new URL` can take on its own.
     globalThis.fetch = (async (input: string | URL | Request) => {
       const url = new URL(typeof input === 'string' ? input : input.toString());
       if (url.host !== new URL(BASE).host) return real(input as never);
-      reads += 1;
       return new Response(
         JSON.stringify({
           id: 'vm-1',
           status: 'running',
           os: 'linux',
-          vnc: { events_url: reads === 1 ? '/not-an-absolute-url' : 'wss://app.test/events' },
+          vnc: { events_url: '/not-an-absolute-url' },
         }),
         { headers: { 'Content-Type': 'application/json' } },
       );
@@ -824,13 +821,16 @@ describe('an events_url the platform sent but nothing can parse', () => {
     try {
       const ev = fakeEvents();
       const { call, close } = await connect({ webSocket: ev.factory });
-      // The first read produces a URL that throws out of `new URL`. That used
-      // to reject the connection promise, escape `#loop`, and put the
-      // subscription into a terminal `stopped` — no backoff, no second read.
-      await call('poll_events');
-      await until('a second read of the computer', () => reads >= 2, 5_000);
-      await until('a socket on the good URL', () => ev.sockets.length >= 1, 5_000);
-      expect(ev.last().url).toContain('wss://app.test/events');
+      const res = await call('poll_events');
+      // It used to throw out of the connection's Promise executor, reject past
+      // a `#loop` that does not catch, and arrive as "the event stream failed:
+      // Invalid URL". Decided in `#url()` now, where the missing-events_url
+      // case is already decided, and said as a sentence.
+      expect(res.isError).toBe(true);
+      expect(textOf(res)).toContain('cannot parse');
+      expect(textOf(res)).toContain('screenshot');
+      // And nothing was opened on a URL there was no way to open.
+      expect(ev.sockets).toHaveLength(0);
       await close();
     } finally {
       globalThis.fetch = real;
@@ -865,6 +865,28 @@ describe('a capability withdrawn while somebody is already waiting', () => {
 
   it('still returns the event when one arrives, capabilities notwithstanding', async () => {
     const { call, close, ev } = await attach({ ready: false });
+    const waiting = call('wait_for_event', { types: ['window.opened'], timeout_s: 30 });
+    await new Promise((r) => setTimeout(r, 20));
+    ev.last().send(frame('window.opened', { id: '0x1' }, 'cur-1'));
+    const res = await waiting;
+    expect(res.isError).toBeFalsy();
+    expect(eventsOf(res).map((e) => e.type)).toContain('window.opened');
+    await close();
+  });
+});
+
+describe('a hello that carried no events list', () => {
+  let platform: ReturnType<typeof installFakePlatform>;
+  beforeEach(() => {
+    platform = installFakePlatform();
+  });
+  afterEach(() => platform.restore());
+
+  it('is unknown rather than "can emit nothing", and does not end a wait', async () => {
+    // `list(frame.events) ?? []` renders an absent key and an empty list
+    // identically, so reading an empty list as a refusal would abandon a
+    // healthy wait the moment a reconnect landed on such a frame.
+    const { call, close, ev } = await attach({ ready: false, events: undefined });
     const waiting = call('wait_for_event', { types: ['window.opened'], timeout_s: 30 });
     await new Promise((r) => setTimeout(r, 20));
     ev.last().send(frame('window.opened', { id: '0x1' }, 'cur-1'));

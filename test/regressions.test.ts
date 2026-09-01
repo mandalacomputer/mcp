@@ -3553,7 +3553,11 @@ describe('deleting a computer that is already gone', () => {
       const res = await call('delete_computer', { computer_id: 'vm-1', confirm: true });
       // Not an error: the state the caller asked for is the state that holds.
       expect(res.isError).toBeFalsy();
-      expect(said(res)).toMatch(/already gone/i);
+      // It names both readings of a 404 rather than asserting a deletion: the
+      // id may simply not be one on this account.
+      expect(said(res)).toMatch(/Nothing was deleted/i);
+      expect(said(res)).toMatch(/already destroyed/i);
+      expect(said(res)).toMatch(/not one on this account/i);
       // And the binding is gone with it — the next call has nothing to drive
       // and says so, rather than acting on a destroyed machine.
       const after = await call('screenshot', {});
@@ -3643,6 +3647,63 @@ describe('write_file and half a character', () => {
 });
 
 describe('a moves table with a malformed row in it', () => {
+  it('says how many it could not read, rather than dropping them silently', async () => {
+    const real = globalThis.fetch;
+    globalThis.fetch = (async (input: string | URL | Request) => {
+      const url = new URL(typeof input === 'string' ? input : input.toString());
+      if (url.pathname.endsWith('/moves')) {
+        return new Response(
+          JSON.stringify({
+            moves: [null, { computer_id: 'vm-1', state: 'done', live: false }],
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } },
+        );
+      }
+      return new Response(JSON.stringify({ id: 'vm-1', status: 'running' }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }) as typeof fetch;
+    try {
+      const { call, close } = await connect();
+      const res = await call('list_moves', {});
+      expect(said(res)).toMatch(/ignored 1 malformed move entry/i);
+      expect(said(res)).toMatch(/vm-1/);
+      await close();
+    } finally {
+      globalThis.fetch = real;
+    }
+  });
+
+  it('refuses rather than calling a listing of nothing but bad rows an empty account', async () => {
+    const real = globalThis.fetch;
+    globalThis.fetch = (async (input: string | URL | Request) => {
+      const url = new URL(typeof input === 'string' ? input : input.toString());
+      if (url.pathname.endsWith('/moves')) {
+        return new Response(JSON.stringify({ moves: [null, 'nonsense'] }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      return new Response(JSON.stringify({ id: 'vm-1', status: 'running' }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }) as typeof fetch;
+    try {
+      const { call, close } = await connect();
+      const res = await call('list_moves', {});
+      // "No moves on this account" is an affirmative claim, and an unreadable
+      // listing does not establish it.
+      expect(res.isError).toBe(true);
+      expect(said(res)).not.toMatch(/No moves on this account/);
+      expect(said(res)).toMatch(/may still be running/i);
+      await close();
+    } finally {
+      globalThis.fetch = real;
+    }
+  });
+
   it('drops the row rather than throwing past the refusal that says the move is still running', async () => {
     const real = globalThis.fetch;
     globalThis.fetch = (async (input: string | URL | Request) => {
@@ -3689,9 +3750,11 @@ describe('the Host allowlist an operator actually writes', () => {
     expect(hostSpellings('[::1]:3000', 9999)).toEqual(['[::1]:3000']);
   });
 
-  it('does not append a port to a bare IPv6 address, which would be unsendable', () => {
-    // `::1` + `:3000` is `::1:3000`, a string no client can ever send.
-    expect(hostSpellings('::1', 3000)).toEqual(['::1']);
+  it('brackets a bare IPv6 address rather than appending a port to it', () => {
+    // `::1` + `:3000` is `::1:3000`, a string no client can ever send — and
+    // leaving `::1` alone would be a list entry matching nothing, which is the
+    // same 403 this function exists to prevent. Bracketing is the expansion.
+    expect(hostSpellings('::1', 3000)).toEqual(['[::1]', '[::1]:3000']);
   });
 });
 
@@ -3791,5 +3854,46 @@ describe('instructions under MANDALA_NO_LIFECYCLE', () => {
     expect(text).not.toMatch(/create_computer/);
     expect(text).toMatch(/use_computer binds/);
     await without.close();
+  });
+});
+
+describe('a done frame that is not a result', () => {
+  it('does not end the run on a record with no stop, discarding the real one behind it', async () => {
+    const real = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      new Response(
+        'event: step\ndata: {"n":1,"detail":"clicked"}\n\n' +
+          // A record, so the old break fired here and reported "ended: unknown"
+          // for a run that had in fact succeeded one frame later.
+          'event: done\ndata: {}\n\n' +
+          'event: done\ndata: {"stop":"end_turn","text":"Done"}\n\n',
+        { headers: { 'Content-Type': 'text/event-stream' } },
+      )) as typeof fetch;
+    try {
+      const { call, close } = await connect({ modelKey: 'sk-test' });
+      const res = await call('run_agent', { prompt: 'finish' });
+      expect(res.isError).toBeFalsy();
+      expect(said(res)).toMatch(/finished/);
+      expect(said(res)).not.toMatch(/ended: unknown/);
+      await close();
+    } finally {
+      globalThis.fetch = real;
+    }
+  });
+});
+
+describe('a Host allowlist written as an IPv6 address', () => {
+  it('brackets it into the spellings a client can actually send', () => {
+    // `::1` is not a legal Host header and `::1:3000` is not a thing at all, so
+    // an unbracketed entry would sit in the list matching nothing.
+    expect(hostSpellings('::1', 3000)).toEqual(['[::1]', '[::1]:3000']);
+    expect(hostSpellings('::ffff:127.0.0.1', 3000)).toEqual([
+      '[::ffff:127.0.0.1]',
+      '[::ffff:127.0.0.1]:3000',
+    ]);
+  });
+
+  it('gives a bracketed entry with no port its ported spelling too', () => {
+    expect(hostSpellings('[::1]', 3000)).toEqual(['[::1]', '[::1]:3000']);
   });
 });

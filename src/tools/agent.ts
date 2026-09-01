@@ -107,12 +107,20 @@ export const registerAgent: Registrar = (server, session) => {
             // watch_build does. Waiting held a result that was already in hand
             // until the generator ended, so a client that aborted in that window
             // — or a stream the platform left open — turned a finished run into
-            // a CancelledError and threw the answer away. A `done` that is not a
-            // record is still skipped rather than accepted: that is the null-done
-            // case the regression suite pins, and it must not end the loop.
+            // a CancelledError and threw the answer away.
+            //
+            // Terminal means it SAYS SO, which is watch_build's discipline
+            // (OPL-3835) applied to this stream's own vocabulary: `stop` is the
+            // field the platform always sends on a result — the AgentResult type
+            // in its lib/agent.ts requires it, and every `done` it yields carries
+            // one — and it is the field the verdict below reads. A record
+            // without it is not a result, so it is kept, in case nothing better
+            // arrives, but it does not end the loop and discard the frame that
+            // would have been the real one. A `done` that is not a record at all
+            // is skipped entirely: the null-done case the regression suite pins.
             if (isRecord(ev.data)) {
               done = ev.data;
-              break;
+              if (typeof ev.data.stop === 'string' && ev.data.stop) break;
             }
           } else if (ev.event === 'error') {
             // A run that errored is a failure, and has to carry `isError` to
