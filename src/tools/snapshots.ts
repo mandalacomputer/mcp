@@ -224,7 +224,15 @@ export const registerSnapshots: Registrar = (server, session, opts) => {
           .string()
           .optional()
           .describe(
-            `What this capture is of: "before the upgrade", "clean install", "reproduces the bug". It is the only place the reason for taking it can be written down — ${opts.lifecycle ? 'restore_snapshot, clone_snapshot and delete_snapshot' : 'restore_snapshot'} all take an id, so a set of captures of one computer is otherwise told apart by timestamp alone, and the wrong guess on the last of those is unrecoverable. Omit it and the platform names the snapshot after the computer and the time, which says when but never why.`,
+            // Two sentences rather than a name substituted into one. The
+            // three-tool list carries "all take an id" and "the last of
+            // those" — grammar and a referent that both break when the list
+            // is one item, and the unrecoverable-wrong-guess warning is about
+            // delete_snapshot, which is not registered here to warn about
+            // (/code-review, OPL-4244).
+            opts.lifecycle
+              ? 'What this capture is of: "before the upgrade", "clean install", "reproduces the bug". It is the only place the reason for taking it can be written down — restore_snapshot, clone_snapshot and delete_snapshot all take an id, so a set of captures of one computer is otherwise told apart by timestamp alone, and the wrong guess on the last of those is unrecoverable. Omit it and the platform names the snapshot after the computer and the time, which says when but never why.'
+              : 'What this capture is of: "before the upgrade", "clean install", "reproduces the bug". It is the only place the reason for taking it can be written down — restore_snapshot takes an id and nothing else, so a set of captures of one computer is otherwise told apart by timestamp alone, and restoring the wrong one overwrites a disk. Omit it and the platform names the snapshot after the computer and the time, which says when but never why.',
           ),
         memory: z
           .boolean()

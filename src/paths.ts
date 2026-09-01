@@ -455,12 +455,21 @@ export function scrollBody(args: {
  *
  * The same silent corruption {@link clipboardBody} refuses and `write_file`
  * refuses, on the third path that carries a caller's own characters into the
- * guest: `JSON.stringify` escapes a lone surrogate, Go's `encoding/json` decodes
- * it to U+FFFD, and the desktop is typed a replacement character where the
- * caller's text was — reported as `Typed N character(s).` A write that succeeds
- * with different text than was asked for is worse than one that fails, and
- * typing is not a weaker case than a clipboard; it is the one whose result is
- * already inside whatever had focus.
+ * guest: `JSON.stringify` escapes a lone surrogate and Go's `encoding/json`
+ * decodes it to U+FFFD.
+ *
+ * What happens NEXT is this route's own, and it is worth stating precisely
+ * rather than borrowing the clipboard's sentence. The platform's `type` handler
+ * walks runes and looks each one up in `charKeys` — a printable-ASCII map — and
+ * `continue`s past anything it does not find (server/input.go). So the
+ * replacement character is not typed onto the desktop; it is DROPPED, and the
+ * tool goes on to report `Typed N character(s).` counting the character that
+ * never arrived. Either way the screen does not hold what the caller asked for
+ * and the answer says it does, which is the thing worth refusing. NOT extended
+ * to a NUL for the same reason: the platform skips an unmappable rune rather
+ * than truncating the string at it, so a NUL is no more special there than any
+ * other unmappable character, and singling it out would be a rule about one
+ * codepoint dressed as a rule about corruption (/code-review, OPL-4244).
  */
 export function typeBody(text: string): Json {
   if (hasUnpairedSurrogate(text)) throw new Error(typedSurrogateRefusal);
@@ -469,9 +478,10 @@ export function typeBody(text: string): Json {
 
 const typedSurrogateRefusal =
   'that text has an unpaired surrogate in it — half of a character, usually from a string cut ' +
-  'through the middle of an emoji. It is not valid UTF-8, and typing it would put a replacement ' +
-  'character on the desktop rather than what you meant, so nothing was typed. Send the whole ' +
-  'character, or cut the text on a character boundary.';
+  'through the middle of an emoji. It is not valid UTF-8: it reaches the guest as a replacement ' +
+  'character, which is not a key the desktop can type, so it would be dropped and the count ' +
+  'reported back would include it. Nothing was typed. Send the whole character, or cut the text ' +
+  'on a character boundary.';
 
 export function keyBody(keys: string[], holdSeconds?: number): Json {
   if (!keys.length) throw new Error('press_key needs at least one key');

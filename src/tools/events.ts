@@ -162,13 +162,6 @@ function body(id: string, d: Delivery): Record<string, unknown> {
  * A subscription that has stopped, said once, with whatever it was still
  * holding, and with what to do about it.
  *
- * Dropped as it is reported, and that is what makes the last sentence true. A
- * stopped subscription would otherwise sit in the hub until the idle sweep took
- * it, answering "suspended" for five minutes after `start_computer` had already
- * fixed it — a model told to fix something, doing so, and being told the same
- * thing again is a model that stops believing the tool. The cursor is kept, so
- * the stream that opens next resumes rather than restarts.
- *
  * DRAINED BEFORE THE DROP, which is the whole of the order here. A stream can
  * stop with events still in its ring, and on this platform that is the ordinary
  * case rather than the odd one: listening is not using, so a computer nobody
@@ -183,6 +176,21 @@ function body(id: string, d: Delivery): Record<string, unknown> {
  * platform could still replay across the stop — which is exactly what a suspend
  * is least likely to allow. Reading here hands them over AND moves that cursor
  * past them, so what is remembered is true whichever way the replay goes.
+ *
+ * AND THE DROP WAITS FOR AN EMPTY RING, which is the other half of the same
+ * point. The drop is what keeps a stopped subscription from answering
+ * "suspended" for five minutes after `start_computer` has already fixed it — a
+ * model told to fix something, doing so, and being told the same thing again is
+ * a model that stops believing the tool. But the drop also destroys the buffer,
+ * and this read is bounded by the caller's `limit` while the ring holds up to
+ * `MAX_BUFFERED`. Dropping on the first call therefore MOVED the loss rather
+ * than removing it: three hundred unread events became a hundred delivered and
+ * two hundred discarded, under a sentence calling them the last this stream has
+ * and a `more_waiting` that said otherwise (/code-review, OPL-4244). So the stop
+ * is reported on every call — which is true every time, and each one hands over
+ * another batch — and the subscription goes only when there is nothing left in
+ * it. A model that never calls back leaves it to the idle sweep, which is what
+ * the sweep is for.
  */
 function stopped(
   session: Session,
@@ -192,17 +200,25 @@ function stopped(
   read: { since?: string; limit: number },
 ) {
   const d = sub.read(read);
-  session.events.drop(id, reason, true);
   const n = d.events.length;
+  const drained = !d.more;
+  if (drained) session.events.drop(id, reason, true);
   const held = n
     ? `${n} event${n === 1 ? '' : 's'} had already arrived before it stopped and ${n === 1 ? 'is' : 'are'} ` +
-      `below — ${n === 1 ? 'it is' : 'they are'} the last this stream has. `
+      (drained
+        ? `below — ${n === 1 ? 'it is' : 'they are'} the last this stream has. `
+        : `below. ${d.more} more ${d.more === 1 ? 'is' : 'are'} still held here — call again for ` +
+          `${d.more === 1 ? 'it' : 'them'} before doing anything else, because they are only in this ` +
+          `session and a replay across the stop may not reach them. `)
     : '';
   return refused(
-    `${held}The event stream for ${id} is not running: ${reason}. Fix the cause and call again: the next ` +
-      `call opens a fresh stream and resumes from the last event you were handed, so whatever the ` +
-      `platform can still replay you will still be given, and whatever it cannot comes back as a ` +
-      `stated gap rather than as silence.`,
+    `${held}The event stream for ${id} is not running: ${reason}. Fix the cause and call again: ` +
+      (drained
+        ? `the next call opens a fresh stream and resumes from the last event you were handed, so ` +
+          `whatever the platform can still replay you will still be given, and whatever it cannot ` +
+          `comes back as a stated gap rather than as silence.`
+        : `the next call hands over what is still buffered here, and the one after the buffer is ` +
+          `empty opens a fresh stream that resumes from the last event you were handed.`),
     n || d.loss ? body(id, d) : undefined,
   );
 }

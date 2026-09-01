@@ -3949,6 +3949,60 @@ describe('an event stream that stopped with events still in it', () => {
   }, 20000);
 });
 
+describe('a stopped stream holding more than one batch', () => {
+  it('keeps the buffer until it is drained rather than dropping the rest with it', async () => {
+    // The drain fixed the first-batch loss and, dropping on the first call,
+    // moved the rest of it: the read is bounded by the caller's `limit` while
+    // the ring holds up to MAX_BUFFERED, so 5 unread events with limit 2 became
+    // 2 delivered and 3 discarded — under a sentence calling them the last this
+    // stream has and a more_waiting that said otherwise.
+    const platform = installFakePlatform();
+    const events = fakeEvents();
+    const { call, close } = await connect({ webSocket: events.factory });
+    try {
+      await call('poll_events', {});
+      for (let i = 1; i <= 5; i++) {
+        events.last().send({ type: 'process.exited', cursor: `cur-${i}`, data: { pid: i } });
+      }
+      await new Promise((r) => setTimeout(r, 20));
+
+      const real = globalThis.fetch;
+      globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+        const url = new URL(String(input));
+        if (url.pathname.endsWith('/computers/vm-1')) {
+          return new Response(JSON.stringify({ id: 'vm-1', status: 'suspended' }), {
+            headers: { 'Content-Type': 'application/json' },
+          });
+        }
+        return real(input as never, init);
+      }) as typeof fetch;
+      events.last().close();
+      await new Promise((r) => setTimeout(r, 1600));
+      globalThis.fetch = real;
+
+      // First call: two of the five, and it must not claim they are the last.
+      const first = await call('poll_events', { limit: 2 });
+      expect(first.isError).toBe(true);
+      expect(said(first)).toMatch(/still held here/);
+      expect(said(first)).not.toMatch(/the last this stream has/);
+      expect(said(first)).toMatch(/"pid": 1/);
+      expect(said(first)).toMatch(/"pid": 2/);
+
+      // The rest survive, rather than having gone with the subscription.
+      const second = await call('poll_events', { limit: 2 });
+      expect(said(second)).toMatch(/"pid": 3/);
+      expect(said(second)).toMatch(/"pid": 4/);
+      const third = await call('poll_events', { limit: 2 });
+      expect(said(third)).toMatch(/"pid": 5/);
+      // Now the ring is empty, so this one is the last and says so.
+      expect(said(third)).toMatch(/the last this stream has/);
+    } finally {
+      await close();
+      platform.restore();
+    }
+  }, 20000);
+});
+
 describe('wait_for_event and the deadline it was given', () => {
   it('bounds the attach with timeout_s rather than spending ATTACH_MS in front of it', async () => {
     // A socket that opens and never sends `hello`. The attach used to be its
@@ -4052,7 +4106,7 @@ describe('text typed at the keyboard', () => {
       const res = await call('type_text', { text: 'hello \ud800 there' });
       expect(res.isError).toBe(true);
       expect(said(res)).toMatch(/unpaired surrogate/);
-      expect(said(res)).toMatch(/nothing was typed/);
+      expect(said(res)).toMatch(/Nothing was typed/);
       expect(platform.calls.some((c) => c.path.endsWith('/input'))).toBe(false);
     } finally {
       await close();
