@@ -27,6 +27,10 @@ const COMPUTER = {
     url: 'wss://app.test/vnc?token=SECRET-CONTROL',
     view_url: 'wss://app.test/vnc?token=view-only',
     embed_url: 'https://app.test/embed/vm-1',
+    // The event stream (platform OPL-3785). Carries the controlling credential
+    // like `url` does, which is why `withoutCredentials` has to keep taking the
+    // whole `vnc` object rather than a named list of keys.
+    events_url: 'wss://app.test/api/v1/computers/vm-1/events?token=SECRET-CONTROL',
     // Present and false, the way the platform sends it (OPL-3870): a computer
     // whose QEMU has no vdagent channel, or whose image was never verified to
     // carry the agent. Absent would be a different fixture — this server reads
@@ -370,6 +374,121 @@ export function download(content: string | Uint8Array, range?: string): Response
 const PNG_1PX =
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
 
+/**
+ * A stand-in for the platform's event socket (platform OPL-3785).
+ *
+ * The one part of this server that is not `fetch`, so it is the one part
+ * `installFakePlatform` cannot answer for: a websocket is not a request, and
+ * replacing the global would not see it. Frames are pushed by the test rather
+ * than scripted here, because what these tests are about is what the server
+ * does BETWEEN frames — the order they arrive in is the fixture.
+ */
+export class FakeSocket {
+  readonly url: string;
+  closed = false;
+  readonly #listeners = new Map<string, Set<(ev?: unknown) => void>>();
+
+  constructor(url: string) {
+    this.url = url;
+  }
+
+  /** The `since` this connection asked to resume from, if any. */
+  get since(): string | null {
+    return new URL(this.url).searchParams.get('since');
+  }
+
+  // The overloads the server's structural `EventSocket` asks for, over one
+  // implementation. Without them this class is not assignable to it, and the
+  // seam the whole file exists to fill does not typecheck.
+  addEventListener(type: 'open', fn: () => void): void;
+  addEventListener(type: 'message', fn: (ev: { data: unknown }) => void): void;
+  addEventListener(type: 'error', fn: () => void): void;
+  addEventListener(type: 'close', fn: () => void): void;
+  addEventListener(type: string, fn: (ev: never) => void): void {
+    const set = this.#listeners.get(type) ?? new Set();
+    set.add(fn as (ev?: unknown) => void);
+    this.#listeners.set(type, set);
+  }
+
+  close(): void {
+    if (this.closed) return;
+    this.closed = true;
+    this.#fire('close');
+  }
+
+  /** The handshake completing, which is not the opening frame. */
+  open(): void {
+    this.#fire('open');
+  }
+
+  /** One text frame, as the platform writes them. */
+  send(frame: unknown): void {
+    this.#fire('message', { data: JSON.stringify(frame) });
+  }
+
+  /** A refused upgrade: an error with nothing readable on it, then a close. */
+  fail(): void {
+    this.#fire('error');
+    this.close();
+  }
+
+  #fire(type: string, ev?: unknown): void {
+    for (const fn of this.#listeners.get(type) ?? []) fn(ev);
+  }
+}
+
+/** The opening frame a computer with a working guest watcher sends. */
+export const HELLO = {
+  type: 'hello',
+  computer: 'vm-1',
+  cursor: 'cur-0',
+  ready: true,
+  events: [
+    'window.opened',
+    'window.closed',
+    'window.focused',
+    'window.blurred',
+    'clipboard.changed',
+    'process.exited',
+    'computer.ready',
+    'computer.idle',
+    'computer.started',
+    'computer.stopped',
+    'computer.suspended',
+  ],
+  windows: [],
+};
+
+/**
+ * A socket factory that hands back sockets the test can drive.
+ *
+ * `hello` is sent on a turn of the event loop rather than inside the factory,
+ * because the server attaches its listeners after the factory returns — a frame
+ * delivered synchronously would arrive before anything was listening, which is
+ * a race no real socket can produce and every test would then be written around.
+ */
+export function fakeEvents(hello: Record<string, unknown> | null = {}) {
+  const sockets: FakeSocket[] = [];
+  const factory = (url: string) => {
+    const socket = new FakeSocket(url);
+    sockets.push(socket);
+    if (hello !== null) {
+      setTimeout(() => {
+        if (socket.closed) return;
+        socket.open();
+        socket.send({ ...HELLO, ...hello });
+      }, 0);
+    }
+    return socket;
+  };
+  return {
+    factory,
+    sockets,
+    /** The connection now open — the newest, since each replaces the last. */
+    last: () => sockets[sockets.length - 1],
+  };
+}
+
 /** A connected client and server pair over an in-memory transport. */
 export async function connect(cfg: Partial<ServerConfig> = {}) {
   const server = createServer({
@@ -377,6 +496,10 @@ export async function connect(cfg: Partial<ServerConfig> = {}) {
     baseUrl: BASE,
     computerId: 'vm-1',
     ...cfg,
+    // After the spread, not before it: `{webSocket: undefined}` is what a
+    // caller who did not mention sockets passes, and it would otherwise
+    // overwrite this with nothing and send every test at undici.
+    webSocket: cfg.webSocket ?? fakeEvents().factory,
   });
   const client = new Client({ name: 'test', version: '0' });
   const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();

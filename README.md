@@ -81,6 +81,8 @@ entirely.
 `list_windows`, `window_action`, `read_clipboard`, `write_clipboard`,
 `read_file`, `write_file`
 
+**Being told rather than asking** — `wait_for_event`, `poll_events`
+
 **Snapshots** — `list_snapshots`, `snapshot_holdings`, `create_snapshot`,
 `restore_snapshot`, `clone_snapshot`, `snapshot_schedule`, `get_retention`,
 `delete_snapshot`
@@ -97,10 +99,51 @@ entirely.
 
 ## Things worth knowing
 
-**A screenshot is how you find out what happened.** Nothing on a desktop reports
-back. The tools say so in their own descriptions, and the server's instructions
-say it once more, because a model that acts without looking is the single most
-common way one of these sessions goes wrong.
+**A screenshot is how you find out what the screen looks like.** A click that
+landed and a click that did nothing produce the same tool result, so a model
+that acts without looking is the single most common way one of these sessions
+goes wrong. The tools say so in their own descriptions and the server's
+instructions say it once more.
+
+**But a screenshot is no longer how you find out whether anything happened.**
+The platform's computers report what they do — a window opening, closing or
+taking focus, the clipboard changing hands, a background command exiting, the
+desktop coming up, the machine going idle, every power transition — and
+`wait_for_event` blocks until one of those arrives instead of screenshotting in
+a loop to discover that nothing has.
+
+The part worth understanding is where the socket lives. A model takes turns; it
+is not sitting in a loop reading a stream, and between two of its turns there is
+nobody here to read one. So **this server holds the connection**, one per
+computer, opened the first time a tool asks about it and kept across turns. What
+arrives while the model is doing something else is buffered, and the next
+`wait_for_event` or `poll_events` is handed it in order. The model holds a
+cursor and never learns that a socket exists.
+
+Three consequences, and they are the whole of the design:
+
+- **A wait that times out has missed nothing.** The stream stayed open while the
+  tool call was not running. That is why the timeout is capped at 55 seconds
+  rather than the fifteen minutes `wait_for_computer` allows — a short wait
+  costs nothing, because calling again picks up exactly where it left off. A
+  timeout is a normal answer here, not an error.
+- **An event that already happened still ends a wait.** `computer.ready` fires
+  once per desktop session, so a machine that has been up for an hour will never
+  send it again; attach to one and you are handed a `computer.ready` marked
+  `synthesized` rather than waiting forever for an event that cannot arrive.
+- **A hole in the history is answered, not forwarded.** When the platform cannot
+  replay from where this server had got to, the events that survived come back
+  with a count of what did not **and** with the state the missing ones would
+  have reported — the window listing and the computer's own record. The `gap`
+  frame itself never reaches the model, because a model handed one would invent
+  a recovery procedure.
+
+Not everything is an event. A click landing, a page painting and a file being
+written are not, and no amount of waiting will produce one — `screenshot`,
+`list_windows` and `exec_poll` are still the answers there. `wait_for_event`
+refuses at once, naming what the computer *can* emit, when asked for something
+this guest will never produce: a Windows guest has no event stream at all, and a
+Linux image built without the X bindings its watcher needs emits no `window.*`.
 
 **`running` does not mean ready.** A computer reports running when the
 hypervisor has started the VM; the desktop inside comes up seconds later.

@@ -2857,6 +2857,9 @@ describe('the tools our own prose tells a model to call', () => {
     'cheapest_plan',
     'from_x',
     'from_y',
+    // A field on what poll_events and wait_for_event answer with (OPL-3926):
+    // how many events are still buffered behind the batch that was returned.
+    'more_waiting',
   ]);
 
   it('names only tools that exist', async () => {
