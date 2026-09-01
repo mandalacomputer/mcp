@@ -373,6 +373,7 @@ export class Subscription {
     deadline: AbortSignal,
     cancel?: AbortSignal,
     since?: string,
+    abandon?: () => boolean,
   ): Promise<number | undefined> {
     this.touch();
     const start = this.resolveFrom(since);
@@ -387,6 +388,13 @@ export class Subscription {
       if (hit) return hit.index;
       if (deadline.aborted || cancel?.aborted) return undefined;
       if (this.#state.status === 'stopped') return undefined;
+      // Asked on every wake, AFTER the buffered check, so an event that is
+      // already here still wins. This is what makes a `capabilities` frame
+      // arriving mid-wait answerable: the frame wakes every parked waiter but
+      // is not itself an event, so a loop that only re-ran `matches` saw
+      // nothing, parked again, and sat out the whole deadline on a computer
+      // that could no longer produce what it was waiting for.
+      if (abandon?.()) return undefined;
       await this.#park(deadline, cancel);
     }
   }
@@ -608,11 +616,6 @@ export class Subscription {
     // able to reintroduce the leak by forgetting.
     if (this.#abort.signal.aborted) return Promise.resolve(false);
     return new Promise<boolean>((resolve) => {
-      // `since` is this subscription's own place, never the model's. The two
-      // are different positions on purpose: the model may be four turns behind
-      // and the socket must not re-request what is already in the ring.
-      const target = new URL(url);
-      if (this.#resume) target.searchParams.set('since', this.#resume);
       // Whether this connection can be handed events it missed. A connection
       // with no continuity is joining at the head, and everything before it is
       // simply not this stream's to report.
@@ -620,6 +623,21 @@ export class Subscription {
 
       let socket: EventSocket;
       try {
+        // `since` is this subscription's own place, never the model's. The two
+        // are different positions on purpose: the model may be four turns behind
+        // and the socket must not re-request what is already in the ring.
+        //
+        // The URL is parsed INSIDE this try, with the socket it is for. `#url()`
+        // returns any non-empty string the platform put in `events_url`, so a
+        // relative or malformed one threw out of the Promise executor and
+        // REJECTED — and nothing between here and `#run` catches, so the
+        // subscription went to a terminal `stopped` with no backoff and no
+        // reconnect. A failure to open a socket resolves `false` precisely so
+        // the loop can back off and re-read the computer, which is also how a
+        // rotated credential is picked up; a URL that would not parse is the
+        // same kind of failure and gets the same answer.
+        const target = new URL(url);
+        if (this.#resume) target.searchParams.set('since', this.#resume);
         socket = this.#socketFor(target.toString());
       } catch {
         return resolve(false);

@@ -40,6 +40,31 @@ export const refused = (line: string, v?: unknown): CallToolResult => ({
 export const MAX_INLINE_IMAGE_BYTES = 8 * 1024 * 1024;
 
 /**
+ * Raster types that MCP image content can carry safely.
+ *
+ * `image/*` includes `image/svg+xml`, and a client that inlines that MIME as a
+ * picture can execute script from it. SVG is XML; it goes through the text /
+ * base64 path like any other non-raster file.
+ *
+ * Here, beside the size cap, for the reason written above it: every path that
+ * produces image content has to observe this, and the two paths did not agree.
+ * `read_file` checked the allowlist while `screenshot` checked only
+ * `startsWith('image/')` — and the case screenshot's check exists for is a
+ * proxy or captive portal answering in place of the capture, which is exactly
+ * the situation where the bytes are chosen by somebody else.
+ */
+export const INLINE_IMAGE_TYPES: ReadonlySet<string> = new Set([
+  'image/png',
+  'image/jpeg',
+  'image/gif',
+  'image/webp',
+]);
+
+export function isInlineImage(contentType: string): boolean {
+  return INLINE_IMAGE_TYPES.has(contentType);
+}
+
+/**
  * A screenshot, as image content.
  *
  * This is the whole reason this server is more than a CLI wrapper: the bytes go

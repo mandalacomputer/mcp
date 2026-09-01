@@ -3,6 +3,7 @@ import {
   CancelledError,
   isTransientForPoll,
   MoveRequiredError,
+  NotFoundError,
   RateLimitError,
 } from '../errors.js';
 import {
@@ -106,7 +107,18 @@ type Move = {
  */
 const movesOf = (body: unknown): Move[] | undefined => {
   const list = (body as { moves?: unknown } | null)?.moves;
-  return Array.isArray(list) ? (list as Move[]) : undefined;
+  if (!Array.isArray(list)) return undefined;
+  // Rows shape-checked, as list_computers and list_snapshots check theirs. Both
+  // callers reach straight into a row — `m.computer_id`, and moveLine's field
+  // reads — so a `null` in the array threw a TypeError. In the poll that throw
+  // landed OUTSIDE the try/catch that exists to say "THE MOVE IS STILL
+  // RUNNING", replacing the one sentence that stops a caller concluding a
+  // multi-minute disk copy had failed. Dropping the row keeps the answer the
+  // array can support; an unreadable ENVELOPE is still undefined, which is a
+  // different fact and stays a different answer.
+  return list.filter(
+    (row): row is Move => row !== null && typeof row === 'object' && !Array.isArray(row),
+  );
 };
 
 /** What arrived where a list was expected, for a refusal that names it. */
@@ -1228,14 +1240,39 @@ export const registerComputers: Registrar = (server, session, opts) => {
               'Nothing has been deleted.',
           );
         }
-        const res = await session.api
-          .with(extra.signal)
-          .send<{ snapshots_deleted?: number }>('DELETE', P.computer(computer_id), {
-            query: {
-              snapshots: delete_snapshots ? 'delete' : undefined,
-              expect: delete_snapshots ? fingerprint : undefined,
-            },
-          });
+        let res: { snapshots_deleted?: number } | undefined;
+        try {
+          res = await session.api
+            .with(extra.signal)
+            .send<{ snapshots_deleted?: number }>('DELETE', P.computer(computer_id), {
+              query: {
+                snapshots: delete_snapshots ? 'delete' : undefined,
+                expect: delete_snapshots ? fingerprint : undefined,
+              },
+            });
+        } catch (err) {
+          // A 404 means the computer is not there, which is the state this call
+          // was asking for. The platform answers it for an id it cannot scope,
+          // and this tool is annotated `idempotentHint`, so the retry after a
+          // lost 2xx is one a client is invited to make — and it was the one
+          // path that reached `send`, threw, and skipped `unbind` entirely,
+          // leaving the session driving a machine that no longer exists. That
+          // ghost is the whole reason unbind exists.
+          //
+          // Unbound BEFORE the rethrow-or-report decision, because it is true
+          // either way: whatever this answers, the caller must not be left
+          // selected on a computer the platform says is gone.
+          if (!(err instanceof NotFoundError)) throw err;
+          session.unbind(computer_id);
+          // Reported as a success rather than an error, and deliberately not as
+          // a plain "Deleted": a caller retrying cannot be told its snapshots
+          // were purged when this call is not what purged them, and the count
+          // is a thing only the response that actually did the work carries.
+          return said(
+            `${computer_id} is already gone — the platform has no such computer, so there was nothing left to delete. ` +
+              'If this is a retry, the first call is the one that destroyed it, and whatever it did with the snapshots is what happened to them.',
+          );
+        }
         session.unbind(computer_id);
         // A count only when the platform sent one. `?? 0` here would turn "it
         // did not say" into the affirmative claim that nothing was destroyed —

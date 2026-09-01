@@ -797,3 +797,80 @@ describe('the socket underneath', () => {
     await until('the socket to be closed', () => ev.last().closed);
   });
 });
+
+// --- grok bug hunt, OPL-4218 ---------------------------------------------
+
+describe('an events_url the platform sent but nothing can parse', () => {
+  it('backs off and reconnects rather than stopping the stream for good', async () => {
+    const real = globalThis.fetch;
+    // A relative URL: a string, so `#url()` hands it over, and not something
+    // `new URL` can take on its own. Two reads — the malformed one, then a good
+    // one — so the test can show the subscription survived to use the second.
+    let reads = 0;
+    globalThis.fetch = (async (input: string | URL | Request) => {
+      const url = new URL(typeof input === 'string' ? input : input.toString());
+      if (url.host !== new URL(BASE).host) return real(input as never);
+      reads += 1;
+      return new Response(
+        JSON.stringify({
+          id: 'vm-1',
+          status: 'running',
+          os: 'linux',
+          vnc: { events_url: reads === 1 ? '/not-an-absolute-url' : 'wss://app.test/events' },
+        }),
+        { headers: { 'Content-Type': 'application/json' } },
+      );
+    }) as typeof fetch;
+    try {
+      const ev = fakeEvents();
+      const { call, close } = await connect({ webSocket: ev.factory });
+      // The first read produces a URL that throws out of `new URL`. That used
+      // to reject the connection promise, escape `#loop`, and put the
+      // subscription into a terminal `stopped` — no backoff, no second read.
+      await call('poll_events');
+      await until('a second read of the computer', () => reads >= 2, 5_000);
+      await until('a socket on the good URL', () => ev.sockets.length >= 1, 5_000);
+      expect(ev.last().url).toContain('wss://app.test/events');
+      await close();
+    } finally {
+      globalThis.fetch = real;
+    }
+  });
+});
+
+describe('a capability withdrawn while somebody is already waiting', () => {
+  let platform: ReturnType<typeof installFakePlatform>;
+  beforeEach(() => {
+    platform = installFakePlatform();
+  });
+  afterEach(() => platform.restore());
+
+  it('answers at once instead of sitting until the timeout', async () => {
+    const { call, close, ev } = await attach({ ready: false });
+    // The wait starts while the guest still advertises window events, so the
+    // refusal cannot be computed up front — which is exactly the case the
+    // one-shot check missed.
+    const waiting = call('wait_for_event', { types: ['window.opened'], timeout_s: 30 });
+    await new Promise((r) => setTimeout(r, 20));
+    ev.last().send({
+      type: 'capabilities',
+      events: ['computer.started', 'computer.stopped'],
+      detail: 'the window watcher went away',
+    });
+    const res = await waiting;
+    expect(res.isError).toBe(true);
+    expect(textOf(res)).toContain('cannot emit window.opened');
+    await close();
+  });
+
+  it('still returns the event when one arrives, capabilities notwithstanding', async () => {
+    const { call, close, ev } = await attach({ ready: false });
+    const waiting = call('wait_for_event', { types: ['window.opened'], timeout_s: 30 });
+    await new Promise((r) => setTimeout(r, 20));
+    ev.last().send(frame('window.opened', { id: '0x1' }, 'cur-1'));
+    const res = await waiting;
+    expect(res.isError).toBeFalsy();
+    expect(eventsOf(res).map((e) => e.type)).toContain('window.opened');
+    await close();
+  });
+});

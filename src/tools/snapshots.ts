@@ -146,7 +146,20 @@ export const registerSnapshots: Registrar = (server, session, opts) => {
         // down in lib/hostroute: an extra unreachable row is visible and is
         // corrected by the next complete answer, while a withheld one makes a
         // row vanish mid-outage, which is the failure worth preventing.
+        // A filter that was GIVEN and trims to nothing is refused, not dropped.
+        // `"   "` used to fall through to the unfiltered list, so a caller who
+        // asked about one computer was handed the whole account's inventory
+        // with nothing saying the filter had been ignored — the one shape of
+        // wrong answer a listing must not produce. Every other id path treats
+        // whitespace as absent and then REFUSES; this is that rule, here.
         const filterId = computer_id?.trim();
+        if (computer_id !== undefined && !filterId) {
+          return refused(
+            'computer_id was given but is blank, and a blank filter would have listed every snapshot on ' +
+              'the account as though it belonged to one computer. Pass a real computer_id, or omit it ' +
+              'entirely to ask for the whole account.',
+          );
+        }
         const rows = filterId
           ? all.filter((s) => s.computer_id === filterId || s.unreachable)
           : all;
