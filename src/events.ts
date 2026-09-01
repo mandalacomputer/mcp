@@ -215,11 +215,17 @@ export function cleanWatchPath(input: string): string {
         'relative to.',
     );
   }
-  // Go's `path.Clean` and not Node's `normalize`, which differ on exactly one
-  // thing that matters: normalize keeps a trailing slash and Clean does not,
-  // and the cleaned form is the one every event echoes.
+  // Go's `path.Clean` and not Node's `normalize`, because what has to come out
+  // of here is the spelling the HOST will echo, and the two do not agree
+  // everywhere. Both differences are fixed up rather than relied on: normalize
+  // keeps a trailing slash and Clean does not, and a leading `//` is a shape
+  // POSIX leaves implementation-defined — Node collapses it on the versions
+  // this was measured on, but `engines` here says 20.3 and up and this is not
+  // something to discover from a `400` on an upgrade that reaches a websocket
+  // client with no status and no body. Clean collapses it; so does this.
   let c = posix.normalize(input);
   if (c.length > 1 && c.endsWith('/')) c = c.slice(0, -1);
+  c = c.replace(/^\/{2,}/, '/');
   if (c === '/') {
     throw new MandalaError(
       'watching / is not a nomination; name the directory you are waiting on. The root is every ' +
@@ -379,7 +385,7 @@ export class Subscription {
   /**
    * Trees a connection carrying them would not open, PROVEN so.
    *
-   * Proven means the experiment in {@link #account} came back positive: the
+   * Proven means the experiment came back positive — see {@link #cleared}: the
    * tree was withheld, the same stream opened without it, and there is nothing
    * else the difference could be. A tree merely suspected is
    * {@link #shedCandidate} and is not in here.
@@ -655,7 +661,7 @@ export class Subscription {
       // Most recently asked about goes last, so the eviction below always takes
       // the tree that has waited longest for somebody to care about it. Which
       // tree gets BLAMED for a stream that will not open is a different order
-      // and deliberately not this one — see `#account`.
+      // and deliberately not this one — see `#blamed`.
       this.#watches.splice(at, 1);
       this.#watches.push(path);
       // Already on the wire and not under suspicion, so there is nothing to
@@ -1410,20 +1416,6 @@ export class Subscription {
     this.#armed = armed;
   }
 
-  /**
-   * Stop nominating the newest tree, so the rest of the stream can come back.
-   *
-   * Newest because it is the one that has just changed: the connections before
-   * it were opening, so whatever the host is refusing arrived with this. Shed
-   * one at a time rather than all of them, since three working watches must not
-   * be thrown away for a fourth the host will not take.
-   *
-   * The path is remembered rather than forgotten. A tree that silently stopped
-   * being nominated would be answered with an ordinary "not being watched yet"
-   * for as long as the caller kept asking, and the caller would keep asking —
-   * so {@link watchWasRefused} is what lets the tool say the real thing, which
-   * is that the connection carrying it would not open at all.
-   */
   /**
    * What one connection's outcome says about the watches it carried.
    *

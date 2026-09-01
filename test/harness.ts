@@ -123,8 +123,20 @@ const AGENT_STREAM =
  * the tools read fields off these responses and a uniform `{}` would let a tool
  * that misreads its own route pass.
  */
-export function installFakePlatform(): { calls: Recorded[]; restore: () => void } {
+export function installFakePlatform(): {
+  calls: Recorded[];
+  restore: () => void;
+  /**
+   * What `GET computers/:id` says this computer is doing.
+   *
+   * Mutable, because a computer changing state under an open stream is a fixture
+   * rather than a fixed value: the event socket re-reads this record on every
+   * reconnect, which is how a suspend reaches a websocket client at all.
+   */
+  state: { status: string };
+} {
   const calls: Recorded[] = [];
+  const state = { status: 'running' };
   const real = globalThis.fetch;
 
   globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
@@ -150,11 +162,12 @@ export function installFakePlatform(): { calls: Recorded[]; restore: () => void 
       headers[k.toLowerCase()] = v;
     });
     calls.push({ method, path, body, query: url.searchParams, headers });
-    return respond(method, path, headers);
+    return respond(method, path, headers, state.status);
   }) as typeof fetch;
 
   return {
     calls,
+    state,
     restore: () => {
       globalThis.fetch = real;
     },
@@ -227,7 +240,12 @@ const BUILD_STREAM =
   `event: progress\ndata: ${JSON.stringify({ ...BUILD_PROGRESS, done: false, status: 'running', phase: 'copying' })}\n\n` +
   `event: done\ndata: ${JSON.stringify(BUILD_PROGRESS)}\n\n`;
 
-function respond(method: string, path: string, headers: Record<string, string>): Response {
+function respond(
+  method: string,
+  path: string,
+  headers: Record<string, string>,
+  status = 'running',
+): Response {
   const json = (v: unknown, status = 200) =>
     new Response(JSON.stringify(v), { status, headers: { 'Content-Type': 'application/json' } });
 
@@ -316,10 +334,11 @@ function respond(method: string, path: string, headers: Record<string, string>):
   if (path.endsWith('/move')) return json(MOVE_STARTED, 202);
   if (path === '/snapshots') return json([SNAPSHOT]);
   if (path.endsWith('/snapshots')) return json(method === 'GET' ? HOLDINGS : SNAPSHOT);
-  if (path.endsWith('/computers')) return json(method === 'GET' ? [COMPUTER] : COMPUTER);
+  if (path.endsWith('/computers'))
+    return json(method === 'GET' ? [{ ...COMPUTER, status }] : COMPUTER);
   // Before the catch-all, which answers COMPUTER for every id there is.
   if (path === '/computers/vm-bridged') return json(BRIDGED_COMPUTER);
-  return json(COMPUTER);
+  return json({ ...COMPUTER, status });
 }
 
 /**

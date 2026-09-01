@@ -139,33 +139,64 @@ async function reconcile(
 /**
  * Why a computer is missing part of the guest half, in words.
  *
- * "The guest half" is two capabilities and not one, which is the thing a client
- * gets wrong here and this server got wrong until OPL-4221. `file.changed` runs
- * in the terminal broker against libc's own inotify calls, so it needs the
- * terminal channel and NOTHING an image can be missing; the window, clipboard
- * and readiness events need that channel AND the X bindings their desktop
- * watcher is written against. So an old Linux golden — one published before
- * python3-xlib was in the image — emits every file event and no window event at
- * all, and a sentence that explained the missing window events by saying the
- * guest has nowhere to run a watcher would be describing a computer that is
- * running one.
+ * "The guest half" is not one thing, which is what a client gets wrong here and
+ * what this server got wrong until OPL-4221. `file.changed` runs in the
+ * terminal broker against libc's own inotify calls, so it needs the terminal
+ * channel and NOTHING an image can be missing; the window, clipboard and
+ * readiness events need that channel AND the X bindings their desktop watcher
+ * is written against. Three shapes fall out of that, and each wants something
+ * different done about it — one is fixed by a stop and a start, one is a fact
+ * about the image, one is a fact about the host.
+ *
+ * Written once and used by both wait tools, because the branch was split
+ * correctly in one of them and not the other, which is how a two-copy
+ * explanation goes wrong.
  *
  * Read off `can` rather than off the computer record, because `can` is what the
  * host actually said and is revised mid-stream by a `capabilities` frame.
  */
 function guestHalf(can: string[]): string {
-  return can.includes('file.changed')
-    ? 'The guest half of this stream is two capabilities and this computer has one of them: ' +
-        'file.changed needs only the terminal channel its watcher runs over, which this computer ' +
-        'has, while window, clipboard and readiness events also need the X bindings their desktop ' +
-        'watcher is written against — and this image does not carry those. That is a fact about ' +
-        'the image and there is no operation that moves an existing computer onto a newer one, so ' +
-        'nothing will make it report those. Use screenshot and list_windows for the desktop.'
-    : 'This guest has nowhere to run a watcher at all — a Windows one, or a Linux one whose ' +
-        'hardware carries no terminal channel — so none of the guest-reported half reaches this ' +
-        'stream. The channel is hardware and is acquired on a COLD start, so stop_computer then ' +
-        'start_computer can get one where restart_computer cannot. Meanwhile screenshot, ' +
-        'list_windows and exec_poll still work.';
+  const files = can.includes('file.changed');
+  const desktop = can.some((t) => t.startsWith('window.'));
+  if (files && !desktop) {
+    return (
+      'The guest half of this stream is more than one capability and this computer has some of ' +
+      'it: file.changed needs only the terminal channel its watcher runs over, which this ' +
+      'computer has, while window, clipboard and readiness events also need the X bindings their ' +
+      'desktop watcher is written against — and this image does not carry those. That is a fact ' +
+      'about the image and there is no operation that moves an existing computer onto a newer ' +
+      'one, so nothing will make it report those. Use screenshot and list_windows for the desktop.'
+    );
+  }
+  if (desktop && !files) {
+    // The reverse of the case above, and the one that reads most like a missing
+    // channel while being its opposite: the desktop half needs that channel
+    // too, so a computer reporting it plainly has one.
+    return (
+      'It does report the desktop half, which needs the same terminal channel a file watch runs ' +
+      'over — so the channel is there and it is the file watch that is missing. The host holding ' +
+      'this computer predates them (platform OPL-3927), and there is nothing to do about that ' +
+      'from here.'
+    );
+  }
+  if (files && desktop) {
+    // Both halves present, so whatever was asked for is not a guest capability
+    // at all. Reachable only when the platform's vocabulary grows past what this
+    // build knows, which the reference says it will — and a paragraph about a
+    // missing watcher would be a confident answer to a question nobody asked.
+    return (
+      'This computer reports both halves of what a guest observes about itself, so the type you ' +
+      'asked for is one it does not emit rather than one it is unable to emit. The vocabulary ' +
+      'grows; this build may simply be asking for something newer than the host.'
+    );
+  }
+  return (
+    'This guest has nowhere to run a watcher at all — a Windows one, or a Linux one whose ' +
+    'hardware carries no terminal channel — so none of the guest-reported half reaches this ' +
+    'stream. The channel is hardware and is acquired on a COLD start, so stop_computer then ' +
+    'start_computer can get one where restart_computer cannot. Meanwhile screenshot, ' +
+    'list_windows and exec_poll still work.'
+  );
 }
 
 /** One event's type and the thing about it worth putting in a sentence. */
@@ -445,11 +476,6 @@ export const registerEvents: Registrar = (server, session) => {
         // Measured on ARMED trees and not on nominated ones, because a
         // nomination is not a watch: a tree that is still arming, that the guest
         // called unwatchable, or that the host would not carry produces exactly
-        // as many events as no tree at all. Counting it would let each of those
-        // suppress this and hand back a timeout reading "nothing happened".
-        // Measured on ARMED trees and not on nominated ones, because a
-        // nomination is not a watch: a tree that is still arming, that the guest
-        // called unwatchable, or that the host would not carry produces exactly
         // as many events as no tree at all. Counting one would let each of those
         // suppress the refusal below and hand back a timeout reading "nothing
         // happened".
@@ -669,7 +695,12 @@ export const registerEvents: Registrar = (server, session) => {
     id: string,
     root: string,
     wire: string,
-    tail: string,
+    // A FUNCTION, because a caller's tail can CONSUME something — the
+    // once-only interruption note — and an argument is evaluated whether or not
+    // this returns anything. Passed as a value it took that note on every call
+    // that reached here and printed it only on the calls that settled, which is
+    // the defect the note's own laziness exists to prevent, moved one frame up.
+    tail: () => string,
     extras: Record<string, unknown> = {},
   ) => {
     const answer = { computer: id, watch: wire, watching: sub.watching, ...extras };
@@ -682,7 +713,7 @@ export const registerEvents: Registrar = (server, session) => {
           `this computer is already watching the 32 trees it will watch at once across every ` +
           `client connected to it, or it will not honour this path. Nominate a directory it is ` +
           `already watching, close another client, or use exec to look at this one.` +
-          tail,
+          tail(),
         answer,
       );
     }
@@ -690,7 +721,8 @@ export const registerEvents: Registrar = (server, session) => {
       return refused(
         `${wire} on ${id} stopped being watched while this call was waiting: another call ` +
           `nominated a fifth tree and this was the one it pushed out. Nothing can be said about ` +
-          `whether it changed after that. Call again to nominate it back.`,
+          `whether it changed after that. Call again to nominate it back.` +
+          tail(),
         answer,
       );
     }
@@ -700,12 +732,13 @@ export const registerEvents: Registrar = (server, session) => {
         `${id} stopped being able to report file changes while this call was waiting — the guest ` +
           `half of its event stream was withdrawn, which is what a guest turning out to have no ` +
           `watcher looks like. It now reports it can emit: ${can.join(', ')}. Nothing can be said ` +
-          `about whether ${wire} changed. Use exec to look at the directory.`,
+          `about whether ${wire} changed. Use exec to look at the directory.` +
+          tail(),
         answer,
       );
     }
     if (sub.lostFor(root) === 'unwatchable') {
-      return refused(unwatchable(wire) + tail, answer);
+      return refused(unwatchable(wire) + tail(), answer);
     }
     return undefined;
   };
@@ -822,23 +855,10 @@ export const registerEvents: Registrar = (server, session) => {
         // wait_for_event.
         const can = sub.eventTypes;
         if (can.length && !can.includes('file.changed')) {
-          // A computer reporting the DESKTOP half has the terminal channel a
-          // file watch runs over — that is the same channel, and the desktop
-          // half needs it as well as the X bindings. So the missing capability
-          // cannot be the channel, and saying it was would describe a computer
-          // that is plainly running a watcher over one. What it is instead is a
-          // host that predates file watches.
-          const desktop = can.some((t) => t.startsWith('window.'));
           return refused(
             `${id} cannot emit file.changed, so nothing here can watch a directory on it. It ` +
-              `reports it can emit: ${can.join(', ')}. ` +
-              (desktop
-                ? 'It does report the desktop half, which needs the same terminal channel a file ' +
-                  'watch runs over — so the channel is there and it is the file watch that is ' +
-                  'missing. The host holding this computer predates them (platform OPL-3927), and ' +
-                  'there is nothing to do about that from here.'
-                : guestHalf(can)) +
-              ` To find out whether a file has appeared on this computer, run ls with exec.`,
+              `reports it can emit: ${can.join(', ')}. ${guestHalf(can)} To find out whether a ` +
+              `file has appeared on this computer, run ls with exec.`,
           );
         }
 
@@ -866,7 +886,7 @@ export const registerEvents: Registrar = (server, session) => {
           // carry, one another call evicted, or a computer that has stopped
           // being able to report file changes at all are none of them "the
           // stream has not come back yet".
-          const settledEarly = settled(sub, id, root, sub.hostPath(root), renamed + evicted);
+          const settledEarly = settled(sub, id, root, sub.hostPath(root), () => renamed + evicted);
           if (settledEarly) return settledEarly;
           if (!sub.nominationLive(root)) {
             return refused(
@@ -905,7 +925,7 @@ export const registerEvents: Registrar = (server, session) => {
           // up — and every word of it is false when the tree has been evicted
           // by another call, given up on as one this host will not carry, or
           // when the computer has stopped being able to report file changes.
-          const why = settled(sub, id, root, wire, renamed + evicted);
+          const why = settled(sub, id, root, wire, () => renamed + evicted);
           if (why) return why;
           // The one answer this tool must never give as "nothing changed".
           // inotify reports changes and not state, so anything that happened
@@ -938,12 +958,21 @@ export const registerEvents: Registrar = (server, session) => {
         // replay to hand back. Re-nominating gets the watch going again and says
         // nothing about the hole, which would leave a model reading an entirely
         // ordinary "nothing changed" over minutes during which nothing looked.
-        const interrupted = sub.takeInterruption(root)
-          ? ` Note: this tree was NOT being watched between an earlier call and this one — the ` +
-            `stream carrying it was closed for want of anything asking about this computer, and a ` +
-            `watch lives on the connection. Anything that changed in that window was never ` +
-            `reported and cannot be. Re-read the directory with exec if it matters.`
-          : '';
+        // A FUNCTION, and the flag is taken where the note is RENDERED rather
+        // than here. Taken up front it was consumed by every answer this call
+        // could give and printed by only some of them — a cancel, a stream
+        // between connections, a tree another call had evicted — so the one
+        // thing it exists to say was thrown away, and the next call, which is
+        // the one that finally reports a quiet directory, had nothing to say
+        // about the minutes during which nothing was watching. This way an
+        // answer that does not print it defers it rather than losing it.
+        const interrupted = () =>
+          sub.takeInterruption(root)
+            ? ` Note: this tree was NOT being watched between an earlier call and this one — the ` +
+              `stream carrying it was closed for want of anything asking about this computer, and ` +
+              `a watch lives on the connection. Anything that changed in that window was never ` +
+              `reported and cannot be. Re-read the directory with exec if it matters.`
+            : '';
         // When the waiting actually started, which is not when the call did.
         // `timeout_s` bounds the whole call — it has to, because a client
         // cancels a request that outlives its own timeout — so a call that
@@ -997,9 +1026,15 @@ export const registerEvents: Registrar = (server, session) => {
 
         if (hit === undefined) {
           if (extra.signal?.aborted) {
+            // Deliberately not "the tree is still being watched", which this
+            // call did not check and which a cancel racing an eviction or a
+            // shed makes false. What IS true is the part that matters: the
+            // buffer is on this side and nothing in it went anywhere.
             return refused(
-              `Cancelled while waiting on ${wire}. The tree is still being watched and this server ` +
-                `is still buffering — nothing was missed.`,
+              `Cancelled while waiting on ${wire}. Nothing was missed by the cancellation — this ` +
+                `server holds the stream and its buffer between calls — but nothing was checked ` +
+                `about the watch either, so call again for an answer about the tree.` +
+                interrupted(),
             );
           }
           const now = sub.state;
@@ -1016,7 +1051,7 @@ export const registerEvents: Registrar = (server, session) => {
           // nothing nominates. A tree the host would not carry is missing from
           // the set for a quite different reason, which is why the refusal is
           // asked about ahead of the membership.
-          const why = settled(sub, id, root, wire, evicted, {
+          const why = settled(sub, id, root, wire, () => interrupted() + evicted, {
             ...body(id, d, sub.watching),
             ...extras,
           });
@@ -1027,6 +1062,7 @@ export const registerEvents: Registrar = (server, session) => {
                 `guest reboot, a broker replaced. Reporting starts again HERE, and nothing that ` +
                 `happened to the tree while it was down was reported or ever will be. Re-read the ` +
                 `directory with exec if that window matters, then call again to keep waiting.` +
+                interrupted() +
                 evicted,
               answer,
             );
@@ -1037,6 +1073,7 @@ export const registerEvents: Registrar = (server, session) => {
                 `be said about whether anything changed under it after that — do not read this as ` +
                 `"nothing changed". The stream is being reopened here and the nomination stands; ` +
                 `call again and it will be waiting properly.` +
+                interrupted() +
                 evicted,
               answer,
             );
@@ -1053,6 +1090,7 @@ export const registerEvents: Registrar = (server, session) => {
                 `deeper in it are not reported and a silence here is not an answer about the ` +
                 `directory. This does not clear by waiting. Call again with a narrower path — the ` +
                 `subdirectory you actually care about — and re-read this one with exec.` +
+                interrupted() +
                 renamed,
               answer,
             );
@@ -1067,6 +1105,7 @@ export const registerEvents: Registrar = (server, session) => {
                 `moment and nothing can be said about the last few seconds — do not read this as ` +
                 `"nothing changed". The nomination stands and this server is still reconnecting ` +
                 `between your turns; call again.` +
+                interrupted() +
                 evicted,
               answer,
             );
@@ -1085,7 +1124,7 @@ export const registerEvents: Registrar = (server, session) => {
               `The tree was being watched for the whole of that and still is, so this is an ` +
               `answer rather than a gap. Call again to keep waiting; nothing is missed between ` +
               `calls.` +
-              interrupted +
+              interrupted() +
               renamed +
               evicted +
               (d.loss ? ' Some events were lost before they could be read — see lost.' : ''),
@@ -1104,6 +1143,7 @@ export const registerEvents: Registrar = (server, session) => {
         if (((last?.data as Record<string, unknown> | undefined)?.lost ?? '') === 'unwatchable') {
           return refused(
             `${unwatchable(wire)} It was being watched until now; from here it is not.` +
+              interrupted() +
               renamed +
               evicted,
             { ...body(id, d, sub.watching), watch: wire, ...extras },
@@ -1119,7 +1159,7 @@ export const registerEvents: Registrar = (server, session) => {
             `Something changed under ${wire} on ${id}, and another call on this computer was ` +
               `handed it before this one could read it — the events are in that call's answer, ` +
               `not below. Nothing is lost; look there, or call again for whatever comes next.` +
-              interrupted +
+              interrupted() +
               renamed +
               evicted,
             { ...body(id, d, sub.watching), watch: wire, ...extras },
@@ -1129,7 +1169,7 @@ export const registerEvents: Registrar = (server, session) => {
           `${changeLine(last, id)} after ${waited}s` +
             (earlier > 0 ? `, and ${earlier} event${earlier === 1 ? '' : 's'} before it` : '') +
             '.' +
-            interrupted +
+            interrupted() +
             renamed +
             evicted,
           { ...body(id, d, sub.watching), watch: wire, ...extras },

@@ -25,9 +25,11 @@ import { BASE, connect, FakeSocket, fakeEvents, HELLO, installFakePlatform } fro
  * that reported it as a failure would teach a model to give up on a watch that
  * is working.
  *
- * And the guest half is TWO capabilities. `file.changed` needs the terminal
+ * And the guest half is not one thing. `file.changed` needs the terminal
  * channel and nothing an image can be missing, so it is offered on computers
- * that emit no window events at all.
+ * that emit no window events at all — and a host old enough to predate it
+ * offers the reverse. Three shapes, each wanting something different done about
+ * it, and one explanation shared by both wait tools so they cannot disagree.
  */
 
 const textOf = (res: CallToolResult) =>
@@ -383,7 +385,7 @@ describe('a tree the model nominates', () => {
     });
     const res = await call('wait_for_event', { types: ['window.opened'], timeout_s: 1 });
     expect(res.isError).toBe(true);
-    expect(textOf(res)).toContain('two capabilities and this computer has one of them');
+    expect(textOf(res)).toContain('more than one capability and this computer has some of it');
     expect(textOf(res)).toContain('X bindings');
     expect(textOf(res)).not.toContain('nowhere to run a watcher at all');
     await close();
@@ -563,11 +565,14 @@ describe('a tree the model nominates', () => {
   it('stops an arming wait when another call takes the tree away', {
     timeout: 30_000,
   }, async () => {
-    const { call, close } = await attach({}, false);
+    const { call, close, ev } = await attach({}, false);
     // The arming wait used to park through an eviction and then say the tree
     // was still coming up and the nomination stood — both false.
     const answer = call('wait_for_file_change', { path: '/a', timeout_s: 25 });
-    await until('the /a nomination', () => true);
+    // A real condition, not a predicate that is constantly true: waiting on
+    // nothing happened to work only because the calls below queue behind this
+    // one in the microtask order, which is not a thing to depend on.
+    await nominated(ev);
     await Promise.all(
       ['/b', '/c', '/d', '/e'].map((path) => call('wait_for_file_change', { path, timeout_s: 1 })),
     );
@@ -733,6 +738,46 @@ describe('a tree the model nominates', () => {
     const res = await call('wait_for_file_change', { path: '/a', timeout_s: 2 });
     expect(res.isError).toBe(true);
     expect(textOf(res)).not.toContain('in 2s');
+    await close();
+  });
+
+  it('does not blame a missing channel on a host with one when the general wait asks', async () => {
+    // The same three-way split the file tool makes, in the tool that shares its
+    // explanation. A computer reporting window events plainly has the terminal
+    // channel a file watch runs over, so telling the caller to stop and start it
+    // for a channel would be advice that cannot help.
+    const { call, close } = await attach({
+      events: ['window.opened', 'window.closed', 'clipboard.changed', 'computer.ready'],
+    });
+    const res = await call('wait_for_event', { types: ['file.changed'], timeout_s: 1 });
+    expect(res.isError).toBe(true);
+    expect(textOf(res)).toContain('the channel is there');
+    expect(textOf(res)).not.toContain('nowhere to run a watcher at all');
+    await close();
+  });
+
+  it('carries the interruption to the answer that finally reports a quiet tree', async () => {
+    const { call, close, ev } = await attach();
+    await call('wait_for_file_change', { path: '/a', timeout_s: 1 });
+    // Listening is not using, so a computer nobody touches suspends underneath
+    // its own stream — which is how a watch ends without anybody deciding to
+    // end one. The subscription settles, is drained and dropped, and its
+    // nominations are remembered.
+    platform.state.status = 'suspended';
+    ev.last().close();
+    const settled = await call('wait_for_file_change', { path: '/a', timeout_s: 1 });
+    expect(settled.isError).toBe(true);
+    // That answer says nothing about the hole — it could not, the hole was not
+    // over yet — so the note has to survive it and land on the call that does
+    // report a quiet directory. Consumed by an answer that never printed it,
+    // this is exactly the sentence "nothing changed" would have gone out
+    // without.
+    platform.state.status = 'running';
+    const res = await call('wait_for_file_change', { path: '/a', timeout_s: 2 });
+    expect(textOf(res)).toContain('was NOT being watched between an earlier call and this one');
+    // And said once.
+    const again = await call('wait_for_file_change', { path: '/a', timeout_s: 1 });
+    expect(textOf(again)).not.toContain('was NOT being watched');
     await close();
   });
 

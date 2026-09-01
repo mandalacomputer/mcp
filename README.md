@@ -181,14 +181,16 @@ and `exec_poll` are still the answers there. `wait_for_event` refuses at once,
 naming what the computer *can* emit, when asked for something this guest will
 never produce.
 
-**The guest half is two capabilities, not one.** A Windows guest has no event
-stream at all. A Linux one whose hardware carries no terminal channel produces
-nothing the guest reports about itself. But `file.changed` runs against libc's
-own inotify calls and needs only that channel, while `window.*`, the clipboard
-and readiness also need the X bindings their desktop watcher is written against
-— so an older Linux image reports every file change and no window event
-whatever. The refusals name which of the two is missing, because one of them is
-fixable by a stop and a start and the other is a fact about the image.
+**The guest half is not one capability.** A Windows guest has no event stream at
+all. A Linux one whose hardware carries no terminal channel produces nothing the
+guest reports about itself. But `file.changed` runs against libc's own inotify
+calls and needs only that channel, while `window.*`, the clipboard and readiness
+also need the X bindings their desktop watcher is written against — so an older
+Linux image reports every file change and no window event whatever, and a host
+old enough to predate file watches reports the reverse. The refusals name which
+shape it is, because the three want different things done about them: a stop and
+a start gets a channel, nothing gets an image its bindings, and a host that
+predates the feature is not something a caller can act on at all.
 
 **`running` does not mean ready.** A computer reports running when the
 hypervisor has started the VM; the desktop inside comes up seconds later.
