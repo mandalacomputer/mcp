@@ -537,9 +537,10 @@ describe('the socket underneath', () => {
     const ev = fakeEvents({ ready: false });
     const hub = new EventHub(new Api('com_test', BASE), ev.factory);
     try {
-      hub.open('vm-1');
+      const sub = hub.open('vm-1');
       await until('the first connection', () => ev.sockets.length === 1);
       ev.last().send(frame('window.opened', { id: '0x1' }, 'cur-1'));
+      sub.read({ limit: 100 });
 
       hub.drop('vm-1', 'idle', true);
       hub.open('vm-1');
@@ -547,6 +548,91 @@ describe('the socket underneath', () => {
       expect(ev.last().since).toBe('cur-1');
     } finally {
       hub.closeAll();
+    }
+  });
+
+  it('resumes from what the MODEL was handed, not from what the socket received', async () => {
+    // The two are the same only when the model is caught up, and the case where
+    // they differ is the case the memory exists for: events arrive, the model is
+    // busy on another computer, the sweep reaps the subscription and the ring
+    // goes with it. Resuming from the last event RECEIVED would ask the platform
+    // to replay from after the unread ones — losing exactly what was being kept,
+    // and losing it silently, because a `since` the platform can honour produces
+    // no gap to report.
+    const ev = fakeEvents({ ready: false });
+    const hub = new EventHub(new Api('com_test', BASE), ev.factory);
+    try {
+      const sub = hub.open('vm-1');
+      await until('the first connection', () => ev.sockets.length === 1);
+      ev.last().send(frame('window.opened', { id: '0x1' }, 'cur-1'));
+      sub.read({ limit: 100 });
+      // Never read: this is the process.exited the detour was waiting on.
+      ev.last().send(frame('process.exited', { pid: 9, exit_code: 0 }, 'cur-2', 'daemon'));
+
+      hub.drop('vm-1', 'idle', true);
+      hub.open('vm-1');
+      await until('the second connection', () => ev.sockets.length === 2);
+      expect(ev.last().since).toBe('cur-1');
+    } finally {
+      hub.closeAll();
+    }
+  });
+
+  it('replays the whole buffer when the model was handed nothing at all', async () => {
+    const ev = fakeEvents({ ready: false });
+    const hub = new EventHub(new Api('com_test', BASE), ev.factory);
+    try {
+      hub.open('vm-1');
+      await until('the first connection', () => ev.sockets.length === 1);
+      ev.last().send(frame('window.opened', { id: '0x1' }, 'cur-1'));
+
+      hub.drop('vm-1', 'idle', true);
+      hub.open('vm-1');
+      await until('the second connection', () => ev.sockets.length === 2);
+      // Where this stream BEGAN, which is the opening frame's own cursor.
+      expect(ev.last().since).toBe('cur-0');
+    } finally {
+      hub.closeAll();
+    }
+  });
+
+  it('opens no socket for a subscription closed while it was reading the URL', async () => {
+    // `#url()` is a network round trip, and a close can land inside it — a
+    // session ending, a computer deleted, an idle drop. A socket opened after
+    // that abort is one nothing holds and nothing will ever close: close() has
+    // already run, and an abort listener added to a signal that has ALREADY
+    // fired never fires. It would sit open and buffering for the life of the
+    // process.
+    const real = globalThis.fetch;
+    let release: (() => void) | undefined;
+    const held = new Promise<void>((r) => {
+      release = r;
+    });
+    globalThis.fetch = (async (input: string | URL | Request) => {
+      const url = new URL(typeof input === 'string' ? input : input.toString());
+      if (url.host !== new URL(BASE).host) return real(input as never);
+      await held;
+      return new Response(
+        JSON.stringify({
+          id: 'vm-1',
+          status: 'running',
+          os: 'linux',
+          vnc: { events_url: 'wss://app.test/api/v1/computers/vm-1/events?token=t' },
+        }),
+        { headers: { 'Content-Type': 'application/json' } },
+      );
+    }) as typeof fetch;
+    try {
+      const ev = fakeEvents({ ready: false });
+      const hub = new EventHub(new Api('com_test', BASE), ev.factory);
+      hub.open('vm-1');
+      // Closed while the read is still in flight, then the read completes.
+      hub.closeAll();
+      release?.();
+      await new Promise((r) => setTimeout(r, 50));
+      expect(ev.sockets).toHaveLength(0);
+    } finally {
+      globalThis.fetch = real;
     }
   });
 

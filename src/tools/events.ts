@@ -157,8 +157,10 @@ function body(id: string, d: Delivery): Record<string, unknown> {
 function stopped(session: Session, id: string, reason: string) {
   session.events.drop(id, reason, true);
   return refused(
-    `The event stream for ${id} is not running: ${reason}. Nothing is being buffered, so nothing ` +
-      `is being missed while this is true — fix the cause and the next call opens a fresh stream.`,
+    `The event stream for ${id} is not running: ${reason}. Fix the cause and call again: the next ` +
+      `call opens a fresh stream and resumes from the last event you were handed, so whatever the ` +
+      `platform can still replay you will still be given, and whatever it cannot comes back as a ` +
+      `stated gap rather than as silence.`,
   );
 }
 

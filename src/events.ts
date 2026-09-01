@@ -169,6 +169,17 @@ export class Subscription {
   #loss?: Loss;
   /** The platform cursor to resume from: after the last event RECEIVED. */
   #resume?: string;
+  /**
+   * Where this stream began, as a platform cursor.
+   *
+   * The seeded `since`, or the first opening frame's own cursor. It is what a
+   * NEW subscription for this computer has to resume from when the model was
+   * never handed anything, so that a buffer thrown away by a reap is replayed
+   * rather than skipped.
+   */
+  #start?: string;
+  /** The cursor after the last event actually handed to the model. */
+  #deliveredCursor?: string;
   #hello?: Hello;
   #types?: string[];
   #state: SubscriptionState = { status: 'connecting' };
@@ -190,16 +201,27 @@ export class Subscription {
     // replay from there rather than joining at the head — see
     // {@link EventHub.open}, which is where that memory lives.
     this.#resume = since;
+    this.#start = since;
   }
 
   /**
-   * The platform cursor this stream has consumed up to.
+   * Where a REPLACEMENT for this subscription should start.
    *
-   * Kept by the hub when this subscription is reaped, so that reopening the
-   * same computer resumes rather than restarts.
+   * The position after the last event the MODEL was handed — deliberately not
+   * `#resume`, which is after the last event this SOCKET received. The two are
+   * the same only when the model is caught up, and the case where they differ
+   * is the case this exists for: events arrive, the model is busy on another
+   * computer, the idle sweep reaps the subscription and its ring goes with it.
+   * Handing the replacement `#resume` there would ask the platform to replay
+   * from AFTER the unread events — losing exactly what the memory was meant to
+   * preserve, and losing it silently, since a `since` the platform can honour
+   * produces no gap.
+   *
+   * Before anything has been delivered the answer is where this stream began,
+   * which replays the whole buffer.
    */
   get resumeCursor(): string | undefined {
-    return this.#resume;
+    return this.#deliveredCursor ?? this.#start;
   }
 
   get state(): SubscriptionState {
@@ -275,6 +297,10 @@ export class Subscription {
     }
 
     const last = batch.length ? batch[batch.length - 1] : undefined;
+    if (last && last.index + 1 > this.#delivered) {
+      const at = last.event.cursor;
+      if (typeof at === 'string' && at) this.#deliveredCursor = at;
+    }
     this.#delivered = Math.max(this.#delivered, last ? last.index + 1 : from);
     const loss = omitted
       ? {
@@ -458,6 +484,15 @@ export class Subscription {
         backoff = Math.min(backoff * 2, MAX_BACKOFF_MS);
         continue;
       }
+      // Checked HERE, between the read and the socket, because `#url()` is a
+      // network round trip and a close can land inside it — a session ending, a
+      // computer deleted, an idle drop. Without this the socket opened after
+      // the abort is one nothing holds a reference to and nothing will ever
+      // close: `close()` already ran, `#socket` was undefined at the time, and
+      // an `abort` listener added to a signal that has ALREADY fired never
+      // fires. It would sit open and buffering into an object nobody can read,
+      // for as long as the process lives.
+      if (this.#abort.signal.aborted) return;
       const reached = await this.#connection(url);
       if (this.#abort.signal.aborted) return;
       // A connection that got as far as its opening frame is not a failure,
@@ -547,6 +582,10 @@ export class Subscription {
    * uses to tell a stream that keeps dropping from one that never started.
    */
   #connection(url: string): Promise<boolean> {
+    // The same check as the one in `#loop`, kept here as well because this is
+    // the method that would leak the socket, and a second caller must not be
+    // able to reintroduce the leak by forgetting.
+    if (this.#abort.signal.aborted) return Promise.resolve(false);
     return new Promise<boolean>((resolve) => {
       // `since` is this subscription's own place, never the model's. The two
       // are different positions on purpose: the model may be four turns behind
@@ -565,7 +604,7 @@ export class Subscription {
         return resolve(false);
       }
       this.#socket = socket;
-      this.#state = { status: 'connecting' };
+      if (this.#state.status !== 'stopped') this.#state = { status: 'connecting' };
 
       let settled = false;
       let opened = false;
@@ -628,6 +667,7 @@ export class Subscription {
     this.#hello = hello;
     this.#types = hello.events;
     this.#resume ??= hello.cursor || undefined;
+    this.#start ??= hello.cursor || undefined;
     this.#state = { status: 'open' };
 
     // `computer.ready` fires once per desktop SESSION, so a stream that
@@ -692,6 +732,11 @@ export class Subscription {
       // suppress: a display manager restarted inside a running computer is a
       // new desktop session, and a gap is exactly where the event saying so
       // went missing (the SDK's OPL-4206).
+      // The floor moves with the gap when the model has been handed nothing
+      // yet: the history before this point is what the gap says is gone, so a
+      // replacement subscription resuming from where this one STARTED would ask
+      // for a window that cannot be replayed and be told so a second time.
+      if (!this.#deliveredCursor) this.#start = this.#resume;
       if (this.#hello?.ready) this.#pushReady(this.#hello.cursor);
       this.#wakeAll();
       return;
