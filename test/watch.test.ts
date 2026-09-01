@@ -85,21 +85,28 @@ async function nominated(ev: ReturnType<typeof fakeEvents>, trees = 1) {
 }
 
 /**
- * A socket factory that refuses any upgrade carrying a watch.
+ * A socket factory whose behaviour the test moves.
  *
- * What a host does when a nomination would take a computer past the 32 trees it
- * will watch, or names a path it will not honour: a 409 or a 400 on the UPGRADE.
- * Neither reaches a websocket client — undici reports both as a bare error — so
- * from here it is a socket that would not open, which is the whole difficulty.
+ * `failWatched` is what a host does to a nomination it will not take: a 400 for
+ * a path it will not honour, a 409 past the 32 trees a computer will watch —
+ * both on the UPGRADE, where neither status nor body reaches a websocket
+ * client. `failAll` is a host that is simply down, which from here looks
+ * exactly the same, and telling the two apart without being told either is the
+ * whole difficulty. `greet` off is a handshake that never completes.
  */
-function greetsUntilTold() {
+function drivenEvents() {
   const sockets: FakeSocket[] = [];
-  const state = { greet: true };
+  const state = { greet: true, failWatched: false, failAll: false };
   const factory = (url: string) => {
     const socket = new FakeSocket(url);
     sockets.push(socket);
     setTimeout(() => {
-      if (socket.closed || !state.greet) return;
+      if (socket.closed) return;
+      if (state.failAll || (state.failWatched && socket.watches.length)) {
+        socket.fail();
+        return;
+      }
+      if (!state.greet) return;
       socket.open();
       const watches = socket.watches;
       socket.send({
@@ -113,24 +120,24 @@ function greetsUntilTold() {
   return { factory, sockets, state, last: () => sockets[sockets.length - 1] };
 }
 
-function refusesWatches() {
+/** A factory that greets only when the test says so, so a nomination can beat a hello. */
+function greetsOnDemand() {
   const sockets: FakeSocket[] = [];
   const factory = (url: string) => {
     const socket = new FakeSocket(url);
     sockets.push(socket);
-    setTimeout(() => {
-      if (socket.closed) return;
-      if (socket.watches.length) {
-        socket.fail();
-        return;
-      }
-      socket.open();
-      socket.send(HELLO);
-      socket.greeted = true;
-    }, 0);
     return socket;
   };
-  return { factory, sockets, last: () => sockets[sockets.length - 1] };
+  const greet = (socket: FakeSocket) => {
+    socket.open();
+    const watches = socket.watches;
+    socket.send({
+      ...HELLO,
+      ...(watches.length ? { watching: watches.map((path) => ({ path, armed: true })) } : {}),
+    });
+    socket.greeted = true;
+  };
+  return { factory, sockets, greet, last: () => sockets[sockets.length - 1] };
 }
 
 describe('a tree the model nominates', () => {
@@ -466,13 +473,17 @@ describe('a tree the model nominates', () => {
     // so on the upgrade — where a websocket client is told nothing. Left alone,
     // one tree the host will not take is the whole stream gone: no windows, no
     // process exits, no readiness, reconnecting forever with nothing saying why.
-    const ev = refusesWatches();
+    const ev = drivenEvents();
+    ev.state.failWatched = true;
     const { call, close } = await connect({ webSocket: ev.factory });
     await call('poll_events');
     const res = await call('wait_for_file_change', { path: '/a', timeout_s: 10 });
     expect(res.isError).toBe(true);
     expect(textOf(res)).toContain('would not open an event stream carrying /a');
     expect(textOf(res)).toContain('32 trees');
+    // And not as an eviction. A shed tree is missing from the set for quite a
+    // different reason than somebody else's fifth directory.
+    expect(textOf(res)).not.toContain('pushed out');
     // And the rest of the stream comes back, which is how this server knew.
     await until('a connection carrying no watch', () => {
       const last = ev.last();
@@ -480,6 +491,122 @@ describe('a tree the model nominates', () => {
     });
     const after = await call('poll_events');
     expect(after.isError).toBeFalsy();
+    await close();
+  });
+
+  it('does not count a socket it closed itself as a refused upgrade', async () => {
+    // `nominate` closes the socket to put a new watch set on the URL, and if it
+    // does so before the opening frame lands the connection reads as one that
+    // never opened — which is the same shape a host refusing the watch has. One
+    // re-nomination of an in-flight connection plus one ordinary blip used to be
+    // enough to shed a tree and report it as one the host would not carry.
+    const ev = greetsOnDemand();
+    const hub = new EventHub(new Api('com_test', BASE), ev.factory);
+    try {
+      const sub = hub.open('vm-1');
+      await until('the first connection', () => ev.sockets.length === 1);
+      ev.greet(ev.last());
+      for (const path of ['/a', '/b', '/c']) {
+        const before = ev.sockets.length;
+        sub.nominate(path);
+        await until(`a connection carrying ${path}`, () => ev.sockets.length > before);
+      }
+      ev.greet(ev.last());
+      await until('the nominations to settle', () => ev.last().greeted);
+      expect(ev.last().watches).toEqual(['/a', '/b', '/c']);
+      for (const path of ['/a', '/b', '/c']) {
+        expect(sub.watchWasRefused(path), path).toBe(false);
+      }
+    } finally {
+      hub.closeAll();
+    }
+  });
+
+  it('does not read a host that is simply down as a watch the host refused', {
+    timeout: 30_000,
+  }, async () => {
+    // A down host and a refused watch fail identically: undici reports both as
+    // a non-101. So shedding a tree is a hypothesis, and the answer is only
+    // allowed to name the 32-tree limit once the SAME stream has opened without
+    // it. Here it never does, so nothing is claimed beyond an unreachable host.
+    const ev = drivenEvents();
+    const { call, close } = await connect({ webSocket: ev.factory });
+    await call('poll_events');
+    ev.state.failAll = true;
+    const res = await call('wait_for_file_change', { path: '/a', timeout_s: 12 });
+    expect(res.isError).toBe(true);
+    expect(textOf(res)).toContain('Could not start watching /a');
+    expect(textOf(res)).not.toContain('32 trees');
+    expect(textOf(res)).not.toContain('will not honour this path');
+    await close();
+  });
+
+  it('retries a tree it gave up on when the model asks for it again', {
+    timeout: 30_000,
+  }, async () => {
+    const ev = drivenEvents();
+    ev.state.failWatched = true;
+    const { call, close } = await connect({ webSocket: ev.factory });
+    await call('poll_events');
+    const refusal = await call('wait_for_file_change', { path: '/a', timeout_s: 10 });
+    expect(textOf(refusal)).toContain('would not open an event stream carrying /a');
+    // Every one of those refusals ends by telling the caller to call again, so
+    // calling again has to mean something: the computer may since have dropped
+    // below its tree limit.
+    ev.state.failWatched = false;
+    const res = await call('wait_for_file_change', { path: '/a', timeout_s: 2 });
+    expect(res.isError).toBeFalsy();
+    expect(textOf(res)).toContain('Nothing changed under /a');
+    await close();
+  });
+
+  it('stops an arming wait when another call takes the tree away', {
+    timeout: 30_000,
+  }, async () => {
+    const { call, close } = await attach({}, false);
+    // The arming wait used to park through an eviction and then say the tree
+    // was still coming up and the nomination stood — both false.
+    const answer = call('wait_for_file_change', { path: '/a', timeout_s: 25 });
+    await until('the /a nomination', () => true);
+    await Promise.all(
+      ['/b', '/c', '/d', '/e'].map((path) => call('wait_for_file_change', { path, timeout_s: 1 })),
+    );
+    const res = await answer;
+    expect(res.isError).toBe(true);
+    expect(textOf(res)).toContain('pushed out');
+    expect(textOf(res)).not.toContain('nomination stands');
+    await close();
+  });
+
+  it('hands over a file event that already arrived even with nothing armed now', async () => {
+    const { call, close, ev } = await attach({}, false);
+    await call('wait_for_file_change', { path: '/a', timeout_s: 1 });
+    const socket = await nominated(ev);
+    socket.send(frame({ watch: '/a', path: '/a/x', kind: 'created' }, 'cur-1'));
+    // Anything already buffered wins before anything about the present is
+    // judged. A refusal that ran ahead of the ring would withhold an event this
+    // computer had already sent.
+    const res = await call('wait_for_event', { types: ['file.changed'], timeout_s: 1 });
+    expect(res.isError).toBeFalsy();
+    // And it says what the event was. Three payloads wear this one type, so the
+    // bare type read the same for a file being written and a tree going away.
+    expect(textOf(res)).toContain('created /a/x');
+    await close();
+  });
+
+  it('keeps a standing budget across the reconnect another nomination causes', async () => {
+    const { call, close, ev } = await attach();
+    const first = call('wait_for_file_change', { path: '/a', timeout_s: 5 });
+    (await nominated(ev)).send(frame({ watch: '/a', lost: 'budget' }, 'cur-1'));
+    expect(textOf(await first)).toContain('narrower path');
+    // Nominating a different tree reopens the connection, and the opening frame
+    // has no field for a loss — so a client that cleared the flag on every hello
+    // would drop a permanent condition nothing puts back, and go on to report a
+    // confident silence over a subtree nobody is looking at.
+    await call('wait_for_file_change', { path: '/b', timeout_s: 1 });
+    const res = await call('wait_for_file_change', { path: '/a', timeout_s: 1 });
+    expect(res.isError).toBe(true);
+    expect(textOf(res)).toContain('that is not the whole tree');
     await close();
   });
 
@@ -499,11 +626,14 @@ describe('a tree the model nominates', () => {
   });
 
   it('does not call a tree watched while the stream is between connections', async () => {
-    const ev = greetsUntilTold();
+    const ev = drivenEvents();
     const { call, close } = await connect({ webSocket: ev.factory });
     await call('poll_events');
     const answer = call('wait_for_file_change', { path: '/a', timeout_s: 2 });
-    await until('the nominated connection', () => ev.last().greeted && ev.last().watches.length);
+    await until(
+      'the nominated connection',
+      () => ev.last().greeted && ev.last().watches.length > 0,
+    );
     // The armed map is what the last opening frame said, and it is deliberately
     // not cleared by a dropped socket — clearing it would make every routine
     // reconnect look like a re-arm, which is a "go and re-read this" for an

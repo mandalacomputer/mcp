@@ -171,6 +171,21 @@ function guestHalf(can: string[]): string {
 /** One event's type and the thing about it worth putting in a sentence. */
 function name(ev: ComputerEvent): string {
   const data = (ev.data ?? {}) as Record<string, unknown>;
+  // `file.changed` wears three payloads, and two of them are not a file: a
+  // marker saying this stream's picture of the tree is wrong, and the tree
+  // going live. Left to the fallthrough all three read as the bare type, so a
+  // wait that ended on "the tree is too big to watch" and one that ended on a
+  // file being written said exactly the same thing. wait_for_file_change is
+  // careful about this; the general wait advertises the type too and has to be.
+  const file =
+    ev.type === 'file.changed'
+      ? data.armed === true
+        ? 'now watching this tree — reporting starts here, so re-read it'
+        : typeof data.lost === 'string' && data.lost
+          ? `${data.lost} under ${data.watch} — this stream's picture of that tree is incomplete`
+          : `${data.kind} ${data.path}${data.dir ? ', a directory' : ''}`
+      : '';
+  if (file) return `${ev.type} (${file})`;
   const detail =
     ev.type === 'process.exited'
       ? `pid ${data.pid}${data.lost ? ', outcome unknown — the guest lost track of it' : ` exited ${data.exit_code}`}`
@@ -432,27 +447,33 @@ export const registerEvents: Registrar = (server, session) => {
         // called unwatchable, or that the host would not carry produces exactly
         // as many events as no tree at all. Counting it would let each of those
         // suppress this and hand back a timeout reading "nothing happened".
-        const live = sub.watching.filter((w) => w.armed);
-        const unwatched = Boolean(wanted?.has('file.changed')) && !live.length;
-        const nominated = sub.watching.length;
-        const nominate = nominated
-          ? `file.changed is the one event nobody is sent unasked, and the ` +
-            `${nominated === 1 ? 'tree' : 'trees'} nominated on ${id} ` +
-            `${nominated === 1 ? 'is' : 'are'} not being watched yet — a nomination is accepted ` +
-            `at once and the guest is asked afterwards, so there is a window in which no file ` +
-            `event can arrive. wait_for_file_change is the call that waits through it and says ` +
-            `which of the two you are in.`
-          : `file.changed is the one event nobody is sent unasked: a directory has to be ` +
-            `nominated on the connection, and nothing on ${id} has one. Use wait_for_file_change, ` +
-            `which nominates the directory, waits until the guest is genuinely watching it, and ` +
-            `then waits for a change. Once a tree is nominated its file.changed events arrive ` +
-            `here like any other event.`;
-        if (unwatched && wanted?.size === 1) {
-          return refused(
-            `No file.changed can arrive on ${id}'s stream as it stands, however long you wait. ` +
-              nominate,
-          );
-        }
+        // Measured on ARMED trees and not on nominated ones, because a
+        // nomination is not a watch: a tree that is still arming, that the guest
+        // called unwatchable, or that the host would not carry produces exactly
+        // as many events as no tree at all. Counting one would let each of those
+        // suppress the refusal below and hand back a timeout reading "nothing
+        // happened".
+        //
+        // A function rather than a value, because it is asked AFTER the buffered
+        // read and after the capability question, by which time a tree can have
+        // armed. See the call site for why it is asked there.
+        const unwatched = () =>
+          Boolean(wanted?.has('file.changed')) && !sub.watching.some((w) => w.armed);
+        const nominate = () => {
+          const nominated = sub.watching.length;
+          return nominated
+            ? `file.changed is the one event nobody is sent unasked, and the ` +
+                `${nominated === 1 ? 'tree' : 'trees'} nominated on ${id} ` +
+                `${nominated === 1 ? 'is' : 'are'} not being watched yet — a nomination is accepted ` +
+                `at once and the guest is asked afterwards, so there is a window in which no file ` +
+                `event can arrive. wait_for_file_change is the call that waits through it and says ` +
+                `which of the two you are in.`
+            : `file.changed is the one event nobody is sent unasked: a directory has to be ` +
+                `nominated on the connection, and nothing on ${id} has one. Use ` +
+                `wait_for_file_change, which nominates the directory, waits until the guest is ` +
+                `genuinely watching it, and then waits for a change. Once a tree is nominated its ` +
+                `file.changed events arrive here like any other event.`;
+        };
         const matches = (ev: ComputerEvent): boolean => {
           if (wanted && !wanted.has(ev.type)) return false;
           if (pid === undefined) return true;
@@ -498,6 +519,20 @@ export const registerEvents: Registrar = (server, session) => {
         if (hit === undefined) {
           const already = cannotEmit();
           if (already) return refused(already);
+        }
+        // AFTER the buffered read and after the capability question, both of
+        // which used to sit behind it. A `file.changed` that has already
+        // arrived is still an answer even if the tree has since disarmed or
+        // been evicted — anything buffered wins before anything about the
+        // present is judged, which is the rule two lines up. And a computer
+        // that cannot emit file.changed AT ALL is explained by `cannotEmit`;
+        // sending that caller to wait_for_file_change would only have it
+        // refused there for the reason this call already knew.
+        if (hit === undefined && unwatched() && wanted?.size === 1) {
+          return refused(
+            `No file.changed can arrive on ${id}'s stream as it stands, however long you wait. ` +
+              nominate(),
+          );
         }
         if (hit === undefined) {
           // The capability question is asked on every wake rather than once
@@ -560,7 +595,7 @@ export const registerEvents: Registrar = (server, session) => {
               // Said here rather than as a refusal, because the rest of this
               // wait was real: what must not happen is a model reading "nothing
               // happened" as covering a type nothing was ever going to send.
-              (unwatched ? ` One thing was NOT being waited for: ${nominate}` : '') +
+              (unwatched() ? ` One thing was NOT being waited for: ${nominate()}` : '') +
               (d.loss ? ' Some events were lost before they could be read — see lost.' : ''),
             { ...body(id, d, sub.watching), ...extras },
           );
@@ -614,6 +649,66 @@ export const registerEvents: Registrar = (server, session) => {
     `Name the real directory. Nominating one a job is about to create is fine and the nomination ` +
     `stands: the watch starts by itself when the directory appears, so calling again later will ` +
     `find it armed.`;
+
+  /**
+   * Why this tree is not one this call can answer about, if it is not.
+   *
+   * The four conditions the change wait abandons on, and the same four the two
+   * waits ahead of it now give up on rather than parking through — so they have
+   * to be reported the same way from both, in the same ORDER. Getting the order
+   * wrong is not cosmetic: a tree withheld because the host would not carry it
+   * is also a tree missing from the nomination set, so a membership check ahead
+   * of the refusal check calls a rejected watch an eviction and tells the
+   * caller somebody else's fifth directory pushed theirs out.
+   *
+   * `undefined` when none of them holds, which is when the tree really is just
+   * still coming up.
+   */
+  const settled = (
+    sub: Subscription,
+    id: string,
+    root: string,
+    wire: string,
+    tail: string,
+    extras: Record<string, unknown> = {},
+  ) => {
+    const answer = { computer: id, watch: wire, watching: sub.watching, ...extras };
+    if (sub.watchWasRefused(root)) {
+      return refused(
+        `${id} would not open an event stream carrying ${root}, so this server has stopped asking ` +
+          `for it — it dropped the tree, the same stream opened without it, and that is how it ` +
+          `knows. A watch is the one thing on that connection a host refuses outright, and it ` +
+          `does so where a websocket client is told nothing at all, so the reason is one of two: ` +
+          `this computer is already watching the 32 trees it will watch at once across every ` +
+          `client connected to it, or it will not honour this path. Nominate a directory it is ` +
+          `already watching, close another client, or use exec to look at this one.` +
+          tail,
+        answer,
+      );
+    }
+    if (!sub.nominates(root)) {
+      return refused(
+        `${wire} on ${id} stopped being watched while this call was waiting: another call ` +
+          `nominated a fifth tree and this was the one it pushed out. Nothing can be said about ` +
+          `whether it changed after that. Call again to nominate it back.`,
+        answer,
+      );
+    }
+    const can = sub.eventTypes;
+    if (can?.length && !can.includes('file.changed')) {
+      return refused(
+        `${id} stopped being able to report file changes while this call was waiting — the guest ` +
+          `half of its event stream was withdrawn, which is what a guest turning out to have no ` +
+          `watcher looks like. It now reports it can emit: ${can.join(', ')}. Nothing can be said ` +
+          `about whether ${wire} changed. Use exec to look at the directory.`,
+        answer,
+      );
+    }
+    if (sub.lostFor(root) === 'unwatchable') {
+      return refused(unwatchable(wire) + tail, answer);
+    }
+    return undefined;
+  };
 
   const changeLine = (ev: ComputerEvent, id: string): string => {
     const d = (ev.data ?? {}) as Record<string, unknown>;
@@ -766,27 +861,13 @@ export const registerEvents: Registrar = (server, session) => {
             return stopped(session, id, after.reason, sub, { since, limit });
           }
           if (extra.signal?.aborted) return cancelledWhileArming(id, root);
-          // ASKED FIRST, because this is the answer and the timeout below is
-          // only the absence of one. The host refused the connection carrying
-          // this tree, and refused it on the upgrade — where a websocket client
-          // is told nothing at all, no status and no body. This server worked it
-          // out by elimination: it dropped the tree, the stream came back, so
-          // the tree is what the host would not take.
-          if (sub.watchWasRefused(root)) {
-            return refused(
-              `${id} would not open an event stream carrying ${root}, so this server has stopped ` +
-                `asking for it — the rest of the stream (windows, process exits, readiness) is ` +
-                `working again, which is how it knows. A watch is the one thing on that ` +
-                `connection a host refuses outright, and it does so where a websocket client is ` +
-                `told nothing, so the reason is one of two: this computer is already watching the ` +
-                `32 trees it will watch at once across every client connected to it, or it will ` +
-                `not honour this path. Nominate a directory it is already watching, close another ` +
-                `client, or use exec to look at this one.` +
-                renamed +
-                evicted,
-              { computer: id, watch: root, watching: sub.watching },
-            );
-          }
+          // ASKED FIRST, all four of them, because each is an answer and the
+          // timeout below is only the absence of one. A tree the host would not
+          // carry, one another call evicted, or a computer that has stopped
+          // being able to report file changes at all are none of them "the
+          // stream has not come back yet".
+          const settledEarly = settled(sub, id, root, sub.hostPath(root), renamed + evicted);
+          if (settledEarly) return settledEarly;
           if (!sub.nominationLive(root)) {
             return refused(
               `Could not start watching ${root} on ${id} within ${timeout_s}s. The stream has to ` +
@@ -819,13 +900,13 @@ export const registerEvents: Registrar = (server, session) => {
           if (now.status === 'stopped')
             return stopped(session, id, now.reason, sub, { since, limit });
           if (extra.signal?.aborted) return cancelledWhileArming(id, wire);
-          if (sub.lostFor(root) === 'unwatchable') {
-            return refused(unwatchable(wire) + renamed + evicted, {
-              computer: id,
-              watch: wire,
-              watching: sub.watching,
-            });
-          }
+          // Asked before the sentence below, all four of them, because that
+          // sentence says the nomination stands and this tree is still coming
+          // up — and every word of it is false when the tree has been evicted
+          // by another call, given up on as one this host will not carry, or
+          // when the computer has stopped being able to report file changes.
+          const why = settled(sub, id, root, wire, renamed + evicted);
+          if (why) return why;
           // The one answer this tool must never give as "nothing changed".
           // inotify reports changes and not state, so anything that happened
           // before the watch armed was never reported and never will be —
@@ -927,31 +1008,19 @@ export const registerEvents: Registrar = (server, session) => {
           const d = sub.read({ since, limit });
           const extras = d.loss ? await reconcile(session, id, extra.signal) : {};
           const answer = { ...body(id, d, sub.watching), watch: wire, ...extras };
-          // EVICTION FIRST, because it is the one that would otherwise be
+          // THESE FIRST, and in this order, because each would otherwise be
           // described as something else. Evicting a tree does not reset its arm
           // generation — that is kept monotonic on purpose — but it does take
-          // the tree out of the watch set, and a waiter reading the generation
-          // branch before the membership one would call an eviction a re-arm
-          // and invite the caller to go on waiting on a tree nothing is
-          // nominating any more.
-          if (!sub.nominates(root)) {
-            return refused(
-              `${wire} on ${id} stopped being watched while this call was waiting: another call ` +
-                `nominated a fifth tree and this was the one it pushed out. Nothing can be said ` +
-                `about whether it changed after that. Call again to nominate it back.`,
-              answer,
-            );
-          }
-          if (withdrawn()) {
-            return refused(
-              `${id} stopped being able to report file changes while this call was waiting — the ` +
-                `guest half of its event stream was withdrawn, which is what a guest turning out ` +
-                `to have no watcher looks like. It now reports it can emit: ` +
-                `${(sub.eventTypes ?? []).join(', ')}. Nothing can be said about whether ${wire} ` +
-                `changed. Use exec to look at the directory.`,
-              answer,
-            );
-          }
+          // the tree out of the watch set, and the generation branch below would
+          // call that a re-arm and invite the caller to go on waiting on a tree
+          // nothing nominates. A tree the host would not carry is missing from
+          // the set for a quite different reason, which is why the refusal is
+          // asked about ahead of the membership.
+          const why = settled(sub, id, root, wire, evicted, {
+            ...body(id, d, sub.watching),
+            ...extras,
+          });
+          if (why) return why;
           if (sub.armGeneration(root) !== generation) {
             return said(
               `The watch on ${wire} was re-armed after an interruption — a stop and a start, a ` +
@@ -963,13 +1032,6 @@ export const registerEvents: Registrar = (server, session) => {
             );
           }
           if (!sub.isArmed(root)) {
-            if (sub.lostFor(root) === 'unwatchable') {
-              return refused(
-                `${unwatchable(wire)} It was being watched when this call started and is not now.` +
-                  evicted,
-                answer,
-              );
-            }
             return refused(
               `${wire} on ${id} stopped being watched while this call was waiting, so NOTHING can ` +
                 `be said about whether anything changed under it after that — do not read this as ` +

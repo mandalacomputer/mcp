@@ -377,10 +377,34 @@ export class Subscription {
    */
   #interrupted = new Set<string>();
   /**
-   * Trees this stream stopped nominating because the connection carrying them
-   * would not open. See {@link WATCH_SHED_AFTER}.
+   * Trees a connection carrying them would not open, PROVEN so.
+   *
+   * Proven means the experiment in {@link #account} came back positive: the
+   * tree was withheld, the same stream opened without it, and there is nothing
+   * else the difference could be. A tree merely suspected is
+   * {@link #shedCandidate} and is not in here.
    */
   #watchRefused = new Set<string>();
+  /**
+   * The tree currently withheld from the URL to find out whether it is the
+   * reason nothing will open. `undefined` when no experiment is running.
+   *
+   * It stays in {@link #watches} throughout, which is what keeps a caller from
+   * being told its tree was evicted to make room for somebody else's — this is
+   * a suspicion, not a decision about what the caller asked for.
+   */
+  #shedCandidate?: string;
+  /**
+   * Whether a watch has been ruled out as the reason connections are failing.
+   *
+   * Set when an experiment comes back negative, cleared the moment anything
+   * greets. Without it a host that is simply DOWN would shed its way through
+   * every tree in the set two failures at a time, reporting each in turn as one
+   * the host would not carry.
+   */
+  #shedRuledOut = false;
+  /** What the last connection that reached an opening frame was carrying. */
+  #lastGood: string[] = [];
   /** Consecutive connections that never reached an opening frame while watching. */
   #upgradeFailures = 0;
   /**
@@ -615,12 +639,31 @@ export class Subscription {
    */
   nominate(path: string): { evicted?: string } {
     this.touch();
+    // A nomination is also a RETRY, and this is where that is honoured. Whatever
+    // this stream concluded about this path last time — that its connection
+    // would not open, that it is the one under suspicion for that — is a fact
+    // about a moment that has passed: the computer may since have dropped below
+    // its tree limit, and the directory may since exist. "Call again" is the
+    // advice every one of those refusals gives, so calling again has to mean
+    // something.
+    const retrying = this.#watchRefused.delete(path) || this.#shedCandidate === path;
+    if (this.#shedCandidate === path) this.#shedCandidate = undefined;
+    this.#upgradeFailures = 0;
+    this.#shedRuledOut = false;
     const at = this.#watches.indexOf(path);
     if (at >= 0) {
       // Most recently asked about goes last, so the eviction below always takes
-      // the tree that has waited longest for somebody to care about it.
+      // the tree that has waited longest for somebody to care about it. Which
+      // tree gets BLAMED for a stream that will not open is a different order
+      // and deliberately not this one — see `#account`.
       this.#watches.splice(at, 1);
       this.#watches.push(path);
+      // Already on the wire and not under suspicion, so there is nothing to
+      // reopen for. A tree being retried is neither.
+      if (!retrying && this.#sent.includes(path)) return {};
+      this.#renominate = true;
+      this.#socket?.close();
+      this.#wakeAll();
       return {};
     }
     this.#watches.push(path);
@@ -632,6 +675,11 @@ export class Subscription {
         this.#watchLost.delete(evicted);
         this.#hostName.delete(evicted);
         this.#interrupted.delete(evicted);
+        this.#watchRefused.delete(evicted);
+        // An experiment about a tree nobody nominates any more has nothing left
+        // to prove, and letting it finish would file a refusal against a path
+        // this stream is no longer asking for.
+        if (this.#shedCandidate === evicted) this.#shedCandidate = undefined;
         // The arm generation is deliberately NOT deleted. It has to stay
         // monotonic per path, because a waiter parked on this tree is holding a
         // number from before the eviction: reset to zero and re-nominated, the
@@ -644,13 +692,6 @@ export class Subscription {
     // Closed rather than aborted: `#loop` is still running and its next turn
     // reads `#watches` for the new connection. The flag is what keeps that turn
     // from paying the reconnect floor for a reconnection this side chose.
-    // A nomination is also a retry. Whatever this stream concluded about this
-    // path last time — that its connection would not open, that the tree was
-    // never watched — is a fact about a moment that has passed: the computer may
-    // since have dropped below its tree limit, and the directory may since
-    // exist. Starting the shed budget again is the same decision.
-    this.#watchRefused.delete(path);
-    this.#upgradeFailures = 0;
     this.#renominate = true;
     this.#socket?.close();
     this.#wakeAll();
@@ -845,13 +886,29 @@ export class Subscription {
   async nominated(path: string, deadline: AbortSignal, cancel?: AbortSignal): Promise<void> {
     while (!this.nominationLive(path) && this.#state.status !== 'stopped') {
       if (deadline.aborted || cancel?.aborted) return;
-      // A tree this stream has given up on will never come live by waiting: it
-      // is not on the URL any more, by decision rather than by weather. Waiting
-      // out the deadline for it would turn an answer this server already has
-      // into a timeout the caller has to interpret.
-      if (this.#watchRefused.has(path)) return;
+      if (this.#settledAgainst(path)) return;
       await this.#park(deadline, cancel);
     }
+  }
+
+  /**
+   * Whether waiting for this tree to come live has stopped being worth doing.
+   *
+   * The same four questions the change wait asks on every wake, asked by the
+   * two waits that come BEFORE it — which used to park through all of them and
+   * then answer "it is not being watched yet, the nomination stands, call
+   * again". Every word of that is false when the tree has been evicted by
+   * another call, given up on as one this host will not carry, or when the
+   * computer has stopped being able to report file changes at all. Each of
+   * those is an answer this server already has, and parking on it turns an
+   * answer into a timeout the caller has to interpret.
+   */
+  #settledAgainst(path: string): boolean {
+    if (this.#watchRefused.has(path)) return true;
+    if (!this.#watches.includes(path)) return true;
+    const types = this.#types;
+    if (types?.length && !types.includes('file.changed')) return true;
+    return false;
   }
 
   /**
@@ -875,6 +932,7 @@ export class Subscription {
     while (!this.isArmed(path) && this.#state.status !== 'stopped') {
       if (deadline.aborted || cancel?.aborted) return;
       if (this.#watchLost.get(path) === 'unwatchable') return;
+      if (this.#settledAgainst(path)) return;
       await this.#park(deadline, cancel);
     }
   }
@@ -973,28 +1031,34 @@ export class Subscription {
       if (this.#abort.signal.aborted) return;
       const reached = await this.#connection(url);
       if (this.#abort.signal.aborted) return;
+      // A reconnection THIS side asked for, to put a new watch set on the URL.
+      // ASKED FIRST, before anything reads `reached`, because a connection this
+      // client closed did not fail: `nominate` closes the socket, and if it does
+      // so before the opening frame lands then `reached` is false for a reason
+      // that has nothing to do with the host. Counted as a failure it is
+      // evidence against a watch — and two of them, which is one re-nomination
+      // of an in-flight connection plus one ordinary blip, used to shed a tree
+      // and report it as one the host would not carry.
+      //
+      // It also skips the floor below, which exists for a host that keeps
+      // hanging up on us rather than for a connection we closed on purpose;
+      // paying it would put half a second in front of every first watch of a
+      // tree, under an arming the caller is already waiting on.
+      if (this.#renominate) {
+        this.#renominate = false;
+        continue;
+      }
       // A connection that got as far as its opening frame is not a failure,
       // however soon it died: a computer that restarts drops the socket every
       // time, and treating that as a failed attempt would back a healthy
       // stream off to fifteen seconds for doing what it always does.
       backoff = reached ? BACKOFF_MS : Math.min(backoff * 2, MAX_BACKOFF_MS);
-      // The one refusal a websocket cannot report, answered by elimination.
-      // A watch is the only thing on this URL a host will refuse outright, and
-      // it refuses it on the UPGRADE — where there is no status and no body for
-      // a client to read. Left alone, one nomination the host will not honour
-      // is the whole stream gone: no windows, no process exits, no readiness,
-      // reconnecting forever with nothing ever saying why.
-      if (reached) this.#upgradeFailures = 0;
-      else if (this.#sent.length && ++this.#upgradeFailures >= WATCH_SHED_AFTER) this.#shed();
-      // A reconnection THIS side asked for, to put a new watch set on the URL.
-      // It skips the floor below, which exists for a host that keeps hanging up
-      // on us rather than for a connection we closed on purpose — and paying it
-      // would put half a second on every first watch of a tree, in front of an
-      // arming the caller is already waiting on.
-      if (this.#renominate) {
-        this.#renominate = false;
-        continue;
-      }
+      // Only the failing half is driven from here. A connection that WORKED is
+      // not a connection that has ended, and this line runs when one ends —
+      // which for a healthy stream is minutes or hours later, or never. The
+      // other half is in `#onHello`, where reaching the opening frame actually
+      // happens.
+      if (!reached) this.#blamed();
       // A floor even on a connection that worked. A host that sends `hello`
       // and closes — which is what a subscriber being put down for not reading
       // looks like from here — would otherwise be a reconnect loop with no
@@ -1150,7 +1214,15 @@ export class Subscription {
         // Snapshotted as it goes on the URL. This is what the opening frame's
         // `watching` is measured against, and what says whether a nomination
         // made a moment ago is on this connection or on the next one.
-        this.#sent = [...this.#watches];
+        //
+        // The nominations MINUS whatever is being withheld: a tree proven to be
+        // one this host will not carry, and the one currently under suspicion
+        // for it. Both stay in `#watches`, because they are still what the
+        // caller asked for and the difference belongs on the wire rather than
+        // in this client's record of the request.
+        this.#sent = this.#watches.filter(
+          (w) => !this.#watchRefused.has(w) && w !== this.#shedCandidate,
+        );
         for (const w of this.#sent) target.searchParams.append('watch', w);
         socket = this.#socketFor(target.toString());
       } catch {
@@ -1235,6 +1307,11 @@ export class Subscription {
     this.#hello = hello;
     this.#types = hello.events;
     this.#greeted = true;
+    // Here and not where the connection ends, which is the only place this
+    // could be observed from otherwise — and a connection that WORKS does not
+    // end for minutes or hours. An experiment whose positive result was only
+    // read on the way out is an experiment with no result.
+    this.#cleared();
     this.#adoptWatching(hello.watching);
     this.#resume ??= hello.cursor || undefined;
     this.#start ??= hello.cursor || undefined;
@@ -1310,12 +1387,25 @@ export class Subscription {
       // the same arming reported again by a socket that reconnected under it,
       // and bumping there would tell every waiter to go and re-read a tree
       // nothing had interrupted.
-      if (w.armed && !this.isArmed(nominated)) this.#bumpArm(nominated);
-      // Whatever this tree had lost belongs to the connection that reported it.
-      // The guest re-states itself to a new nomination, so carrying a stale
-      // `unwatchable` forward would refuse a wait on a tree that had since
-      // appeared.
-      this.#watchLost.delete(nominated);
+      //
+      // And the arming is what clears a standing loss, which is why only a
+      // TRANSITION does. The guest reports `budget` when it installs the watch
+      // and finds the tree too big, so a tree that really re-armed is about to
+      // say so again if it is still true — but a connection whose `hello` says
+      // a tree was armed all along did not re-arm anything, and clearing there
+      // would drop a permanent condition that nothing puts back. `hello.watching`
+      // has no field for it, so the flag is the only record there is.
+      if (w.armed && !this.isArmed(nominated)) {
+        this.#bumpArm(nominated);
+        this.#watchLost.delete(nominated);
+      } else if (this.#watchLost.get(nominated) === 'unwatchable') {
+        // Cleared on any new connection, unlike `budget`, because a tree that
+        // is not armed is one the guest is about to be asked about again — and
+        // it will answer `unwatchable` a second time if the directory is still
+        // missing. Carried forward it would refuse a wait on a tree that had
+        // since appeared.
+        this.#watchLost.delete(nominated);
+      }
     });
     this.#armed = armed;
   }
@@ -1334,15 +1424,61 @@ export class Subscription {
    * so {@link watchWasRefused} is what lets the tool say the real thing, which
    * is that the connection carrying it would not open at all.
    */
-  #shed(): void {
-    const shed = this.#watches.pop();
+  /**
+   * What one connection's outcome says about the watches it carried.
+   *
+   * The one refusal a websocket cannot report, answered by elimination — and it
+   * has to be an elimination actually carried out rather than a guess dressed
+   * as one. A watch is the only thing on this URL a host refuses outright: a
+   * path it will not honour is a 400 on the UPGRADE and a nomination past the
+   * 32 trees a computer will watch is a 409, and neither status nor body
+   * reaches a websocket client. Left alone, one nomination the host will not
+   * take is the whole stream gone — no windows, no process exits, no readiness,
+   * reconnecting forever with nothing ever saying why.
+   *
+   * But a host that is down fails in exactly the same way, so two missed
+   * handshakes are not proof of anything. The experiment is: drop the newest
+   * tree and try again WITHOUT it. If that connection greets, the tree was the
+   * problem and this server can say so. If it fails too, the tree was innocent
+   * — it goes back, and nothing is claimed about the host beyond its being
+   * unreachable, which the reconnect loop was already handling.
+   */
+  #cleared(): void {
+    // Whatever was withheld is now proven guilty: this is the same stream
+    // without it, and it opened.
+    if (this.#shedCandidate !== undefined) {
+      this.#watchRefused.add(this.#shedCandidate);
+      this.#shedCandidate = undefined;
+    }
+    this.#lastGood = [...this.#sent];
     this.#upgradeFailures = 0;
-    if (shed === undefined) return;
-    this.#watchRefused.add(shed);
-    this.#armed.delete(shed);
-    this.#watchLost.delete(shed);
-    this.#hostName.delete(shed);
-    this.#interrupted.delete(shed);
+    this.#shedRuledOut = false;
+  }
+
+  /** @see {@link #cleared} — the other half, for a connection that never greeted. */
+  #blamed(): void {
+    if (this.#shedCandidate !== undefined) {
+      // The experiment came back negative. The tree goes back on the URL and
+      // watches stop being blamed until something connects — otherwise a host
+      // that is simply down would shed its way through every tree in the set,
+      // reporting each in turn as one the host would not carry.
+      this.#shedCandidate = undefined;
+      this.#shedRuledOut = true;
+      this.#upgradeFailures = 0;
+      this.#wakeAll();
+      return;
+    }
+    if (!this.#sent.length || this.#shedRuledOut) return;
+    if (++this.#upgradeFailures < WATCH_SHED_AFTER) return;
+    this.#upgradeFailures = 0;
+    // Whatever changed since this stream last worked, and only then the newest.
+    // After an LRU refresh "newest" means "most recently asked about", which is
+    // the opposite of a good suspect: the tree a caller keeps asking about is
+    // the one least likely to be new. What the last connection that actually
+    // greeted was carrying is the real before-and-after.
+    const carried = this.#sent;
+    this.#shedCandidate =
+      carried.find((w) => !this.#lastGood.includes(w)) ?? carried[carried.length - 1];
     this.#wakeAll();
   }
 
