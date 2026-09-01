@@ -2,6 +2,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { Session, type SessionConfig } from './session.js';
 import { registerAgent } from './tools/agent.js';
 import { registerComputers } from './tools/computers.js';
+import { registerEvents } from './tools/events.js';
 import { registerGuest } from './tools/guest.js';
 import { registerInput } from './tools/input.js';
 import { registerSnapshots } from './tools/snapshots.js';
@@ -30,6 +31,7 @@ Things that are true here and are not obvious:
 
 - exec runs as root with NO display. A GUI application started without desktop: true cannot draw. open_url is the reliable way to put a web page on the screen.
 - Anything slower than a few seconds wants exec with background: true — a build or an install run in the foreground comes back as a timeout with the work still going and its output unreadable. Sixteen of them run at once per computer, and a slot is held until its command exits; exec_kill on a pid you no longer need is what frees one.
+- The computer says what it is doing, so you do not have to look in order to find out. wait_for_event blocks until something is reported — a background command exiting, a window opening, the desktop coming up, the machine going idle — and poll_events hands you whatever was reported while you were busy with something else. The stream is held open between your turns, so nothing that happens between two calls is missed and a wait that times out has cost you nothing. Use these in place of a screenshot loop: a screenshot is for seeing what the screen LOOKS like, not for finding out whether anything changed.
 - list_windows tells you what is on the screen as data. It is how you distinguish an application that failed to start from one that has not painted yet, which a screenshot alone cannot do.
 - A computer suspends itself when nobody uses it — 30 minutes by default. Input, exec and file transfers all count as use and resume it. Screenshots deliberately do not, so a loop that only watches can see its own machine go down.
 - A 409 is not one thing, and retrying blindly is how a turn gets burned. Most describe a passing state and clear on their own: a guest still booting, a guest agent busy with another call. Some describe a DECISION about what you asked for — a size the host cannot run, a computer that has to be stopped first — and those answer the same way forever; the message says which, and usually says what to do instead. A 400 never clears.
@@ -83,7 +85,19 @@ export function createServer(cfg: ServerConfig): McpServer {
   registerGuest(server, session, opts);
   registerSnapshots(server, session, opts);
   registerTemplates(server, session, opts);
+  registerEvents(server, session, opts);
   registerAgent(server, session, opts);
+
+  // The event sockets outlive every tool call by design (OPL-3926), so nothing
+  // in a tool can be the thing that closes them. This is the end of the
+  // session, which is the lifetime they actually have — without it an HTTP
+  // transport whose client went away leaves a websocket per computer open,
+  // reconnecting, for as long as the process lives.
+  const closed = server.server.onclose;
+  server.server.onclose = () => {
+    session.events.closeAll();
+    closed?.();
+  };
 
   return server;
 }
