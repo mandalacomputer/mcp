@@ -7,7 +7,16 @@ import {
   platformSaid,
   RangeNotSatisfiableError,
 } from '../errors.js';
-import { guarded, image, json, MAX_INLINE_IMAGE_BYTES, refused, said, text } from '../format.js';
+import {
+  guarded,
+  image,
+  isInlineImage,
+  json,
+  MAX_INLINE_IMAGE_BYTES,
+  refused,
+  said,
+  text,
+} from '../format.js';
 import * as P from '../paths.js';
 import type { Registrar } from './types.js';
 
@@ -46,19 +55,6 @@ const MAX_INLINE_BYTES = 256 * 1024;
  * body is cancelled rather than read.
  */
 const MAX_WINDOW_BYTES = MAX_INLINE_IMAGE_BYTES;
-
-/**
- * Raster types that MCP image content can carry safely.
- *
- * `image/*` includes `image/svg+xml`, and a client that inlines that MIME as
- * a picture can execute script from a guest file. SVG is XML; it goes through
- * the text / base64 path like any other non-raster file.
- */
-const INLINE_IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
-
-function isInlineImage(contentType: string): boolean {
-  return INLINE_IMAGE_TYPES.has(contentType);
-}
 
 const absolutePath = (what: string) =>
   z
@@ -502,6 +498,20 @@ export const registerGuest: Registrar = (server, session) => {
         if (encoding === 'base64' && !isBase64(content)) {
           return refused(
             `That is not valid base64, and decoding it would have written a corrupt ${path} while reporting success. Nothing was written. Re-encode the content, or send it with encoding: "utf8" if it is text.`,
+          );
+        }
+        // The same failure the base64 check above refuses, reached down the
+        // other branch: a write that lands and is wrong. Nothing on the utf8
+        // path refused half a character — `Buffer.from(…, 'utf8')` substitutes
+        // U+FFFD and says nothing — so the file was written with a replacement
+        // character where the caller's text was, and the tool reported success.
+        // `clipboardBody` has refused exactly this since it was written, on the
+        // grounds that a write that succeeds with different text than was asked
+        // for is worse than one that fails. A file is not a weaker case than a
+        // clipboard; it is the more durable one.
+        if (encoding === 'utf8' && P.hasUnpairedSurrogate(content)) {
+          return refused(
+            `That content has an unpaired surrogate in it — half of a character, usually from a string cut through the middle of an emoji. It is not valid UTF-8, so ${path} would have been written with a replacement character where your text was, and reported as a success. Nothing was written. Send the whole character, cut the text on a character boundary, or send the exact bytes with encoding: "base64".`,
           );
         }
         const bytes = new Uint8Array(

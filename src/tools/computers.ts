@@ -3,6 +3,7 @@ import {
   CancelledError,
   isTransientForPoll,
   MoveRequiredError,
+  NotFoundError,
   RateLimitError,
 } from '../errors.js';
 import {
@@ -104,9 +105,28 @@ type Move = {
  * stops watching a move that is still running. An unreadable body establishes
  * neither.
  */
-const movesOf = (body: unknown): Move[] | undefined => {
+const movesOf = (body: unknown): { moves: Move[]; dropped: number } | undefined => {
   const list = (body as { moves?: unknown } | null)?.moves;
-  return Array.isArray(list) ? (list as Move[]) : undefined;
+  if (!Array.isArray(list)) return undefined;
+  // Rows shape-checked, as list_computers and list_snapshots check theirs. Both
+  // callers reach straight into a row — `m.computer_id`, and moveLine's field
+  // reads — so a `null` in the array threw a TypeError. In the poll that throw
+  // landed OUTSIDE the try/catch that exists to say "THE MOVE IS STILL
+  // RUNNING", replacing the one sentence that stops a caller concluding a
+  // multi-minute disk copy had failed.
+  //
+  // The COUNT comes back with them, and that is the half a bare filter would
+  // get wrong. Both callers read an empty result as a fact about the account —
+  // one reports a quiet account, the other concludes the computer was deleted
+  // and stops watching a move that is still running — and a row this function
+  // could not read establishes neither. Silently dropping it would trade a
+  // TypeError for a confident wrong answer, which is the worse of the two.
+  // An unreadable ENVELOPE is still `undefined`: a different fact, a different
+  // answer, and the one the callers already handle.
+  const moves = list.filter(
+    (row): row is Move => row !== null && typeof row === 'object' && !Array.isArray(row),
+  );
+  return { moves, dropped: list.length - moves.length };
 };
 
 /** What arrived where a list was expected, for a refusal that names it. */
@@ -642,7 +662,7 @@ export const registerComputers: Registrar = (server, session, opts) => {
               last,
             );
           }
-          let table: Move[] | undefined;
+          let table: { moves: Move[]; dropped: number } | undefined;
           let raw: unknown;
           try {
             raw = await api.json('GET', P.MOVES);
@@ -681,10 +701,22 @@ export const registerComputers: Registrar = (server, session, opts) => {
             continue;
           }
           blocked = undefined;
-          const mine = table.find((m) => m.computer_id === id);
+          const mine = table.moves.find((m) => m.computer_id === id);
           // A move that is no longer listed is one the platform reaped, and it
           // reaps for one reason: the computer was deleted. Not a state to keep
           // polling for.
+          //
+          // Unless a row could not be READ, in which case absence is not
+          // established: the move may be sitting in the row this poll had to
+          // drop. That is a poll that could not be answered rather than an
+          // answer, so it rides out exactly as a transient failure does, and
+          // the deadline's sentence says the platform could not be asked
+          // instead of claiming a deletion nothing showed.
+          if (!mine && table.dropped) {
+            blocked = `GET /moves answered with ${table.dropped} unreadable row(s), so this move may be among them`;
+            await sleep(POLL_MS, signal);
+            continue;
+          }
           if (!mine) {
             return refused(
               `The move of ${id} is no longer listed. That happens when the computer is deleted — check ` +
@@ -726,8 +758,22 @@ export const registerComputers: Registrar = (server, session, opts) => {
             body,
           );
         }
-        if (!moves.length) return said('No moves on this account.', []);
-        return said(moves.map(moveLine).join('\n'), moves);
+        // Said the way list_computers and list_snapshots say it: a dropped row
+        // is reported, and a listing left with nothing but dropped rows is a
+        // refusal rather than an empty account. "No moves on this account" is
+        // an affirmative claim, and it is the one the refusal above exists to
+        // avoid making from an unreadable answer.
+        const warning = moves.dropped
+          ? `WARNING: ignored ${moves.dropped} malformed move entr${moves.dropped === 1 ? 'y' : 'ies'} from the platform.\n\n`
+          : '';
+        if (!moves.moves.length && moves.dropped) {
+          return refused(
+            `${warning}No readable moves remained. This is not an account with no moves on it — a move you started may still be running.`,
+            body,
+          );
+        }
+        if (!moves.moves.length) return said('No moves on this account.', []);
+        return said(`${warning}${moves.moves.map(moveLine).join('\n')}`, moves.moves);
       }),
   );
 
@@ -1228,14 +1274,50 @@ export const registerComputers: Registrar = (server, session, opts) => {
               'Nothing has been deleted.',
           );
         }
-        const res = await session.api
-          .with(extra.signal)
-          .send<{ snapshots_deleted?: number }>('DELETE', P.computer(computer_id), {
-            query: {
-              snapshots: delete_snapshots ? 'delete' : undefined,
-              expect: delete_snapshots ? fingerprint : undefined,
-            },
-          });
+        let res: { snapshots_deleted?: number } | undefined;
+        try {
+          res = await session.api
+            .with(extra.signal)
+            .send<{ snapshots_deleted?: number }>('DELETE', P.computer(computer_id), {
+              query: {
+                snapshots: delete_snapshots ? 'delete' : undefined,
+                expect: delete_snapshots ? fingerprint : undefined,
+              },
+            });
+        } catch (err) {
+          // A 404 means the computer is not there, which is the state this call
+          // was asking for. The platform answers it for an id it cannot scope,
+          // and this tool is annotated `idempotentHint`, so the retry after a
+          // lost 2xx is one a client is invited to make — and it was the one
+          // path that reached `send`, threw, and skipped `unbind` entirely,
+          // leaving the session driving a machine that no longer exists. That
+          // ghost is the whole reason unbind exists.
+          //
+          // Unbound BEFORE the rethrow-or-report decision, because it is true
+          // either way: whatever this answers, the caller must not be left
+          // selected on a computer the platform says is gone.
+          if (!(err instanceof NotFoundError)) throw err;
+          session.unbind(computer_id);
+          // Reported as a success rather than an error, and deliberately not as
+          // a plain "Deleted": a caller retrying cannot be told its snapshots
+          // were purged when this call is not what purged them, and the count
+          // is a thing only the response that actually did the work carries.
+          //
+          // It does not claim a deletion happened, either. A 404 is equally the
+          // platform's answer for an id that was never on this account — a typo,
+          // or a computer belonging to somebody else — and "deleted" said over
+          // a mistyped id leaves a caller believing a machine is gone while the
+          // real one keeps running and billing. Both readings are named, and the
+          // one call that settles which is the one to make next.
+          return said(
+            `Nothing was deleted: the platform has no computer with the id ${computer_id} on this account. ` +
+              'Either it was already destroyed — if this is a retry, the first call is the one that did it, and ' +
+              'whatever that call did with the snapshots is what happened to them — or the id is not one on this ' +
+              'account, in which case NO computer of yours has been touched and a real one may still be running ' +
+              'under the id you meant. list_computers says which of the two this is. The session is no longer ' +
+              'bound to that id either way.',
+          );
+        }
         session.unbind(computer_id);
         // A count only when the platform sent one. `?? 0` here would turn "it
         // did not say" into the affirmative claim that nothing was destroyed —

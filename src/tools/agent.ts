@@ -25,7 +25,7 @@ export const registerAgent: Registrar = (server, session) => {
     {
       title: 'Have the platform drive the computer',
       description:
-        'Give the computer a task in plain language and let the platform drive it — screenshot, decide, click, type, repeat — until it is done. Runs on the Anthropic key this server was configured with, and bills that key for every step. Use it to delegate a long stretch of pixel work; drive with the individual tools when you want to see each frame yourself. The computer must already be running.',
+        'Give the computer a task in plain language and let the platform drive it — screenshot, decide, click, type, repeat — until it is done. Runs on the Anthropic key this server was configured with, and bills that key for every step. Use it to delegate a long stretch of pixel work; drive with the individual tools when you want to see each frame yourself. The computer must already be running. A run is MINUTES, not seconds: it reports progress on every step so a client that sends a progressToken and sets resetTimeoutOnProgress can hold the request open, and a client that cannot should lower max_steps rather than watch its own default timeout cancel a run it is already paying for.',
       inputSchema: {
         computer_id: z
           .string()
@@ -50,6 +50,10 @@ export const registerAgent: Registrar = (server, session) => {
         const id = session.resolve(computer_id);
         const steps: string[] = [];
         let done: Record<string, unknown> | undefined;
+        // The token the CLIENT sends when it wants progress, exactly as
+        // watch_build reads it. Without one there is nothing to address a
+        // progress notification to, and this falls back to logging alone.
+        const progressToken = extra._meta?.progressToken;
 
         for await (const ev of session.api.sse('POST', P.computerAction(id, 'agent'), {
           body: P.agentBody({ prompt, system, max_steps, stream: true }),
@@ -60,6 +64,38 @@ export const registerAgent: Registrar = (server, session) => {
             if (!isRecord(ev.data)) continue;
             const s = ev.data as { n?: number; action?: string; detail?: string };
             steps.push(`${s.n ?? steps.length + 1}. ${s.detail ?? s.action ?? 'step'}`);
+            // A PROGRESS notification, not only a logging one, for the reason
+            // watch_build sends one: `_onprogress` in the SDK's
+            // shared/protocol.js resets a pending request's timer, and
+            // `notifications/message` — what sendLoggingMessage emits — never
+            // touches it. This tool had only the logging half, so a run of the
+            // default 20 steps, each a model call plus a screenshot, sailed past
+            // the client's 60s default and was cancelled while the platform went
+            // on driving the desktop on the caller's own Anthropic key.
+            //
+            // Not sufficient on its own, and the same caveat applies here as
+            // there: protocol.js reads `options?.resetTimeoutOnProgress ?? false`,
+            // so a client that mints a token and leaves that option alone is
+            // still cancelled. What this does is make the keepalive AVAILABLE.
+            // The description says so, and max_steps is the lever for a client
+            // that cannot opt in.
+            if (progressToken !== undefined) {
+              await extra
+                .sendNotification({
+                  method: 'notifications/progress',
+                  params: {
+                    progressToken,
+                    // The step COUNT, which the SDK's ProgressSchema asks to
+                    // increase every time. `max_steps` is a real total here —
+                    // unlike a build's step count it is known before the first
+                    // step and cannot change — so the bar means something.
+                    progress: steps.length,
+                    total: max_steps,
+                    message: steps[steps.length - 1],
+                  },
+                })
+                .catch(() => {});
+            }
             // Told, not just collected. A run is minutes of clicking, and a tool
             // that says nothing until it is over is one nobody watching can tell
             // from a hang.
@@ -67,7 +103,25 @@ export const registerAgent: Registrar = (server, session) => {
               .sendLoggingMessage({ level: 'info', data: steps[steps.length - 1] })
               .catch(() => {});
           } else if (ev.event === 'done') {
-            if (isRecord(ev.data)) done = ev.data;
+            // Stop at the terminal frame rather than waiting for EOF, as
+            // watch_build does. Waiting held a result that was already in hand
+            // until the generator ended, so a client that aborted in that window
+            // — or a stream the platform left open — turned a finished run into
+            // a CancelledError and threw the answer away.
+            //
+            // Terminal means it SAYS SO, which is watch_build's discipline
+            // (OPL-3835) applied to this stream's own vocabulary: `stop` is the
+            // field the platform always sends on a result — the AgentResult type
+            // in its lib/agent.ts requires it, and every `done` it yields carries
+            // one — and it is the field the verdict below reads. A record
+            // without it is not a result, so it is kept, in case nothing better
+            // arrives, but it does not end the loop and discard the frame that
+            // would have been the real one. A `done` that is not a record at all
+            // is skipped entirely: the null-done case the regression suite pins.
+            if (isRecord(ev.data)) {
+              done = ev.data;
+              if (typeof ev.data.stop === 'string' && ev.data.stop) break;
+            }
           } else if (ev.event === 'error') {
             // A run that errored is a failure, and has to carry `isError` to
             // say so. Prose alone leaves it indistinguishable at the protocol
