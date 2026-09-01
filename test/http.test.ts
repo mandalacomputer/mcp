@@ -935,3 +935,87 @@ describe("the operator's own computer", () => {
     expect(text).not.toMatch(/vm-operator/);
   });
 });
+
+// --- grok bug hunt, OPL-4218 ---------------------------------------------
+
+describe('an operator allowlist written the way operators write it', () => {
+  let server: Server;
+  let port: number;
+  let platform: ReturnType<typeof installFakePlatform>;
+
+  beforeAll(async () => {
+    platform = installFakePlatform();
+    // A bare name, which is what MANDALA_ALLOWED_HOSTS documents and what
+    // anybody types. The server is bound on an ephemeral port, so every direct
+    // client sends `Host: mcp.example.com:<port>`.
+    server = await runHttp({
+      port: 0,
+      host: '127.0.0.1',
+      baseUrl: BASE,
+      allowedHosts: ['mcp.example.com'],
+    });
+    port = (server.address() as AddressInfo).port;
+  });
+  afterAll(async () => {
+    platform.restore();
+    await new Promise<void>((r) => server.close(() => r()));
+  });
+
+  it('answers the Host header a browser actually sends, port and all', async () => {
+    // The bug: only the bare name was allowlisted, the SDK compares the whole
+    // header, and so the protection an operator had just turned on answered 403
+    // to every request their own clients made.
+    const res = await rawPost(
+      port,
+      `mcp.example.com:${port}`,
+      { Authorization: 'Bearer com_alice' },
+      INIT,
+    );
+    expect(res.status).toBe(200);
+  });
+
+  it('still answers the portless spelling a proxy forwards', async () => {
+    const res = await rawPost(port, 'mcp.example.com', { Authorization: 'Bearer com_alice' }, INIT);
+    expect(res.status).toBe(200);
+  });
+
+  it('still turns away a name nobody allowed', async () => {
+    const res = await rawPost(
+      port,
+      `evil.example:${port}`,
+      { Authorization: 'Bearer com_alice' },
+      INIT,
+    );
+    expect(res.status).toBe(403);
+  });
+});
+
+describe('what /healthz says about capacity', () => {
+  let server: Server;
+  let url: string;
+  let platform: ReturnType<typeof installFakePlatform>;
+
+  beforeAll(async () => {
+    platform = installFakePlatform();
+    // Every interface, and no allowlist: the exposed bind, where the counters
+    // are a capacity oracle rather than a local convenience.
+    server = await runHttp({ port: 0, host: '0.0.0.0', baseUrl: BASE });
+    url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  });
+  afterAll(async () => {
+    platform.restore();
+    await new Promise<void>((r) => server.close(() => r()));
+  });
+
+  it('still reports liveness', async () => {
+    const health = (await (await fetch(`${url}/healthz`)).json()) as Record<string, unknown>;
+    expect(health.ok).toBe(true);
+    expect(health.name).toBe('mandala-computer');
+  });
+
+  it('withholds the two numbers that time an exhaustion', async () => {
+    const health = (await (await fetch(`${url}/healthz`)).json()) as Record<string, unknown>;
+    expect(health.sessions).toBeUndefined();
+    expect(health.largeBodyParses).toBeUndefined();
+  });
+});
