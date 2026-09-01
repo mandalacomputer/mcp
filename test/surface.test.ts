@@ -121,6 +121,14 @@ const EXERCISE: Record<string, Record<string, unknown>[]> = {
     { window_id: '0x2600003', action: 'move', x: 10, y: 20 },
     { window_id: '0x2600003', action: 'resize', width: 640, height: 480 },
   ],
+  // The event stream (OPL-3926). Both land on `GET computers/:id`, which is
+  // where `events_url` lives — the socket itself is not a route on this table
+  // and never can be, for the reason the platform keeps it beside `V1_ROUTES`
+  // rather than on it: the catch-all that serves the table cannot hold one open.
+  // The fixture's opening frame says the desktop is already up, so the wait ends
+  // on a synthesized computer.ready rather than on its timeout.
+  wait_for_event: [{ types: ['computer.ready'], timeout_s: 1 }],
+  poll_events: [{}],
   read_clipboard: [{}],
   write_clipboard: [{ text: 'on the clipboard' }],
   write_file: [{ path: '/home/user/a.txt', content: 'hello' }],
