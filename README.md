@@ -81,7 +81,8 @@ entirely.
 `list_windows`, `window_action`, `read_clipboard`, `write_clipboard`,
 `read_file`, `write_file`
 
-**Being told rather than asking** — `wait_for_event`, `poll_events`
+**Being told rather than asking** — `wait_for_event`, `poll_events`,
+`wait_for_file_change`
 
 **Snapshots** — `list_snapshots`, `snapshot_holdings`, `create_snapshot`,
 `restore_snapshot`, `clone_snapshot`, `snapshot_schedule`, `get_retention`,
@@ -138,12 +139,52 @@ Three consequences, and they are the whole of the design:
   frame itself never reaches the model, because a model handed one would invent
   a recovery procedure.
 
-Not everything is an event. A click landing, a page painting and a file being
-written are not, and no amount of waiting will produce one — `screenshot`,
-`list_windows` and `exec_poll` are still the answers there. `wait_for_event`
-refuses at once, naming what the computer *can* emit, when asked for something
-this guest will never produce: a Windows guest has no event stream at all, and a
-Linux image built without the X bindings its watcher needs emits no `window.*`.
+**A file being written is an event, once you ask for one.** `file.changed` is
+the one thing on this stream nobody is sent unasked: a directory has to be
+nominated on the connection, and without one the platform sends no file events
+at all. `wait_for_file_change` is that nomination and the wait in one call —
+give it an absolute directory in the guest and it blocks until something under
+it is created, modified or deleted. Use it for a build writing its output, a
+download landing, a script producing a file; the alternative is running `ls` in
+a loop, which is the file-shaped version of the screenshot loop.
+
+Three things about it are worth knowing before you use it, because each is a way
+to read an answer wrongly:
+
+- **A nomination is not a watch.** The guest has to be asked, and on a computer
+  nobody has opened a terminal on the watcher is installed into the guest first
+  — seconds, not milliseconds. inotify reports changes and not state, so nothing
+  that happens before a tree is armed is ever reported. This tool never returns
+  "nothing changed" from inside that window: until the tree is genuinely being
+  watched it says so, in as many words, and tells you to call again.
+- **`lost` is not an error.** A tree that changes faster than the stream reports
+  it comes back as one marker rather than thousands of events — which is what
+  makes a watch under a build usable at all. The watch is still on and the tree
+  is still being watched; what you have lost is your picture of it, so list the
+  directory and carry on. The one exception is `unwatchable`, which means the
+  tree is not being watched: the path is not there yet, is not a directory,
+  cannot be read, or is a symlink, and symlinks are refused rather than followed.
+- **Nominate the narrowest tree you care about.** A home directory under a build
+  is thousands of changes a second, and what you get for it is a flood marker
+  rather than the changes. Your session holds four trees at once per computer —
+  a fifth evicts the one you asked about longest ago, and you are told which one
+  went — while the computer itself watches at most 32 across every client
+  connected to it.
+
+Not everything else is an event, though. A click landing and a page painting are
+not, and no amount of waiting will produce one — `screenshot`, `list_windows`
+and `exec_poll` are still the answers there. `wait_for_event` refuses at once,
+naming what the computer *can* emit, when asked for something this guest will
+never produce.
+
+**The guest half is two capabilities, not one.** A Windows guest has no event
+stream at all. A Linux one whose hardware carries no terminal channel produces
+nothing the guest reports about itself. But `file.changed` runs against libc's
+own inotify calls and needs only that channel, while `window.*`, the clipboard
+and readiness also need the X bindings their desktop watcher is written against
+— so an older Linux image reports every file change and no window event
+whatever. The refusals name which of the two is missing, because one of them is
+fixable by a stop and a start and the other is a fact about the image.
 
 **`running` does not mean ready.** A computer reports running when the
 hypervisor has started the VM; the desktop inside comes up seconds later.
