@@ -343,15 +343,22 @@ export class Subscription {
     const at = this.#ring.findIndex((b) => b.event.cursor === since);
     if (at >= 0) return this.#ring[at].index + 1;
     // The position at the moment this connection attached, which is
-    // legitimately older than anything in the ring on a quiet computer.
+    // legitimately older than anything in the ring on a quiet computer. The one
+    // deliberate rewind: a caller asking for it is asking to be re-sent this
+    // connection's whole buffer, and saying so exactly.
     if (since === this.#hello?.cursor) return this.#oldest;
+    // Otherwise: the unread frontier, NOT the oldest thing still in the ring.
+    // A delivered event stays in the ring until the cap evicts it, so answering
+    // an unplaceable cursor with `#oldest` re-sent events the model already
+    // had — while attaching a loss note that said they "were not kept", which
+    // was false about exactly the events being re-sent.
     this.#loss ??= {
       events: null,
       reason:
-        'that cursor is older than anything this session still holds, so the events between it ' +
-        'and the ones below were not kept',
+        'that cursor is not a place this session can find, so whatever happened between it and ' +
+        'the events below was not kept here',
     };
-    return this.#oldest;
+    return Math.max(this.#delivered, this.#oldest);
   }
 
   /**
@@ -529,7 +536,12 @@ export class Subscription {
   async #url(): Promise<string> {
     let c: Computer;
     try {
-      c = unwrapComputer(await this.#api.json('GET', P.computer(this.computerId)));
+      // Bound to this subscription's own signal. Without it a `closeAll()` on
+      // session teardown leaves this fetch running to undici's 330-second
+      // header timeout, with `#loop` parked inside it the whole time.
+      c = unwrapComputer(
+        await this.#api.with(this.#abort.signal).json('GET', P.computer(this.computerId)),
+      );
     } catch (err) {
       // A question already answered ends the stream rather than being asked
       // again behind it: a deleted computer or a revoked key is otherwise a
@@ -546,11 +558,20 @@ export class Subscription {
           'suspends underneath its own stream. start_computer, then ask again.',
       );
     }
-    if (status !== 'running') {
+    if (status === 'stopped' || status === 'build-failed') {
       throw new SettledError(
         `${this.computerId} is ${status}, and only a running computer has an event stream. ` +
           'start_computer, then ask again.',
       );
+    }
+    if (status !== 'running') {
+      // `starting`, `moving`, `creating` — states that clear on their own, so
+      // they get the backoff rather than the refusal. Settling on everything
+      // that was not `running` broke the flow the README advertises: a
+      // create_computer followed at once by wait_for_event("computer.ready")
+      // meets `starting`, which is the ordinary weather of a machine coming up
+      // and is precisely what the caller is waiting through.
+      throw new MandalaError(`${this.computerId} is ${status}; waiting for it to be running`);
     }
     const vnc = c.vnc as Record<string, unknown> | undefined;
     const url = typeof vnc?.events_url === 'string' ? vnc.events_url : undefined;
@@ -633,10 +654,20 @@ export class Subscription {
       const onAbort = () => finish(opened);
       this.#abort.signal.addEventListener('abort', onAbort, { once: true });
 
+      // Both listeners are guarded, because `finish()` does not stop a socket
+      // from delivering. A `close()` is a handshake rather than an instant, and
+      // a connect-timeout `finish` leaves the socket open by definition — so
+      // frames from connection A could still arrive after `#loop` had given up
+      // on it and opened connection B, into the same subscription: a second
+      // synthesized readiness, events B will replay, a `stopped` state walked
+      // back to `open` with `#loop` already returned.
+      const mine = () => !settled && this.#socket === socket;
       socket.addEventListener('open', () => {
+        if (!mine()) return;
         this.#state = { status: 'open' };
       });
       socket.addEventListener('message', (ev) => {
+        if (!mine()) return;
         const frame = parse(ev.data);
         if (!frame) return;
         if (frame.type === 'hello') {
@@ -737,7 +768,13 @@ export class Subscription {
       // replacement subscription resuming from where this one STARTED would ask
       // for a window that cannot be replayed and be told so a second time.
       if (!this.#deliveredCursor) this.#start = this.#resume;
-      if (this.#hello?.ready) this.#pushReady(this.#hello.cursor);
+      // Stamped with the GAP's position, not the opening frame's. A resumed
+      // connection's `hello` carries the cursor it attached at, which can be
+      // older than events the model has already been handed — and a synthesized
+      // event carrying it would walk `#deliveredCursor` backwards, so the next
+      // `since` re-delivered what had already been read, silently, with no gap
+      // to report it.
+      if (this.#hello?.ready) this.#pushReady(this.#resume ?? this.#hello.cursor);
       this.#wakeAll();
       return;
     }

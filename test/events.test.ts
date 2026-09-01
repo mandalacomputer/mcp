@@ -224,6 +224,39 @@ describe('waiting for one event', () => {
     await close();
   });
 
+  it('names the events it handed over when the wait itself timed out', async () => {
+    // The failure mode this prevents: the read on the timeout path is a full
+    // drain, so unmatched events are delivered — and the sentence said "nothing
+    // happened" over a payload holding three of them. A model reads the prose
+    // before the JSON, and this server's whole promise is that it was listening.
+    const { call, close, ev } = await attach({ ready: false });
+    const waiting = call('wait_for_event', { types: ['process.exited'], timeout_s: 1 });
+    ev.last().send(frame('window.opened', { id: '0x1' }, 'cur-1'));
+    ev.last().send(frame('clipboard.changed', { selection: 'clipboard' }, 'cur-2'));
+
+    const res = await waiting;
+    expect(res.isError).toBeFalsy();
+    expect(eventsOf(res)).toHaveLength(2);
+    expect(textOf(res)).toContain('2 other events did happen');
+    await close();
+  });
+
+  it('takes a pid on its own as meaning that command’s exit', async () => {
+    // The argument's own description reads as "wait for this exec", and without
+    // an implied type the filter says "anything that is not a process.exited
+    // passes" — so the wait ended on the next clipboard change instead.
+    const { call, close, ev } = await attach({ ready: false });
+    const waiting = call('wait_for_event', { pid: 99, timeout_s: 5 });
+    ev.last().send(frame('clipboard.changed', { selection: 'clipboard' }, 'cur-1'));
+    ev.last().send(frame('process.exited', { pid: 4242, exit_code: 0 }, 'cur-2', 'daemon'));
+    ev.last().send(frame('process.exited', { pid: 99, exit_code: 5 }, 'cur-3', 'daemon'));
+
+    const res = await waiting;
+    const last = eventsOf(res)[eventsOf(res).length - 1];
+    expect((last.data as { pid: number }).pid).toBe(99);
+    await close();
+  });
+
   it('refuses at once for something this computer cannot emit', async () => {
     const { call, close } = await attach({ ready: false, events: ['computer.started'] });
     const started = Date.now();
@@ -302,6 +335,13 @@ describe('a desktop that came up before anybody was listening', () => {
 
     const res = await call('poll_events');
     expect(eventsOf(res).map((e) => e.type)).toEqual(['computer.ready']);
+    // Stamped with the GAP's position, not the opening frame's. A resumed
+    // connection's hello carries the cursor it attached at, which here is older
+    // than the window.opened already handed over — and a synthesized event
+    // carrying it would walk the delivered position backwards, so the next
+    // `since` re-delivered what had already been read, with no gap to say so.
+    expect(eventsOf(res)[0].cursor).toBe('cur-9');
+    expect(dataOf(res).cursor).toBe('cur-9');
     await close();
   });
 });
@@ -335,6 +375,19 @@ describe('a hole in the history', () => {
     await close();
   });
 
+  it('does not deny the gap when nothing survived it', async () => {
+    // The one case where "this is an answer rather than a gap" is exactly
+    // wrong: a hole with no surviving events leaves an empty batch beside a
+    // real loss, and the sentence has to agree with the JSON beside it.
+    const { call, close, ev } = await attach({ ready: false });
+    ev.last().send({ type: 'gap', cursor: 'cur-9', detail: 'too far back', data: {} });
+    const res = await call('poll_events');
+    expect(eventsOf(res)).toHaveLength(0);
+    expect(textOf(res)).toContain('hole in the history');
+    expect(textOf(res)).not.toContain('rather than a gap');
+    await close();
+  });
+
   it('answers the gap with the state it would have sent the model to fetch', async () => {
     const { call, close, ev } = await attach({ ready: false });
     ev.last().send({ type: 'gap', cursor: 'cur-9', detail: 'too far back', data: {} });
@@ -365,13 +418,32 @@ describe('a hole in the history', () => {
     await close();
   });
 
+  it('does not re-deliver read events for a cursor it cannot place', async () => {
+    // A delivered event stays in the ring until the cap evicts it, so resuming
+    // an unplaceable cursor at the OLDEST thing buffered re-sent events the
+    // model already had — and attached a loss note saying they "were not kept",
+    // which was false about exactly the events being re-sent. The right place
+    // is the unread frontier.
+    const { call, close, ev } = await attach({ ready: false });
+    ev.last().send(frame('window.opened', { id: '0x1' }, 'cur-1'));
+    expect(eventsOf(await call('poll_events'))).toHaveLength(1);
+
+    const res = await call('poll_events', { since: 'cur-from-another-session' });
+    expect(eventsOf(res)).toHaveLength(0);
+    expect((dataOf(res).lost as { events: null }).events).toBeNull();
+    await close();
+  });
+
   it('says so when a cursor is older than anything it still holds', async () => {
     const { call, close, ev } = await attach({ ready: false });
     ev.last().send(frame('window.opened', { id: '0x1' }, 'cur-1'));
     const res = await call('poll_events', { since: 'cur-from-another-session' });
     const lost = dataOf(res).lost as { events: null; reason: string };
     expect(lost.events).toBeNull();
-    expect(lost.reason).toContain('older than anything this session still holds');
+    expect(lost.reason).toContain('not a place this session can find');
+    // The event itself is unread, so it comes back; what must not come back is
+    // an event already handed over — see the test below.
+    expect(eventsOf(res)).toHaveLength(1);
     expect(dataOf(res).windows_now).toBeTruthy();
     await close();
   });
@@ -458,6 +530,65 @@ describe('the socket underneath', () => {
       await close();
     } finally {
       globalThis.fetch = real;
+    }
+  });
+
+  it('waits through a computer that is still starting', async () => {
+    // Settling on everything that is not `running` broke the flow the README
+    // advertises: create_computer, then wait_for_event("computer.ready"). That
+    // meets `starting`, which is the ordinary weather of a machine coming up
+    // and is precisely what the caller is waiting through — not a refusal.
+    const real = globalThis.fetch;
+    let status = 'starting';
+    globalThis.fetch = (async (input: string | URL | Request) => {
+      const url = new URL(typeof input === 'string' ? input : input.toString());
+      if (url.host !== new URL(BASE).host) return real(input as never);
+      return new Response(
+        JSON.stringify({
+          id: 'vm-1',
+          status,
+          os: 'linux',
+          vnc: { events_url: 'wss://app.test/api/v1/computers/vm-1/events?token=t' },
+        }),
+        { headers: { 'Content-Type': 'application/json' } },
+      );
+    }) as typeof fetch;
+    try {
+      const ev = fakeEvents({ ready: true });
+      const hub = new EventHub(new Api('com_test', BASE), ev.factory);
+      try {
+        const sub = hub.open('vm-1');
+        // It backs off rather than stopping, and connects once it is running.
+        await new Promise((r) => setTimeout(r, 100));
+        expect(sub.state.status).not.toBe('stopped');
+        status = 'running';
+        await until('a connection once it is running', () => ev.sockets.length === 1, 5_000);
+      } finally {
+        hub.closeAll();
+      }
+    } finally {
+      globalThis.fetch = real;
+    }
+  });
+
+  it('ignores frames from a connection it has already given up on', async () => {
+    // `finish()` does not stop a socket from delivering: a close is a handshake
+    // rather than an instant, and a connect-timeout finish leaves the socket
+    // open by definition. Frames from the abandoned connection would otherwise
+    // land in the same subscription as the live one's.
+    const ev = fakeEvents({ ready: false });
+    const hub = new EventHub(new Api('com_test', BASE), ev.factory);
+    try {
+      const sub = hub.open('vm-1');
+      await until('the first connection', () => ev.sockets.length === 1);
+      const abandoned = ev.sockets[0];
+      abandoned.close();
+      await until('a reconnect', () => ev.sockets.length === 2, 5_000);
+
+      abandoned.send(frame('window.opened', { id: '0xdead' }, 'cur-ghost'));
+      expect(sub.read({ limit: 100 }).events).toHaveLength(0);
+    } finally {
+      hub.closeAll();
     }
   });
 

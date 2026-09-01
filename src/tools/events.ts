@@ -180,6 +180,13 @@ function unattached(session: Session, id: string) {
   );
 }
 
+/** The caller hung up before the stream had opened. Nothing is claimed about the computer. */
+const cancelledDuringAttach = (id: string) =>
+  refused(
+    `Cancelled while the event stream for ${id} was still opening. Nothing was learned about the ` +
+      `computer, and the stream is still coming up — call again.`,
+  );
+
 export const registerEvents: Registrar = (server, session) => {
   server.registerTool(
     'wait_for_event',
@@ -236,9 +243,21 @@ export const registerEvents: Registrar = (server, session) => {
         // statement about a moment that has passed.
         const opening = sub.state;
         if (opening.status === 'stopped') return stopped(session, id, opening.reason);
+        // A caller who hung up is not a stream that failed to open, and must not
+        // take the connection down with it: `unattached` drops the subscription,
+        // which would throw away a socket that was still opening.
+        if (extra.signal?.aborted) return cancelledDuringAttach(id);
         if (!sub.eventTypes) return unattached(session, id);
 
-        const wanted = types?.length ? new Set(types) : undefined;
+        // A `pid` on its own means the exit of THAT command. Without this the
+        // filter below reads "anything that is not a process.exited passes",
+        // and `wait_for_event({pid: 99})` — which is how the argument's own
+        // description reads — ends on the next clipboard change instead.
+        const wanted = types?.length
+          ? new Set(types)
+          : pid !== undefined
+            ? new Set(['process.exited'])
+            : undefined;
         const matches = (ev: ComputerEvent): boolean => {
           if (wanted && !wanted.has(ev.type)) return false;
           if (pid === undefined) return true;
@@ -292,10 +311,22 @@ export const registerEvents: Registrar = (server, session) => {
           // stop asking — back to the screenshot loop this tool exists to end.
           const d = sub.read({ since, limit });
           const extras = d.loss ? await reconcile(session, id, extra.signal) : {};
+          // What did NOT match still happened, and this read has just handed it
+          // over — so the sentence has to name it. Saying "nothing happened"
+          // over a payload holding three events is the one thing a model must
+          // not be told by a server whose whole promise is that it was
+          // listening: it would read the prose, not the JSON, and the events
+          // would be delivered and unmentioned in the same breath.
+          const others = d.events.length
+            ? ` ${d.events.length} other event${d.events.length === 1 ? '' : 's'} did happen and ` +
+              `${d.events.length === 1 ? 'is' : 'are'} below.`
+            : '';
           return said(
             `Nothing ${wanted ? `matching ${[...wanted].join(' or ')} ` : ''}happened on ${id} in ` +
-              `${timeout_s}s. This server kept listening the whole time and is still listening — ` +
-              `nothing was missed and nothing is being missed now. Call again to keep waiting.`,
+              `${timeout_s}s.${others} This server kept listening the whole time and is still ` +
+              `listening — nothing was missed and nothing is being missed now. Call again to ` +
+              `keep waiting.` +
+              (d.loss ? ' Some events were lost before they could be read — see lost.' : ''),
             { ...body(id, d), ...extras },
           );
         }
@@ -356,11 +387,25 @@ export const registerEvents: Registrar = (server, session) => {
         await attached(sub, extra.signal);
         const state = sub.state;
         if (state.status === 'stopped') return stopped(session, id, state.reason);
+        if (extra.signal?.aborted) return cancelledDuringAttach(id);
         if (!sub.eventTypes) return unattached(session, id);
 
         const d = sub.read({ since, limit });
         const extras = d.loss ? await reconcile(session, id, extra.signal) : {};
         if (!d.events.length) {
+          // The one case where "this is an answer rather than a gap" is exactly
+          // wrong: a gap whose surviving events were all read already leaves an
+          // empty batch beside a real hole. The reconciled state is attached
+          // either way; the sentence has to agree with it.
+          if (d.loss) {
+            return said(
+              `Nothing new on ${id} that survived — there is a hole in the history here, and what ` +
+                `was in it is gone. See lost for what is known about it, and windows_now and ` +
+                `computer_now for where the computer actually stands, which is what the missing ` +
+                `events would have told you.`,
+              { ...body(id, d), ...extras },
+            );
+          }
           return said(
             `Nothing new on ${id}. The stream is open and buffering, so this is an answer rather ` +
               `than a gap: nothing has been reported since you last read.`,
