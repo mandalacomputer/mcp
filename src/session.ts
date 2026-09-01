@@ -1,5 +1,6 @@
 import { Api, DEFAULT_BASE_URL } from './api.js';
 import { MandalaError } from './errors.js';
+import { EventHub, type EventSocketFactory } from './events.js';
 
 export type SessionConfig = {
   apiKey: string;
@@ -14,6 +15,14 @@ export type SessionConfig = {
    * A tool a model can see is a tool it will try.
    */
   modelKey?: string;
+  /**
+   * How the event stream opens a websocket. Defaults to undici's.
+   *
+   * A seam rather than a knob: the platform's event socket is the one part of
+   * this server that is not `fetch`, so it is the one part a test cannot stand
+   * in for by replacing the global.
+   */
+  webSocket?: EventSocketFactory;
 };
 
 /**
@@ -26,6 +35,14 @@ export type SessionConfig = {
  */
 export class Session {
   readonly api: Api;
+  /**
+   * The event sockets this session is holding open (OPL-3926).
+   *
+   * On the session and not on a tool, because that is the whole shape of the
+   * decision: the socket outlives the call that opened it, and the next turn's
+   * `poll_events` is a different tool invocation reading the same buffer.
+   */
+  readonly events: EventHub;
   readonly modelKey?: string;
   #current?: string;
   /** WIDTHxHEIGHT of the bound computer, remembered from the last read of it. */
@@ -39,6 +56,7 @@ export class Session {
 
   constructor(cfg: SessionConfig) {
     this.api = new Api(cfg.apiKey, cfg.baseUrl ?? DEFAULT_BASE_URL);
+    this.events = new EventHub(this.api, cfg.webSocket);
     this.modelKey = cfg.modelKey;
     this.#current = id(cfg.computerId);
   }
@@ -97,6 +115,10 @@ export class Session {
   unbind(computerId: string): void {
     const normalized = id(computerId);
     if (!normalized) return;
+    // A destroyed computer has no more events, and its socket would otherwise
+    // reconnect against a 404 until the idle sweep took it. The buffer goes
+    // too: what it holds is the history of a machine that no longer exists.
+    this.events.drop(normalized, `${normalized} was deleted`);
     // Increment even when another computer is selected: an earlier
     // use_computer for this id may still be waiting on its GET response.
     // Recency is delete-then-set so a repeated id is the newest entry and an
