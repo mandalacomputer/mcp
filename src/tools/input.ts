@@ -1,5 +1,14 @@
 import { z } from 'zod';
-import { guarded, image, json, MAX_INLINE_IMAGE_BYTES, refused, said } from '../format.js';
+import {
+  guarded,
+  INLINE_IMAGE_TYPES,
+  image,
+  isInlineImage,
+  json,
+  MAX_INLINE_IMAGE_BYTES,
+  refused,
+  said,
+} from '../format.js';
 import * as P from '../paths.js';
 import type { Registrar } from './types.js';
 
@@ -101,11 +110,18 @@ export const registerInput: Registrar = (server, session) => {
         // misconfigured proxy answering 200 with an HTML page is the case this
         // exists for: without it that page is handed over as image content
         // typed `text/html`, and the model is left staring at a picture that
-        // will not decode with nothing saying why. `read_file` guards the same
-        // shape; this is the other path that emits an image.
-        if (!shot.contentType.startsWith('image/')) {
+        // will not decode with nothing saying why.
+        //
+        // The RASTER allowlist, not `startsWith('image/')`, which is what
+        // read_file has always used and what this path should have used with
+        // it. `image/*` admits `image/svg+xml` — XML, which a client that
+        // renders inline image content can be made to execute script from. The
+        // interloper this check exists to catch is precisely the party that
+        // would choose that type, so the loose spelling was widest open in the
+        // one case it was written for.
+        if (!isInlineImage(shot.contentType)) {
           return refused(
-            `That screenshot came back as ${shot.contentType}, not an image (${shot.bytes.length} bytes). Something between here and the guest answered in place of the capture; nothing was returned rather than passing it off as a picture.`,
+            `That screenshot came back as ${shot.contentType}, not one of the image types this can hand over (${[...INLINE_IMAGE_TYPES].join(', ')}) — ${shot.bytes.length} bytes. Something between here and the guest answered in place of the capture; nothing was returned rather than passing it off as a picture.`,
           );
         }
         const scaled = width

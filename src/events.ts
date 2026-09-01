@@ -373,6 +373,7 @@ export class Subscription {
     deadline: AbortSignal,
     cancel?: AbortSignal,
     since?: string,
+    abandon?: () => boolean,
   ): Promise<number | undefined> {
     this.touch();
     const start = this.resolveFrom(since);
@@ -387,6 +388,13 @@ export class Subscription {
       if (hit) return hit.index;
       if (deadline.aborted || cancel?.aborted) return undefined;
       if (this.#state.status === 'stopped') return undefined;
+      // Asked on every wake, AFTER the buffered check, so an event that is
+      // already here still wins. This is what makes a `capabilities` frame
+      // arriving mid-wait answerable: the frame wakes every parked waiter but
+      // is not itself an event, so a loop that only re-ran `matches` saw
+      // nothing, parked again, and sat out the whole deadline on a computer
+      // that could no longer produce what it was waiting for.
+      if (abandon?.()) return undefined;
       await this.#park(deadline, cancel);
     }
   }
@@ -575,7 +583,31 @@ export class Subscription {
     }
     const vnc = c.vnc as Record<string, unknown> | undefined;
     const url = typeof vnc?.events_url === 'string' ? vnc.events_url : undefined;
-    if (url) return url;
+    if (url) {
+      // Parsed HERE, where every other events_url decision is made, rather than
+      // beside the socket. A string that is not a URL is the same fact as the
+      // missing one below — there is nothing to connect to — and this method is
+      // the one place that says so with a sentence instead of an exception.
+      //
+      // It used to throw from inside the connection's Promise executor, which
+      // REJECTED: nothing between there and `#run` catches, so the subscription
+      // reached a terminal `stopped` reading "the event stream failed: Invalid
+      // URL". Settling it is the same outcome said properly. Retrying it
+      // forever would be worse than either — the URL is re-read on every
+      // attempt, so a value the platform keeps sending is a poll of
+      // `GET /computers/:id` every fifteen seconds for the life of the session,
+      // under a wait that keeps answering "nothing happened".
+      try {
+        new URL(url);
+      } catch {
+        throw new SettledError(
+          `${this.computerId} has an events_url this client cannot parse (${JSON.stringify(url)}), ` +
+            'so there is nowhere to connect. This is the platform sending something unexpected rather ' +
+            'than a passing condition — screenshot and list_windows still work.',
+        );
+      }
+      return url;
+    }
     if (!vnc) {
       // The platform could not reach the host holding this computer, so it sent
       // no connect surface at all. Weather, and the backoff is the right
@@ -608,11 +640,6 @@ export class Subscription {
     // able to reintroduce the leak by forgetting.
     if (this.#abort.signal.aborted) return Promise.resolve(false);
     return new Promise<boolean>((resolve) => {
-      // `since` is this subscription's own place, never the model's. The two
-      // are different positions on purpose: the model may be four turns behind
-      // and the socket must not re-request what is already in the ring.
-      const target = new URL(url);
-      if (this.#resume) target.searchParams.set('since', this.#resume);
       // Whether this connection can be handed events it missed. A connection
       // with no continuity is joining at the head, and everything before it is
       // simply not this stream's to report.
@@ -620,6 +647,18 @@ export class Subscription {
 
       let socket: EventSocket;
       try {
+        // `since` is this subscription's own place, never the model's. The two
+        // are different positions on purpose: the model may be four turns behind
+        // and the socket must not re-request what is already in the ring.
+        //
+        // Inside the try with the socket it is for, so that nothing in this
+        // executor can reject: a rejection here escapes `#loop` — which does
+        // not catch — and `#run` turns it into a terminal `stopped`, which is
+        // not what a failure to open one connection means. `#url()` has already
+        // settled a value that cannot parse, so this is belt and braces on the
+        // path that used to throw.
+        const target = new URL(url);
+        if (this.#resume) target.searchParams.set('since', this.#resume);
         socket = this.#socketFor(target.toString());
       } catch {
         return resolve(false);

@@ -17,12 +17,20 @@ export const SERVER_VERSION = '0.1.0';
  * called. It is the only place to say the things that are true of the whole
  * server rather than of one tool — chiefly that a screenshot is how you find
  * out what happened, because nothing on a desktop reports back on its own.
+ *
+ * Built from `lifecycle` rather than written out flat, because under
+ * MANDALA_NO_LIFECYCLE `create_computer` is not registered at all — and the
+ * reason it is withheld rather than left to refuse is that a tool a model can
+ * see is a tool it will try. Naming it in the very first line of the
+ * instructions gave the model the same idea by a different route, in the one
+ * text it reads before it has a tool list to check against.
  */
-const INSTRUCTIONS = `Mandala Computer gives you a real Linux desktop in the cloud that you can see and drive.
+const instructions = (lifecycle: boolean) =>
+  `Mandala Computer gives you a real Linux desktop in the cloud that you can see and drive.
 
 How to work with one:
 
-1. use_computer (or create_computer) binds a machine to this session. Every other tool then leaves computer_id out.
+1. ${lifecycle ? 'use_computer (or create_computer) binds' : 'use_computer binds'} a machine to this session. Every other tool then leaves computer_id out.
 2. wait_for_computer with until="guest" before the first screenshot or exec. A computer that reports "running" is a VM the hypervisor has started; the desktop inside it comes up seconds later.
 3. screenshot, look, act, screenshot again. The desktop does not tell you whether a click landed — the only way to know is to look. Take a fresh screenshot after anything you expect to change the screen.
 4. Coordinates are the pixels of the full-size screenshot, and the screen size is on the computer record as "resolution".
@@ -56,7 +64,7 @@ export function createServer(cfg: ServerConfig): McpServer {
 
   const server = new McpServer(
     { name: SERVER_NAME, version: SERVER_VERSION },
-    { capabilities: { logging: {} }, instructions: INSTRUCTIONS },
+    { capabilities: { logging: {} }, instructions: instructions(opts.lifecycle) },
   );
 
   // A cancelled Streamable HTTP response can let transport.handleRequest()

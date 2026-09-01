@@ -257,8 +257,15 @@ export const registerTemplates: Registrar = (server, session) => {
             body,
           );
         }
+        // The ref is named only when the platform sent one. Unchecked, a 2xx
+        // without it read `Build bld-1 started for undefined` — the same
+        // sentence-level failure the `id` guard above was added for
+        // (OPL-3835), and the one publish_template already guards its own ref
+        // against. The build handle is the checked `id` either way, so a
+        // missing ref costs nothing but the clause that names the document.
+        const ref = typeof body.ref === 'string' && body.ref.trim() ? body.ref : undefined;
         return said(
-          `Build ${body.id} started for ${body.ref}. It is not finished — call watch_build with that id, or get_build to check once.`,
+          `Build ${body.id} started${ref ? ` for ${ref}` : ''}. It is not finished — call watch_build with that id, or get_build to check once.`,
           body,
         );
       }),

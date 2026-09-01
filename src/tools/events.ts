@@ -272,24 +272,56 @@ export const registerEvents: Registrar = (server, session) => {
         // Anything already buffered wins before capability is judged. An event
         // this computer has ALREADY sent is not one it cannot send, whatever a
         // later `capabilities` frame says about the guest as it now is.
+        //
+        // Asked as a function rather than computed once, because capability is
+        // not a fact about the moment the wait STARTED. A `capabilities` frame
+        // can land mid-wait and withdraw the very type being waited for — a
+        // guest half going away is exactly when that happens — and the answer
+        // this tool promises for a type the computer cannot emit is an
+        // immediate refusal, not the same silence as a quiet computer. Computed
+        // once, a withdrawal was indistinguishable from nothing happening and
+        // the call sat until its timeout.
+        const cannotEmit = (): string | undefined => {
+          if (!wanted) return undefined;
+          const can = sub.eventTypes;
+          // An EMPTY list is not a computer that can emit nothing; it is a
+          // `hello` that carried no `events` key, which `list(frame.events) ??
+          // []` renders identically. Reading it as a refusal would end a healthy
+          // wait the moment a reconnect landed on such a frame — and the
+          // `capabilities` frame that follows can restore the list, since that
+          // frame goes both ways. Unknown is not the same as none.
+          if (!can?.length) return undefined;
+          if (![...wanted].every((t) => !can.includes(t))) return undefined;
+          return (
+            `${id} cannot emit ${[...wanted].join(' or ')}. It reports it can emit: ` +
+            `${can.join(', ')}. A guest with nowhere to run its watcher — a ` +
+            `Windows one, or a Linux one whose hardware carries no terminal channel — never ` +
+            `produces the guest-reported half of this stream, so this wait could only ever ` +
+            `have ended at its timeout. Use screenshot and list_windows on this computer.`
+          );
+        };
+
         const started = Date.now();
         let hit = await sub.waitFor(matches, AbortSignal.abort(), undefined, since);
-        if (hit === undefined && wanted) {
-          const can = sub.eventTypes;
-          const impossible = can && [...wanted].every((t) => !can.includes(t));
-          if (impossible) {
-            return refused(
-              `${id} cannot emit ${[...wanted].join(' or ')}. It reports it can emit: ` +
-                `${can?.join(', ') || 'nothing'}. A guest with nowhere to run its watcher — a ` +
-                `Windows one, or a Linux one whose hardware carries no terminal channel — never ` +
-                `produces the guest-reported half of this stream, so this wait could only ever ` +
-                `have ended at its timeout. Use screenshot and list_windows on this computer.`,
-            );
-          }
+        if (hit === undefined) {
+          const already = cannotEmit();
+          if (already) return refused(already);
         }
         if (hit === undefined) {
           const deadline = AbortSignal.timeout(timeout_s * 1000);
-          hit = await sub.waitFor(matches, deadline, extra.signal, since);
+          // The capability question is asked on every wake rather than once
+          // before the wait, because a `capabilities` frame can land inside it.
+          // Such a frame wakes the waiter but is not an event, so a loop that
+          // only re-ran the match saw nothing and parked again — and the answer
+          // this tool promises for a type the computer cannot emit is an
+          // immediate refusal, not the same silence a quiet computer produces.
+          hit = await sub.waitFor(
+            matches,
+            deadline,
+            extra.signal,
+            since,
+            () => cannotEmit() !== undefined,
+          );
         }
         const waited = Math.round((Date.now() - started) / 1000);
 
@@ -302,6 +334,13 @@ export const registerEvents: Registrar = (server, session) => {
           }
           const now = sub.state;
           if (now.status === 'stopped') return stopped(session, id, now.reason);
+          // Asked again, because the wait that just ended is long enough for a
+          // `capabilities` frame to have arrived inside it. A withdrawal that
+          // happened while parked is still the reason nothing came, and saying
+          // so beats reporting a quiet few seconds on a computer that can no
+          // longer produce this event at all.
+          const withdrawn = cannotEmit();
+          if (withdrawn) return refused(withdrawn);
           // NOT an error, and this is the one place this server's wait tools
           // differ from each other on purpose. `wait_for_computer` timing out
           // means the state it was told to wait for never arrived and may never;

@@ -63,12 +63,53 @@ const SMALL_BODY_BYTES = 256 * 1024;
  * The whole of 127.0.0.0/8 is loopback, not only 127.0.0.1. Binding
  * `127.0.0.2` used to skip the default Host check because the set named three
  * spellings and nothing else on this machine.
+ *
+ * IPv4-mapped loopback — `::ffff:127.0.0.1`, and the bracketed spelling — is
+ * the same widening one notation further out. It is a v6 socket carrying a v4
+ * loopback address, Node will bind it, and it was falling through to "not
+ * loopback": no default Host allowlist, so DNS-rebinding protection silently
+ * off on a bind that is as local as `127.0.0.1` is. A zone suffix (`%lo`) is
+ * dropped first, since it names an interface rather than an address.
  */
-function isLoopbackHost(host: string): boolean {
-  const h = host.toLowerCase();
-  if (h === 'localhost' || h === '::1' || h === '[::1]') return true;
+export function isLoopbackHost(host: string): boolean {
+  let h = host.toLowerCase();
+  if (h.startsWith('[') && h.endsWith(']')) h = h.slice(1, -1);
+  const zone = h.indexOf('%');
+  if (zone >= 0) h = h.slice(0, zone);
+  if (h === 'localhost' || h === '::1') return true;
+  const mapped = /^::ffff:(.+)$/.exec(h);
+  if (mapped) h = mapped[1];
   const m = /^127\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(h);
   return Boolean(m && [m[1], m[2], m[3]].every((part) => Number(part) <= 255));
+}
+
+/**
+ * One operator-supplied allowlist entry, as the Host headers it should match.
+ *
+ * Bracket-aware, because that is the whole difficulty: a literal IPv6 address
+ * is full of colons and is only a `host:port` when the colon falls after the
+ * `]`. Three cases, and only the last is expanded:
+ *
+ * - already carries a port — left exactly as written. That operator has said
+ *   which port their callers use, and it need not be the one bound here.
+ * - a BARE IPv6 address, unbracketed. `::1` is not a legal Host header and
+ *   `::1` + `:3000` is `::1:3000`, which nothing can send — so it is BRACKETED
+ *   into the spellings a client actually sends, rather than left as a dead
+ *   entry that matches nothing. An operator who writes the address has said
+ *   which host they mean; the brackets are notation, not a second guess.
+ * - anything else — matched with and without the bound port.
+ */
+export function hostSpellings(host: string, port: number): string[] {
+  if (host.startsWith('[')) {
+    // Already bracketed: with a port it is exactly what a client sends, and
+    // without one it still needs the ported spelling.
+    return /\]:\d+$/.test(host) ? [host] : [host, `${host}:${port}`];
+  }
+  // Unbracketed and full of colons is a v6 literal; one colon and digits is a
+  // name that already names its port.
+  if (/:\d+$/.test(host) && host.indexOf(':') === host.lastIndexOf(':')) return [host];
+  if (host.includes(':')) return [`[${host}]`, `[${host}]:${port}`];
+  return [host, `${host}:${port}`];
 }
 
 /**
@@ -311,9 +352,32 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
   function allowedHosts(portNow: number): string[] | undefined {
     // Lowercased to match the folded header — an operator who writes
     // `Example.COM` means the same host the client sends as `example.com`.
-    if (cfg.allowedHosts?.length) return cfg.allowedHosts.map((h) => h.toLowerCase());
+    //
+    // Expanded with and without the bound port, exactly as the loopback default
+    // below is, and for the same reason: the SDK's check is a whole-header
+    // `allowedHosts.includes(hostHeader)`, and a browser sends the port whenever
+    // it is not the scheme's default. An operator writing the obvious
+    // `MANDALA_ALLOWED_HOSTS=mcp.example.com` for a server bound on :3000 got a
+    // list that matched no header any direct client sends, so every request was
+    // answered 403 by the protection they had just turned on. See
+    // {@link hostSpellings} for which entries are expanded and which are not.
+    if (cfg.allowedHosts?.length) {
+      return [
+        ...new Set(
+          cfg.allowedHosts.map((h) => h.toLowerCase()).flatMap((h) => hostSpellings(h, portNow)),
+        ),
+      ];
+    }
     if (!isLoopbackHost(cfg.host)) return undefined;
-    const names = new Set(['127.0.0.1', 'localhost', '[::1]', cfg.host.toLowerCase()]);
+    // `cfg.host` goes in as the spellings a client SENDS, which for a v6
+    // literal means bracketed. Widening isLoopbackHost to accept
+    // `::ffff:127.0.0.1` would otherwise have handed that bind a default
+    // allowlist naming only the bare form — so a client using the address it
+    // was given, `http://[::ffff:127.0.0.1]:port`, would be 403'd by
+    // protection that had not existed there before.
+    const bare = cfg.host.toLowerCase();
+    const own = bare.startsWith('[') || !bare.includes(':') ? [bare] : [`[${bare}]`];
+    const names = new Set(['127.0.0.1', 'localhost', '[::1]', ...own]);
     return [...names].flatMap((h) => [`${h}:${portNow}`, h]);
   }
 
@@ -343,13 +407,26 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
     next();
   });
 
+  // Liveness is public; OCCUPANCY is not.
+  //
+  // `sessions` and `largeBodyParses` are the two caps this process enforces,
+  // and their current values are the two numbers somebody would want in order
+  // to time an exhaustion of either — how close the table is to 256, and
+  // whether all four parse slots are taken right now. Unauthenticated, on an
+  // exposed bind, that is a capacity oracle handed over on request.
+  //
+  // Kept where they are useful and cannot be read from outside: a loopback
+  // bind, where the only readers are on this machine, and an operator who has
+  // configured a Host allowlist, which is the deliberate act that says who may
+  // reach this server at all. Everywhere else the endpoint still answers, still
+  // says the server is alive, and simply does not count out loud.
+  const countsArePrivate = isLoopbackHost(cfg.host) || Boolean(cfg.allowedHosts?.length);
   app.get('/healthz', (_req, res) => {
     res.json({
       ok: true,
       name: SERVER_NAME,
       version: SERVER_VERSION,
-      sessions: sessions.size,
-      largeBodyParses,
+      ...(countsArePrivate ? { sessions: sessions.size, largeBodyParses } : {}),
     });
   });
 

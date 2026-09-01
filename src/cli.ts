@@ -243,7 +243,21 @@ async function main(): Promise<void> {
     return;
   }
 
-  const apiKey = str(flags.key, 'key') ?? env('MANDALA_API_KEY') ?? '';
+  const fromFlag = str(flags.key, 'key');
+  const apiKey = fromFlag ?? env('MANDALA_API_KEY') ?? '';
+  // An argument vector is not a private place. `--key com_…` is readable by any
+  // `ps` on the machine, is what a shell writes into its history, and is what a
+  // process-exec audit log records verbatim — none of which is true of the
+  // environment variable that does the same job. The flag stays, because a
+  // caller launching several servers under different keys has a real use for
+  // it, but it should not be the quiet default anybody reaches for. Warned
+  // rather than refused, and the value itself is never echoed.
+  if (fromFlag) {
+    console.error(
+      'WARNING: --key puts your API key in this process’s command line, where `ps`, the shell ' +
+        'history and any exec audit log can read it. Prefer MANDALA_API_KEY.',
+    );
+  }
   if (!apiKey) {
     // stderr and a non-zero exit, not a thrown stack. On stdio the client sees
     // a process that died; the person reading the log needs the one sentence
