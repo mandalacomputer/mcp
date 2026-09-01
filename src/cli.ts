@@ -141,6 +141,15 @@ export function lifecycleEnabled(flags: Flags, configured = env('MANDALA_NO_LIFE
  */
 export function port(flag: string | boolean | undefined): number {
   if (flag === true) throw new Error('--port needs a number, e.g. --port 3000');
+  // A flag that is PRESENT decides, even when it is empty — the same rule `str`
+  // applies to every other value flag, and the one the usage text promises when
+  // it says flags override the environment. `--port=` used to trim to `''` and
+  // fall through `||` to PORT, so the clearest way to say "not the environment's
+  // port" silently deferred to the environment. It is not a port either, so it
+  // is refused rather than turned into the default.
+  if (typeof flag === 'string' && !flag.trim()) {
+    throw new Error('--port needs a number, e.g. --port 3000');
+  }
   // `??` is not enough here: PORT='' is a set-but-empty variable, which is the
   // ordinary shape of an unset value in shell and compose files, and it passes
   // `??` intact. `Number('')` is 0, which passes every check below and means

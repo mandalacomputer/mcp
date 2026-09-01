@@ -268,6 +268,21 @@ export function execBody(args: {
   cwd?: string;
   env?: Record<string, string>;
 }): Json {
+  // A NUL ends a C string, and the command is the one field on this route that
+  // reaches the guest without anything checking it. `execEnv` below refuses one
+  // for this exact reason, and the platform refuses one in `cwd` and in every
+  // file path — `validGuestPath` rejects the whole control range — but its only
+  // test on `command` is that it is not empty (server/api.go). So a command
+  // carrying a NUL is truncated at the guest's argv boundary: a shorter command
+  // than the caller wrote runs, and its exit code is reported as an ordinary
+  // success. The same shape as the surrogate refusals — a call that works and
+  // does something other than what was asked.
+  if (args.command.includes('\0')) {
+    throw new Error(
+      'command must not contain a NUL: a NUL ends a C string, so the guest would run only the part ' +
+        'in front of it and report that as a success.',
+    );
+  }
   const body: Json = { command: args.command };
   if (args.timeout_s !== undefined) body.timeout_s = args.timeout_s;
   // Omitted rather than sent empty: the platform's default is the system
@@ -435,7 +450,28 @@ export function scrollBody(args: {
   return body;
 }
 
-export const typeBody = (text: string): Json => ({ action: 'type', text });
+/**
+ * Text typed at the keyboard, checked the way the clipboard's is.
+ *
+ * The same silent corruption {@link clipboardBody} refuses and `write_file`
+ * refuses, on the third path that carries a caller's own characters into the
+ * guest: `JSON.stringify` escapes a lone surrogate, Go's `encoding/json` decodes
+ * it to U+FFFD, and the desktop is typed a replacement character where the
+ * caller's text was — reported as `Typed N character(s).` A write that succeeds
+ * with different text than was asked for is worse than one that fails, and
+ * typing is not a weaker case than a clipboard; it is the one whose result is
+ * already inside whatever had focus.
+ */
+export function typeBody(text: string): Json {
+  if (hasUnpairedSurrogate(text)) throw new Error(typedSurrogateRefusal);
+  return { action: 'type', text };
+}
+
+const typedSurrogateRefusal =
+  'that text has an unpaired surrogate in it — half of a character, usually from a string cut ' +
+  'through the middle of an emoji. It is not valid UTF-8, and typing it would put a replacement ' +
+  'character on the desktop rather than what you meant, so nothing was typed. Send the whole ' +
+  'character, or cut the text on a character boundary.';
 
 export function keyBody(keys: string[], holdSeconds?: number): Json {
   if (!keys.length) throw new Error('press_key needs at least one key');
