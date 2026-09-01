@@ -169,7 +169,11 @@ to read an answer wrongly:
   rather than the changes. Your session holds four trees at once per computer —
   a fifth evicts the one you asked about longest ago, and you are told which one
   went — while the computer itself watches at most 32 across every client
-  connected to it.
+  connected to it. A nomination past that limit is refused where a websocket
+  client is told nothing at all, so this server works it out by elimination: it
+  drops the tree, the rest of the stream comes back, and it says which of the
+  two it was. Adding a watch can never cost you the window and process events
+  you already had.
 
 Not everything else is an event, though. A click landing and a page painting are
 not, and no amount of waiting will produce one — `screenshot`, `list_windows`
