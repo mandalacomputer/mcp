@@ -43,7 +43,6 @@ const repo = resolve(here, '..');
 
 const candidates = [
   process.env.MANDALA_PLATFORM_REPO,
-  resolve(repo, '..', 'platform'),
   resolve(repo, '..', 'mandala-computer'),
   resolve(repo, '..', 'app'),
 ].filter(Boolean);
