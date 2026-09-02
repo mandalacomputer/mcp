@@ -13,7 +13,10 @@
       "args": ["-y", "mandala-computer-mcp"],
       "env": {
         "MANDALA_API_KEY": "${MANDALA_API_KEY:-}",
-        "MANDALA_MODEL_KEY": "${MANDALA_MODEL_KEY:-}"
+        "MANDALA_MODEL_KEY": "${MANDALA_MODEL_KEY:-}",
+        "MANDALA_BASE_URL": "${MANDALA_BASE_URL:-}",
+        "MANDALA_COMPUTER_ID": "${MANDALA_COMPUTER_ID:-}",
+        "MANDALA_NO_LIFECYCLE": "${MANDALA_NO_LIFECYCLE:-}"
       }
     }
   }

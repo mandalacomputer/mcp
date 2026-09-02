@@ -24,17 +24,18 @@ nothing. If the task is "run this script", run it here.
 
 ## Setup, once
 
-The plugin starts the server for you. It reads two variables from the shell
-Claude Code was started in:
+The plugin starts the server for you, reading its environment from the shell
+Claude Code was started in. Two variables are the whole of what most sessions
+need:
 
 - `MANDALA_API_KEY` — a `com_…` key from **Settings → API keys** at
-  https://app.mandala.computer. Required. It is every computer on the account,
-  so treat it as a password.
+  https://app.mandala.computer. Required. Treat it as a password: at its widest
+  it is every computer on the account, and a key may instead be scoped to one
+  workspace, which is the reason a 404 below is not what it looks like.
 - `MANDALA_MODEL_KEY` — an Anthropic key. Optional; it is what enables
-  `run_agent`. Without it the tool is not registered at all.
-
-Without the plugin, the same server is one line:
-`claude mcp add mandala -e MANDALA_API_KEY=com_… -- npx -y mandala-computer-mcp`.
+  `run_agent`. Without it the tool is not registered at all. It is **spent, not
+  stored**: the platform keeps no copy of it and every step `run_agent` takes
+  is a model call billed to that key.
 
 If there are no `mandala` tools at all, or the server shows as failed, the
 key is not exported: with `MANDALA_API_KEY` empty the server prints "No API
@@ -42,6 +43,48 @@ key" to its log and exits before registering anything, so what you see is an
 absent server, not a tool error. Stop and ask the user to export the key in
 the shell Claude Code starts from and restart it — nothing else in this skill
 works until then. Do not try to work around it with `exec` or a browser.
+
+Three more variables, none of them needed for a first computer:
+
+- `MANDALA_BASE_URL` — a platform other than the default
+  `https://app.mandala.computer/api/v1`: a self-hosted install, or staging.
+- `MANDALA_COMPUTER_ID` — bind one machine at startup, so `use_computer` is
+  never needed and every call may leave `computer_id` out.
+- `MANDALA_NO_LIFECYCLE=1` — withholds every tool that makes a computer or
+  destroys one: `create_computer`, `clone_computer`, `clone_snapshot`,
+  `delete_computer`, `delete_snapshot`. If you were sent here to create a
+  computer and `create_computer` is not among the tools, this is why, and it
+  is a deliberate setting rather than a fault. Say so and stop; the rest of
+  the surface still drives a computer somebody else made.
+
+### The two ways it gets installed
+
+**stdio**, which is what the plugin does, and what any client that can spawn a
+subprocess should do — one server per client, holding the key from its own
+environment:
+
+```sh
+claude mcp add mandala -e MANDALA_API_KEY=com_… -- npx -y mandala-computer-mcp
+```
+
+**HTTP**, for a caller that cannot spawn a subprocess — claude.ai, a phone, a
+shared team endpoint. One server, many callers, and it holds no credential of
+its own: each caller sends their own key as a bearer token.
+
+```sh
+# whoever runs it, once
+MANDALA_ALLOWED_HOSTS=mcp.example.com npx mandala-computer-mcp --http --port 3000
+
+# each caller
+claude mcp add --transport http mandala https://mcp.example.com/mcp \
+  --header "Authorization: Bearer com_…"
+```
+
+Over HTTP the server ignores `MANDALA_MODEL_KEY` and `MANDALA_COMPUTER_ID`
+rather than lending the operator's Anthropic key and the operator's machine to
+everyone who connects. A caller who wants `run_agent` there sends their own
+Anthropic key as an `X-Model-Key` header, and `run_agent` is registered for
+that session only if they did.
 
 ## The shape of a session
 
@@ -83,8 +126,12 @@ clicks and types inside itself, then answers with a sentence and the list of
 what it did. Ten clicks are not ten images in your context. Use it for
 anything that is more than two or three interactions: filling a form, logging
 in and navigating somewhere, reading a value off a page, driving an
-application. It needs a running computer, and it needs `MANDALA_MODEL_KEY` to
-exist at all.
+application. It needs a running computer, and it needs a model key to exist
+at all: `MANDALA_MODEL_KEY` in the server's environment over stdio, or the
+caller's own `X-Model-Key` header over HTTP, where the server's variable is
+ignored. If every other `mandala` tool is present and `run_agent` is not, that
+is the whole cause — say which of the two applies rather than telling an HTTP
+user to export a variable the server will never read.
 
 - `max_steps` (default 20, max 100) is the spending cap as much as the loop
   bound — every step is a model call on the user's key. Size it to the task.
@@ -122,6 +169,28 @@ or for one or two actions. The rules there:
 - Screenshots deliberately do not count as activity. A loop that only watches
   can see its own machine suspend under it; input, `exec` and files do count.
 
+## Keeping the work: snapshots and clones
+
+A snapshot is a saved point on one computer; a clone is a second computer made
+from one. They are how an expensive setup — an install, a login, a configured
+application — stops being something you redo.
+
+- `create_snapshot` **before** anything you would not want to do twice, and
+  name it after the step rather than letting the platform name it after the
+  clock: the name is the only place the reason survives. A disk snapshot is the
+  filesystem; a memory one also saves the running session, so a fork of it comes
+  up with the windows already open.
+- `restore_snapshot` puts the *same* computer back and discards everything on
+  that disk since, and it leaves the computer running — which is a start, and
+  is charged. `clone_snapshot` and `clone_computer` make a *new* computer
+  instead, which bills like any other: the cheap way to get five identical
+  desktops, and an easy way to leave five of them running.
+- Read `state` in `list_snapshots` before acting: a capture still being taken
+  is listed first, reads `capturing`, and restore, clone and delete all fail on
+  one. Only automatic snapshots age out — `get_retention` is the window, and
+  one you took yourself with `create_snapshot` is kept until somebody deletes
+  it.
+
 ## Refusals: which are worth a second try
 
 The server renders every failure as one sentence, and the sentence usually
@@ -130,6 +199,14 @@ says what to do. The judgement it cannot make for you:
 - **A 400 never clears.** Do not resend it. Change the request or stop.
 - **A 402 is a plan limit.** Waiting does not fix it and neither do you — tell
   the user what was refused and leave it there.
+- **A 404 is not proof the computer is gone.** An API key can be scoped to a
+  single workspace, and a computer in a *different* workspace answers 404 and
+  not 403 — deliberately, so a key that cannot reach a machine is not told the
+  machine exists. So a 404 on an id the user handed you means either deleted or
+  out of this key's reach, and from here the two are indistinguishable. Do not
+  report it as deleted. `list_computers` shows what the key can actually see;
+  if the id the user named is not in that list, ask whether the key is the one
+  for that workspace. The same holds for a snapshot id and `list_snapshots`.
 - **A 409 is not one thing.** Most describe a passing state — a guest still
   booting, an agent busy with another call, the clipboard claimed for an
   instant — and the sentence will say "worth sending again". Some describe a
