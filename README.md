@@ -115,6 +115,10 @@ entirely.
 
 ## Things worth knowing
 
+**Every computer is a Linux desktop today.** Windows guests are not offered on any
+plan; where this README mentions Windows it is describing behaviour the client
+already supports for when they are.
+
 **A running computer costs money, and a forgotten one keeps costing it.**
 `create_computer` says so in its own description, and so does everything that
 starts a machine by a side door — `restore_snapshot` boots a stopped computer,
