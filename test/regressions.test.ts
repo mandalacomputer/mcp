@@ -3018,6 +3018,55 @@ describe('the tools our own prose tells a model to call', () => {
     expect(wrong, 'text that tells a model to call something we do not register').toEqual([]);
     await close();
   });
+
+  // OPL-3680. The tool half of the skill is guarded above; the environment half
+  // was not guarded at all, and it is the half a reader acts on BEFORE any tool
+  // exists to be wrong about. A variable renamed in `cli.ts` is renamed in the
+  // usage text by the same diff and in this Markdown file by nobody, and the
+  // failure that produces is the worst-shaped one this server has: the server
+  // starts, the variable is ignored, and every symptom surfaces somewhere else.
+  const MANDALA_VAR = /\bMANDALA_[A-Z_]+\b/g;
+
+  it('names only environment variables the CLI reads', () => {
+    const cli = readFileSync(new URL('../src/cli.ts', import.meta.url), 'utf8');
+    // What `cli.ts` actually calls `env()` on — not what its own usage text
+    // claims, which is prose and can be wrong in exactly the way this test
+    // exists to catch.
+    const read = new Set([...cli.matchAll(/\benv\('(MANDALA_[A-Z_]+)'\)/g)].map((m) => m[1]));
+    expect(read.size, 'the reader found the env() calls it is parsing').toBeGreaterThan(4);
+    const named = new Set(readFileSync(SKILL, 'utf8').match(MANDALA_VAR) ?? []);
+    expect(named.size, 'the skill still documents the environment').toBeGreaterThan(0);
+    expect(
+      [...named].filter((v) => !read.has(v)).sort(),
+      'the skill tells a user to export something the server never reads',
+    ).toEqual([]);
+  });
+
+  it('passes every stdio variable it documents through the plugin manifest', () => {
+    // The manifest is the only path those variables take under the plugin:
+    // Claude Code starts the server with that env block and nothing else, so a
+    // variable documented in the skill and absent there is documented and
+    // inert. The exemptions are not stdio settings — they configure the --http
+    // listener, which the plugin does not start.
+    const HTTP_ONLY = new Set(['MANDALA_ALLOWED_HOSTS', 'MANDALA_ALLOWED_ORIGINS']);
+    const plugin = JSON.parse(
+      readFileSync(new URL('../plugin/.claude-plugin/plugin.json', import.meta.url), 'utf8'),
+    ) as { mcpServers: Record<string, { env?: Record<string, string> }> };
+    const passed = plugin.mcpServers.mandala.env ?? {};
+    const named = [...new Set(readFileSync(SKILL, 'utf8').match(MANDALA_VAR) ?? [])].filter(
+      (v) => !HTTP_ONLY.has(v),
+    );
+    expect(
+      named.filter((v) => !Object.hasOwn(passed, v)).sort(),
+      'documented in the skill, and the plugin never hands it to the server',
+    ).toEqual([]);
+    // Each forwarded from the variable of the same name, and defaulting to
+    // empty rather than leaving the literal `${…}` an unset variable would
+    // otherwise become — every one of these reads an empty value as unset.
+    for (const [name, value] of Object.entries(passed)) {
+      expect(value, `${name} is forwarded from the shell's own ${name}`).toBe(`\${${name}:-}`);
+    }
+  });
 });
 
 describe('a refusal the platform put a word on', () => {
