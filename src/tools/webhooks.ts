@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { NotFoundError } from '../errors.js';
 import { guarded, refused, said } from '../format.js';
 import * as P from '../paths.js';
 import type { Registrar } from './types.js';
@@ -48,21 +49,34 @@ const EVENT_TYPES = [
   'computer.suspended',
 ];
 
-const filterArgs = {
-  description: z.string().optional().describe('Free text for the listing, up to 200 characters.'),
-  events: z
-    .array(z.string())
-    .optional()
-    .describe(
-      `Event types to deliver: ${EVENT_TYPES.join(', ')}. Omit or send [] for every type. file.changed is never delivered to a webhook. An unknown type is refused by the platform with the current list.`,
-    ),
-  computers: z
-    .array(z.string())
-    .optional()
-    .describe(
-      'Computer ids to deliver for, up to 64. Omit or send [] for every computer the key can see. Not checked against your computers — a subscription may name a computer you are about to create.',
-    ),
-  enabled: z.boolean().optional().describe('Whether deliveries are made.'),
+/**
+ * The four fields a create and an update share, described for the one being
+ * built. Omission means two different things on the two routes — "every
+ * type" on a create, "leave the filter as it is" on an update — and a model
+ * fills a field from ITS description, not from the tool's, so each has to say
+ * which it means. One shared copy said the create meaning on both.
+ */
+const filterArgs = (on: 'create' | 'update') => {
+  const omit =
+    on === 'create'
+      ? 'Omit or send [] for every'
+      : 'Omit to keep the current filter; send [] to clear it to every';
+  return {
+    description: z.string().optional().describe('Free text for the listing, up to 200 characters.'),
+    events: z
+      .array(z.string())
+      .optional()
+      .describe(
+        `Event types to deliver: ${EVENT_TYPES.join(', ')}. ${omit} type. file.changed is never delivered to a webhook. An unknown type is refused by the platform with the current list.`,
+      ),
+    computers: z
+      .array(z.string())
+      .optional()
+      .describe(
+        `Computer ids to deliver for, up to 64. ${omit} computer the key can see. Not checked against your computers — a subscription may name a computer you are about to create.`,
+      ),
+    enabled: z.boolean().optional().describe('Whether deliveries are made.'),
+  };
 };
 
 type Webhook = {
@@ -97,18 +111,32 @@ const asRecord = (v: unknown): Record<string, unknown> =>
 function health(w: Webhook): string {
   if (w.enabled === false) {
     return w.disabled_reason === 'failing'
-      ? 'DISABLED BY THE PLATFORM after a day of failures — PATCH enabled: true to start it again'
+      ? 'DISABLED BY THE PLATFORM after a day of failures — update_webhook with enabled: true to start it again'
       : 'disabled by you';
   }
-  if (w.last_success_at && !w.last_failure_at) return 'healthy';
-  if (w.last_failure_at && !w.last_success_at) {
+  const success = instant(w.last_success_at);
+  const failure = instant(w.last_failure_at);
+  if (success !== undefined && failure === undefined) return 'healthy';
+  if (failure !== undefined && success === undefined) {
     return `no delivery has ever been accepted (newest attempt: ${attempt(w.last_status)})`;
   }
-  if (w.last_failure_at && w.last_success_at && w.last_failure_at > w.last_success_at) {
+  if (failure !== undefined && success !== undefined && failure > success) {
     return `failing since its last success (newest attempt: ${attempt(w.last_status)})`;
   }
-  if (w.last_success_at) return 'healthy';
+  if (success !== undefined) return 'healthy';
   return 'nothing delivered yet';
+}
+
+/**
+ * A timestamp as a number, or undefined for anything that is not one. Parsed
+ * rather than compared as strings: two RFC 3339 spellings of nearby instants —
+ * one with fractional seconds and one without — do not sort by the clock, and
+ * a "healthy" read off that would be wrong about the newest attempt.
+ */
+function instant(v: string | null | undefined): number | undefined {
+  if (typeof v !== 'string' || !v) return undefined;
+  const t = Date.parse(v);
+  return Number.isNaN(t) ? undefined : t;
 }
 
 const attempt = (status: number | null | undefined) =>
@@ -180,7 +208,7 @@ export const registerWebhooks: Registrar = (server, session) => {
           .describe(
             'Where to POST. https:// only, no username or password, resolving to a public address. A port other than 443 is fine.',
           ),
-        ...filterArgs,
+        ...filterArgs('create'),
       },
     },
     (args, extra) =>
@@ -226,7 +254,7 @@ export const registerWebhooks: Registrar = (server, session) => {
           .describe(
             'A new endpoint, checked exactly as on create: https, no credentials, public address.',
           ),
-        ...filterArgs,
+        ...filterArgs('update'),
       },
       annotations: { idempotentHint: true },
     },
@@ -323,7 +351,25 @@ export const registerWebhooks: Registrar = (server, session) => {
     },
     ({ webhook_id }, extra) =>
       guarded(async () => {
-        const res = await session.api.with(extra.signal).send('DELETE', P.webhook(webhook_id));
+        let res: unknown;
+        try {
+          res = await session.api.with(extra.signal).send('DELETE', P.webhook(webhook_id));
+        } catch (err) {
+          // A 404 is the state this call asked for, and this tool is annotated
+          // `idempotentHint`, so the retry after a lost 2xx is one a client is
+          // invited to make. Said as a success but not as "Deleted": the same
+          // 404 answers an id that was never on this account — the platform
+          // will not say whether a subscription exists outside your scope —
+          // and "deleted" over a mistyped id leaves a real subscription
+          // delivering. delete_computer and delete_snapshot answer the same way.
+          if (!(err instanceof NotFoundError)) throw err;
+          return said(
+            `Nothing was deleted: the platform has no webhook with the id ${webhook_id} on this account. ` +
+              'Either it was already removed — if this is a retry, the first call is the one that did it — or ' +
+              'the id is not one of yours, in which case NO subscription has been touched and a real one may ' +
+              'still be delivering under the id you meant. list_webhooks says which of the two this is.',
+          );
+        }
         return said(
           `Deleted ${webhook_id}. Nothing more will be sent to its endpoint, and its delivery history is gone with it.`,
           res,

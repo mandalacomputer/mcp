@@ -93,6 +93,83 @@ describe('the webhooks CRUD', () => {
     await close();
   });
 
+  // A variant of the platform's answer, swapped in over the fake the way
+  // retention.test.ts reads its own variants: installFakePlatform serves one
+  // healthy fixture, and these cases are about the shapes it does not carry.
+  const answering =
+    (body: unknown, status = 200) =>
+    async () =>
+      new Response(JSON.stringify(body), {
+        status,
+        headers: { 'Content-Type': 'application/json' },
+      });
+  const over = async (
+    body: unknown,
+    status: number,
+    tool: string,
+    args: Record<string, unknown>,
+  ) => {
+    const restore = globalThis.fetch;
+    globalThis.fetch = answering(body, status) as typeof fetch;
+    try {
+      const { call, close } = await connect();
+      const res = await call(tool, args);
+      await close();
+      return res;
+    } finally {
+      globalThis.fetch = restore;
+    }
+  };
+
+  it('names update_webhook, not the HTTP verb, when the platform has disabled one', async () => {
+    const res = await over(
+      { ...WEBHOOK, enabled: false, disabled_reason: 'failing', disabled_at: WEBHOOK.updated_at },
+      200,
+      'get_webhook',
+      { webhook_id: WEBHOOK.id },
+    );
+    const text = textOf(res);
+    expect(text).toMatch(/DISABLED BY THE PLATFORM/);
+    expect(text).toContain('update_webhook with enabled: true');
+    expect(text).not.toMatch(/PATCH/);
+  });
+
+  it('orders the last success and the last failure by the clock, not by the string', async () => {
+    // A success on the second and a failure 100 ms later, spelled the way two
+    // timestamps from one platform can be: one without fractional seconds and
+    // one with. As strings the success sorts later, because '.' < 'Z'.
+    const res = await over(
+      {
+        ...WEBHOOK,
+        last_success_at: '2026-09-01T12:00:05Z',
+        last_failure_at: '2026-09-01T12:00:05.1Z',
+        last_status: 503,
+      },
+      200,
+      'get_webhook',
+      { webhook_id: WEBHOOK.id },
+    );
+    const text = textOf(res);
+    expect(text).toContain('failing since its last success');
+    expect(text).toContain('HTTP 503');
+    expect(text).not.toContain('healthy');
+  });
+
+  it('answers a 404 on delete as a success that does not say deleted', async () => {
+    // The retry `idempotentHint` invites, after a lost 2xx — and equally the
+    // answer for an id that was never on this account. Both readings named,
+    // neither claimed; the same shape delete_computer and delete_snapshot use.
+    const res = await over({ error: 'webhook not found' }, 404, 'delete_webhook', {
+      webhook_id: 'whk-0000000000000000',
+      confirm: true,
+    });
+    expect(res.isError).toBeFalsy();
+    const text = textOf(res);
+    expect(text).toContain('Nothing was deleted');
+    expect(text).not.toMatch(/^Deleted/);
+    expect(text).toContain('list_webhooks');
+  });
+
   it('reaches every route without a computer selected', async () => {
     // Account-scoped, all of it: none of these tools should consult the
     // session's computer, and a session with none bound must still be able to
