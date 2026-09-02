@@ -1,0 +1,66 @@
+name: Release
+
+# A tag `vX.Y.Z` pushed to this repository publishes X.Y.Z to npm. Nothing
+# else does: there is no token anywhere, npm trusts this workflow file in this
+# repository through OpenID Connect (a "trusted publisher"), and the publish
+# carries a provenance attestation linking the package to this run.
+#
+# The tag has to agree with package.json before anything is built; a mismatch
+# fails the run rather than publishing one version under another's name. Tests
+# run again here because CI runs on branches and this workflow runs on tags.
+
+on:
+  push:
+    tags: ["v[0-9]+.[0-9]+.[0-9]+*"]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - name: Tag matches the declared version
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          declared=$(node -p "require('./package.json').version")
+          echo "tag=$tag package.json=$declared"
+          [ "$tag" = "$declared" ]
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm run build
+      - run: npm test
+
+  publish:
+    needs: verify
+    runs-on: ubuntu-latest
+    environment:
+      name: npm
+      url: https://www.npmjs.com/package/mandala-computer-mcp/v/${{ github.ref_name }}
+    permissions:
+      id-token: write   # the OIDC token npm exchanges for a publish
+      contents: write   # the GitHub release below
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          registry-url: https://registry.npmjs.org
+          cache: npm
+      # Trusted publishing needs npm 11.5.1 or later; the npm that ships with
+      # Node is older.
+      - run: npm install -g npm@latest && npm --version
+      - run: npm ci
+      - run: npm publish --access public
+      - name: GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          npm pack
+          gh release create "$GITHUB_REF_NAME" ./*.tgz --verify-tag --generate-notes --title "$GITHUB_REF_NAME"
