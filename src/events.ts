@@ -1150,8 +1150,14 @@ export class Subscription {
       try {
         new URL(url);
       } catch {
+        // The URL is not interpolated. `events_url` lives inside `vnc`, which
+        // is root-equivalent on the machine, and this sentence becomes
+        // `state.reason` which poll_events prints. JSON-stringifying the raw
+        // value put the token `withoutCredentials` exists to strip into model
+        // context — a relative URL with a query token is the ordinary shape of
+        // "the platform omitted the host" (adversarial review, OPL-4314).
         throw new SettledError(
-          `${this.computerId} has an events_url this client cannot parse (${JSON.stringify(url)}), ` +
+          `${this.computerId} has an events_url this client cannot parse, ` +
             'so there is nowhere to connect. This is the platform sending something unexpected rather ' +
             'than a passing condition — screenshot and list_windows still work.',
         );
