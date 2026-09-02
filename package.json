@@ -14,8 +14,9 @@
   "homepage": "https://mandala.computer",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/mboyd1/mandala-computer-mcp.git"
+    "url": "git+https://github.com/mandalacomputer/mcp.git"
   },
+  "bugs": "https://github.com/mandalacomputer/mcp/issues",
   "type": "module",
   "bin": {
     "mandala-computer-mcp": "dist/cli.js"
