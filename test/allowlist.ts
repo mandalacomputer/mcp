@@ -97,6 +97,20 @@ export const V1_ROUTES: Route[] = [
   // like `usage` and `moves`, and read-only on every surface: the plan owns
   // retention.
   r('GET', 'retention'),
+
+  // Account webhooks (platform OPL-4300; OPL-4306 here). The CRUD only: this
+  // server never receives a webhook, so there is no route for that to mirror
+  // and no `verify` beside these. Account-scoped like `usage` — a subscription
+  // receives events from many computers — and answered from the control
+  // plane's own tables, never forwarded to a daemon.
+  r('GET', 'webhooks'),
+  r('POST', 'webhooks'),
+  r('GET', 'webhooks/:id'),
+  r('PATCH', 'webhooks/:id'),
+  r('DELETE', 'webhooks/:id'),
+  r('POST', 'webhooks/:id/rotate'),
+  r('POST', 'webhooks/:id/test'),
+  r('GET', 'webhooks/:id/deliveries'),
 ];
 
 /**
@@ -258,6 +272,26 @@ export const PARAMETERS: ReadonlyMap<string, readonly string[]> = new Map([
   ['GET usage', ['query:from', 'query:to']],
 
   ['GET retention', []],
+
+  ['GET webhooks', []],
+  // The same five fields on create and on PATCH; only `url` is required on the
+  // create, and that is a fact about the schema rather than about the mirror.
+  [
+    'POST webhooks',
+    ['body:url', 'body:description', 'body:events', 'body:computers', 'body:enabled'],
+  ],
+  ['GET webhooks/:id', []],
+  [
+    'PATCH webhooks/:id',
+    ['body:url', 'body:description', 'body:events', 'body:computers', 'body:enabled'],
+  ],
+  ['DELETE webhooks/:id', []],
+  // Bodyless, all three: a rotate and a test act on the subscription named in
+  // the path, and the deliveries read takes no filter — it is the newest
+  // hundred, always.
+  ['POST webhooks/:id/rotate', []],
+  ['POST webhooks/:id/test', []],
+  ['GET webhooks/:id/deliveries', []],
 ]);
 
 /**
@@ -337,7 +371,16 @@ export function patternFor(path: string): string {
   return parts
     .map((seg, i) => {
       const parent = parts[i - 1];
-      if (parent === 'computers' || parent === 'snapshots' || parent === 'builds') return ':id';
+      // `webhooks` joined the list with the platform's own (OPL-4300), for the
+      // reason `builds` did: without it `webhooks/:id` was in both tables and
+      // `webhooks/whk-1` was in neither.
+      if (
+        parent === 'computers' ||
+        parent === 'snapshots' ||
+        parent === 'builds' ||
+        parent === 'webhooks'
+      )
+        return ':id';
       if (i === 3 && parts[0] === 'computers' && parts[2] === 'windows') return ':window';
       if (i === 3 && parts[0] === 'computers' && parts[2] === 'exec') return ':pid';
       // A template ref's two halves, pinned to a THREE-segment path under

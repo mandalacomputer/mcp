@@ -86,6 +86,48 @@ const HOLDINGS = { count: 2, size_bytes: 6_100_000_000, fingerprint: 'fp-abc123'
 export const RETENTION = { daily: 7, weekly: 4, monthly: 12 };
 
 /**
+ * One webhook subscription as the platform lists it — never with a secret. The
+ * health fields are all non-null, so a sentence that reads one shows it.
+ */
+export const WEBHOOK = {
+  id: 'whk-9f3c1a7e5b2d4c80',
+  url: 'https://ci.example.com/mandala',
+  description: 'CI',
+  events: ['process.exited', 'computer.ready'],
+  computers: [],
+  enabled: true,
+  disabled_reason: null,
+  disabled_at: null,
+  last_success_at: '2026-09-01T12:00:05.000Z',
+  last_failure_at: null,
+  last_status: 200,
+  created_at: '2026-09-01T11:00:00.000Z',
+  updated_at: '2026-09-01T11:00:00.000Z',
+};
+
+/** The same subscription as a create or a rotate answers it: with the secret. */
+export const WEBHOOK_CREATED = {
+  ...WEBHOOK,
+  secret: 'whsec_bWFuZGFsYS13ZWJob29rLXRlc3QtdmVjdG9yLWtleSE=',
+};
+
+/** One delivery, accepted on the first attempt. */
+export const WEBHOOK_DELIVERY = {
+  id: 'whd-9f3c1a7e5b2d4c80',
+  event_type: 'process.exited',
+  computer: 'vm-1',
+  cursor: 'mfc9z1k2x5ab.7:42',
+  state: 'delivered',
+  attempts: 1,
+  next_at: null,
+  attempted_at: '2026-09-01T12:00:04.000Z',
+  last_status: 200,
+  last_error: null,
+  delivered_at: '2026-09-01T12:00:05.000Z',
+  created_at: '2026-09-01T12:00:03.000Z',
+};
+
+/**
  * One usage report, complete: both shortfall flags false and the breakdown
  * present. The degraded shapes are built in the test that is about them.
  */
@@ -330,6 +372,29 @@ function respond(
   // adjacent so that stays visible.
   if (path === '/usage') return json(USAGE);
   if (path === '/retention') return json(RETENTION);
+  // The webhooks resource (OPL-4306). The two answers that carry the secret
+  // are the create and the rotate, and only those; the test is a 202 with a
+  // queued delivery, the way the platform answers it.
+  if (path === '/webhooks')
+    return json(method === 'GET' ? [WEBHOOK] : WEBHOOK_CREATED, method === 'GET' ? 200 : 201);
+  if (path.startsWith('/webhooks/')) {
+    if (path.endsWith('/rotate')) return json(WEBHOOK_CREATED);
+    if (path.endsWith('/test'))
+      return json(
+        {
+          ...WEBHOOK_DELIVERY,
+          event_type: 'webhook.test',
+          computer: '',
+          state: 'pending',
+          attempts: 0,
+          last_status: null,
+          delivered_at: null,
+        },
+        202,
+      );
+    if (path.endsWith('/deliveries')) return json([WEBHOOK_DELIVERY]);
+    return json(method === 'DELETE' ? { ok: true } : WEBHOOK);
+  }
   if (path === '/moves') return json({ moves: [MOVE_DONE] });
   if (path.endsWith('/move')) return json(MOVE_STARTED, 202);
   if (path === '/snapshots') return json([SNAPSHOT]);
