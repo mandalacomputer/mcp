@@ -7,15 +7,17 @@ Point Claude Code, Claude Desktop, or anything else that speaks MCP at a real
 Linux desktop it can **see and drive**. Screenshots come back as images, so the
 model looks at the screen and clicks what it sees.
 
-> **Status: alpha, unpublished.** The tool surface is settling; expect breaking
-> changes before 1.0. Tracks the platform's `/api/v1`, which is itself still
-> moving.
+> **Status: alpha.** The tool surface is settling; expect breaking changes
+> before 1.0. Tracks the platform's `/api/v1`, which is itself still moving.
 
 ## Install
 
 You need an API key from the dashboard — **Settings → API keys**, a `com_…`
 string. It is scoped to your account and it is every computer on it, so treat it
 the way you would treat a password.
+
+Node 20.3 or newer. There is nothing else to install: `npx` fetches the server
+the first time a client starts it.
 
 **Claude Code**
 
@@ -37,6 +39,9 @@ claude mcp add mandala -e MANDALA_API_KEY=com_… -- npx -y mandala-computer-mcp
 }
 ```
 
+**Cursor, Windsurf and the rest** take the same three fields — `command`,
+`args`, `env` — in whichever file they keep their MCP servers in.
+
 Nothing is hosted and nothing is operated: your MCP client starts this as a
 subprocess, and it talks to `https://app.mandala.computer/api/v1` with your key.
 
@@ -57,6 +62,12 @@ screenshot()                         → an image the model can point at
 click(x=640, y=400)                  → clicks what it saw
 screenshot()                         → looks again
 ```
+
+`create_computer(size="large")` is the fast path: the named shapes from
+`list_sizes` are the ones the platform keeps pre-booted, so one of those is
+usually answered in about a second where a custom `cpu`/`ram_mb`/`disk_gb`
+shape boots cold. A `size` sets the template and the numbers together, so send
+it alone or the explicit fields alone.
 
 `use_computer` binds a machine to the session, so every later call can leave
 `computer_id` out. Pass `computer_id` explicitly on any call to override it
@@ -103,6 +114,29 @@ entirely.
 `MANDALA_MODEL_KEY` on stdio, or the caller's own `X-Model-Key` header over HTTP.
 
 ## Things worth knowing
+
+**Every computer is a Linux desktop today.** Windows guests are not offered on any
+plan; where this README mentions Windows it is describing behaviour the client
+already supports for when they are.
+
+**A running computer costs money, and a forgotten one keeps costing it.**
+`create_computer` says so in its own description, and so does everything that
+starts a machine by a side door — `restore_snapshot` boots a stopped computer,
+`write_clipboard` resumes a suspended one, and each of those is charged like
+any other start. When a stretch of work is over, `suspend_computer` (a pause:
+`start_computer` brings the same session back in about a second) or
+`stop_computer` (a shutdown: the disk is kept, the session is not). Idle
+suspend catches the ones a model forgets, but only after 30 minutes untouched.
+`get_usage` is what says what any of it cost.
+
+**Ten clicks need not be ten screenshots.** Driving the desktop one tool at a
+time — `screenshot`, `click`, `screenshot` — puts an image in the calling
+model's context for every step. `run_agent` hands a task in plain language to
+the platform's own loop instead, which screenshots, decides and clicks inside
+the platform and answers with a sentence and the list of what it did. It is
+registered only when a model key is present (see [Configuration](#configuration)),
+bills that key for every step, and `max_steps` is the spending cap as much as
+the loop bound.
 
 **A screenshot is how you find out what the screen looks like.** A click that
 landed and a click that did nothing produce the same tool result, so a model
@@ -396,13 +430,16 @@ The same server speaks streamable HTTP, for clients that cannot spawn a
 subprocess — claude.ai, mobile, a shared team endpoint:
 
 ```sh
-MANDALA_ALLOWED_HOSTS=mcp.mandala.computer npx mandala-computer-mcp --http --port 3000
+MANDALA_ALLOWED_HOSTS=mcp.example.com npx mandala-computer-mcp --http --port 3000
 ```
 
 ```sh
-claude mcp add --transport http mandala https://mcp.mandala.computer/mcp \
+claude mcp add --transport http mandala https://mcp.example.com/mcp \
   --header "Authorization: Bearer com_…"
 ```
+
+The MCP endpoint is `/mcp`; `/healthz` answers a JSON `{ ok, name, version }`
+for whatever is checking that the process is up.
 
 **It holds no credential of its own.** Each caller's key arrives as their own
 bearer token and is used only for their session; there is no store, and nothing
@@ -439,6 +476,14 @@ naming the fix.
 | `PORT`, `HOST` | For `--http`. Default `3000`, `127.0.0.1`. |
 | `MANDALA_ALLOWED_HOSTS`, `MANDALA_ALLOWED_ORIGINS` | Comma-separated. Which `Host` and `Origin` values this server answers to. On a loopback bind the host list defaults to the address it was given, so DNS-rebinding protection is on without configuration; set this when serving under a name. |
 
+Every one of these but the model key has a flag as well, and a flag overrides
+the environment: `--http`, `--port`, `--host`, `--base-url`, `--computer`,
+`--allowed-hosts`, `--allowed-origins`, `--no-lifecycle`, plus `--help` and
+`--version`. `--key` exists for a caller launching several servers under
+different keys, and warns when used, because an argument vector is readable by
+`ps`, lands in shell history and is recorded verbatim by any exec audit —
+none of which is true of `MANDALA_API_KEY`.
+
 `run_agent` deserves a note. It hands a task to the platform's own agent loop,
 which drives the computer inside the platform and answers with a sentence. Worth
 it when a stretch of pixel work would otherwise cost the calling model a
@@ -454,7 +499,17 @@ npm run build
 npm run lint
 ```
 
-### The surface check
+CI runs the suite on Node 20, 22, 24 and 26 — the floor `package.json`
+declares and the ceiling a current `npx` will actually use.
+
+### Where the platform's rules live
+
+This server gets no privileged access. Everything it does goes through the same
+curated `/api/v1` surface the Python SDK uses, owner-scoped to the key's account
+and audited against it. Anything it needs that `/api/v1` does not expose is a
+change to the platform's route table, not a wider pass-through here.
+
+### Maintainers: the surface check
 
 The platform allowlists every route `/api/v1` will answer and 404s the rest.
 `test/allowlist.ts` mirrors that table, and the tests assert two things: that
@@ -463,29 +518,26 @@ between the platform's surface and this server's coverage is *exactly* the set
 written down in `UNIMPLEMENTED`. A route added upstream becomes a failing test
 here rather than a feature nobody noticed.
 
-`npm run check:surface` goes further and diffs the mirror against the real
-`V1_ROUTES` in the platform repo, whenever that repo happens to be checked out
-next door — or wherever `MANDALA_PLATFORM_REPO` points. It skips silently when
-it is not there, which is the ordinary case in CI on this repository.
+`npm run check:surface` goes further and diffs the mirror against the platform's
+own route table, whenever the platform repository happens to be checked out next
+door — or wherever `MANDALA_PLATFORM_REPO` points. Without it the script says
+it is skipping and exits 0, which is what it does for anyone outside the
+platform team; the diff is enforced from the platform's own CI, which checks
+this repository out beside itself and runs the same script.
 
 ```
-check:surface — the mirror matches the platform (56 routes, 89 parameters, from /Users/…/mandala-computer).
+check:surface — the mirror matches the platform (56 routes, 89 parameters, from …/mandala-computer).
 ```
-
-### Where the platform's rules live
-
-This server gets no privileged access. Everything it does goes through the same
-curated `/api/v1` surface the Python SDK uses, owner-scoped to the key's account
-and audited against it. Anything it needs that `/api/v1` does not expose is a
-change to the platform's route table, not a wider pass-through here — see the
-long note at the top of `web/lib/surface.ts` in the platform repo for why that
-boundary is where it is.
 
 ## See also
 
-- [mandala-computer-python](https://github.com/mboyd1/mandala-computer-python) —
-  the Python SDK, for writing code against the same API rather than driving it
-  from a model.
+- [python-sdk](https://github.com/mandalacomputer/python-sdk) — the Python SDK,
+  for writing code against the same API rather than driving it from a model.
+
+## Security
+
+Please report anything security-sensitive privately — see
+[SECURITY.md](SECURITY.md) rather than opening an issue.
 
 ## Licence
 
