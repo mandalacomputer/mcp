@@ -501,8 +501,15 @@ export const registerComputers: Registrar = (server, session, opts) => {
       // first agent to dogfood the skill (OPL-3914) read as a suspend that had
       // not worked. The id is the one we sent, so say that; a record, should
       // the platform ever start returning one, is described as before.
+      //
+      // Stripped of credentials on this branch too, and not only on the record
+      // one: the test for "is this an Ack" is the absence of an id, and a body
+      // with no id is not thereby a body with no `vnc`.
       if (!c.id) {
-        return said(`${action}: ok — ${id}.${POWER_NEXT[action] ?? ''}${opts.note ?? ''}`, body);
+        return said(
+          `${action}: ok — ${id}.${POWER_NEXT[action] ?? ''}${opts.note ?? ''}`,
+          withoutCredentials(c),
+        );
       }
       session.noteResolution(id, c.resolution);
       return said(`${action}: ${describe(c)}${opts.note ?? ''}`, withoutCredentials(c));

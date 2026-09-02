@@ -10,7 +10,7 @@
   "plugins": [
     {
       "name": "mandala-computer",
-      "source": "./",
+      "source": "./plugin",
       "description": "The Mandala Computer MCP server plus a skill for driving a cloud desktop from an agent.",
       "category": "productivity"
     }

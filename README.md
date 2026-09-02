@@ -27,7 +27,7 @@ export MANDALA_API_KEY=com_…       # in the shell Claude Code starts from
 /plugin install mandala-computer@mandala
 ```
 
-The skill — [`skills/mandala-computer/SKILL.md`](skills/mandala-computer/SKILL.md)
+The skill — [`plugin/skills/mandala-computer/SKILL.md`](plugin/skills/mandala-computer/SKILL.md)
 — is the part the tools cannot say for themselves: when a cloud desktop is the
 right answer at all, that it costs money until it is suspended or stopped, that
 `run_agent` is usually the right level and a screenshot per click is not, and

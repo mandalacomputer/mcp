@@ -36,8 +36,12 @@ Claude Code was started in:
 Without the plugin, the same server is one line:
 `claude mcp add mandala -e MANDALA_API_KEY=com_… -- npx -y mandala-computer-mcp`.
 
-If a `mandala` tool call fails saying there is no API key, stop and ask the
-user for one — nothing else in this skill works until it is set.
+If there are no `mandala` tools at all, or the server shows as failed, the
+key is not exported: with `MANDALA_API_KEY` empty the server prints "No API
+key" to its log and exits before registering anything, so what you see is an
+absent server, not a tool error. Stop and ask the user to export the key in
+the shell Claude Code starts from and restart it — nothing else in this skill
+works until then. Do not try to work around it with `exec` or a browser.
 
 ## The shape of a session
 
