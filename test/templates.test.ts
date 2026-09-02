@@ -848,6 +848,30 @@ describe('what the codex adversarial review found', () => {
     await close();
   });
 
+  /**
+   * The lists are the sentence that must not be wrong. The account counters
+   * interpolated untyped became "undefined template(s)" in the prose a model
+   * reads first (adversarial review, OPL-4314).
+   */
+  it('omits account totals when the counters are not numbers', async () => {
+    const real = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      answer({ retired: ['acc-1/devbox@1.0.0'], versions: [] })) as typeof fetch;
+    const { call, close } = await connect();
+    const res = await call('retire_template', {
+      namespace: 'acc-1',
+      name: 'devbox',
+      confirm: true,
+    });
+    globalThis.fetch = real;
+
+    expect(res.isError).toBeFalsy();
+    expect(textOf(res)).toMatch(/Retired 1 version/);
+    expect(textOf(res)).not.toMatch(/undefined template/);
+    expect(textOf(res)).not.toMatch(/undefined ref/);
+    await close();
+  });
+
   it('says a build may have started when the response carries no id', async () => {
     const real = globalThis.fetch;
     globalThis.fetch = (async () => answer({ ref: 'acc-1/devbox@1.0.0' }, 202)) as typeof fetch;

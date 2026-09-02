@@ -813,7 +813,7 @@ describe('an events_url the platform sent but nothing can parse', () => {
           id: 'vm-1',
           status: 'running',
           os: 'linux',
-          vnc: { events_url: '/not-an-absolute-url' },
+          vnc: { events_url: '/not-an-absolute-url?token=SECRET-CONTROL' },
         }),
         { headers: { 'Content-Type': 'application/json' } },
       );
@@ -829,6 +829,11 @@ describe('an events_url the platform sent but nothing can parse', () => {
       expect(res.isError).toBe(true);
       expect(textOf(res)).toContain('cannot parse');
       expect(textOf(res)).toContain('screenshot');
+      // The raw URL used to be JSON-stringified into this sentence. events_url
+      // is inside vnc, which is root-equivalent, and this text is tool-visible
+      // (adversarial review, OPL-4314).
+      expect(textOf(res)).not.toContain('SECRET-CONTROL');
+      expect(textOf(res)).not.toContain('not-an-absolute-url');
       // And nothing was opened on a URL there was no way to open.
       expect(ev.sockets).toHaveLength(0);
       await close();
