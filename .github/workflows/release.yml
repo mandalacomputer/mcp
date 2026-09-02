@@ -7,7 +7,9 @@ name: Release
 #
 # The tag has to agree with package.json before anything is built; a mismatch
 # fails the run rather than publishing one version under another's name. Tests
-# run again here because CI runs on branches and this workflow runs on tags.
+# run again here because CI runs on branches and this workflow runs on tags —
+# and one of them holds .claude-plugin/plugin.json to the same number, so a
+# release is four copies of the version agreeing, not three.
 
 on:
   push:

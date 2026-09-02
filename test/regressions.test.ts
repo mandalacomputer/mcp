@@ -572,6 +572,28 @@ describe('the version a user quotes in a bug report', () => {
     };
     expect(SERVER_VERSION).toBe(pkg.version);
   });
+
+  it('is the one the Claude Code plugin declares', () => {
+    // A fourth copy (OPL-3914). The plugin manifest starts `npx -y
+    // mandala-computer-mcp`, so what it installs is always the latest publish
+    // and its own number is documentation of which server the skill was written
+    // against — which is only true if it moves with the rest.
+    //
+    // Under plugin/ and not at the root, because a marketplace entry's `source`
+    // is the directory Claude Code copies into its plugin cache — and copying
+    // the root copies this whole repository, node_modules and dist included,
+    // into a plugin that starts the server from npm and reads none of it.
+    const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as {
+      version: string;
+    };
+    const plugin = JSON.parse(
+      readFileSync(new URL('../plugin/.claude-plugin/plugin.json', import.meta.url), 'utf8'),
+    ) as { version: string; mcpServers: Record<string, { command: string; args: string[] }> };
+    expect(plugin.version).toBe(pkg.version);
+    // And it starts the package this repository publishes, not a path.
+    expect(plugin.mcpServers.mandala.command).toBe('npx');
+    expect(plugin.mcpServers.mandala.args).toEqual(['-y', 'mandala-computer-mcp']);
+  });
 });
 
 describe('a Content-Disposition this server did not expect', () => {
@@ -2380,6 +2402,69 @@ describe('a guest that will not shut down', () => {
     await close();
   });
 
+  it('reads the Ack a power action answers as the ok it is', async () => {
+    // OPL-3914, found by the first agent to drive this server from the skill.
+    // The platform answers every power action with its Ack — `{ok: true}` and
+    // no computer — and this server described that as a computer record:
+    // `suspend: (unnamed) · (no id) · unknown`, which the agent read as a
+    // suspend that had not taken. The id is the one we sent, and the fake
+    // platform now answers the real shape, so the record path is only reached
+    // if the platform ever changes its mind.
+    const { call, close } = await connect();
+    for (const tool of [
+      'start_computer',
+      'stop_computer',
+      'suspend_computer',
+      'restart_computer',
+    ]) {
+      const text = said(await call(tool, {}));
+      expect(text, tool).toContain('ok — vm-1');
+      expect(text, tool).not.toContain('unnamed');
+      expect(text, tool).not.toContain('no id');
+      expect(text, tool).not.toContain('unknown');
+    }
+    // A start is the one where "ok" and "usable" are furthest apart.
+    expect(said(await call('start_computer', {}))).toContain('until="guest"');
+    expect(said(await call('suspend_computer', {}))).not.toContain('until="guest"');
+    await close();
+  });
+
+  it('still describes a computer record, and still strips its credentials, on either branch', async () => {
+    // The fake platform answers the documented Ack, which means the record
+    // path in `power` — and the credential sweep in behaviour.test.ts, which
+    // runs the four power tools against that same fake — would otherwise be
+    // exercised by nothing. So the record is answered here, once with an id and
+    // once without: the second is the shape the Ack test is inferred from, and
+    // a body with no id is not a body with no `vnc`.
+    const { call, close } = await connect();
+    const fake = globalThis.fetch;
+    const answer = (record: Record<string, unknown>) => {
+      globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+        const url = new URL(typeof input === 'string' ? input : input.toString());
+        if (url.pathname.endsWith('/suspend'))
+          return new Response(JSON.stringify(record), {
+            headers: { 'Content-Type': 'application/json' },
+          });
+        return fake(input as never, init);
+      }) as typeof fetch;
+    };
+    const vnc = { url: 'wss://app.test/vnc?token=SECRET-CONTROL' };
+    try {
+      answer({ id: 'vm-1', name: 'desk', status: 'suspended', vnc });
+      const record = await call('suspend_computer', {});
+      expect(said(record)).toContain('suspend: desk · vm-1 · suspended');
+      expect(JSON.stringify(record)).not.toContain('SECRET-CONTROL');
+
+      answer({ ok: true, vnc });
+      const ack = await call('suspend_computer', {});
+      expect(said(ack)).toContain('suspend: ok — vm-1');
+      expect(JSON.stringify(ack)).not.toContain('SECRET-CONTROL');
+    } finally {
+      globalThis.fetch = fake;
+      await close();
+    }
+  });
+
   it('offers force on stop and on no other power tool', async () => {
     // start, suspend and restart are different operations with different
     // outcomes; the reason this GAP mattered is that a model with no `force`
@@ -2838,6 +2923,7 @@ describe('the tools our own prose tells a model to call', () => {
   // two. So: before adding a line here, say which field it is. If you cannot
   // name one, it is a tool that does not exist and the fix is in the prose.
   const IDENTIFIER = /\b[a-z][a-z0-9]*(?:_[a-z0-9]+)+\b/g;
+  const SKILL = new URL('../plugin/skills/mandala-computer/SKILL.md', import.meta.url);
   const NOT_TOOLS = new Set([
     // Parameters and response fields we name in prose, on purpose.
     'computer_id',
@@ -2893,6 +2979,15 @@ describe('the tools our own prose tells a model to call', () => {
     // tool description and which name eight tools. They were outside the scan
     // entirely — the largest single piece of tool-naming text we ship.
     prose.push({ where: 'server instructions', text: client.getInstructions() ?? '' });
+    // The Claude Code skill (OPL-3914), which is prose a model reads before it
+    // has even started this server, and which names more tools than the
+    // instructions do. It is the text most likely to drift: a tool renamed here
+    // is renamed in its description by the same diff, and in the skill by
+    // nobody — the skill is a Markdown file the compiler never reads.
+    prose.push({
+      where: 'plugin/skills/mandala-computer/SKILL.md',
+      text: readFileSync(SKILL, 'utf8'),
+    });
     for (const t of (await client.listTools()).tools) {
       prose.push({ where: `${t.name} description`, text: t.description ?? '' });
       for (const [arg, schema] of Object.entries(t.inputSchema.properties ?? {})) {
