@@ -29,8 +29,9 @@ jobs:
         run: |
           tag="${GITHUB_REF_NAME#v}"
           declared=$(node -p "require('./package.json').version")
-          echo "tag=$tag package.json=$declared"
-          [ "$tag" = "$declared" ]
+          server=$(grep -oE "SERVER_VERSION = '[^']+'" src/server.ts | sed -E "s/.*'([^']+)'/\\1/")
+          echo "tag=$tag package.json=$declared src/server.ts=$server"
+          [ "$tag" = "$declared" ] && [ "$tag" = "$server" ]
       - run: npm ci
       - run: npm run lint
       - run: npm run typecheck

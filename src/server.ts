@@ -11,7 +11,7 @@ import type { ToolOptions } from './tools/types.js';
 import { registerWebhooks } from './tools/webhooks.js';
 
 export const SERVER_NAME = 'mandala-computer';
-export const SERVER_VERSION = '0.1.0';
+export const SERVER_VERSION = '0.1.1';
 
 /**
  * Told to the client on connect, and shown to the model before any tool is
