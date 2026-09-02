@@ -95,6 +95,10 @@ entirely.
 
 **Spending** — `get_usage`
 
+**Being told somewhere else** — `list_webhooks`, `create_webhook`,
+`get_webhook`, `update_webhook`, `rotate_webhook_secret`, `test_webhook`,
+`list_webhook_deliveries`, `delete_webhook`
+
 **Delegating** — `run_agent`, registered only when a model key is present:
 `MANDALA_MODEL_KEY` on stdio, or the caller's own `X-Model-Key` header over HTTP.
 
@@ -207,6 +211,18 @@ arrival. Tell whoever you are working for what it costs before you call it, and
 read `list_moves` if the wait runs out. A move that ends `moved` rather than
 `done` is the one to read carefully — the computer **is** on another host, at
 its old size, and an ordinary `update_computer` finishes the job.
+
+**A webhook is the same events, delivered to somebody who is not here.**
+`wait_for_event` is for the model, which takes turns and can afford to ask.
+A CI job or a queue worker cannot, and `create_webhook` is how it gets woken
+instead: an HTTPS endpoint the platform POSTs each event to, byte for byte the
+object the socket frames, signed with the three Standard Webhooks headers. The
+secret that signs them is in the create answer **once** and never readable
+again, which is why the first line of that answer says so; `rotate_webhook_secret`
+is the only way to another. This server only sets webhooks up and reads how
+they are doing — it does not receive them and has no `verify`, because a
+server with no endpoint has nothing to verify. `list_webhook_deliveries` is
+where a delivery that ran out of retries shows up; nothing is dropped silently.
 
 **A schedule says when, not how long.** `snapshot_schedule` sets the window a
 computer's automatic snapshot is taken in; `get_retention` is what says how many
