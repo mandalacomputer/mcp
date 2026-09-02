@@ -19,7 +19,24 @@ the way you would treat a password.
 Node 20.3 or newer. There is nothing else to install: `npx` fetches the server
 the first time a client starts it.
 
-**Claude Code**
+**Claude Code** — as a plugin, which installs the server and a skill together:
+
+```sh
+export MANDALA_API_KEY=com_…       # in the shell Claude Code starts from
+/plugin marketplace add mandalacomputer/mcp
+/plugin install mandala-computer@mandala
+```
+
+The skill — [`plugin/skills/mandala-computer/SKILL.md`](plugin/skills/mandala-computer/SKILL.md)
+— is the part the tools cannot say for themselves: when a cloud desktop is the
+right answer at all, that it costs money until it is suspended or stopped, that
+`run_agent` is usually the right level and a screenshot per click is not, and
+which refusals are worth a second try. It is a description of *when and how*,
+not a second client; once the server is installed it stays out of the way.
+`MANDALA_MODEL_KEY`, if exported alongside, is passed through and turns on
+`run_agent`.
+
+Or the server on its own, with the key inline:
 
 ```sh
 claude mcp add mandala -e MANDALA_API_KEY=com_… -- npx -y mandala-computer-mcp
