@@ -1,0 +1,20 @@
+{
+  "name": "mandala-computer",
+  "version": "0.1.1",
+  "description": "Drive a Mandala Computer cloud desktop from Claude Code: installs the MCP server and a skill that says when to reach for a computer, how to create and dispose of one, and how to get from a task to a screenshot and an action loop.",
+  "author": { "name": "Mandala Computer", "url": "https://mandala.computer" },
+  "homepage": "https://mandala.computer",
+  "repository": "https://github.com/mandalacomputer/mcp",
+  "license": "MIT",
+  "keywords": ["mandala", "computer-use", "cloud-desktop", "mcp", "ai-agents"],
+  "mcpServers": {
+    "mandala": {
+      "command": "npx",
+      "args": ["-y", "mandala-computer-mcp"],
+      "env": {
+        "MANDALA_API_KEY": "${MANDALA_API_KEY:-}",
+        "MANDALA_MODEL_KEY": "${MANDALA_MODEL_KEY:-}"
+      }
+    }
+  }
+}

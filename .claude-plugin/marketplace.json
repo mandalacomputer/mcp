@@ -1,0 +1,18 @@
+{
+  "name": "mandala",
+  "owner": {
+    "name": "Mandala Computer",
+    "url": "https://mandala.computer"
+  },
+  "metadata": {
+    "description": "Cloud desktops for AI agents."
+  },
+  "plugins": [
+    {
+      "name": "mandala-computer",
+      "source": "./",
+      "description": "The Mandala Computer MCP server plus a skill for driving a cloud desktop from an agent.",
+      "category": "productivity"
+    }
+  ]
+}

@@ -572,6 +572,23 @@ describe('the version a user quotes in a bug report', () => {
     };
     expect(SERVER_VERSION).toBe(pkg.version);
   });
+
+  it('is the one the Claude Code plugin declares', () => {
+    // A fourth copy (OPL-3914). The plugin manifest starts `npx -y
+    // mandala-computer-mcp`, so what it installs is always the latest publish
+    // and its own number is documentation of which server the skill was written
+    // against — which is only true if it moves with the rest.
+    const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as {
+      version: string;
+    };
+    const plugin = JSON.parse(
+      readFileSync(new URL('../.claude-plugin/plugin.json', import.meta.url), 'utf8'),
+    ) as { version: string; mcpServers: Record<string, { command: string; args: string[] }> };
+    expect(plugin.version).toBe(pkg.version);
+    // And it starts the package this repository publishes, not a path.
+    expect(plugin.mcpServers.mandala.command).toBe('npx');
+    expect(plugin.mcpServers.mandala.args).toEqual(['-y', 'mandala-computer-mcp']);
+  });
 });
 
 describe('a Content-Disposition this server did not expect', () => {
@@ -2838,6 +2855,7 @@ describe('the tools our own prose tells a model to call', () => {
   // two. So: before adding a line here, say which field it is. If you cannot
   // name one, it is a tool that does not exist and the fix is in the prose.
   const IDENTIFIER = /\b[a-z][a-z0-9]*(?:_[a-z0-9]+)+\b/g;
+  const SKILL = new URL('../skills/mandala-computer/SKILL.md', import.meta.url);
   const NOT_TOOLS = new Set([
     // Parameters and response fields we name in prose, on purpose.
     'computer_id',
@@ -2893,6 +2911,12 @@ describe('the tools our own prose tells a model to call', () => {
     // tool description and which name eight tools. They were outside the scan
     // entirely — the largest single piece of tool-naming text we ship.
     prose.push({ where: 'server instructions', text: client.getInstructions() ?? '' });
+    // The Claude Code skill (OPL-3914), which is prose a model reads before it
+    // has even started this server, and which names more tools than the
+    // instructions do. It is the text most likely to drift: a tool renamed here
+    // is renamed in its description by the same diff, and in the skill by
+    // nobody — the skill is a Markdown file the compiler never reads.
+    prose.push({ where: 'skills/mandala-computer/SKILL.md', text: readFileSync(SKILL, 'utf8') });
     for (const t of (await client.listTools()).tools) {
       prose.push({ where: `${t.name} description`, text: t.description ?? '' });
       for (const [arg, schema] of Object.entries(t.inputSchema.properties ?? {})) {
