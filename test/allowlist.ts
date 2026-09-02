@@ -121,7 +121,7 @@ export const V1_ROUTES: Route[] = [
  * arguments that make the route worth reaching. `Range` on `GET
  * computers/:id/files` is the case that proved it: the platform shipped it in
  * OPL-3727 naming this server as the caller it was for, `check:surface` went on
- * reporting "in step with gorillacloud (32 routes)", and read_file went on
+ * reporting "in step with the platform (32 routes)", and read_file went on
  * telling models it could not page — because a header is a parameter of a route
  * that already existed, and a route table has nowhere to put one.
  *

@@ -12,7 +12,7 @@
  * repository is where that was proved. `Range` landed on `GET
  * computers/:id/files` in OPL-3727, with this server named in the commit
  * message as the caller it was for, and this script said "in step with
- * gorillacloud (32 routes)" the whole time — because a header is a new
+ * the platform (32 routes)" the whole time — because a header is a new
  * PARAMETER on a route that already existed, and a route table cannot see one.
  * The call lands in the right place either way; the only thing missing is the
  * argument that made it worth making. read_file went on telling models it
@@ -43,7 +43,6 @@ const repo = resolve(here, '..');
 
 const candidates = [
   process.env.MANDALA_PLATFORM_REPO,
-  resolve(repo, '..', 'gorillacloud'),
   resolve(repo, '..', 'mandala-computer'),
   resolve(repo, '..', 'app'),
 ].filter(Boolean);

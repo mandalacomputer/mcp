@@ -469,7 +469,7 @@ next door — or wherever `MANDALA_PLATFORM_REPO` points. It skips silently when
 it is not there, which is the ordinary case in CI on this repository.
 
 ```
-check:surface — in step with /Users/…/gorillacloud (30 routes).
+check:surface — the mirror matches the platform (56 routes, 89 parameters, from /Users/…/mandala-computer).
 ```
 
 ### Where the platform's rules live
