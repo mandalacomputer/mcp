@@ -8,6 +8,7 @@ import { registerInput } from './tools/input.js';
 import { registerSnapshots } from './tools/snapshots.js';
 import { registerTemplates } from './tools/templates.js';
 import type { ToolOptions } from './tools/types.js';
+import { registerWebhooks } from './tools/webhooks.js';
 
 export const SERVER_NAME = 'mandala-computer';
 export const SERVER_VERSION = '0.1.0';
@@ -95,6 +96,7 @@ export function createServer(cfg: ServerConfig): McpServer {
   registerSnapshots(server, session, opts);
   registerTemplates(server, session, opts);
   registerEvents(server, session, opts);
+  registerWebhooks(server, session, opts);
   registerAgent(server, session, opts);
 
   // The event sockets outlive every tool call by design (OPL-3926), so nothing

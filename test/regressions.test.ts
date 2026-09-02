@@ -2873,6 +2873,9 @@ describe('the tools our own prose tells a model to call', () => {
     // A field on what poll_events and wait_for_event answer with (OPL-3926):
     // how many events are still buffered behind the batch that was returned.
     'more_waiting',
+    // A delivery state on what list_webhook_deliveries answers with (OPL-4306):
+    // an attempt is running. A state, not a tool.
+    'in_flight',
   ]);
 
   it('names only tools that exist', async () => {
