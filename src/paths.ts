@@ -45,6 +45,14 @@ export const USAGE = 'usage';
  * write on any surface.
  */
 export const RETENTION = 'retention';
+/**
+ * The account's webhook subscriptions (platform OPL-4300; OPL-4306 here).
+ *
+ * Account-scoped like {@link USAGE}: a subscription receives events from many
+ * computers, so it belongs to the account and not to any of them. Answered by
+ * the control plane from its own tables, never by a hypervisor.
+ */
+export const WEBHOOKS = 'webhooks';
 
 /**
  * An RFC 3339 timestamp WITH a time zone, which is the only kind `GET /usage`
@@ -688,4 +696,80 @@ export function agentBody(args: {
   stream: boolean;
 }): Json {
   return omitUndefined({ ...args } as Json);
+}
+
+/** One webhook subscription. The id is `whk-`-shaped. */
+export const webhook = (id: string) => `${WEBHOOKS}/${segment('webhook_id', id)}`;
+
+/** rotate | test | deliveries */
+export const webhookAction = (id: string, action: string) => `${webhook(id)}/${action}`;
+
+/** The platform's own caps (`DESCRIPTION_MAX`, `COMPUTERS_MAX` in its lib/webhooks). */
+export const WEBHOOK_DESCRIPTION_MAX = 200;
+export const WEBHOOK_COMPUTERS_MAX = 64;
+
+/**
+ * The body for a webhook create or update — the fields, checked before they
+ * cost a round trip.
+ *
+ * Three of the platform's refusals are mirrored here, because each is a call
+ * that can only fail: a url that is not `https:` or carries a username or
+ * password, a description over the cap, and a `computers` filter over its cap.
+ * The one that is NOT mirrored is the address check — that the hostname resolves
+ * to a public address — because it is a DNS answer the platform gets at create
+ * time, and a guess made here would be wrong in both directions.
+ *
+ * `events` and `computers` are de-duplicated rather than refused for repeats,
+ * the way the platform stores them. The event vocabulary is not checked at all:
+ * the platform refuses an unknown type with a 400 that lists the current ones,
+ * and a list held here would refuse a type it had started accepting.
+ *
+ * Undefined fields are dropped. On an update that is what "leave it as it is"
+ * means, and on a create it is what lets the platform apply its defaults.
+ */
+export function webhookBody(args: {
+  url?: string;
+  description?: string;
+  events?: string[];
+  computers?: string[];
+  enabled?: boolean;
+}): Json {
+  let url: string | undefined;
+  if (args.url !== undefined) {
+    url = args.url.trim();
+    let parsed: URL;
+    try {
+      parsed = new URL(url);
+    } catch {
+      throw new Error(`url is not a URL: ${JSON.stringify(args.url)}`);
+    }
+    if (parsed.protocol !== 'https:') {
+      throw new Error(`url must be https://, and this one is ${parsed.protocol}//`);
+    }
+    if (parsed.username || parsed.password) {
+      throw new Error('url must not carry a username or password');
+    }
+  }
+  if (args.description !== undefined && args.description.length > WEBHOOK_DESCRIPTION_MAX) {
+    throw new Error(
+      `description is ${args.description.length} characters; the platform keeps at most ${WEBHOOK_DESCRIPTION_MAX}`,
+    );
+  }
+  const events = args.events === undefined ? undefined : [...new Set(args.events)];
+  const computers = args.computers === undefined ? undefined : [...new Set(args.computers)];
+  if (computers?.some((c) => !c.trim())) {
+    throw new Error('computers must not contain an empty id');
+  }
+  if (computers && computers.length > WEBHOOK_COMPUTERS_MAX) {
+    throw new Error(
+      `computers names ${computers.length} computers; the platform takes at most ${WEBHOOK_COMPUTERS_MAX} — filter at the receiver instead`,
+    );
+  }
+  return omitUndefined({
+    url,
+    description: args.description,
+    events,
+    computers,
+    enabled: args.enabled,
+  });
 }

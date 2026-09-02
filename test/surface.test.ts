@@ -75,6 +75,35 @@ const EXERCISE: Record<string, Record<string, unknown>[]> = {
   // No arguments to sweep: the window belongs to the account, so there is no id
   // and nothing to filter by.
   get_retention: [{}],
+  // The webhooks CRUD (OPL-4306). Every body field on the create and on the
+  // update, because the parameter sweep is what proves this server can send
+  // them; the other five routes are bodyless or take only the id.
+  list_webhooks: [{}],
+  create_webhook: [
+    { url: 'https://ci.example.com/mandala' },
+    {
+      url: 'https://ci.example.com/mandala',
+      description: 'CI',
+      events: ['process.exited'],
+      computers: ['vm-1'],
+      enabled: false,
+    },
+  ],
+  get_webhook: [{ webhook_id: 'whk-9f3c1a7e5b2d4c80' }],
+  update_webhook: [
+    {
+      webhook_id: 'whk-9f3c1a7e5b2d4c80',
+      url: 'https://ci.example.com/mandala2',
+      description: 'CI',
+      events: ['process.exited'],
+      computers: ['vm-1'],
+      enabled: true,
+    },
+  ],
+  rotate_webhook_secret: [{ webhook_id: 'whk-9f3c1a7e5b2d4c80' }],
+  test_webhook: [{ webhook_id: 'whk-9f3c1a7e5b2d4c80' }],
+  list_webhook_deliveries: [{ webhook_id: 'whk-9f3c1a7e5b2d4c80' }],
+  delete_webhook: [{ webhook_id: 'whk-9f3c1a7e5b2d4c80', confirm: true }],
   wait_for_computer: [{ until: 'guest' }],
   get_desktop_url: [{}],
   // A named size and an explicit shape are alternatives, never both.
@@ -345,6 +374,7 @@ describe('patternFor', () => {
     expect(patternFor('/snapshots/snap-1/clone')).toBe('snapshots/:id/clone');
     expect(patternFor('/computers/vm-1/exec/103457')).toBe('computers/:id/exec/:pid');
     expect(patternFor('/computers/vm-1/windows/0x2600003')).toBe('computers/:id/windows/:window');
+    expect(patternFor('/webhooks/whk-9f3c1a7e5b2d4c80/deliveries')).toBe('webhooks/:id/deliveries');
     // A computer whose id looks like a route segment is still an id.
     expect(patternFor('/computers/audit')).toBe('computers/:id');
   });
