@@ -1,6 +1,7 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import type { Server } from 'node:http';
+import { BlockList, isIP } from 'node:net';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
 import express, { type Request, type Response } from 'express';
@@ -68,19 +69,31 @@ const SMALL_BODY_BYTES = 256 * 1024;
  * the same widening one notation further out. It is a v6 socket carrying a v4
  * loopback address, Node will bind it, and it was falling through to "not
  * loopback": no default Host allowlist, so DNS-rebinding protection silently
- * off on a bind that is as local as `127.0.0.1` is. A zone suffix (`%lo`) is
- * dropped first, since it names an interface rather than an address.
+ * off on a bind that is as local as `127.0.0.1` is.
+ *
+ * IPv6 loopback is the same hole one spelling further in. Node accepts
+ * `0:0:0:0:0:0:0:1` and `::0:1` and reports the bound address as `::1`, but
+ * `cfg.host` stays the operator's spelling — a string match on `::1` alone
+ * skipped the default Host allowlist and left DNS-rebinding protection off.
+ * Parsed as an address, every compression of all-zeros-then-one is loopback.
+ *
+ * A zone suffix (`%lo`) is dropped first, since it names an interface rather
+ * than an address.
  */
+const LOOPBACK = new BlockList();
+LOOPBACK.addAddress('::1', 'ipv6');
+LOOPBACK.addSubnet('127.0.0.0', 8, 'ipv4');
+
 export function isLoopbackHost(host: string): boolean {
   let h = host.toLowerCase();
   if (h.startsWith('[') && h.endsWith(']')) h = h.slice(1, -1);
   const zone = h.indexOf('%');
   if (zone >= 0) h = h.slice(0, zone);
-  if (h === 'localhost' || h === '::1') return true;
-  const mapped = /^::ffff:(.+)$/.exec(h);
-  if (mapped) h = mapped[1];
-  const m = /^127\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(h);
-  return Boolean(m && [m[1], m[2], m[3]].every((part) => Number(part) <= 255));
+  if (h === 'localhost') return true;
+  const version = isIP(h);
+  if (version === 4) return LOOPBACK.check(h, 'ipv4');
+  if (version === 6) return LOOPBACK.check(h, 'ipv6');
+  return false;
 }
 
 /**
@@ -110,6 +123,35 @@ export function hostSpellings(host: string, port: number): string[] {
   if (/:\d+$/.test(host) && host.indexOf(':') === host.lastIndexOf(':')) return [host];
   if (host.includes(':')) return [`[${host}]`, `[${host}]:${port}`];
   return [host, `${host}:${port}`];
+}
+
+/**
+ * The Host/Origin refusal the SDK would have returned from handleRequest.
+ *
+ * Matched here so a DNS-rebinding initialize never reaches `createServer`.
+ * The SDK's check returns a 403 Response without throwing, so a refusal that
+ * ran after construction paid for every tool registration and never hit the
+ * catch that closes the transport (adversarial review, OPL-4314).
+ */
+function dnsRebindingRefusal(
+  req: Request,
+  hosts: string[] | undefined,
+  origins: string[] | undefined,
+): string | undefined {
+  if (!(hosts?.length || origins?.length)) return undefined;
+  if (hosts?.length) {
+    const hostHeader = req.header('host');
+    if (!hostHeader || !hosts.includes(hostHeader)) {
+      return `Invalid Host header: ${hostHeader}`;
+    }
+  }
+  if (origins?.length) {
+    const originHeader = req.header('origin');
+    if (originHeader && !origins.includes(originHeader)) {
+      return `Invalid Origin header: ${originHeader}`;
+    }
+  }
+  return undefined;
 }
 
 /**
@@ -469,6 +511,14 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
         rpcId(req),
       );
     }
+    // Host/Origin are already decided, and constructing the McpServer is the
+    // expensive part of an initialize. Checked here so a DNS-rebinding POST
+    // never pays that cost, never takes a pending slot, and is 403 even when
+    // the session cap is full — occupancy is not the answer to a Host the
+    // operator never served (adversarial review, OPL-4314).
+    const hosts = allowedHosts(boundPort);
+    const refused = dnsRebindingRefusal(req, hosts, allowedOrigins);
+    if (refused) return rpcError(res, 403, -32000, refused);
     // Swept sessions free their slot on the timer; this is the backstop for the
     // case the timer cannot help with, which is arrivals faster than the TTL.
     if (sessions.size + pending >= maxSessions) {
@@ -500,9 +550,9 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
     // is written to the map from inside handleRequest, so a throw after that
     // point has something to clean up.
     let transport: StreamableHTTPServerTransport | undefined;
+    let mcp: ReturnType<typeof createServer> | undefined;
     let finishInitialize = () => {};
     try {
-      const hosts = allowedHosts(boundPort);
       const t = new StreamableHTTPServerTransport({
         sessionIdGenerator: () => randomUUID(),
         // On whenever there is a list to check against, which for a loopback
@@ -567,8 +617,17 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
         // that is not theirs is named back to them by way of explanation.
         computerId: undefined,
       });
+      mcp = server;
       await server.connect(t);
-      return await t.handleRequest(req, res, req.body);
+      const handled = await t.handleRequest(req, res, req.body);
+      // Any initialize that never reached `onsessioninitialized` has no map
+      // slot and nothing the sweeper will reap. The SDK's 403 used to take
+      // this path without throwing; other early returns still can.
+      if (!t.sessionId) {
+        void server.close().catch(() => {});
+        void t.close().catch(() => {});
+      }
+      return handled;
     } catch (err) {
       // `onsessioninitialized` fires from inside handleRequest, so by the time
       // anything past it throws the session is already in the map — holding a
@@ -576,7 +635,8 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
       // and so can never DELETE. Left alone it sits there until the TTL sweep
       // half an hour later, and enough of them ratchet the cap to zero.
       if (transport?.sessionId) sessions.delete(transport.sessionId);
-      if (transport) void transport.close().catch(() => {});
+      if (mcp) void mcp.close().catch(() => {});
+      else if (transport) void transport.close().catch(() => {});
       throw err;
     } finally {
       finishInitialize();

@@ -371,6 +371,41 @@ describe('a page that resolved its own name to this server', () => {
   });
 });
 
+describe('a Host the rebinding check refuses, when the session cap is already full', () => {
+  let server: Server;
+  let port: number;
+  let platform: ReturnType<typeof installFakePlatform>;
+
+  beforeAll(async () => {
+    platform = installFakePlatform();
+    server = await runHttp({ port: 0, host: '127.0.0.1', baseUrl: BASE, maxSessions: 1 });
+    port = (server.address() as AddressInfo).port;
+  });
+  afterAll(async () => {
+    platform.restore();
+    await new Promise<void>((r) => server.close(() => r()));
+  });
+
+  it('is 403, not 503, because occupancy is not the answer to a name this server never served', async () => {
+    // The Host check used to run inside handleRequest, after the reservation.
+    // A full table then answered a DNS-rebinding initialize with 503, and a
+    // table that still had room paid for a whole McpServer to say 403.
+    const ok = await rawPost(
+      port,
+      `127.0.0.1:${port}`,
+      { Authorization: 'Bearer com_alice' },
+      INIT,
+    );
+    expect(ok.status).toBe(200);
+    const evil = await rawPost(port, 'evil.example', { Authorization: 'Bearer com_mallory' }, INIT);
+    expect(evil.status).toBe(403);
+    const health = (await (await fetch(`http://127.0.0.1:${port}/healthz`)).json()) as {
+      sessions: number;
+    };
+    expect(health.sessions).toBe(1);
+  });
+});
+
 describe('an Origin allowlist', () => {
   let server: Server;
   let port: number;
@@ -401,6 +436,16 @@ describe('an Origin allowlist', () => {
       );
       expect(res.status, `${origin} was refused`).toBe(200);
     }
+  });
+
+  it('turns away an Origin that is not on the list', async () => {
+    const res = await rawPost(
+      port,
+      `localhost:${port}`,
+      { Authorization: 'Bearer com_alice', Origin: 'https://evil.example' },
+      INIT,
+    );
+    expect(res.status).toBe(403);
   });
 });
 

@@ -219,12 +219,27 @@ export const registerTemplates: Registrar = (server, session, opts) => {
         }
         const gone = body.retired;
         const left = body.versions;
+        const templates = body.templates;
+        const claimed = body.refs_claimed;
+        // The lists above are the sentence that must not be wrong about an
+        // irreversible DELETE. The account totals are detail: interpolating
+        // them untyped turned a 2xx that had the lists but omitted the
+        // counters into "undefined template(s)" / "undefined ref(s)" in the
+        // prose a model reads first (adversarial review, OPL-4314). Omit the
+        // clause rather than invent a number; the JSON is still attached.
+        const totals =
+          typeof templates === 'number' &&
+          Number.isFinite(templates) &&
+          typeof claimed === 'number' &&
+          Number.isFinite(claimed)
+            ? ` The account now holds ${templates} template(s), and has claimed ${claimed} ref(s) — that second number does not go down, because a retired ref still counts.`
+            : '';
         return said(
           `Retired ${gone.length} version(s): ${gone.join(', ')}. ` +
             (left.length
               ? `${left.join(', ')} ${left.length === 1 ? 'is' : 'are'} still published under this name.`
               : 'Nothing is published under this name any more.') +
-            ` The account now holds ${body.templates} template(s), and has claimed ${body.refs_claimed} ref(s) — that second number does not go down, because a retired ref still counts.`,
+            totals,
           body,
         );
       }),

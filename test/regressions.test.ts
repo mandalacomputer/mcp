@@ -552,6 +552,14 @@ describe('PORT set to an empty string', () => {
     // 0 still means "any free port" when it is asked for on purpose.
     expect(port('0')).toBe(0);
   });
+
+  it('refuses hex and scientific notation rather than binding the coerced port', () => {
+    // `Number('0x12')` is 18 and `Number('1e3')` is 1000; both used to pass
+    // Number.isInteger and the 0–65535 range (adversarial review, OPL-4314).
+    expect(() => port('0x12')).toThrow(/not a port number/);
+    expect(() => port('1e3')).toThrow(/not a port number/);
+    expect(port('3000')).toBe(3000);
+  });
 });
 
 describe('the version a user quotes in a bug report', () => {
@@ -3769,6 +3777,21 @@ describe('what counts as a loopback bind', () => {
     // The hole: a v6 socket carrying a v4 loopback address read as "not
     // loopback", so no default Host allowlist and rebinding protection off.
     for (const h of ['::ffff:127.0.0.1', '[::ffff:127.0.0.1]', '::ffff:127.0.0.1%lo']) {
+      expect(isLoopbackHost(h), h).toBe(true);
+    }
+  });
+
+  it('takes every compression of IPv6 loopback, not only the canonical ::1', () => {
+    // Node accepts these, reports the bound address as ::1, and leaves
+    // cfg.host as the operator's spelling. A string match on ::1 alone
+    // skipped the default Host allowlist (adversarial review, OPL-4314).
+    for (const h of [
+      '0:0:0:0:0:0:0:1',
+      '::0:1',
+      '0::1',
+      '[0:0:0:0:0:0:0:1]',
+      '0:0:0:0:0:0:0:1%lo',
+    ]) {
       expect(isLoopbackHost(h), h).toBe(true);
     }
   });

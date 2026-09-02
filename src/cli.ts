@@ -158,6 +158,14 @@ export function port(flag: string | boolean | undefined): number {
   const given = typeof flag === 'string' ? flag.trim() : '';
   const fromEnv = process.env.PORT?.trim() ?? '';
   const raw = given || fromEnv || '3000';
+  // Decimal digits only. `Number('0x12')` is 18 and `Number('1e3')` is 1000,
+  // both integers in range, so they used to bind those ports — the same
+  // `Number()` footgun this function already refuses for `true` and `''`.
+  // `contentLength` already gates on `/^\d+$/` before converting (adversarial
+  // review, OPL-4314).
+  if (!/^\d+$/.test(raw)) {
+    throw new Error(`not a port number: ${raw}`);
+  }
   const n = Number(raw);
   if (!Number.isInteger(n) || n < 0 || n > 65535) {
     throw new Error(`not a port number: ${raw}`);
