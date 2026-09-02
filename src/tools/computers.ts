@@ -262,6 +262,17 @@ const finishedMove = (id: string, m: Move) => {
   );
 };
 
+/**
+ * What follows an acknowledged power action, where anything does. A start is
+ * the one whose "ok" is furthest from "usable": the VM is booting or resuming
+ * and the desktop inside it answers later, which is the gap the second line of
+ * the server instructions exists for.
+ */
+const POWER_NEXT: Record<string, string> = {
+  start: ' wait_for_computer with until="guest" is what says when the desktop is answering.',
+  restart: ' wait_for_computer with until="guest" is what says when the desktop is back.',
+};
+
 const POWER_DESCRIPTIONS: Record<string, string> = {
   start:
     'Boot a computer, or resume a suspended one — a resume restores the saved session, same processes and windows, in about a second.',
@@ -480,11 +491,19 @@ export const registerComputers: Registrar = (server, session, opts) => {
   ) =>
     guarded(async () => {
       const id = session.resolve(computer_id);
-      const c = unwrapComputer(
-        await session.api
-          .with(extra.signal)
-          .json('POST', P.computerAction(id, action), { query: opts.query }),
-      );
+      const body = await session.api
+        .with(extra.signal)
+        .json('POST', P.computerAction(id, action), { query: opts.query });
+      const c = unwrapComputer(body);
+      // What the platform documents for all four is an Ack — `{ok: true}` and
+      // nothing else — and that is what it sends. Formatting it as a computer
+      // record answered `suspend: (unnamed) · (no id) · unknown`, which the
+      // first agent to dogfood the skill (OPL-3914) read as a suspend that had
+      // not worked. The id is the one we sent, so say that; a record, should
+      // the platform ever start returning one, is described as before.
+      if (!c.id) {
+        return said(`${action}: ok — ${id}.${POWER_NEXT[action] ?? ''}${opts.note ?? ''}`, body);
+      }
       session.noteResolution(id, c.resolution);
       return said(`${action}: ${describe(c)}${opts.note ?? ''}`, withoutCredentials(c));
     });

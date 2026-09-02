@@ -2397,6 +2397,33 @@ describe('a guest that will not shut down', () => {
     await close();
   });
 
+  it('reads the Ack a power action answers as the ok it is', async () => {
+    // OPL-3914, found by the first agent to drive this server from the skill.
+    // The platform answers every power action with its Ack — `{ok: true}` and
+    // no computer — and this server described that as a computer record:
+    // `suspend: (unnamed) · (no id) · unknown`, which the agent read as a
+    // suspend that had not taken. The id is the one we sent, and the fake
+    // platform now answers the real shape, so the record path is only reached
+    // if the platform ever changes its mind.
+    const { call, close } = await connect();
+    for (const tool of [
+      'start_computer',
+      'stop_computer',
+      'suspend_computer',
+      'restart_computer',
+    ]) {
+      const text = said(await call(tool, {}));
+      expect(text, tool).toContain('ok — vm-1');
+      expect(text, tool).not.toContain('unnamed');
+      expect(text, tool).not.toContain('no id');
+      expect(text, tool).not.toContain('unknown');
+    }
+    // A start is the one where "ok" and "usable" are furthest apart.
+    expect(said(await call('start_computer', {}))).toContain('until="guest"');
+    expect(said(await call('suspend_computer', {}))).not.toContain('until="guest"');
+    await close();
+  });
+
   it('offers force on stop and on no other power tool', async () => {
     // start, suspend and restart are different operations with different
     // outcomes; the reason this GAP mattered is that a model with no `force`
