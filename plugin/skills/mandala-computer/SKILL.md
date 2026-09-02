@@ -126,8 +126,12 @@ clicks and types inside itself, then answers with a sentence and the list of
 what it did. Ten clicks are not ten images in your context. Use it for
 anything that is more than two or three interactions: filling a form, logging
 in and navigating somewhere, reading a value off a page, driving an
-application. It needs a running computer, and it needs `MANDALA_MODEL_KEY` to
-exist at all.
+application. It needs a running computer, and it needs a model key to exist
+at all: `MANDALA_MODEL_KEY` in the server's environment over stdio, or the
+caller's own `X-Model-Key` header over HTTP, where the server's variable is
+ignored. If every other `mandala` tool is present and `run_agent` is not, that
+is the whole cause — say which of the two applies rather than telling an HTTP
+user to export a variable the server will never read.
 
 - `max_steps` (default 20, max 100) is the spending cap as much as the loop
   bound — every step is a model call on the user's key. Size it to the task.
