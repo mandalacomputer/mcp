@@ -99,8 +99,39 @@ type Delivery = {
   last_error?: string | null;
 };
 
-const asRecord = (v: unknown): Record<string, unknown> =>
-  v !== null && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : {};
+const isRecord = (v: unknown): v is Record<string, unknown> =>
+  v !== null && typeof v === 'object' && !Array.isArray(v);
+
+const asRecord = (v: unknown): Record<string, unknown> => (isRecord(v) ? v : {});
+
+/** What a body turned out to be, for a refusal that names the shape that arrived. */
+const shapeOf = (v: unknown): string =>
+  v === undefined ? 'no body at all' : v === null ? 'null' : typeof v;
+
+/**
+ * The rows of a listing, checked, the way `list_computers`, `list_snapshots`
+ * and `list_builds` check theirs.
+ *
+ * Two separate mistakes, and the sentence in front of a listing depends on
+ * telling them apart. A body that is not an array at all — an error envelope, a
+ * future paginated wrapper, a gateway answering 200 with nothing — coerced to
+ * `[]` becomes an affirmative claim about the account made from a body this
+ * server could not read; and a listing whose ROWS are not objects throws at the
+ * first `w.id` before any `??` can help, so `guarded` turns the whole answer
+ * into an opaque failure. Neither is an empty list, and only one of the two
+ * answers invites an action.
+ */
+const rowsOf = (
+  body: unknown,
+): { rows: Record<string, unknown>[]; malformed: number } | undefined =>
+  Array.isArray(body)
+    ? { rows: body.filter(isRecord), malformed: body.filter((item) => !isRecord(item)).length }
+    : undefined;
+
+const malformedWarning = (noun: string, n: number): string =>
+  n
+    ? `WARNING: ignored ${n} malformed ${noun} entr${n === 1 ? 'y' : 'ies'} from the platform.\n\n`
+    : '';
 
 /**
  * One subscription's health in a clause, for the sentence in front of a
@@ -151,6 +182,24 @@ const attempt = (status: number | null | undefined) =>
 const shownOnce = (verb: string, w: Webhook) =>
   `${verb} ${w.id ?? 'the subscription'}. THE SECRET IN THIS ANSWER IS SHOWN ONCE and cannot be read back: store it now, or hand it to whoever runs ${w.url ?? 'the endpoint'}. Every delivery is signed with it (Standard Webhooks v1: webhook-id, webhook-timestamp, webhook-signature over the raw body). rotate_webhook_secret is the only way to get another.`;
 
+/**
+ * Whether a 2xx from a create or a rotate actually carries the secret its
+ * sentence is about to promise.
+ *
+ * `asRecord` coerces anything it cannot read to `{}`, which costs a `?` in a
+ * listing and costs the whole answer here. The secret is minted once and is
+ * never readable again, so "THE SECRET IN THIS ANSWER IS SHOWN ONCE" over a
+ * body holding none tells the caller to store something that is not there — and
+ * on a rotate the OLD secret is already on its 24-hour clock by then, so the
+ * loss surfaces a day later as deliveries failing signature checks, with
+ * nothing in the answer that pointed at it. Checked the way build_template
+ * checks a 2xx for its `id` (OPL-3835): if the one field that cannot be
+ * re-fetched is not there, say the call MAY have happened rather than claim it
+ * did.
+ */
+const carriesSecret = (w: Webhook): boolean =>
+  typeof w.secret === 'string' && w.secret.trim() !== '';
+
 /** The states of a delivery listing, counted, so the line says what is stuck. */
 function deliveriesLine(id: string, list: Delivery[]): string {
   if (!list.length) {
@@ -166,7 +215,7 @@ function deliveriesLine(id: string, list: Delivery[]): string {
       ? 'accepted'
       : `${newest.state}${newest.last_error ? ` (${newest.last_error})` : ''}`;
   return (
-    `${list.length} deliveries for ${id}, newest first: ${summary}. The newest is a ${newest.event_type ?? 'unknown'} event, ${outcome} after ${newest.attempts ?? 0} attempt(s). ` +
+    `${list.length} deliver${list.length === 1 ? 'y' : 'ies'} for ${id}, newest first: ${summary}. The newest is a ${newest.event_type ?? 'unknown'} event, ${outcome} after ${newest.attempts ?? 0} attempt(s). ` +
     'exhausted means eight attempts failed over about fourteen hours and it will not be retried; pending and in_flight are still being tried.'
   );
 }
@@ -184,13 +233,30 @@ export const registerWebhooks: Registrar = (server, session) => {
     (_args, extra) =>
       guarded(async () => {
         const body = await session.api.with(extra.signal).json<unknown>('GET', P.WEBHOOKS);
-        const list = Array.isArray(body) ? (body as Webhook[]) : [];
+        const checked = rowsOf(body);
+        if (!checked) {
+          return refused(
+            `GET /webhooks answered with ${shapeOf(body)}, not a list of subscriptions. This is not an empty account — do not create a webhook on the strength of it.`,
+            body,
+          );
+        }
+        const list = checked.rows as Webhook[];
+        const warning = malformedWarning('webhook', checked.malformed);
         if (!list.length) {
-          return said('No webhook subscriptions on this account. create_webhook makes one.', body);
+          if (checked.malformed) {
+            return refused(
+              `${warning}No valid webhook subscriptions remained. This is not an empty account — do not create a webhook on the strength of a malformed listing.`,
+              body,
+            );
+          }
+          return said(
+            `${warning}No webhook subscriptions on this account. create_webhook makes one.`,
+            body,
+          );
         }
         const lines = list.map((w) => `${w.id ?? '?'} → ${w.url ?? '?'}: ${health(w)}`);
         return said(
-          `${list.length} webhook subscription${list.length === 1 ? '' : 's'}, oldest first:\n${lines.join('\n')}`,
+          `${warning}${list.length} webhook subscription${list.length === 1 ? '' : 's'}, oldest first:\n${lines.join('\n')}`,
           body,
         );
       }),
@@ -213,11 +279,16 @@ export const registerWebhooks: Registrar = (server, session) => {
     },
     (args, extra) =>
       guarded(async () => {
-        const w = asRecord(
-          await session.api
-            .with(extra.signal)
-            .json<unknown>('POST', P.WEBHOOKS, { body: P.webhookBody(args) }),
-        ) as Webhook;
+        const body = await session.api
+          .with(extra.signal)
+          .json<unknown>('POST', P.WEBHOOKS, { body: P.webhookBody(args) });
+        const w = asRecord(body) as Webhook;
+        if (!carriesSecret(w)) {
+          return refused(
+            `POST /webhooks answered with ${shapeOf(body)} and no \`secret\`, so the signing secret is NOT in this answer and cannot be read back. THE SUBSCRIPTION MAY HAVE BEEN CREATED — call list_webhooks to find out rather than creating a second one, and rotate_webhook_secret on it for a secret you can actually store.`,
+            body,
+          );
+        }
         return said(shownOnce('Created', w), w);
       }),
   );
@@ -285,11 +356,16 @@ export const registerWebhooks: Registrar = (server, session) => {
     },
     ({ webhook_id }, extra) =>
       guarded(async () => {
-        const w = asRecord(
-          await session.api
-            .with(extra.signal)
-            .json<unknown>('POST', P.webhookAction(webhook_id, 'rotate')),
-        ) as Webhook;
+        const body = await session.api
+          .with(extra.signal)
+          .json<unknown>('POST', P.webhookAction(webhook_id, 'rotate'));
+        const w = asRecord(body) as Webhook;
+        if (!carriesSecret(w)) {
+          return refused(
+            `The rotate on ${webhook_id} answered with ${shapeOf(body)} and no \`secret\`, so the new signing secret is NOT in this answer and cannot be read back. THE ROTATE MAY HAVE HAPPENED — and if it did, the old secret is already on its 24-hour clock and deliveries will start failing signature checks when it runs out. Read the subscription with get_webhook, then rotate again: rotating inside the window replaces the pending secret rather than keeping three, so a second rotate is safe and is the only way to get one you can store.`,
+            body,
+          );
+        }
         return said(shownOnce('Rotated the secret on', w), w);
       }),
   );
@@ -330,8 +406,22 @@ export const registerWebhooks: Registrar = (server, session) => {
         const body = await session.api
           .with(extra.signal)
           .json<unknown>('GET', P.webhookAction(webhook_id, 'deliveries'));
-        const list = Array.isArray(body) ? (body as Delivery[]) : [];
-        return said(deliveriesLine(webhook_id, list), body);
+        const checked = rowsOf(body);
+        if (!checked) {
+          return refused(
+            `GET the deliveries of ${webhook_id} answered with ${shapeOf(body)}, not a list of deliveries. This is not an empty history — do not conclude anything about what has been delivered from it.`,
+            body,
+          );
+        }
+        const list = checked.rows as Delivery[];
+        const warning = malformedWarning('delivery', checked.malformed);
+        if (!list.length && checked.malformed) {
+          return refused(
+            `${warning}No valid deliveries remained for ${webhook_id}. This is not an empty history — do not conclude anything about what has been delivered from it.`,
+            body,
+          );
+        }
+        return said(`${warning}${deliveriesLine(webhook_id, list)}`, body);
       }),
   );
 

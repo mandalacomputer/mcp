@@ -183,7 +183,15 @@ export const registerInput: Registrar = (server, session) => {
     ({ computer_id, text }, extra) =>
       guarded(async () => {
         await post(computer_id, P.typeBody(text), extra.signal);
-        return said(`Typed ${text.length} character(s).`);
+        // Code points, not `.length`. A string's length is its UTF-16 code
+        // units, so an emoji is two and "Typed 2 character(s)" is a number this
+        // server made up about a single keystroke's worth of text — a number a
+        // model may repeat to whoever asked. The neighbours here already count
+        // in the unit that means something rather than in units of storage:
+        // `hasUnpairedSurrogate` works in code points and `clipboardBody`
+        // accounts in bytes.
+        const typed = [...text].length;
+        return said(`Typed ${typed} character(s).`);
       }),
   );
 

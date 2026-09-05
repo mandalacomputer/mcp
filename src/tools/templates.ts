@@ -200,9 +200,16 @@ export const registerTemplates: Registrar = (server, session, opts) => {
     },
     ({ namespace, name, version }, extra) =>
       guarded(async () => {
+        // `send` rather than `json`, because `json` raises on an empty body and
+        // a DELETE answering 204 is the ordinary REST shape — the same reason
+        // `kill_exec` gives one module over. A transport error here would be
+        // this server reporting the platform's silence as its own failure, on
+        // the one call in this file that cannot be undone: a model told the
+        // retire failed is a model that repeats a call the refusal below
+        // explicitly warns it not to repeat.
         const body = await session.api
           .with(extra.signal)
-          .json<Record<string, unknown>>('DELETE', P.templateRef(namespace, name), {
+          .send<Record<string, unknown>>('DELETE', P.templateRef(namespace, name), {
             query: P.templateVersionQuery(version),
           });
         // The one unreadable response in this module that must not be smoothed
@@ -211,14 +218,32 @@ export const registerTemplates: Registrar = (server, session, opts) => {
         // that nothing happened, about an irreversible DELETE the platform
         // answered 2xx to and which may well have just taken every version of
         // the name (adversarial review, OPL-3835).
-        if (!Array.isArray(body.retired) || !Array.isArray(body.versions)) {
+        if (
+          body === null ||
+          typeof body !== 'object' ||
+          Array.isArray(body) ||
+          !Array.isArray(body.retired) ||
+          !Array.isArray(body.versions)
+        ) {
           return refused(
             'The retire answered without the `retired` and `versions` lists, so this server cannot say what went. THE RETIRE MAY HAVE HAPPENED, and it cannot be undone — read the name with get_template before concluding anything, and do not repeat the call on the assumption that nothing was taken.',
             body,
           );
         }
-        const gone = body.retired;
-        const left = body.versions;
+        // And the ELEMENTS checked, not only that the lists are lists. These two
+        // are the sentence the comment above calls the one that must not be
+        // wrong about an irreversible DELETE, and `join` over a row that is an
+        // object enumerates the versions that went as `[object Object]` — the
+        // same sentence-level failure the account totals below were type-checked
+        // for (OPL-4314), in the clause a caller actually needs after a call it
+        // cannot repeat. The counts stay honest by counting what arrived.
+        const readable = (v: unknown): v is string => typeof v === 'string' && v.trim() !== '';
+        const gone = body.retired.filter(readable);
+        const left = body.versions.filter(readable);
+        const unreadable = body.retired.length - gone.length + (body.versions.length - left.length);
+        const dropped = unreadable
+          ? ` ${unreadable} version identifier${unreadable === 1 ? '' : 's'} the platform sent ${unreadable === 1 ? 'was' : 'were'} not readable and ${unreadable === 1 ? 'is' : 'are'} not named above — the attached JSON has them as they arrived.`
+          : '';
         const templates = body.templates;
         const claimed = body.refs_claimed;
         // The lists above are the sentence that must not be wrong about an
@@ -234,12 +259,19 @@ export const registerTemplates: Registrar = (server, session, opts) => {
           Number.isFinite(claimed)
             ? ` The account now holds ${templates} template(s), and has claimed ${claimed} ref(s) — that second number does not go down, because a retired ref still counts.`
             : '';
+        // Counted off what ARRIVED and enumerated off what was readable. A
+        // retire the platform reported took three versions took three whether
+        // or not this server could read all three names, and counting the
+        // filtered list would under-report an irreversible DELETE.
+        const retiredCount = body.retired.length;
+        const remaining = body.versions.length;
         return said(
-          `Retired ${gone.length} version(s): ${gone.join(', ')}. ` +
-            (left.length
-              ? `${left.join(', ')} ${left.length === 1 ? 'is' : 'are'} still published under this name.`
+          `Retired ${retiredCount} version(s)${gone.length ? `: ${gone.join(', ')}` : ''}. ` +
+            (remaining
+              ? `${left.length ? left.join(', ') : `${remaining} other version(s)`} ${remaining === 1 ? 'is' : 'are'} still published under this name.`
               : 'Nothing is published under this name any more.') +
-            totals,
+            totals +
+            dropped,
           body,
         );
       }),
