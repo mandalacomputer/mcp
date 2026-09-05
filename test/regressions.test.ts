@@ -2884,6 +2884,26 @@ describe('a connection failure after the request was sent (OPL-3855)', () => {
     }
   };
 
+  // A label of 64 characters, where RFC 1035 allows 63. The resolver rejects the
+  // name on its own grammar and answers without a query, so this is `ENOTFOUND`
+  // with `syscall: 'getaddrinfo'` in about a millisecond, off the network
+  // entirely (OPL-4504).
+  //
+  // It replaced `no-such-host-xyzzy.invalid`, which reddened main once on the
+  // Node 24 leg. `.invalid` is reserved by RFC 2606 and SHOULD NXDOMAIN at once,
+  // but that is a statement about the runner's resolver rather than about this
+  // code: one that pauses, retries, or walks a search-domain list spends the
+  // whole budget, and the assertion never runs. Measured over 40 runs on Node 20
+  // and 26, the spelling below never exceeded 38ms.
+  //
+  // Still a real lookup rather than a stubbed fetch, which is the point of the
+  // note at the top of this describe: what is under test is that undici really
+  // does surface a DNS failure as `getaddrinfo` — the branch of the allow-list
+  // in `neverDispatched` that the closed port beside it does not reach. A
+  // hand-made error would test that allow-list against this file's own guess at
+  // the spelling, which is the half that was never in doubt.
+  const UNRESOLVABLE = `${'a'.repeat(64)}.invalid`;
+
   it('says the request never left only when it can prove that', async () => {
     // A closed port and a name that does not resolve. Nothing was written, so
     // replaying even a create is safe and the public predicate may say so.
@@ -2894,14 +2914,40 @@ describe('a connection failure after the request was sent (OPL-3855)', () => {
     // collision would dispatch the request and fail below, pointing at the
     // classifier rather than at the port. Not port 1, which fetch refuses
     // outright as a bad port, so it never reaches a connect to be refused.
-    for (const url of ['http://127.0.0.1:2/api/v1', 'http://no-such-host-xyzzy.invalid/api/v1']) {
+    for (const url of ['http://127.0.0.1:2/api/v1', `http://${UNRESOLVABLE}/api/v1`]) {
       const err = await failureFrom(url);
       expect(err).toBeInstanceOf(ConnectivityError);
       expect(err).not.toBeInstanceOf(ConnectivityInterruptedError);
       expect(isTransient(err)).toBe(true);
       expect(isTransientForPoll(err)).toBe(true);
     }
-  });
+    // An explicit budget as well, because the default is what ran out. Two real
+    // connect failures need milliseconds; 20s is the file's own figure for "a
+    // loaded runner is not a failing assertion", and a test that has already
+    // reddened main should not be left on an implicit clock.
+  }, 20000);
+
+  it('still gets a getaddrinfo failure out of the runtime for that name', async () => {
+    // A statement about undici rather than about this client, which is why it
+    // reads the raw rejection: `ConnectivityError` is built from a message and
+    // deliberately drops the cause, so nothing above can see the syscall.
+    //
+    // The case above earns its place only while the resolver answers through
+    // `getaddrinfo` — that is the branch of `neverDispatched`'s allow-list the
+    // closed port beside it never reaches. Should a future Node report an
+    // over-long label some other way, the classification test would keep passing
+    // on the closed port alone and the DNS half would be silently vacuous. This
+    // fails instead, and names what changed.
+    const raw = await fetch(`http://${UNRESOLVABLE}/api/v1`).catch((e: unknown) => e);
+    const seen: Array<string | undefined> = [];
+    for (let c: unknown = raw; c; c = (c as { cause?: unknown }).cause) {
+      const one = c as { syscall?: string; errors?: unknown[] };
+      seen.push(one.syscall);
+      // Dual-stack resolution answers with an AggregateError of one per family.
+      for (const inner of one.errors ?? []) seen.push((inner as { syscall?: string }).syscall);
+    }
+    expect(seen).toContain('getaddrinfo');
+  }, 20000);
 
   it('does not read a TLS alert after the handshake as a connect failure', async () => {
     // The prefix that used to be here — `ERR_SSL_` — is how Node spells every
