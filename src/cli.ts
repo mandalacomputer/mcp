@@ -46,6 +46,19 @@ type Flags = Record<string, string | boolean>;
  */
 const BOOLEAN = new Set(['help', 'h', 'version', 'v', 'http', 'no-lifecycle']);
 
+/**
+ * The yes-or-no flags whose VALUE is checked against a vocabulary.
+ *
+ * Not all of them, because the argument for refusing an unrecognised spelling
+ * does not reach the other four. `--http` and `--no-lifecycle` decide what the
+ * server exposes, so reading a misspelled no as a yes arms something — a
+ * listener nobody asked for, or the withholding of tools somebody wanted.
+ * `--help` and `--version` print and exit: nothing is armed either way, and
+ * refusing `--help=` would turn the one flag people reach for when they are
+ * already confused into another error. They keep the older, looser reading.
+ */
+const CHECKED = new Set(['http', 'no-lifecycle']);
+
 const KNOWN = new Set([
   ...BOOLEAN,
   'port',
@@ -78,7 +91,8 @@ function boolFlag(name: string, inline: string): boolean {
   if (FALSEY.has(v)) return false;
   throw new Error(
     `--${name}=${inline} is not a yes or a no. Use one of ${[...TRUTHY].join(', ')} to turn it ` +
-      `on, one of ${[...FALSEY].join(', ')} to turn it off, or just --${name} on its own.`,
+      `on — as does --${name} with no value at all — or one of ${[...FALSEY].join(', ')} to ` +
+      'turn it off.',
   );
 }
 
@@ -170,9 +184,21 @@ export function parse(argv: string[]): Flags {
     // screen up for the environment half of the same controls, and the message
     // is deliberately its twin. An empty `--http=` is refused too: it is
     // neither a yes nor a no, and `--port=` is already refused for being
-    // neither a number nor absent.
-    if (BOOLEAN.has(name)) flags[name] = inline === undefined ? true : boolFlag(name, inline);
-    else if (inline !== undefined) flags[name] = inline;
+    // neither a number nor absent. Refusing is also the only answer to `--http=`
+    // that neither arms nor disarms — reading it as "off" would let a launcher
+    // template whose variable failed to expand quietly turn a safety control
+    // off, which is the failure this whole change is about.
+    //
+    // Only the flags in CHECKED: `--help` and `--version` arm nothing, so the
+    // argument does not reach them and they keep the looser reading.
+    if (BOOLEAN.has(name)) {
+      flags[name] =
+        inline === undefined
+          ? true
+          : CHECKED.has(name)
+            ? boolFlag(name, inline)
+            : !FALSEY.has(inline.trim().toLowerCase());
+    } else if (inline !== undefined) flags[name] = inline;
     // PRESENT, not truthy. `--key ""` is a value token like any other, and a
     // truthiness test skipped it: the flag became the boolean `true` and the
     // empty token came round again as a stray argument, so the two spellings of
