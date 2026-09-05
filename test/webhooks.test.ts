@@ -229,6 +229,11 @@ describe('the webhooks CRUD', () => {
     // because a second update overwrites whatever the first one did.
     expect(text).not.toMatch(/^Updated /);
     expect(text).toContain('get_webhook');
+    // The shape it names is the shape that arrived. "answered with object, not
+    // a subscription" is what a list used to read as, and an object is what a
+    // subscription IS — a contradiction in the sentence a model acts on.
+    expect(text).toContain('answered with a list');
+    expect(text).not.toContain('answered with object');
   });
 
   it('does not report a test delivery as queued over a body it could not read', async () => {

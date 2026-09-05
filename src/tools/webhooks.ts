@@ -104,9 +104,16 @@ const isRecord = (v: unknown): v is Record<string, unknown> =>
 
 const asRecord = (v: unknown): Record<string, unknown> => (isRecord(v) ? v : {});
 
-/** What a body turned out to be, for a refusal that names the shape that arrived. */
+/**
+ * What a body turned out to be, for a refusal that names the shape that arrived.
+ *
+ * A list is called a list. `typeof []` is `'object'`, and while only the
+ * listings could reach this an `object` was never a shape they wanted — but the
+ * single-subscription refusals want exactly that word, so "answered with object,
+ * not a subscription" reads as a contradiction to whoever has to act on it.
+ */
 const shapeOf = (v: unknown): string =>
-  v === undefined ? 'no body at all' : v === null ? 'null' : typeof v;
+  v === undefined ? 'no body at all' : v === null ? 'null' : Array.isArray(v) ? 'a list' : typeof v;
 
 /**
  * The rows of a listing, checked, the way `list_computers`, `list_snapshots`
