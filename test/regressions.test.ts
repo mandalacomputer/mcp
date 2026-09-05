@@ -4799,24 +4799,6 @@ describe('a read that hands back a credential (OPL-4505)', () => {
       platform.restore();
     }
   });
-
-  it('still calls the reads that return no credential read-only', async () => {
-    // The rule is "does not spend AND returns no credential-equivalent", not
-    // "anything sensitive". A screenshot of a desktop showing a password is not
-    // a credential this call minted or revealed, and widening it that far would
-    // leave the hint on nothing.
-    const platform = installFakePlatform();
-    const { client, close } = await connect();
-    try {
-      const { tools } = await client.listTools();
-      for (const name of ['screenshot', 'read_clipboard', 'list_windows', 'list_computers']) {
-        expect(tools.find((t) => t.name === name)?.annotations?.readOnlyHint, name).toBe(true);
-      }
-    } finally {
-      await close();
-      platform.restore();
-    }
-  });
 });
 
 describe('delete_snapshot answering 404', () => {

@@ -146,11 +146,7 @@ rather than a result. The two reads are the surprising half of that list, and
 are why neither is annotated `readOnlyHint`: a host that auto-approves
 read-only tools would otherwise wake and bill a machine with nobody asked.
 `screenshot`, `read_clipboard` and `list_windows` genuinely do not start
-anything and keep the hint. `get_desktop_url` is the one tool that goes without
-one for a different reason: it neither starts a machine nor spends, but it hands
-back a credential — with `control: true`, a link that is root-equivalent on that
-desktop — and a host that auto-approves read-only tools would pass out control
-of a machine with nobody asked. When a stretch of work is over, `suspend_computer` (a pause:
+anything and keep the hint. When a stretch of work is over, `suspend_computer` (a pause:
 `start_computer` brings the same session back in about a second) or
 `stop_computer` (a shutdown: the disk is kept, the session is not). Idle
 suspend catches the ones a model forgets, but only after 30 minutes untouched.
@@ -409,6 +405,10 @@ by default — the platform drops input on that socket, so it is safe to hand to
 somebody. `control: true` returns the full-control one, which is root-equivalent
 on that machine. Neither appears in any other tool's output, deliberately: a
 tool result lands in a model's context and from there in whatever captured it.
+It is also why `get_desktop_url` carries no `readOnlyHint` even though its route
+neither writes nor spends: hosts treat that hint as licence to call without
+asking, so keeping it would let a model pass out control of a desktop with
+nobody prompted.
 
 **Retiring a template cannot be undone, and takes more than it looks.**
 `retire_template` without a `version` retires **every** version of the name —
