@@ -1702,6 +1702,17 @@ export class EventHub {
     this.#socketFor = socketFor;
   }
 
+  /**
+   * This computer's subscription if there is one, WITHOUT opening one.
+   *
+   * For asking whether a handle in hand is still the live one. {@link open}
+   * cannot answer that: it creates on a miss, so comparing against it would
+   * open a stream as a side effect of the question.
+   */
+  current(computerId: string): Subscription | undefined {
+    return this.#subs.get(computerId);
+  }
+
   /** This computer's subscription, opened if this is the first ask. */
   open(computerId: string): Subscription {
     let sub = this.#subs.get(computerId);

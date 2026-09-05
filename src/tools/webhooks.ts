@@ -134,6 +134,21 @@ const malformedWarning = (noun: string, n: number): string =>
     : '';
 
 /**
+ * The single record a one-subscription call answers with, or nothing.
+ *
+ * The same mistake `rowsOf` refuses for a listing, one object down. `asRecord`
+ * turns anything that is not a record into `{}`, and `{}` reads as a
+ * subscription with every field absent — which the sentences below then fill
+ * in from their own fallbacks and state as fact: `wh_x → ?: nothing delivered
+ * yet` is an affirmative report of a subscription's health, and `Updated wh_x`
+ * an affirmative report that a change landed, both assembled from a body this
+ * server could not read. `json()` throws only for an empty body, so a gateway
+ * answering `200 "OK"`, `200 []` or `200 5` arrives here intact.
+ */
+const recordOf = (body: unknown): Record<string, unknown> | undefined =>
+  isRecord(body) ? body : undefined;
+
+/**
  * One subscription's health in a clause, for the sentence in front of a
  * listing or a read. Says the thing a model acts on — whether deliveries are
  * being made, and if not, whose decision that was — rather than restating the
@@ -304,9 +319,17 @@ export const registerWebhooks: Registrar = (server, session) => {
     },
     ({ webhook_id }, extra) =>
       guarded(async () => {
-        const w = asRecord(
-          await session.api.with(extra.signal).json<unknown>('GET', P.webhook(webhook_id)),
-        ) as Webhook;
+        const body = await session.api
+          .with(extra.signal)
+          .json<unknown>('GET', P.webhook(webhook_id));
+        const record = recordOf(body);
+        if (!record) {
+          return refused(
+            `GET ${webhook_id} answered with ${shapeOf(body)}, not a subscription. Nothing here says whether it is enabled or what it has delivered — do not read this as a healthy subscription with an empty history.`,
+            body,
+          );
+        }
+        const w = record as Webhook;
         return said(`${w.id ?? webhook_id} → ${w.url ?? '?'}: ${health(w)}.`, w);
       }),
   );
@@ -337,11 +360,17 @@ export const registerWebhooks: Registrar = (server, session) => {
             'Nothing to change: name at least one of url, description, events, computers or enabled. The platform refuses an empty update, so nothing was sent.',
           );
         }
-        const w = asRecord(
-          await session.api
-            .with(extra.signal)
-            .json<unknown>('PATCH', P.webhook(webhook_id), { body }),
-        ) as Webhook;
+        const answered = await session.api
+          .with(extra.signal)
+          .json<unknown>('PATCH', P.webhook(webhook_id), { body });
+        const record = recordOf(answered);
+        if (!record) {
+          return refused(
+            `The update to ${webhook_id} answered with ${shapeOf(answered)}, not a subscription. THE CHANGE MAY HAVE LANDED — read it back with get_webhook rather than sending it again, since a second update would overwrite whatever the first one did.`,
+            answered,
+          );
+        }
+        const w = record as Webhook;
         return said(`Updated ${w.id ?? webhook_id} → ${w.url ?? '?'}: ${health(w)}.`, w);
       }),
   );
@@ -380,11 +409,17 @@ export const registerWebhooks: Registrar = (server, session) => {
     },
     ({ webhook_id }, extra) =>
       guarded(async () => {
-        const d = asRecord(
-          await session.api
-            .with(extra.signal)
-            .json<unknown>('POST', P.webhookAction(webhook_id, 'test')),
-        ) as Delivery;
+        const answered = await session.api
+          .with(extra.signal)
+          .json<unknown>('POST', P.webhookAction(webhook_id, 'test'));
+        const record = recordOf(answered);
+        if (!record) {
+          return refused(
+            `The test delivery on ${webhook_id} answered with ${shapeOf(answered)}, not a delivery record. IT MAY HAVE BEEN QUEUED — call list_webhook_deliveries for ${webhook_id} in a few seconds to find out, rather than queueing a second one.`,
+            answered,
+          );
+        }
+        const d = record as Delivery;
         return said(
           `Queued test delivery ${d.id ?? ''} to ${webhook_id}. It is ${d.state ?? 'pending'}: the endpoint has not been called yet. Call list_webhook_deliveries for ${webhook_id} in a few seconds to read what it answered.`,
           d,

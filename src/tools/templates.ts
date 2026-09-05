@@ -265,10 +265,19 @@ export const registerTemplates: Registrar = (server, session, opts) => {
         // filtered list would under-report an irreversible DELETE.
         const retiredCount = body.retired.length;
         const remaining = body.versions.length;
+        // The survivors are counted and enumerated on the same footing, for the
+        // same reason. Naming only the readable ones while agreeing the verb
+        // with the full count reads "1.1.0 are still published" and names one
+        // version where two survive — in the clause that has to be right about
+        // what the DELETE did NOT take.
+        const unnamed = remaining - left.length;
+        const survivors = left.length
+          ? `${left.join(', ')}${unnamed > 0 ? ` and ${unnamed} more` : ''}`
+          : `${remaining} other version(s)`;
         return said(
           `Retired ${retiredCount} version(s)${gone.length ? `: ${gone.join(', ')}` : ''}. ` +
             (remaining
-              ? `${left.length ? left.join(', ') : `${remaining} other version(s)`} ${remaining === 1 ? 'is' : 'are'} still published under this name.`
+              ? `${survivors} ${remaining === 1 ? 'is' : 'are'} still published under this name.`
               : 'Nothing is published under this name any more.') +
             totals +
             dropped,

@@ -204,6 +204,41 @@ describe('the webhooks CRUD', () => {
     expect(textOf(res)).not.toContain('Either nothing it subscribes to');
   });
 
+  // The same pass, one object down. `json()` throws only for an empty body, so
+  // a gateway answering 200 with a string, a number or a list reaches these
+  // three intact, and `{}` reads as a subscription with every field absent.
+  it('refuses a single subscription body that is not a record rather than reporting its health', async () => {
+    const res = await over('OK', 200, 'get_webhook', { webhook_id: WEBHOOK.id });
+    expect(res.isError).toBe(true);
+    const text = textOf(res);
+    expect(text).toContain('not a subscription');
+    // The claim that must not be made from a body this server could not read:
+    // that the endpoint is fine and has simply never been called.
+    expect(text).not.toContain('nothing delivered yet');
+  });
+
+  it('does not report an update as landed over a body it could not read', async () => {
+    const res = await over([], 200, 'update_webhook', {
+      webhook_id: WEBHOOK.id,
+      description: 'renamed',
+    });
+    expect(res.isError).toBe(true);
+    const text = textOf(res);
+    expect(text).toContain('THE CHANGE MAY HAVE LANDED');
+    // Not "Updated wh_… → ?" — and a model must not send it again blind,
+    // because a second update overwrites whatever the first one did.
+    expect(text).not.toMatch(/^Updated /);
+    expect(text).toContain('get_webhook');
+  });
+
+  it('does not report a test delivery as queued over a body it could not read', async () => {
+    const res = await over(5, 200, 'test_webhook', { webhook_id: WEBHOOK.id });
+    expect(res.isError).toBe(true);
+    const text = textOf(res);
+    expect(text).toContain('IT MAY HAVE BEEN QUEUED');
+    expect(text).not.toContain('the endpoint has not been called yet');
+  });
+
   it('drops malformed webhook rows and says how many, rather than failing the whole listing', async () => {
     // `list.map((w) => w.id ?? '?')` dereferences before the `??`, so one null
     // row threw a TypeError and `guarded` reported the listing as an opaque

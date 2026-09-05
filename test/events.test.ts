@@ -822,6 +822,35 @@ describe('the socket underneath', () => {
     }
   });
 
+  it('can be asked which stream is the live one without opening one', async () => {
+    // What the call holding the stale handle checks before reporting ITS
+    // reason as the state of the computer's stream. It cannot ask `open()`:
+    // that creates on a miss, so the question would open a socket as a side
+    // effect and the answer would always be yes.
+    const ev = fakeEvents({ ready: false });
+    const hub = new EventHub(new Api('com_test', BASE), ev.factory);
+    try {
+      expect(hub.current('vm-1')).toBeUndefined();
+      expect(ev.sockets).toHaveLength(0);
+
+      const stale = hub.open('vm-1');
+      await until('the first connection', () => ev.sockets.length === 1);
+      expect(hub.current('vm-1')).toBe(stale);
+
+      hub.drop('vm-1', 'the stream stopped', true, stale);
+      // Dropped and not replaced: there is no live stream, which is the case
+      // where the stopped handle's reason IS the answer to give.
+      expect(hub.current('vm-1')).toBeUndefined();
+
+      const fresh = hub.open('vm-1');
+      await until('the second connection', () => ev.sockets.length === 2);
+      expect(hub.current('vm-1')).toBe(fresh);
+      expect(hub.current('vm-1')).not.toBe(stale);
+    } finally {
+      hub.closeAll();
+    }
+  });
+
   it('answers a through read another call emptied with the caller’s own place', async () => {
     // The cursor is documented as where the caller is, and with nothing
     // delivered it was read off the socket instead — after the last event

@@ -900,6 +900,36 @@ describe('what the codex adversarial review found', () => {
     await close();
   });
 
+  it('counts the surviving versions the same way it counts the retired ones', async () => {
+    // The survivors clause enumerated the readable ones and agreed its verb
+    // with the full count, so an unreadable survivor gave "1.1.0 are still
+    // published under this name" — ungrammatical, and naming one version where
+    // two survive, in the half of the sentence about what the DELETE did NOT
+    // take.
+    const real = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      answer({
+        retired: ['acc-1/devbox@1.0.0'],
+        versions: ['acc-1/devbox@1.1.0', { ref: 'acc-1/devbox@1.2.0' }],
+      })) as typeof fetch;
+    const { call, close } = await connect();
+    const res = await call('retire_template', {
+      namespace: 'acc-1',
+      name: 'devbox',
+      confirm: true,
+    });
+    globalThis.fetch = real;
+
+    expect(res.isError).toBeFalsy();
+    const text = textOf(res);
+    expect(text).not.toMatch(/\[object Object\]/);
+    // Two survive, one of them unnameable — so the count says two, the
+    // enumeration names the one it could read, and the verb agrees with two.
+    expect(text).toMatch(/acc-1\/devbox@1\.1\.0 and 1 more are still published/);
+    expect(text).not.toMatch(/acc-1\/devbox@1\.1\.0 are still published/);
+    await close();
+  });
+
   /**
    * The lists are the sentence that must not be wrong. The account counters
    * interpolated untyped became "undefined template(s)" in the prose a model

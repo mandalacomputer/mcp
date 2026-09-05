@@ -347,6 +347,22 @@ function stopped(
   // a handle this one has already dropped would otherwise close the fresh
   // stream opened in between.
   if (drained) session.events.drop(id, reason, true, sub);
+  // The other half of that same overlap. Skipping the drop keeps the
+  // replacement alive, but this call is still holding the stopped handle, and
+  // reporting ITS reason tells the model the computer's event stream is down
+  // and to go and fix a cause that whoever opened the replacement has already
+  // fixed. What is true here is narrower: an earlier stream stopped, this call
+  // was reading it, and a live one is already in its place.
+  const live = session.events.current(id);
+  if (live !== undefined && live !== sub) {
+    return said(
+      (n
+        ? `${n} event${n === 1 ? '' : 's'} that reached an earlier stream for ${id} ${n === 1 ? 'is' : 'are'} below. `
+        : '') +
+        `That stream stopped (${reason}) and a fresh one is already running for ${id} — opened by another call, not by this one. There is nothing to fix: call again to read from it.`,
+      n || d.loss ? body(id, d, sub) : undefined,
+    );
+  }
   const held = n
     ? `${n} event${n === 1 ? '' : 's'} had already arrived before it stopped and ${n === 1 ? 'is' : 'are'} ` +
       (drained
