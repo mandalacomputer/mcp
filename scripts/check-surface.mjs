@@ -171,16 +171,17 @@ for (const m of docClean.matchAll(/^const ([A-Z_]+): Query = \{/gm)) {
 
 /** Every query, header and body field the platform documents, by route. */
 function platformParameters() {
-  const start = docSource.indexOf('export const DOCS: Record<string, Doc> = {');
+  const start = docClean.indexOf('export const DOCS: Record<string, Doc> = {');
   if (start === -1) throw new Error('DOCS not found in web/lib/apidoc.ts');
-  // Stripped once, up front, the way `routeTable` strips before it splits. This
-  // file quotes the shapes being matched in its own comments, and the entry
-  // regex below is run over the text rather than over a parse — so a commented
-  // `'GET x': {` is an entry as far as it can tell. The invented route is the
-  // lesser half: `lastIndex` then moves past a `balanced()` walk that began at a
-  // brace inside the comment, which can carry it over the genuine entry, and
-  // that route reads as taking no parameters at all.
-  const docs = stripComments(balanced(docSource, docSource.indexOf('{', start + 40), '{', '}'));
+  // Located AND sliced out of the stripped copy, the way `routeTable` strips
+  // before it splits. This file quotes the shapes being matched in its own
+  // comments, and everything here is run over text rather than over a parse —
+  // so a commented `'GET x': {` is an entry as far as it can tell, and a comment
+  // quoting this very declaration is where the table starts. The invented route
+  // is the lesser half: `lastIndex` then moves past a `balanced()` walk that
+  // began at a brace inside the comment, which can carry it over the genuine
+  // entry, and that route reads as taking no parameters at all.
+  const docs = balanced(docClean, docClean.indexOf('{', start + 40), '{', '}');
 
   const table = new Map();
   const entry = /'([A-Z]+) ([^']+)':\s*\{/g;

@@ -260,6 +260,18 @@ export function openUrlCommand(url: string): string {
   // cannot stop the browser reading a leading dash as a flag, and no URL starts
   // with one, so that is refused outright rather than quoted.
   if (trimmed.startsWith('-')) throw new Error(`url must not start with '-': ${trimmed}`);
+  // Refused here, where the caller can act on it. `execBody` refuses the same
+  // text a moment later, but `open_url` takes no `command` — a refusal naming
+  // one, and telling the caller to cut it on a character boundary, names a
+  // parameter they cannot see and never passed. `z.string().url()` accepts an
+  // unpaired surrogate, so this is the check, not a second opinion.
+  if (hasUnpairedSurrogate(trimmed)) {
+    throw new Error(
+      'url must not contain an unpaired surrogate — half of a character, usually from a string cut ' +
+        'through the middle of an emoji. It is not valid UTF-8, so the browser would be asked for an ' +
+        'address other than the one you sent.',
+    );
+  }
   return `nohup firefox ${shellQuote(trimmed)} >/dev/null 2>&1 &`;
 }
 

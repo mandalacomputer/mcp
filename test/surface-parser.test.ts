@@ -273,4 +273,21 @@ describe('the parameter reader', () => {
       'query:real',
     ]);
   });
+
+  it('finds the DOCS table itself outside the comments, not inside one', async () => {
+    // Where the table STARTS was the last thing located in the raw source, and
+    // this file's comments quote that declaration like every other shape in it.
+    // A commented copy carrying its own braces is parsed in place of the real
+    // table: every route then reads as documenting nothing, and a comment
+    // quoting a real entry would give the opposite — a false all-clear, which
+    // is the failure this whole script exists to not have.
+    const said = await scan(
+      `{ method: 'GET', pattern: 'computers' }`,
+      `'GET computers': { query: [{ name: 'real' }] },`,
+      "/* export const DOCS: Record<string, Doc> = { 'GET computers': { query: [{ name: 'ghost' }] } }; */",
+    );
+    expect([...said.matchAll(/^ {2}\+ [A-Z]+ \S+ {2}(\S+)$/gm)].map((m) => m[1])).toEqual([
+      'query:real',
+    ]);
+  });
 });

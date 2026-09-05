@@ -1053,29 +1053,62 @@ function parseEvent(chunk: string): SSEEvent | undefined {
 }
 
 /**
+ * The end of the quoted string that opens at `open`, or -1 if it never closes.
+ *
+ * A backslash inside one escapes the next character, `"` included, so an
+ * escaped quote does not end the value.
+ */
+function quotedEnd(text: string, open: number): number {
+  for (let i = open + 1; i < text.length; i++) {
+    if (text[i] === '\\') i++;
+    else if (text[i] === '"') return i;
+  }
+  return -1;
+}
+
+/**
  * The header's parameters, split on the `;` that separate them rather than on
  * every `;` in it.
  *
  * RFC 6266 lets a quoted value carry a `;`, so a split that does not know about
- * quoting reads `note="a; filename=evil.txt"` as two parameters — and the
- * second is indistinguishable, to a pattern anchored on `;`, from the one this
- * module is looking for. Walking the string with a quoted flag is what makes
- * the boundary a real parameter boundary rather than a character.
+ * quoting reads `note="a; filename=evil.txt"` as two parameters — and the second
+ * is indistinguishable, to a pattern anchored on `;`, from the one this module
+ * is looking for.
+ *
+ * A `"` counts as opening a value only where the grammar puts one: immediately
+ * after the `=`, and only if it closes. Treating every `"` as a delimiter is
+ * worse than treating none as one, because a header a proxy wrote with an odd
+ * quote in an earlier value — `note=a"b; filename=real.txt`, or a truncated
+ * `creation-date="Wed, 12 Feb 2026` — then reads as one long quoted run, and
+ * the real parameter is never at the start of a parameter again. That is the
+ * unnamed download the `filename*` comment below says was already fixed once,
+ * arriving from the other direction.
  */
 function dispositionParams(disposition: string): string[] {
   const params: string[] = [];
   let start = 0;
-  let quoted = false;
-  for (let i = 0; i < disposition.length; i++) {
+  let i = 0;
+  while (i < disposition.length) {
     const ch = disposition[i];
-    // A backslash inside a quoted string escapes the next character, `"` and
-    // `;` included, so neither closes anything.
-    if (quoted && ch === '\\') i++;
-    else if (ch === '"') quoted = !quoted;
-    else if (ch === ';' && !quoted) {
+    if (ch === ';') {
       params.push(disposition.slice(start, i));
       start = i + 1;
-    }
+      i++;
+    } else if (ch === '=') {
+      let value = i + 1;
+      while (disposition[value] === ' ' || disposition[value] === '\t') value++;
+      if (disposition[value] === '"') {
+        const close = quotedEnd(disposition, value);
+        // Past the value when it is quoted and closes. When it does not close,
+        // step over that one `"` and carry on: it is an ordinary character in
+        // an ordinary token, not the start of a run to the end of the header.
+        i = close === -1 ? value + 1 : close + 1;
+      } else {
+        // Resume AT the value rather than after it — a `;` here ends an empty
+        // value, and consuming it would drop the boundary.
+        i = value;
+      }
+    } else i++;
   }
   params.push(disposition.slice(start));
   return params;
@@ -1098,21 +1131,34 @@ export function filenameFrom(disposition: string | null): string | undefined {
   // `filename=` in them — so a download the platform had named came back with
   // no name at all. Three groups, not two: the middle one is the language tag,
   // present or empty.
+  //
+  // Trailing whitespace is trimmed off both forms. It is the parameter that
+  // ends at the `;`, not the name, and a space carried out of here silently
+  // becomes part of whatever a caller writes the file under.
   for (const param of params) {
     const star = /^\s*filename\*=([^']*)'([^']*)'(.+)$/i.exec(param);
     if (!star) continue;
+    const text = star[3].trimEnd();
     // A stray `%` in a guest filename is legal on disk and makes this throw.
     // Letting it out would turn a download whose bytes already arrived intact
     // into a failure, over the label on it.
     try {
-      return decodeURIComponent(star[3]);
+      return decodeURIComponent(text);
     } catch {
-      return star[3];
+      return text;
     }
   }
   for (const param of params) {
-    const plain = /^\s*filename\s*=\s*"?([^"]+)"?/i.exec(param);
-    if (plain) return plain[1];
+    const plain = /^\s*filename\s*=\s*(.*)$/i.exec(param);
+    if (!plain) continue;
+    const raw = plain[1].trim();
+    // A quoted value keeps its text exactly, minus the escaping — the quotes
+    // are the grammar's, not the name's. An unquoted one is a bare token.
+    const name =
+      raw.length >= 2 && raw.startsWith('"') && raw.endsWith('"')
+        ? raw.slice(1, -1).replaceAll(/\\(.)/g, '$1')
+        : raw;
+    if (name) return name;
   }
   return undefined;
 }
