@@ -469,6 +469,15 @@ export const registerComputers: Registrar = (server, session, opts) => {
       inputSchema: {
         computer_id: z.string().describe('The id from list_computers.'),
       },
+      // No readOnlyHint — this is not a pure read, so the hint would overclaim —
+      // but destructiveHint set, because the spec defaults it to TRUE once
+      // readOnlyHint is absent and this destroys nothing (OPL-4516). Without it,
+      // waiting for a machine to finish booting asks the operator whether
+      // destructive updates may be performed.
+      //
+      // Idempotent: asking again gives the same answer, and a host gating
+      // retry-of-a-timed-out-call on this flag should not refuse.
+      annotations: { destructiveHint: false, idempotentHint: true },
     },
     ({ computer_id }, extra) =>
       guarded(async () => {
@@ -898,6 +907,15 @@ export const registerComputers: Registrar = (server, session, opts) => {
           ),
         timeout_s: z.number().int().min(5).max(900).default(180),
       },
+      // No readOnlyHint — this is not a pure read, so the hint would overclaim —
+      // but destructiveHint set, because the spec defaults it to TRUE once
+      // readOnlyHint is absent and this destroys nothing (OPL-4516). Without it,
+      // waiting for a machine to finish booting asks the operator whether
+      // destructive updates may be performed.
+      //
+      // Idempotent: asking again gives the same answer, and a host gating
+      // retry-of-a-timed-out-call on this flag should not refuse.
+      annotations: { destructiveHint: false, idempotentHint: true },
     },
     ({ computer_id, until, timeout_s }, extra) =>
       guarded(async () => {
