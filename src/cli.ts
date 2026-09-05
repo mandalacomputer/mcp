@@ -21,8 +21,10 @@ Environment
   MANDALA_MODEL_KEY    an Anthropic key; enables the run_agent tool. stdio only
                        — over HTTP each caller sends their own X-Model-Key, and
                        this is ignored rather than spent on their runs
-  MANDALA_NO_LIFECYCLE set to 1 to withhold create_computer, clone_computer,
-                       clone_snapshot, delete_computer and delete_snapshot
+  MANDALA_NO_LIFECYCLE 1, true, yes or on to withhold create_computer,
+                       clone_computer, clone_snapshot, delete_computer and
+                       delete_snapshot. Any other value is refused rather than
+                       read as off, since a typo here would leave them enabled
   PORT, HOST           for --http (default 3000, 127.0.0.1)
   MANDALA_ALLOWED_HOSTS, MANDALA_ALLOWED_ORIGINS
                        comma-separated; which Host and Origin values to answer
@@ -57,6 +59,34 @@ const KNOWN = new Set([
 
 /** What `--http=…` may say to mean no. */
 const FALSEY = new Set(['false', '0', 'no', 'off']);
+
+/** And its mirror, for the environment variables that are a yes-or-no. */
+const TRUTHY = new Set(['true', '1', 'yes', 'on']);
+
+/**
+ * A yes-or-no environment variable, refusing a spelling it does not know.
+ *
+ * REFUSED rather than read as no, which is the decision worth recording.
+ * `MANDALA_NO_LIFECYCLE` withholds the tools that create and delete computers,
+ * so it is a safety control, and the two wrong answers do not cost the same: an
+ * unrecognised value read as "no" leaves those tools registered on a server
+ * whose operator believes they are gone, and says nothing. A typo is far more
+ * likely than a deliberate `MANDALA_NO_LIFECYCLE=ture`, and the loud version
+ * costs one clear line at startup.
+ *
+ * Empty is unset, as everywhere else here — the ordinary shape of an unquoted
+ * assignment in a compose file, and `env` has already turned it into undefined.
+ */
+function envFlag(name: string, raw: string | undefined): boolean {
+  if (raw === undefined) return false;
+  const v = raw.trim().toLowerCase();
+  if (TRUTHY.has(v)) return true;
+  if (FALSEY.has(v)) return false;
+  throw new Error(
+    `${name}=${raw} is not a yes or a no. Use one of ${[...TRUTHY].join(', ')} to turn it on, ` +
+      `or one of ${[...FALSEY].join(', ')} (or leave it unset) to turn it off.`,
+  );
+}
 
 /**
  * argv into flags.
@@ -133,7 +163,7 @@ export function lifecycleEnabled(flags: Flags, configured = env('MANDALA_NO_LIFE
   // false value deliberately and must not fall through to a true environment.
   const disabled = Object.hasOwn(flags, 'no-lifecycle')
     ? Boolean(flags['no-lifecycle'])
-    : configured === '1';
+    : envFlag('MANDALA_NO_LIFECYCLE', configured);
   return !disabled;
 }
 

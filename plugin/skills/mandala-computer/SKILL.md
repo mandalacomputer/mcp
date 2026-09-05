@@ -50,7 +50,7 @@ Three more variables, none of them needed for a first computer:
   `https://app.mandala.computer/api/v1`: a self-hosted install, or staging.
 - `MANDALA_COMPUTER_ID` — bind one machine at startup, so `use_computer` is
   never needed and every call may leave `computer_id` out.
-- `MANDALA_NO_LIFECYCLE=1` — withholds every tool that makes a computer or
+- `MANDALA_NO_LIFECYCLE=1` (or `true`, `yes`, `on`) — withholds every tool that makes a computer or
   destroys one: `create_computer`, `clone_computer`, `clone_snapshot`,
   `delete_computer`, `delete_snapshot`. If you were sent here to create a
   computer and `create_computer` is not among the tools, this is why, and it

@@ -57,6 +57,34 @@ export class APIError extends MandalaError {
 const REASON_CLEARS: ReadonlySet<string> = new Set(['contention', 'starting']);
 const REASON_PERMANENT: ReadonlySet<string> = new Set(['unavailable', 'unsupported']);
 
+/** Whether waiting can change a classified refusal's answer. */
+export type ReasonKind = 'clears' | 'permanent';
+
+/**
+ * How a refusal the platform classified behaves, or `undefined` for a word this
+ * version has no opinion about.
+ *
+ * The EXPORTED half of the two the sets above feed, and the split is
+ * deliberate. {@link reasonAdvice} beside it is this server's prose for a
+ * language model, tuned to how a model reads an MCP tool result and rewritten
+ * whenever one reads it wrong; publishing those sentences would make their
+ * wording something this package versions. What an embedder needs from here is
+ * narrower and does not move: whether waiting can change the answer.
+ *
+ * The raw word stays theirs. `APIError.reason` is public, the platform's set is
+ * documented and deliberately open, and switching on it is the supported path —
+ * this only offers the classification of the words this version knows, so an
+ * embedder need not duplicate a table that lives here. A word it has never
+ * heard of is `undefined` rather than a guess, which is the same contract
+ * `reasonAdvice` keeps and the reason "absent means unclassified" exists.
+ */
+export function reasonKind(reason: string | undefined): ReasonKind | undefined {
+  if (reason === undefined) return undefined;
+  if (REASON_CLEARS.has(reason)) return 'clears';
+  if (REASON_PERMANENT.has(reason)) return 'permanent';
+  return undefined;
+}
+
 /**
  * What to tell a model about a refusal the platform classified, or `undefined`.
  *
@@ -811,8 +839,11 @@ export function isTransient(err: unknown): boolean {
   // an arbitrary exception may happen to have a `reason` property, and that is
   // neither this protocol nor retry advice.
   if (err instanceof APIError && err.reason !== undefined) {
-    if (REASON_CLEARS.has(err.reason)) return true;
-    if (REASON_PERMANENT.has(err.reason)) return false;
+    // Through the exported classifier rather than the sets directly, so what an
+    // embedder is told and what this server does are one answer and not two.
+    const kind = reasonKind(err.reason);
+    if (kind === 'clears') return true;
+    if (kind === 'permanent') return false;
   }
   return (
     err instanceof ConflictError ||
