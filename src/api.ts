@@ -95,7 +95,7 @@ const MAX_ERROR_BODY_BYTES = 1024 * 1024;
 export const PLATFORM_HEADERS_TIMEOUT_MS = 330_000;
 /** Disabled. A finite idle limit is what used to kill a quiet SSE stream. */
 export const PLATFORM_BODY_TIMEOUT_MS = 0;
-const PLATFORM_DISPATCHER = new Agent({
+export const PLATFORM_DISPATCHER = new Agent({
   headersTimeout: PLATFORM_HEADERS_TIMEOUT_MS,
   bodyTimeout: PLATFORM_BODY_TIMEOUT_MS,
 });
@@ -723,7 +723,7 @@ function isCancellation(_cause: unknown, signal?: AbortSignal): boolean {
  * links have to be followed. Bounded, because a cause chain is user-reachable
  * data and nothing here needs to be robust to a cycle.
  */
-function* causes(err: unknown, depth = 0): Generator<Record<string, unknown>> {
+export function* causes(err: unknown, depth = 0): Generator<Record<string, unknown>> {
   if (!err || typeof err !== 'object' || depth > 5) return;
   const e = err as Record<string, unknown>;
   yield e;

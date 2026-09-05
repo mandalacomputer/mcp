@@ -14,8 +14,10 @@ import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   Api,
+  causes,
   filenameFrom,
   PLATFORM_BODY_TIMEOUT_MS,
+  PLATFORM_DISPATCHER,
   PLATFORM_HEADERS_TIMEOUT_MS,
   platformFetch,
 } from '../src/api.js';
@@ -2928,25 +2930,38 @@ describe('a connection failure after the request was sent (OPL-3855)', () => {
   }, 20000);
 
   it('still gets a getaddrinfo failure out of the runtime for that name', async () => {
-    // A statement about undici rather than about this client, which is why it
-    // reads the raw rejection: `ConnectivityError` is built from a message and
-    // deliberately drops the cause, so nothing above can see the syscall.
+    // A statement about the runtime rather than about this client, and it has to
+    // ask the RIGHT runtime: `platformFetch()` is undici's own fetch with the
+    // platform dispatcher, which is a different copy of undici from the one
+    // Node bundles, and the note above `platformFetch` records that the two have
+    // already diverged behaviourally. A bare `globalThis.fetch` here would watch
+    // the copy no platform call goes through, so the package changing its DNS
+    // spelling would break real requests while this stayed green.
     //
-    // The case above earns its place only while the resolver answers through
-    // `getaddrinfo` — that is the branch of `neverDispatched`'s allow-list the
-    // closed port beside it never reaches. Should a future Node report an
-    // over-long label some other way, the classification test would keep passing
-    // on the closed port alone and the DNS half would be silently vacuous. This
-    // fails instead, and names what changed.
-    const raw = await fetch(`http://${UNRESOLVABLE}/api/v1`).catch((e: unknown) => e);
-    const seen: Array<string | undefined> = [];
-    for (let c: unknown = raw; c; c = (c as { cause?: unknown }).cause) {
-      const one = c as { syscall?: string; errors?: unknown[] };
-      seen.push(one.syscall);
-      // Dual-stack resolution answers with an AggregateError of one per family.
-      for (const inner of one.errors ?? []) seen.push((inner as { syscall?: string }).syscall);
-    }
-    expect(seen).toContain('getaddrinfo');
+    // What it guards is narrower than "the error shape changed" — that case is
+    // already loud, because the loop above asserts per URL and a DNS failure
+    // `neverDispatched` no longer matches throws `ConnectivityInterruptedError`
+    // on the second iteration. The silent case is the name starting to RESOLVE:
+    // a wildcard resolver behind a captive portal answers an address, the
+    // failure becomes `syscall: 'connect'`, and the case above passes on the
+    // closed port's own branch while the `getaddrinfo` half of
+    // `neverDispatched`'s allow-list is exercised by nothing at all.
+    const raw = await platformFetch()(`http://${UNRESOLVABLE}/api/v1`, {
+      dispatcher: PLATFORM_DISPATCHER,
+    } as RequestInit).then(
+      // Resolving is the failure this is watching for, and an undrained body
+      // holds the socket open — a teardown hang on top of the real assertion
+      // buries which of the two went wrong.
+      async (resp: Response) => {
+        await resp.body?.cancel();
+        return resp;
+      },
+      (e: unknown) => e,
+    );
+    // The production walk, not a copy of it: bounded against a cyclic `cause`,
+    // guarded on a non-array `errors`, and it recurses into the dual-stack
+    // `AggregateError`'s members the way the classifier reading this chain does.
+    expect([...causes(raw)].map((c) => c.syscall)).toContain('getaddrinfo');
   }, 20000);
 
   it('does not read a TLS alert after the handshake as a connect failure', async () => {
