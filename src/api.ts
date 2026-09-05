@@ -1099,34 +1099,137 @@ function parseEvent(chunk: string): SSEEvent | undefined {
   }
 }
 
+/**
+ * One `name=value` pair out of a header's parameter list.
+ *
+ * `quoted` is kept because the two forms mean different things about what has
+ * already been consumed: a quoted value has had its delimiters and its
+ * `quoted-pair` escapes resolved and may legitimately contain a `;`, where a
+ * token value is the raw run and has not.
+ */
+type DispositionParam = { name: string; value: string };
+
+/**
+ * Split a `Content-Disposition` header into its parameters, per the grammar in
+ * RFC 6266 §4.1 and RFC 7230 §3.2.6 rather than by regex.
+ *
+ * Two attempts at this shipped a worse bug than the one they fixed, and both
+ * failed at the same place: deciding what a `"` means without tracking where in
+ * the grammar the reader is. A `"` is only a delimiter where a value begins.
+ * Anywhere else — `note=a"b` — it is an ordinary character of a token, and a
+ * reader that toggles on every quote it meets turns the rest of the header into
+ * one run and loses the real `filename` after it.
+ *
+ * Inside a quoted string, `\` escapes the next character (`quoted-pair`), so a
+ * `\"` does NOT close the value. A reader that stops at the first `"` it sees
+ * lets a trailing `\"` smuggle a `; filename=` out of a value the sender
+ * controls and into the parameter list.
+ *
+ * An unterminated quoted value runs to the end of the header. That is the one
+ * decision here that is a judgment rather than the grammar — see the comment on
+ * `filenameFrom` — and it is what keeps such a value's contents from being read
+ * as parameters at all.
+ */
+function dispositionParams(header: string): DispositionParam[] {
+  const params: DispositionParam[] = [];
+  // The disposition-type comes first and is a bare token; parameters begin at
+  // the first `;`. A header with no `;` has no parameters and no filename.
+  let i = header.indexOf(';');
+  if (i === -1) return params;
+
+  while (i < header.length) {
+    i += 1; // past the ';' that begins this parameter
+    while (i < header.length && /\s/.test(header[i] as string)) i += 1;
+
+    const nameFrom = i;
+    while (i < header.length && header[i] !== '=' && header[i] !== ';') i += 1;
+    const name = header.slice(nameFrom, i).trim().toLowerCase();
+
+    if (header[i] !== '=') {
+      // A parameter with no `=` at all. Recorded so it cannot be mistaken for
+      // the next one, and skipped.
+      if (name) params.push({ name, value: '' });
+      continue;
+    }
+
+    i += 1; // past the '='
+    // BWS: RFC 7230 allows whitespace either side of the `=`, and a value that
+    // begins after it is still that parameter's value.
+    while (i < header.length && /[ \t]/.test(header[i] as string)) i += 1;
+
+    let value = '';
+    if (header[i] === '"') {
+      i += 1;
+      let out = '';
+      for (; i < header.length; i += 1) {
+        const ch = header[i] as string;
+        if (ch === '\\' && i + 1 < header.length) {
+          out += header[i + 1] as string;
+          i += 1;
+        } else if (ch === '"') {
+          i += 1;
+          break;
+        } else out += ch;
+      }
+      value = out;
+      // Anything between the closing quote and the next `;` is not part of the
+      // value and is not a parameter either.
+      while (i < header.length && header[i] !== ';') i += 1;
+    } else {
+      const from = i;
+      while (i < header.length && header[i] !== ';') i += 1;
+      // A token value carries no delimiters, so the whitespace around it is the
+      // header's formatting rather than the name: `filename=real.txt ; x=1`
+      // named a file with a trailing space on it.
+      value = header.slice(from, i).trim();
+    }
+    if (name) params.push({ name, value });
+  }
+  return params;
+}
+
 /** The filename the platform put on a download, if it put one there. */
 export function filenameFrom(disposition: string | null): string | undefined {
   if (!disposition) return undefined;
-  // Any charset and any language, not only `UTF-8''`. RFC 5987 writes this
-  // value as charset, language, then the text, with the language ordinarily
-  // empty — and matching only the empty spelling meant that both
-  // `filename*=ISO-8859-1''…` and `filename*=UTF-8'en'…` were read by neither
-  // branch — the plain form below cannot match either, since there is no
-  // `filename=` in them — so a download the platform had named came back with
-  // no name at all. Three groups, not two: the middle one is the language tag,
-  // present or empty.
+  // Parsed rather than matched. Every previous spelling of this read the header
+  // with one regex, and each one in turn found a `filename=` that belonged to
+  // some other parameter's value — `inline; x-filename=q.txt` through a missing
+  // parameter boundary, then `note="a; filename=evil.txt"` through a `;` inside
+  // a quoted string. What the sender controls should not be able to add a
+  // parameter the sender did not send.
   //
-  // Anchored to a PARAMETER BOUNDARY, either end of the header or a `;`, in
-  // both branches. Unanchored, `filename` matched the tail of any longer
-  // parameter name — `inline; x-filename=q.txt` named the download `q.txt` —
-  // so a parameter this code has never heard of, from a proxy or an origin
-  // that is not the platform, supplied the name a file is written under.
-  const star = /(?:^|;)\s*filename\*=([^']*)'([^']*)'([^;]+)/i.exec(disposition);
+  // The judgment call, stated because the grammar does not make it: an
+  // unterminated quoted value consumes the rest of the header. It is what the
+  // WHATWG "collect an HTTP quoted string" algorithm does, and it is the only
+  // reading under which `note="a; filename=evil.txt\"` — where the `\"` escapes
+  // the quote that would have closed the value — yields no filename at all. The
+  // cost is that a sloppy sender's unterminated value swallows a real
+  // `filename` after it; the benefit is that a hostile one cannot smuggle a
+  // fake one out. `filename="report.pdf` still works, because there the
+  // unterminated value IS the filename.
+  const params = dispositionParams(disposition);
+
+  // RFC 8187: charset, language, then the text, with the language ordinarily
+  // empty. Any charset and any language, not only `UTF-8''` — matching the
+  // empty spelling alone meant `ISO-8859-1''…` and `UTF-8'en'…` were read by
+  // neither branch, and a download the platform had named came back unnamed.
+  const star = params.find((p) => p.name === 'filename*');
   if (star) {
-    // A stray `%` in a guest filename is legal on disk and makes this throw.
-    // Letting it out would turn a download whose bytes already arrived intact
-    // into a failure, over the label on it.
-    try {
-      return decodeURIComponent(star[3]);
-    } catch {
-      return star[3];
+    const ext = /^[^']*'[^']*'([\s\S]*)$/.exec(star.value);
+    // An empty `filename*` names nothing, and falling through to the plain
+    // `filename` beside it is better than answering with the empty string.
+    if (ext?.[1]) {
+      try {
+        return decodeURIComponent(ext[1]);
+      } catch {
+        // A stray `%` in a guest filename is legal on disk and makes this
+        // throw. Letting it out would turn a download whose bytes already
+        // arrived intact into a failure, over the label on it.
+        return ext[1];
+      }
     }
   }
-  const plain = /(?:^|;)\s*filename\s*=\s*"?([^";]+)"?/i.exec(disposition);
-  return plain ? plain[1] : undefined;
+
+  const plain = params.find((p) => p.name === 'filename');
+  return plain?.value ? plain.value : undefined;
 }

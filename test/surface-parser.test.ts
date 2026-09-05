@@ -324,8 +324,8 @@ describe('the route table reader', () => {
     return dir;
   };
 
-  const scanTable = async (table: string) => {
-    const dir = fixture(`export const V1_ROUTES: Route[] = [${table}];\n`);
+  const scanTable = async (table: string, preamble = '') => {
+    const dir = fixture(`${preamble}export const V1_ROUTES: Route[] = [${table}];\n`);
     try {
       // Exits 1: a two-route fixture matches none of the real mirror. The `+`
       // lines are the routes it read out of the fixture, which is the subject.
@@ -565,6 +565,21 @@ describe('the route table reader', () => {
         };
       `),
     ).toEqual(['query:limit']);
+  });
+
+  it('finds the route table itself outside the comments, not inside one', async () => {
+    // OPL-4495. `surface.ts` explains itself by quoting the shapes matched
+    // here, and the table declaration is one of them. Located in the raw source,
+    // an `indexOf` stops at the commented copy and `balanced()` walks from a
+    // bracket inside a block comment — so the routes read out are the
+    // superseded ones, or a short set, from the script whose only job is to not
+    // give a false all-clear.
+    expect(
+      await scanTable(
+        `{ method: 'GET', pattern: 'real' }`,
+        "// Superseded: export const V1_ROUTES: Route[] = [{ method: 'GET', pattern: 'ghost' }];\n",
+      ),
+    ).toEqual(['GET real']);
   });
 
   it('reads a route whose entry writes pattern before method', async () => {
