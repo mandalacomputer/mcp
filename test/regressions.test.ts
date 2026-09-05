@@ -48,6 +48,7 @@ import {
   RangeNotSatisfiableError,
   RateLimitError,
   RedirectError,
+  reasonKind,
   UnavailableError,
 } from '../src/errors.js';
 import { failed, MAX_INLINE_IMAGE_BYTES, unwrapComputer } from '../src/format.js';
@@ -62,6 +63,7 @@ import {
   OriginUnreachableError as PublicOriginUnreachableError,
   RangeNotSatisfiableError as PublicRangeNotSatisfiableError,
   RateLimitError as PublicRateLimitError,
+  reasonKind as publicReasonKind,
 } from '../src/index.js';
 import * as P from '../src/paths.js';
 import { windowBody } from '../src/paths.js';
@@ -191,6 +193,64 @@ describe('agent stream media types and payloads', () => {
 });
 
 describe('explicit lifecycle flags', () => {
+  it('reads the usual spellings of yes, not only the digit', () => {
+    // `=== '1'` meant MANDALA_NO_LIFECYCLE=true left every lifecycle tool
+    // registered on a server whose operator had just said to withhold them. The
+    // vocabulary is the mirror of the FALSEY set the `--http=` parser already
+    // uses, rather than a second one invented here (OPL-4506).
+    for (const yes of ['1', 'true', 'yes', 'on', 'TRUE', ' On ']) {
+      expect(lifecycleEnabled(parse([]), yes), yes).toBe(false);
+    }
+    for (const no of ['0', 'false', 'no', 'off', 'OFF', undefined]) {
+      expect(lifecycleEnabled(parse([]), no), String(no)).toBe(true);
+    }
+  });
+
+  it('refuses a spelling it does not know rather than reading it as off', () => {
+    // The direction matters because this is a safety control. Read as "off", a
+    // typo leaves create_computer and delete_computer registered on a server
+    // whose operator believes they are gone, and says nothing about it. A
+    // deliberate `MANDALA_NO_LIFECYCLE=ture` is not a thing anybody types.
+    expect(() => lifecycleEnabled(parse([]), 'ture')).toThrow(/not a yes or a no/);
+    expect(() => lifecycleEnabled(parse([]), '2')).toThrow(/MANDALA_NO_LIFECYCLE=2/);
+    // And the message says both halves of the vocabulary, since being told only
+    // that the value is wrong leaves the reader guessing at the right one.
+    expect(() => lifecycleEnabled(parse([]), 'maybe')).toThrow(/true, 1, yes, on/);
+    expect(() => lifecycleEnabled(parse([]), 'maybe')).toThrow(/false, 0, no, off/);
+  });
+
+  it('treats a set-but-empty variable as unset rather than refusing it', () => {
+    // `FOO=` is the ordinary shape of an unset value in a compose file, and it
+    // is what plugin.json's `${MANDALA_NO_LIFECYCLE:-}` expands to. `env` folds
+    // it away before the parser sees it, but `lifecycleEnabled` takes the value
+    // as a parameter, so the guard belongs where the refusal is.
+    expect(lifecycleEnabled(parse([]), '')).toBe(true);
+    expect(lifecycleEnabled(parse([]), '   ')).toBe(true);
+  });
+
+  it('reports a misspelled variable even when a flag overrides it', () => {
+    // Precedence and validation are separable, and conflating them reintroduces
+    // the silence. An operator who set MANDALA_NO_LIFECYCLE=ture meaning to
+    // withhold the tools, under a launcher that also passes --no-lifecycle=false,
+    // would otherwise be told nothing and get them.
+    expect(() => lifecycleEnabled(parse(['--no-lifecycle=false']), 'ture')).toThrow(
+      /not a yes or a no/,
+    );
+    expect(() => lifecycleEnabled(parse(['--no-lifecycle']), 'ture')).toThrow(/not a yes or a no/);
+  });
+
+  it('still lets a present flag decide against any environment spelling', () => {
+    // Widening the variable does not introduce a precedence question: presence
+    // of the flag was already what settled it, and this pins that the wider
+    // vocabulary did not quietly change which side wins.
+    for (const yes of ['1', 'true', 'yes', 'on']) {
+      expect(lifecycleEnabled(parse(['--no-lifecycle=false']), yes), yes).toBe(true);
+    }
+    for (const no of ['0', 'false', 'off', undefined]) {
+      expect(lifecycleEnabled(parse(['--no-lifecycle']), no), String(no)).toBe(false);
+    }
+  });
+
   it('lets --no-lifecycle=false override a disabling environment value', () => {
     expect(lifecycleEnabled(parse(['--no-lifecycle=false']), '1')).toBe(true);
     expect(lifecycleEnabled(parse([]), '1')).toBe(false);
@@ -852,6 +912,59 @@ describe('a Content-Disposition with a language tag', () => {
     // The real parameter is still read when both are there, whichever is first.
     expect(filenameFrom('attachment; x-filename=q.txt; filename="real.txt"')).toBe('real.txt');
     expect(filenameFrom("inline; xfilename*=UTF-8''q.txt; filename=real.txt")).toBe('real.txt');
+  });
+});
+
+describe('the classification of a refusal, for whoever is embedding this (OPL-4506)', () => {
+  it('answers with how the refusal behaves, not with prose about it', () => {
+    // The narrow half of the pair, and the one that is published. `reasonAdvice`
+    // beside it is this server's sentences for a language model, rewritten
+    // whenever a model reads one wrong; exporting those would make their wording
+    // something this package versions. What an embedder needs does not move:
+    // whether waiting can change the answer.
+    expect(reasonKind('contention')).toBe('clears');
+    expect(reasonKind('starting')).toBe('clears');
+    expect(reasonKind('unavailable')).toBe('permanent');
+    expect(reasonKind('unsupported')).toBe('permanent');
+  });
+
+  it('has no opinion about a word this version has not heard of', () => {
+    // The platform's set is documented as open, and "absent means unclassified"
+    // is its contract. Guessing at a new word is the mistake that contract
+    // exists to prevent, so an unknown one is undefined rather than a default.
+    expect(reasonKind('something-new')).toBeUndefined();
+    expect(reasonKind(undefined)).toBeUndefined();
+    expect(reasonKind('')).toBeUndefined();
+  });
+
+  it('is the same answer the retry predicate acts on', () => {
+    // One source of truth: `isTransient` reads this classifier rather than the
+    // sets directly, so what an embedder is told and what this server does
+    // cannot drift into two answers.
+    for (const reason of ['contention', 'starting', 'unavailable', 'unsupported']) {
+      const err = errorForStatus(409, 'refused', { reason });
+      expect(err.reason, reason).toBe(reason);
+      expect(isTransient(err), reason).toBe(reasonKind(reason) === 'clears');
+    }
+  });
+
+  it('classifies the word, which is not the same as deciding a retry', () => {
+    // The hazard the docstring warns about, kept honest here. `isTransient`
+    // answers MoveRequiredError before it looks at `reason` (OPL-3775), so an
+    // embedder reading `reasonKind(...) !== 'permanent'` as "retry" would send a
+    // resize refusal round forever — it is a decision about the size asked for
+    // and answers the same every time.
+    const err = errorForStatus(409, 'too big', {
+      reason: 'contention',
+      move: { required: true, possible: true },
+    });
+    expect(err.constructor.name).toBe('MoveRequiredError');
+    expect(reasonKind(err.reason)).toBe('clears');
+    expect(isTransient(err)).toBe(false);
+  });
+
+  it('is the same function through the public entrypoint', () => {
+    expect(publicReasonKind).toBe(reasonKind);
   });
 });
 

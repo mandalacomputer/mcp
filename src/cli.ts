@@ -21,8 +21,10 @@ Environment
   MANDALA_MODEL_KEY    an Anthropic key; enables the run_agent tool. stdio only
                        — over HTTP each caller sends their own X-Model-Key, and
                        this is ignored rather than spent on their runs
-  MANDALA_NO_LIFECYCLE set to 1 to withhold create_computer, clone_computer,
-                       clone_snapshot, delete_computer and delete_snapshot
+  MANDALA_NO_LIFECYCLE 1, true, yes or on to withhold create_computer,
+                       clone_computer, clone_snapshot, delete_computer and
+                       delete_snapshot. Any other value is refused rather than
+                       read as off, since a typo here would leave them enabled
   PORT, HOST           for --http (default 3000, 127.0.0.1)
   MANDALA_ALLOWED_HOSTS, MANDALA_ALLOWED_ORIGINS
                        comma-separated; which Host and Origin values to answer
@@ -57,6 +59,42 @@ const KNOWN = new Set([
 
 /** What `--http=…` may say to mean no. */
 const FALSEY = new Set(['false', '0', 'no', 'off']);
+
+/** And its mirror, for the environment variables that are a yes-or-no. */
+const TRUTHY = new Set(['true', '1', 'yes', 'on']);
+
+/**
+ * A yes-or-no environment variable, refusing a spelling it does not know.
+ *
+ * REFUSED rather than read as no, which is the decision worth recording.
+ * `MANDALA_NO_LIFECYCLE` withholds the tools that create and delete computers,
+ * so it is a safety control, and the two wrong answers do not cost the same: an
+ * unrecognised value read as "no" leaves those tools registered on a server
+ * whose operator believes they are gone, and says nothing. A typo is far more
+ * likely than a deliberate `MANDALA_NO_LIFECYCLE=ture`, and the loud version
+ * costs one clear line at startup.
+ *
+ * Empty is unset, as everywhere else here — the ordinary shape of an unquoted
+ * assignment in a compose file, and `env` has already turned it into undefined.
+ */
+function envFlag(name: string, raw: string | undefined): boolean {
+  if (raw === undefined) return false;
+  const v = raw.trim().toLowerCase();
+  // Here as well as in `env`, rather than only there. `env` folds an empty
+  // variable to undefined before this sees it, but that is the caller's
+  // behaviour and this reads as a general helper — `lifecycleEnabled` takes its
+  // value as a parameter, so a caller passing `process.env.X` straight in would
+  // otherwise refuse to start over `X=`, which is what an unquoted assignment
+  // in a compose file writes and what plugin.json's `${MANDALA_NO_LIFECYCLE:-}`
+  // expands to when it is unset.
+  if (!v) return false;
+  if (TRUTHY.has(v)) return true;
+  if (FALSEY.has(v)) return false;
+  throw new Error(
+    `${name}=${raw} is not a yes or a no. Use one of ${[...TRUTHY].join(', ')} to turn it on, ` +
+      `or one of ${[...FALSEY].join(', ')} (or leave it unset) to turn it off.`,
+  );
+}
 
 /**
  * argv into flags.
@@ -131,9 +169,13 @@ export const wantsVersion = (flags: Flags): boolean => Boolean(flags.version || 
 export function lifecycleEnabled(flags: Flags, configured = env('MANDALA_NO_LIFECYCLE')): boolean {
   // Presence is what establishes precedence. `--no-lifecycle=false` carries a
   // false value deliberately and must not fall through to a true environment.
-  const disabled = Object.hasOwn(flags, 'no-lifecycle')
-    ? Boolean(flags['no-lifecycle'])
-    : configured === '1';
+  // Validated before precedence is applied, and that ordering is the point. A
+  // misspelling is a mistake to report whether or not a flag happens to sit in
+  // front of it: an operator who set MANDALA_NO_LIFECYCLE=ture meaning to
+  // withhold the tools, under a launcher that also passes --no-lifecycle=false,
+  // would otherwise get exactly the silent arming this refusal exists to stop.
+  const fromEnv = envFlag('MANDALA_NO_LIFECYCLE', configured);
+  const disabled = Object.hasOwn(flags, 'no-lifecycle') ? Boolean(flags['no-lifecycle']) : fromEnv;
   return !disabled;
 }
 

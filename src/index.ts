@@ -23,7 +23,9 @@ export {
   PlanLimitError,
   RangeNotSatisfiableError,
   RateLimitError,
+  type ReasonKind,
   RedirectError,
+  reasonKind,
   UnavailableError,
 } from './errors.js';
 export { type HttpConfig, runHttp } from './http.js';
