@@ -317,9 +317,27 @@ export const registerInput: Registrar = (server, session) => {
     {
       title: 'Where is the pointer',
       description:
-        'Where the pointer was last put. `known` is false on a computer nothing has moved it on yet — the guest cannot be asked, so there is no coordinate to report and a confident 0,0 would be a wrong answer dressed as a right one.',
+        'Where the pointer was last put. `known` is false on a computer nothing has moved it on yet — the guest cannot be asked, so there is no coordinate to report and a confident 0,0 would be a wrong answer dressed as a right one. This reads a coordinate but reaches the computer to do it: a suspended one is resumed to answer, and that resume is charged. read_clipboard, by contrast, refuses a suspended computer rather than starting it.',
       inputSchema: { ...idArg },
-      annotations: { readOnlyHint: true },
+      // Deliberately not readOnlyHint, for the reason exec_poll is not. It reads
+      // as one — nothing is created, nothing is destroyed, and the answer is a
+      // coordinate — but it POSTs the input drive route, which resumes a
+      // suspended computer and bills for the time, as write_clipboard's
+      // description says in as many words. Clients treat the hint as licence to
+      // call without asking, so the annotation is what decides whether anyone is
+      // asked before a read starts a machine. `screenshot` above keeps its hint
+      // because it is a GET and does no such thing.
+      //
+      // The other two flags are set rather than left to default, because both
+      // defaults are wrong once readOnlyHint is false: the spec defaults
+      // destructiveHint to TRUE and idempotentHint to FALSE. Dropping the
+      // object outright would trade an under-warning for an over-warning — a
+      // host asking whether it may perform destructive updates in order to read
+      // a pointer coordinate — and would tell a host not to retry a read it can
+      // safely retry. `create_computer` sets destructiveHint for this reason,
+      // and idempotentHint is set deliberately in computers.ts, snapshots.ts
+      // and templates.ts.
+      annotations: { destructiveHint: false, idempotentHint: true },
     },
     ({ computer_id }, extra) =>
       guarded(async () =>

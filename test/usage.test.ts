@@ -57,6 +57,74 @@ describe('get_usage', () => {
     expect(textOf(res)).toContain('"disk_gb_months": 0.66');
   });
 
+  it('puts every priced dimension in the sentence, memory and snapshots included', async () => {
+    // Two were missing. The description promises hours "weighted by cores and
+    // memory" and the line carried the cores half only; and apidoc.ts calls
+    // snapshot_gb_months "the unit snapshots are priced in", which is the
+    // figure that explains the bill of an account holding many durable
+    // snapshots and running almost nothing. Both were in the JSON underneath
+    // and nowhere in the sentence a model reads first.
+    const { call, close } = await connect();
+    const res = await call('get_usage', {});
+    await close();
+
+    const text = textOf(res);
+    expect(res.isError).toBeFalsy();
+    expect(text).toContain('50 GB-hours of RAM');
+    expect(text).toContain('0.13 GB-months of snapshots');
+    // Still the whole line, not one figure in place of another.
+    expect(text).toContain('25 vCPU-hours');
+    expect(text).toContain('12.5 running hours');
+    expect(text).toContain('0.66 GB-months of disk');
+  });
+
+  it('does not print the hours twin of a figure the platform prices in months', async () => {
+    // disk_gb_hours and snapshot_gb_hours are the same integrals in the unit
+    // the platform does NOT price. The rule is "every dimension the platform
+    // prices", not "every number it sends" — otherwise the line says each thing
+    // twice and gets twice as easy to stop reading.
+    const { call, close } = await connect();
+    const res = await call('get_usage', {});
+    await close();
+
+    // Selected by its own content, not by paragraph index: when `degraded` or
+    // `unmetered` is set, usageLine puts a TOO LOW warning first, and splitting
+    // on the blank line would hand back the warning and pass every assertion
+    // below without ever looking at the figures.
+    const head = textOf(res)
+      .split('\n\n')
+      .find((p) => p.includes('vCPU-hours')) as string;
+    expect(head).toBeTruthy();
+    expect(head).not.toContain('GB-hours of disk');
+    expect(head).not.toContain('GB-hours of snapshots');
+    // 96 and 480 are snapshot_gb_hours and disk_gb_hours in the fixture.
+    // Anchored on the figure, so an unrelated number containing 96 or 480
+    // somewhere in a timestamp cannot fail this.
+    expect(head).not.toMatch(/\b96\b/);
+    expect(head).not.toMatch(/\b480\b/);
+  });
+
+  it('prints a metered zero rather than dropping the clause', async () => {
+    // A clause that disappears when the figure is 0 makes "metered zero" and
+    // "the platform did not send it" read identically — the distinction this
+    // tool already refuses a missing totals object in order to keep.
+    const restore = globalThis.fetch;
+    globalThis.fetch = answering({ usage: { vcpu_hours: 1, ram_gb_hours: 0 } });
+    try {
+      const { call, close } = await connect();
+      const res = await call('get_usage', {});
+      await close();
+      // Anchored on the clause boundary, not on a substring: the default
+      // fixture's "50 GB-hours of RAM" contains "0 GB-hours of RAM" too, so a
+      // bare toContain would pass even if the override stopped taking effect
+      // and would then be pinning nothing.
+      expect(textOf(res)).toMatch(/(^|[^\d.])0 GB-hours of RAM/);
+      expect(textOf(res)).not.toContain('50 GB-hours of RAM');
+    } finally {
+      globalThis.fetch = restore;
+    }
+  });
+
   it('sends a window the caller names', async () => {
     const { call, close } = await connect();
     await call('get_usage', { from: '2026-07-01T00:00:00Z', to: '2026-08-01T00:00:00Z' });
