@@ -4769,6 +4769,38 @@ describe('tools that only read, but reach the computer to do it', () => {
   });
 });
 
+describe('a read that hands back a credential (OPL-4505)', () => {
+  it('does not call get_desktop_url read-only', async () => {
+    // The second reason to withhold the hint, and the only tool under it today.
+    // `GET /computers/:id` modifies nothing and spends nothing, so the spend
+    // rule from OPL-4499 said the hint was accurate — and it was, about the
+    // route. What it missed is that the annotation is also the consent gate:
+    // clients treat it as licence to call without asking, which is the reading
+    // input.ts states beside cursor_position. This call hands back a
+    // credential, and with `control: true` one that is root-equivalent on the
+    // machine, so under a host that auto-approves read-only tools a model could
+    // pass out control of a desktop with nobody asked.
+    const platform = installFakePlatform();
+    const { client, close } = await connect();
+    try {
+      const { tools } = await client.listTools();
+      const tool = tools.find((t) => t.name === 'get_desktop_url');
+      expect(tool).toBeDefined();
+      expect(tool?.annotations?.readOnlyHint).toBeFalsy();
+      // Both set, for the reason cursor_position sets them: the spec's defaults
+      // are wrong in both directions once readOnlyHint is gone.
+      expect(tool?.annotations?.destructiveHint).toBe(false);
+      expect(tool?.annotations?.idempotentHint).toBe(true);
+      // And the text says it too, for a caller that reads tools/list and never
+      // looks at annotations — the same belt-and-braces the spend rule keeps.
+      expect(tool?.description).toMatch(/credential/i);
+    } finally {
+      await close();
+      platform.restore();
+    }
+  });
+});
+
 describe('delete_snapshot answering 404', () => {
   it('does not report the retry it invites as a failure', async () => {
     // idempotentHint invites a client to retry a lost 2xx, and every non-OK
