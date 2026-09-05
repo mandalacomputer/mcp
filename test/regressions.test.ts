@@ -853,6 +853,106 @@ describe('a Content-Disposition with a language tag', () => {
   });
 });
 
+describe('a Content-Disposition whose parameters have to be parsed, not matched', () => {
+  // OPL-4495. Two earlier attempts at this each shipped a worse bug than the
+  // one they fixed, and both failed at the same point: deciding what a `"`
+  // means without tracking where in the grammar the reader is. These are the
+  // cases that broke them.
+
+  it('does not let a quoted value smuggle a filename parameter', () => {
+    // A `;` inside a quoted string is content, not a parameter boundary. Read
+    // as a boundary, whoever controls any parameter's value chooses the name a
+    // download is written under.
+    expect(filenameFrom('attachment; note="a; filename=evil.txt"; filename=real.txt')).toBe(
+      'real.txt',
+    );
+    expect(filenameFrom('attachment; filename="a; b.txt"')).toBe('a; b.txt');
+  });
+
+  it('does not let an escaped quote end the value that hides the smuggle', () => {
+    // `\"` is a quoted-pair: it is a quote IN the value, and it does not close
+    // it. A reader that stops at the first `"` it meets hands the rest of the
+    // header back to the sender — which is how the second attempt reintroduced
+    // the injection it was written to close.
+    expect(filenameFrom('attachment; note="a; filename=evil.txt\\"')).toBeUndefined();
+    expect(filenameFrom('attachment; filename="say \\"hi\\".txt"')).toBe('say "hi".txt');
+  });
+
+  it('reads a quote that is not where a value begins as an ordinary character', () => {
+    // `note=a"b` is a token with a quote in it, and nothing is opened. The
+    // first attempt toggled on every quote it saw, so this became one run to
+    // the end of the header and the real parameter after it was never at the
+    // start of a parameter again — the download came back unnamed.
+    expect(filenameFrom('attachment; note=a"b; filename=real.txt')).toBe('real.txt');
+  });
+
+  it('does not carry the header’s own spacing into the name', () => {
+    // A token value has no delimiters, so the whitespace around it is
+    // formatting. `real.txt ` is a different file from `real.txt`.
+    expect(filenameFrom('attachment; filename=real.txt ; x=1')).toBe('real.txt');
+    expect(filenameFrom('attachment; filename =  real.txt')).toBe('real.txt');
+  });
+
+  it('falls through to filename when filename* is present but names nothing', () => {
+    // An empty ext-value answered with the whitespace after it, which is a
+    // name no file has, in front of the perfectly good one beside it.
+    expect(filenameFrom("attachment; filename*=UTF-8'' ; filename=real.txt")).toBe('real.txt');
+    expect(filenameFrom("attachment; filename*=UTF-8''")).toBeUndefined();
+  });
+
+  it('answers with no name rather than an empty one', () => {
+    expect(filenameFrom('attachment; filename=')).toBeUndefined();
+    expect(filenameFrom('attachment; filename=""')).toBeUndefined();
+    expect(filenameFrom('attachment')).toBeUndefined();
+    expect(filenameFrom('')).toBeUndefined();
+  });
+
+  it('reads an unterminated quoted value as the value it was opening', () => {
+    // The common sloppy header: the quote is never closed and the filename is
+    // what follows it. Stripping quotes naively left the opening one on.
+    expect(filenameFrom('attachment; filename="report.pdf')).toBe('report.pdf');
+  });
+
+  it('does not stop at a repeated parameter it cannot read', () => {
+    // The regex this replaced walked on from an occurrence it could not read —
+    // `[^";]+` cannot match an empty value — and answered from the next one. A
+    // reader that stops at the first occurrence by name loses a name that was
+    // there. Malformed headers either way, and the platform sends none of them,
+    // but this direction is a regression rather than a defence: every parameter
+    // in the list is one the sender wrote at the top level, because a smuggled
+    // one never becomes a parameter at all.
+    expect(filenameFrom('attachment; filename=""; filename=real.txt')).toBe('real.txt');
+    expect(filenameFrom('attachment; filename=; filename=real.txt')).toBe('real.txt');
+    expect(filenameFrom('attachment; filename; filename=real.txt')).toBe('real.txt');
+    expect(filenameFrom("attachment; filename*=UTF-8''; filename*=UTF-8''real.txt")).toBe(
+      'real.txt',
+    );
+    // And the first one is still what answers when it can.
+    expect(filenameFrom('attachment; filename=real.txt; filename=second.txt')).toBe('real.txt');
+  });
+
+  it('gives no name when an unterminated value swallows the filename after it', () => {
+    // A DECIDED trade, not an oversight, and the one row of OPL-4495's table
+    // this does not satisfy — it asked for `report.pdf` here.
+    //
+    // Both of these are the same header shape: `type; param="junk; filename=X`,
+    // a value opened and never closed with a `filename=` inside it. No rule can
+    // answer them differently, so the choice is which one to serve. The escaped
+    // quote in the second is not what makes it an attack — an attacker simply
+    // omits the backslash and writes the first shape — so a reader that
+    // recovers the name from one recovers it from both, and whoever controls
+    // any parameter's value names the download.
+    //
+    // So an unterminated value consumes the rest of the header, which is what
+    // WHATWG's "collect an HTTP quoted string" does. The cost is here: a sender
+    // who forgets a closing quote loses the name that followed it.
+    expect(
+      filenameFrom('inline; creation-date="Wed, 12 Feb 2026; filename=report.pdf'),
+    ).toBeUndefined();
+    expect(filenameFrom('attachment; note="a; filename=evil.txt')).toBeUndefined();
+  });
+});
+
 describe('a listing the platform answered with no body at all', () => {
   let real: typeof globalThis.fetch;
   beforeEach(() => {

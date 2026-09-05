@@ -130,7 +130,15 @@ function main() {
 
   // --- routes ---------------------------------------------------------------
 
-  const surfaceSource = readFileSync(join(platform, 'web/lib/surface.ts'), 'utf8');
+  // Stripped once, and every read below is of this rather than of the raw file
+  // — the same discipline `docClean` applies to apidoc.ts, and for the same
+  // reason: `surface.ts` explains itself by quoting the shapes matched here, and
+  // a commented copy of the table declaration is where an `indexOf` starts.
+  // `balanced()` then walks from a bracket inside a block comment into the real
+  // table, and what comes back is a short route set or — from the script whose
+  // only job is not to give one — a false all-clear. Blanking rather than
+  // deleting keeps every offset an offset into the original.
+  const surfaceSource = stripComments(readFileSync(join(platform, 'web/lib/surface.ts'), 'utf8'));
 
   /**
    * Pull one `export const NAME: Route[] = [...]` table out, entry by entry.
@@ -164,7 +172,7 @@ function main() {
     // The opening bracket of the table, not the one in `Route[]` a few
     // characters earlier — which is what an indexOf('[') from the declaration
     // finds, and which closes immediately.
-    const body = stripComments(balanced(surfaceSource, start + decl.length - 1, '[', ']'));
+    const body = balanced(surfaceSource, start + decl.length - 1, '[', ']');
     const routes = new Set();
     for (const entry of entries(body)) {
       // Both, out of ONE entry and at that entry's own depth. An entry carrying
@@ -181,14 +189,17 @@ function main() {
 
   const platformRoutes = routeTable('V1_ROUTES');
 
-  const mirrorSource = readFileSync(join(repo, 'test/allowlist.ts'), 'utf8');
+  // Stripped for the reason the platform's two files are: this file documents
+  // each route it mirrors in prose above it, and a declaration named in one of
+  // those comments is where `mirrorSection` would start reading.
+  const mirrorSource = stripComments(readFileSync(join(repo, 'test/allowlist.ts'), 'utf8'));
 
   /** The text of one `export const NAME` declaration in the mirror. */
   function mirrorSection(name, until) {
     const from = mirrorSource.indexOf(`export const ${name}`);
     if (from === -1) throw new Error(`${name} not found in test/allowlist.ts`);
     const to = mirrorSource.indexOf(`export const ${until}`, from);
-    return stripComments(mirrorSource.slice(from, to === -1 ? undefined : to));
+    return mirrorSource.slice(from, to === -1 ? undefined : to);
   }
 
   const mirrorRoutes = new Set(
