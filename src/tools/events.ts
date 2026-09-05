@@ -347,6 +347,16 @@ function stopped(
   // a handle this one has already dropped would otherwise close the fresh
   // stream opened in between.
   if (drained) session.events.drop(id, reason, true, sub);
+  // KNOWN GAP on the `!drained` side of that same overlap: if this call is the
+  // one holding the older handle, "call again for them" is a promise this
+  // server cannot keep. The next call resolves through `EventHub.open()`, which
+  // returns the subscription now in `#subs` — the replacement — and the events
+  // still in THIS one's ring are unreachable from that moment. Reaching it
+  // needs two calls overlapping on one computer with the older one parked
+  // mid-wait, which is why it has no test. Anything written here has to be
+  // narrower than "a fresh stream is running, there is nothing to fix": that
+  // sentence was tried, and it both dropped the disclosure above and reported a
+  // replacement that had itself stopped as healthy.
   const held = n
     ? `${n} event${n === 1 ? '' : 's'} had already arrived before it stopped and ${n === 1 ? 'is' : 'are'} ` +
       (drained

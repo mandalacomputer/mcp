@@ -129,9 +129,16 @@ const movesOf = (body: unknown): { moves: Move[]; dropped: number } | undefined 
   return { moves, dropped: list.length - moves.length };
 };
 
-/** What arrived where a list was expected, for a refusal that names it. */
+/**
+ * What arrived where a list was expected, for a refusal that names it.
+ *
+ * A list is called a list. `typeof []` is `'object'`, and the usage refusal is
+ * reached BY an array — its guard rejects one explicitly — so without this it
+ * reports a body that arrived as an "object where the totals object goes",
+ * which is a contradiction in the sentence a model has to act on.
+ */
 const shapeOf = (v: unknown): string =>
-  v === undefined ? 'no body at all' : v === null ? 'null' : typeof v;
+  v === undefined ? 'no body at all' : v === null ? 'null' : Array.isArray(v) ? 'a list' : typeof v;
 
 /**
  * The resize refusal that is an OFFER, turned into a next step (OPL-3775).
