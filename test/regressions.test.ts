@@ -4447,6 +4447,28 @@ describe('the two event tools and what their annotations claim', () => {
       platform.restore();
     }
   });
+
+  it('does not call a read that can start a machine read-only', async () => {
+    // cursor_position reads as read-only — nothing is created, nothing is
+    // destroyed, and the answer is a coordinate — but it POSTs the input drive
+    // route, which resumes a suspended computer and bills for the time. Clients
+    // gate a consent prompt on this hint, so it is the field that decides
+    // whether anybody is asked before a read starts a machine.
+    const platform = installFakePlatform();
+    const { client, close } = await connect();
+    try {
+      const { tools } = await client.listTools();
+      const cursor = tools.find((t) => t.name === 'cursor_position');
+      expect(cursor).toBeDefined();
+      expect(cursor?.annotations?.readOnlyHint).toBeFalsy();
+      // screenshot keeps its hint, because it is a GET and starts nothing. The
+      // claim is about what the route does, not about input tools as a class.
+      expect(tools.find((t) => t.name === 'screenshot')?.annotations?.readOnlyHint).toBe(true);
+    } finally {
+      await close();
+      platform.restore();
+    }
+  });
 });
 
 describe('delete_snapshot answering 404', () => {

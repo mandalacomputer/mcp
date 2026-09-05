@@ -204,12 +204,26 @@ type Usage = {
  * that could not be reached and comes right when it comes back, `unmetered` is a
  * host running a daemon older than the meter, and telling a caller to wait for
  * that one is advice that never comes true.
+ *
+ * EVERY METERED DIMENSION IS IN THE LINE, `ram_gb_hours` included. This
+ * sentence is what a model reads before it acts on cost, and a dimension the
+ * account is billed on that appears only in the JSON underneath is a figure
+ * nobody weighs. The tool's own description promises hours "weighted by cores
+ * and memory", and for a while the memory half of that was true of the type and
+ * of the platform but not of this line.
+ *
+ * The zero is printed rather than omitted, like every other figure here: an
+ * account that ran nothing weighted by memory metered zero, and a clause that
+ * disappears makes that indistinguishable from a platform that did not send the
+ * figure at all — the distinction `get_usage` already refuses a missing totals
+ * object in order to keep.
  */
 const usageLine = (u: Usage): string => {
   const t = u.usage ?? {};
   const window = u.from && u.to ? `${u.from} to ${u.to}` : 'this billing period';
   const head =
-    `${t.vcpu_hours ?? 0} vCPU-hours, ${t.run_hours ?? 0} running hours and ` +
+    `${t.vcpu_hours ?? 0} vCPU-hours, ${t.ram_gb_hours ?? 0} GB-hours of RAM, ` +
+    `${t.run_hours ?? 0} running hours and ` +
     `${t.disk_gb_months ?? 0} GB-months of disk over ${window}.`;
   const short = [
     u.degraded && 'a hypervisor could not be reached (retry — this one clears)',

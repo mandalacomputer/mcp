@@ -319,7 +319,14 @@ export const registerInput: Registrar = (server, session) => {
       description:
         'Where the pointer was last put. `known` is false on a computer nothing has moved it on yet — the guest cannot be asked, so there is no coordinate to report and a confident 0,0 would be a wrong answer dressed as a right one.',
       inputSchema: { ...idArg },
-      annotations: { readOnlyHint: true },
+      // Deliberately not readOnlyHint, for the reason exec_poll is not. It reads
+      // as one — nothing is created, nothing is destroyed, and the answer is a
+      // coordinate — but it POSTs the input drive route, which resumes a
+      // suspended computer and bills for the time, as write_clipboard's
+      // description says in as many words. Clients treat the hint as licence to
+      // call without asking, so the annotation is what decides whether anyone is
+      // asked before a read starts a machine. `screenshot` above keeps its hint
+      // because it is a GET and does no such thing.
     },
     ({ computer_id }, extra) =>
       guarded(async () =>

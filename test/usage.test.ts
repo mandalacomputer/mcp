@@ -57,6 +57,40 @@ describe('get_usage', () => {
     expect(textOf(res)).toContain('"disk_gb_months": 0.66');
   });
 
+  it('puts every metered dimension in the sentence, memory included', async () => {
+    // The description promises hours "weighted by cores and memory", and the
+    // line carried the cores half only — so the dimension a model would have to
+    // weigh to understand a RAM-heavy bill was in the JSON underneath and
+    // nowhere in the sentence it reads first.
+    const { call, close } = await connect();
+    const res = await call('get_usage', {});
+    await close();
+
+    const text = textOf(res);
+    expect(res.isError).toBeFalsy();
+    expect(text).toContain('50 GB-hours of RAM');
+    // Still the whole line, not RAM in place of something else.
+    expect(text).toContain('25 vCPU-hours');
+    expect(text).toContain('12.5 running hours');
+    expect(text).toContain('0.66 GB-months of disk');
+  });
+
+  it('prints a metered zero rather than dropping the clause', async () => {
+    // A clause that disappears when the figure is 0 makes "metered zero" and
+    // "the platform did not send it" read identically — the distinction this
+    // tool already refuses a missing totals object in order to keep.
+    const restore = globalThis.fetch;
+    globalThis.fetch = answering({ usage: { vcpu_hours: 1, ram_gb_hours: 0 } });
+    try {
+      const { call, close } = await connect();
+      const res = await call('get_usage', {});
+      await close();
+      expect(textOf(res)).toContain('0 GB-hours of RAM');
+    } finally {
+      globalThis.fetch = restore;
+    }
+  });
+
   it('sends a window the caller names', async () => {
     const { call, close } = await connect();
     await call('get_usage', { from: '2026-07-01T00:00:00Z', to: '2026-08-01T00:00:00Z' });
