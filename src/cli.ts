@@ -103,7 +103,13 @@ export function parse(argv: string[]): Flags {
     if (BOOLEAN.has(name))
       flags[name] = inline === undefined ? true : !FALSEY.has(inline.toLowerCase());
     else if (inline !== undefined) flags[name] = inline;
-    else if (argv[i + 1] && !argv[i + 1].startsWith('--')) flags[name] = argv[++i];
+    // PRESENT, not truthy. `--key ""` is a value token like any other, and a
+    // truthiness test skipped it: the flag became the boolean `true` and the
+    // empty token came round again as a stray argument, so the two spellings of
+    // one flag disagreed — `--key=` is the empty value `str()` documents, while
+    // `--key ""` died with `unexpected argument .`, naming nothing the user
+    // could act on.
+    else if (argv[i + 1] !== undefined && !argv[i + 1].startsWith('--')) flags[name] = argv[++i];
     else flags[name] = true;
   }
   return flags;

@@ -933,10 +933,19 @@ const MAX_TIMER_MS = 2_147_483_647;
  * delta-seconds is not malformed enough to stop there: `Date.parse('-5')` is a
  * date in 2001, so it falls through to the branch below and lands on 0, which
  * is the same answer a date in the past gets and is why nothing worse happens.
+ *
+ * DECIMAL DIGITS for the first branch, not whatever `Number()` will take. The
+ * header's grammar is delta-seconds or an HTTP-date, and `0x10` and `1e3` are
+ * neither — but `Number()` reads them as 16 and 1000, so a broken or hostile
+ * intermediary could spell a sixteen-minute sleep in three characters and have
+ * a poll loop honour it as if the platform had asked. Gated the way
+ * {@link contentLength} below and `port()` in cli.ts already gate the same
+ * `Number()` footgun; anything else falls through to the date branch, which
+ * refuses it, and the loop keeps its own interval.
  */
 function retryAfterMs(header: string | null): number | undefined {
   if (!header) return undefined;
-  const seconds = Number(header);
+  const seconds = /^\d+$/.test(header.trim()) ? Number(header) : Number.NaN;
   if (Number.isFinite(seconds) && seconds >= 0) return Math.min(seconds * 1_000, MAX_TIMER_MS);
   const at = Date.parse(header);
   if (!Number.isFinite(at)) return undefined;
@@ -1054,7 +1063,13 @@ export function filenameFrom(disposition: string | null): string | undefined {
   // `filename=` in them — so a download the platform had named came back with
   // no name at all. Three groups, not two: the middle one is the language tag,
   // present or empty.
-  const star = /filename\*=([^']*)'([^']*)'([^;]+)/i.exec(disposition);
+  //
+  // Anchored to a PARAMETER BOUNDARY, either end of the header or a `;`, in
+  // both branches. Unanchored, `filename` matched the tail of any longer
+  // parameter name — `inline; x-filename=q.txt` named the download `q.txt` —
+  // so a parameter this code has never heard of, from a proxy or an origin
+  // that is not the platform, supplied the name a file is written under.
+  const star = /(?:^|;)\s*filename\*=([^']*)'([^']*)'([^;]+)/i.exec(disposition);
   if (star) {
     // A stray `%` in a guest filename is legal on disk and makes this throw.
     // Letting it out would turn a download whose bytes already arrived intact
@@ -1065,6 +1080,6 @@ export function filenameFrom(disposition: string | null): string | undefined {
       return star[3];
     }
   }
-  const plain = /filename="?([^";]+)"?/i.exec(disposition);
+  const plain = /(?:^|;)\s*filename\s*=\s*"?([^";]+)"?/i.exec(disposition);
   return plain ? plain[1] : undefined;
 }

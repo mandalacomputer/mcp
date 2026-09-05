@@ -36,7 +36,14 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { balanced, entries, stripComments, topLevelField, topLevelKeys } from './surface-text.mjs';
+import {
+  balanced,
+  entries,
+  stripComments,
+  topLevelField,
+  topLevelKeys,
+  topLevelValueAt,
+} from './surface-text.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repo = resolve(here, '..');
@@ -141,6 +148,15 @@ const mirrorRoutes = new Set(
 const docSource = readFileSync(join(platform, 'web/lib/apidoc.ts'), 'utf8');
 
 /**
+ * The same source with every comment blanked, which is what the scans below
+ * read. A declaration quoted inside a comment is not a declaration, and one
+ * written at column 0 in a block comment satisfies an anchored pattern exactly
+ * as the real thing does. `stripComments` blanks a comment rather than removing
+ * it, so an offset into this is still an offset into `docSource`.
+ */
+const docClean = stripComments(docSource);
+
+/**
  * Module-level `const NAME: Query = {...}` entries.
  *
  * A route's `query` array can reference one of these by identifier instead of
@@ -148,18 +164,24 @@ const docSource = readFileSync(join(platform, 'web/lib/apidoc.ts'), 'utf8');
  * has to resolve to a parameter name or those routes read as taking none.
  */
 const sharedQuery = new Map();
-for (const m of docSource.matchAll(/^const ([A-Z_]+): Query = \{/gm)) {
-  const named = stripComments(balanced(docSource, m.index + m[0].length - 1, '{', '}')).match(
-    /name:\s*'([^']+)'/,
-  );
+for (const m of docClean.matchAll(/^const ([A-Z_]+): Query = \{/gm)) {
+  const named = balanced(docClean, m.index + m[0].length - 1, '{', '}').match(/name:\s*'([^']+)'/);
   if (named) sharedQuery.set(m[1], named[1]);
 }
 
 /** Every query, header and body field the platform documents, by route. */
 function platformParameters() {
-  const start = docSource.indexOf('export const DOCS: Record<string, Doc> = {');
+  const start = docClean.indexOf('export const DOCS: Record<string, Doc> = {');
   if (start === -1) throw new Error('DOCS not found in web/lib/apidoc.ts');
-  const docs = balanced(docSource, docSource.indexOf('{', start + 40), '{', '}');
+  // Located AND sliced out of the stripped copy, the way `routeTable` strips
+  // before it splits. This file quotes the shapes being matched in its own
+  // comments, and everything here is run over text rather than over a parse —
+  // so a commented `'GET x': {` is an entry as far as it can tell, and a comment
+  // quoting this very declaration is where the table starts. The invented route
+  // is the lesser half: `lastIndex` then moves past a `balanced()` walk that
+  // began at a brace inside the comment, which can carry it over the genuine
+  // entry, and that route reads as taking no parameters at all.
+  const docs = balanced(docClean, docClean.indexOf('{', start + 40), '{', '}');
 
   const table = new Map();
   const entry = /'([A-Z]+) ([^']+)':\s*\{/g;
@@ -168,16 +190,21 @@ function platformParameters() {
     // Past this entry rather than into it: a nested `'GET x': {` inside a
     // description would otherwise be read as a route of its own.
     entry.lastIndex = m.index + m[0].length + body.length;
-    const clean = stripComments(body);
     const params = new Set();
 
     for (const [key, kind] of [
       ['query', 'query'],
       ['headers', 'header'],
     ]) {
-      const at = clean.indexOf(`${key}: [`);
-      if (at === -1) continue;
-      const list = balanced(clean, clean.indexOf('[', at), '[', ']');
+      // At the entry's own depth, for the reason `routeTable` reads its fields
+      // at the entry's: a description or an example can nest a `query: [` of its
+      // own, and the first one at any depth is the one an indexOf finds. A
+      // parameter list read out of prose is a set the platform never documented,
+      // reported against the mirror as if it had — and the route's real list,
+      // further down, is never read at all.
+      const at = topLevelValueAt(body, key);
+      if (at === -1 || body[at] !== '[') continue;
+      const list = balanced(body, at, '[', ']');
       for (const n of list.matchAll(/name:\s*'([^']+)'/g)) params.add(`${kind}:${n[1]}`);
       // `$` as well as a separator, and it is not decoration: `query:
       // [ALLOW_PARTIAL]` on one line is the whole list with nothing after the
@@ -190,11 +217,19 @@ function platformParameters() {
 
     // Only the `object(...)` bodies have named fields. A raw one — the file
     // upload's `{ type: 'string', format: 'binary' }` — has none to name.
-    const bodyAt = clean.indexOf('body: object(');
-    if (bodyAt !== -1) {
-      const args = balanced(clean, clean.indexOf('(', bodyAt), '(', ')');
-      for (const k of topLevelKeys(balanced(args, args.indexOf('{'), '{', '}'))) {
-        params.add(`body:${k}`);
+    const bodyAt = topLevelValueAt(body, 'body');
+    if (bodyAt !== -1 && body.startsWith('object(', bodyAt)) {
+      const args = balanced(body, bodyAt + 'object'.length, '(', ')');
+      const literal = args.indexOf('{');
+      // `object(SHARED_FIELDS)` names a literal declared elsewhere, which this
+      // does not follow — the same indirection `sharedQuery` resolves for
+      // `query:`. Left unread, so the mirror's fields show up as fields the
+      // platform does not document and somebody goes and looks. Read as an
+      // empty body, it would be the opposite: a route silently agreed with.
+      if (literal !== -1) {
+        for (const k of topLevelKeys(balanced(args, literal, '{', '}'))) {
+          params.add(`body:${k}`);
+        }
       }
     }
     table.set(`${m[1]} ${m[2]}`, params);

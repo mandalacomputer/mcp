@@ -134,8 +134,22 @@ export function stripComments(text) {
   return clean;
 }
 
-/** The text inside a balanced pair, ignoring delimiters in literals and comments. */
+/**
+ * The text inside a balanced pair, ignoring delimiters in literals and comments.
+ *
+ * The offset has to BE the opening delimiter, and that is checked rather than
+ * assumed. An `indexOf` that found nothing answers -1, and from -1 the walk
+ * below starts on no character at all: nothing opens the pair, the first closer
+ * takes `depth` to -1, `--depth === 0` never fires where the caller meant it
+ * to, and what comes back is a slice of wherever the walk happened to stop.
+ * That is a wrong answer rather than an error, and the callers read it as a
+ * real one — a route reads as documenting no fields, and the mirror passes.
+ * Say so instead, the way `entries` says so rather than returning a short list.
+ */
 export function balanced(text, from, open, close) {
+  if (text[from] !== open) {
+    throw new Error(`balanced: offset ${from} is ${JSON.stringify(text[from])}, not ${open}`);
+  }
   let depth = 0;
   for (let i = from; i < text.length; i++) {
     const ch = text[i];
@@ -205,9 +219,49 @@ export function topLevelKeys(body) {
  * about which quote closes the literal and hands back a truncated value.
  */
 export function topLevelField(body, name) {
+  let from = 0;
+  for (;;) {
+    const start = topLevelValueAt(body, name, from);
+    if (start === -1) return undefined;
+    const quote = body[start];
+    const end = quote === "'" || quote === '"' || quote === '`' ? quotedClose(body, start) : -1;
+    // A value that is not a closed string literal is not this key's value.
+    // Walking on rather than returning leaves the read where it was: the key is
+    // only found where it is spelled the way the table spells it.
+    if (end === -1) {
+      from = start;
+      continue;
+    }
+    const inner = body.slice(start + 1, end - 1);
+    // A template literal with a hole in it has no value to read here, and
+    // guessing one would be worse than the undefined a half-written entry
+    // already returns. An escaped `${` is not a hole — it is two of the
+    // characters the pattern is spelled with, and dropping the entry over it is
+    // the same false alarm in the other direction.
+    if (quote === '`' && hasHole(inner)) return undefined;
+    return unescaped(inner);
+  }
+}
+
+/**
+ * Where one key's value begins, at the body's own depth only, or -1.
+ *
+ * The offset rather than the value, because not every value is a quoted string:
+ * a `query: [...]` list and a `body: object({...})` call are read by walking
+ * from here with {@link balanced}, and they need the same depth discipline
+ * {@link topLevelField} needs. A plain `indexOf('query: [')` takes the first
+ * occurrence at ANY depth, so an example or an options bag nested in a
+ * description supplies the list — and a parameter set read out of prose is
+ * compared against the mirror as if the platform had documented it.
+ *
+ * `from` is where the scan starts, which is how `topLevelField` walks past a
+ * key whose value it cannot read: the depth at any offset this returns is zero,
+ * so restarting there counts the same depths the first pass would have.
+ */
+export function topLevelValueAt(body, name, from = 0) {
   const at = new RegExp(`${escapeRegExp(name)}\\s*:\\s*`, 'y');
   let depth = 0;
-  let i = 0;
+  let i = from;
   while (i < body.length) {
     const ch = body[i];
     if (ch === '{' || ch === '[' || ch === '(') depth++;
@@ -223,28 +277,11 @@ export function topLevelField(body, name) {
     // sticky match started inside a longer word would read it as one.
     if (depth === 0 && !/[\w$]/.test(body[i - 1] ?? '')) {
       at.lastIndex = i;
-      if (at.exec(body)) {
-        const start = at.lastIndex;
-        const quote = body[start];
-        const end = quote === "'" || quote === '"' || quote === '`' ? quotedClose(body, start) : -1;
-        // A value that is not a closed string literal is not this key's value.
-        // Walking on rather than returning leaves the read where it was: the
-        // key is only found where it is spelled the way the table spells it.
-        if (end !== -1) {
-          const inner = body.slice(start + 1, end - 1);
-          // A template literal with a hole in it has no value to read here, and
-          // guessing one would be worse than the undefined a half-written entry
-          // already returns. An escaped `${` is not a hole — it is two of the
-          // characters the pattern is spelled with, and dropping the entry over
-          // it is the same false alarm in the other direction.
-          if (quote === '`' && hasHole(inner)) return undefined;
-          return unescaped(inner);
-        }
-      }
+      if (at.exec(body)) return at.lastIndex;
     }
     i++;
   }
-  return undefined;
+  return -1;
 }
 
 /**
