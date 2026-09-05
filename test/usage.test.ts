@@ -87,12 +87,21 @@ describe('get_usage', () => {
     const res = await call('get_usage', {});
     await close();
 
-    const head = textOf(res).split('\n\n')[0];
+    // Selected by its own content, not by paragraph index: when `degraded` or
+    // `unmetered` is set, usageLine puts a TOO LOW warning first, and splitting
+    // on the blank line would hand back the warning and pass every assertion
+    // below without ever looking at the figures.
+    const head = textOf(res)
+      .split('\n\n')
+      .find((p) => p.includes('vCPU-hours')) as string;
+    expect(head).toBeTruthy();
     expect(head).not.toContain('GB-hours of disk');
     expect(head).not.toContain('GB-hours of snapshots');
     // 96 and 480 are snapshot_gb_hours and disk_gb_hours in the fixture.
-    expect(head).not.toContain('96');
-    expect(head).not.toContain('480');
+    // Anchored on the figure, so an unrelated number containing 96 or 480
+    // somewhere in a timestamp cannot fail this.
+    expect(head).not.toMatch(/\b96\b/);
+    expect(head).not.toMatch(/\b480\b/);
   });
 
   it('prints a metered zero rather than dropping the clause', async () => {

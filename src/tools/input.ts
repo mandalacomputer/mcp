@@ -327,6 +327,14 @@ export const registerInput: Registrar = (server, session) => {
       // call without asking, so the annotation is what decides whether anyone is
       // asked before a read starts a machine. `screenshot` above keeps its hint
       // because it is a GET and does no such thing.
+      //
+      // `destructiveHint: false` rather than no annotations at all: the spec
+      // defaults that flag to TRUE once readOnlyHint is false, so dropping the
+      // object outright would trade an under-warning for an over-warning — a
+      // host asking whether it may perform destructive updates, in order to
+      // read a pointer coordinate. `create_computer` sets it for the same
+      // reason.
+      annotations: { destructiveHint: false },
     },
     ({ computer_id }, extra) =>
       guarded(async () =>

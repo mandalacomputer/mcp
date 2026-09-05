@@ -536,7 +536,7 @@ export const registerGuest: Registrar = (server, session) => {
     {
       title: 'Get a file out of the guest',
       description:
-        'Read a file from inside the computer. Text comes back as text and images come back as images; anything else comes back base64. A large file comes back a window at a time rather than filling the conversation: `offset` says where the window starts, and the note under a truncated read gives the exact offset to pass next. There is no size a file can be that makes it unreadable this way — a 2 GB log is pages, not a refusal — but a file you want whole is still better pushed out of the guest than carried through a conversation, and the note says how.',
+        'Read a file from inside the computer. Text comes back as text and images come back as images; anything else comes back base64. A large file comes back a window at a time rather than filling the conversation: `offset` says where the window starts, and the note under a truncated read gives the exact offset to pass next. There is no size a file can be that makes it unreadable this way — a 2 GB log is pages, not a refusal — but a file you want whole is still better pushed out of the guest than carried through a conversation, and the note says how. This reaches the guest agent to do it, so a suspended computer is resumed to answer and that resume is charged — it can even come back 402. read_clipboard, by contrast, refuses a suspended computer rather than starting it.',
       inputSchema: {
         ...idArg,
         path: absolutePath('path'),
@@ -550,7 +550,14 @@ export const registerGuest: Registrar = (server, session) => {
             'Byte offset to start at. 0 is the beginning of the file. Each call returns a window from here, and the truncation note names the offset of the byte after the last one it returned — pass that to read on. Never assume a window covers what you asked for: read the offset out of the note rather than adding a fixed number.',
           ),
       },
-      annotations: { readOnlyHint: true },
+      // Not readOnlyHint, for the reason cursor_position is not: the platform
+      // marks `GET computers/:id/files` as spending, because reaching the guest
+      // agent resumes a suspended computer and a resume is charged — its own
+      // note says even reading a file out of an idle machine can come back 402.
+      // `destructiveHint: false` because it genuinely destroys nothing: once
+      // readOnlyHint is false the spec's default for that flag is true, and a
+      // host that warns on it would warn about reading a log.
+      annotations: { destructiveHint: false },
     },
     ({ computer_id, path, offset }, extra) =>
       guarded(async () => {

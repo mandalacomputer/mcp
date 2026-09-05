@@ -4460,12 +4460,29 @@ describe('tools that only read, but reach the computer to do it', () => {
     const { client, close } = await connect();
     try {
       const { tools } = await client.listTools();
-      const cursor = tools.find((t) => t.name === 'cursor_position');
-      expect(cursor).toBeDefined();
-      expect(cursor?.annotations?.readOnlyHint).toBeFalsy();
-      // screenshot keeps its hint, because it is a GET and starts nothing. The
-      // claim is about what the route does, not about input tools as a class.
-      expect(tools.find((t) => t.name === 'screenshot')?.annotations?.readOnlyHint).toBe(true);
+      // Every tool whose route the platform marks `spends: true`. Both reach
+      // the guest agent, and reaching it resumes a suspended computer — the
+      // apidoc note on the files routes says such a read can even come back
+      // 402. read_file was missed on the first pass, which is what an invariant
+      // announced in one file and violated in the next looks like.
+      for (const name of ['cursor_position', 'read_file']) {
+        const tool = tools.find((t) => t.name === name);
+        expect(tool, name).toBeDefined();
+        expect(tool?.annotations?.readOnlyHint, name).toBeFalsy();
+        // Not read-only, but not destructive either: the spec defaults
+        // destructiveHint to TRUE once readOnlyHint is false, and a host that
+        // warns on it would be asking about destructive updates in order to
+        // read a log or a pointer coordinate.
+        expect(tool?.annotations?.destructiveHint, name).toBe(false);
+        // The description carries it too, for a caller that reads tools/list
+        // text and never looks at annotations.
+        expect(tool?.description, name).toMatch(/resum/i);
+      }
+      // The ones whose routes do NOT spend keep their hint. The claim is about
+      // what the route does, not about reads as a class.
+      for (const name of ['screenshot', 'read_clipboard', 'list_windows']) {
+        expect(tools.find((t) => t.name === name)?.annotations?.readOnlyHint, name).toBe(true);
+      }
     } finally {
       await close();
       platform.restore();
