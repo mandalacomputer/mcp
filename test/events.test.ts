@@ -2,7 +2,7 @@ import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { Api } from '../src/api.js';
 import { EventHub } from '../src/events.js';
-import { BASE, connect, fakeEvents, installFakePlatform } from './harness.js';
+import { BASE, connect, FakeSocket, fakeEvents, HELLO, installFakePlatform } from './harness.js';
 
 /**
  * What a long-lived subscription means to a model (OPL-3926).
@@ -795,6 +795,127 @@ describe('the socket underneath', () => {
     // an HTTP transport whose client went away leaves one websocket per
     // computer open and reconnecting for as long as the process lives.
     await until('the socket to be closed', () => ev.last().closed);
+  });
+
+  it('will not let a stale handle drop the stream that replaced it', async () => {
+    // Two calls on one computer overlap by design here — a wait parked while a
+    // poll runs — and each holds its own handle. The first finds its stream
+    // stopped, drains it and drops it; the model's next call opens a fresh,
+    // healthy one; the second wakes with the handle the first already dropped
+    // and drops again. Looked up by id, that second drop closed a stream
+    // nothing was wrong with, out from under whoever had just opened it.
+    const ev = fakeEvents({ ready: false });
+    const hub = new EventHub(new Api('com_test', BASE), ev.factory);
+    try {
+      const stale = hub.open('vm-1');
+      await until('the first connection', () => ev.sockets.length === 1);
+      hub.drop('vm-1', 'the stream stopped', true, stale);
+
+      const fresh = hub.open('vm-1');
+      await until('the second connection', () => ev.sockets.length === 2);
+      hub.drop('vm-1', 'the stream stopped', true, stale);
+
+      expect(fresh.state.status).not.toBe('stopped');
+      expect(hub.open('vm-1')).toBe(fresh);
+    } finally {
+      hub.closeAll();
+    }
+  });
+
+  it('answers a through read another call emptied with the caller’s own place', async () => {
+    // The cursor is documented as where the caller is, and with nothing
+    // delivered it was read off the socket instead — after the last event
+    // RECEIVED. The two are the same on an ordinary empty poll, which is why
+    // this went unnoticed; they part on a `through` read, where a wait resolves
+    // on an event that a concurrent call takes before the wait can read up to
+    // it. The answer then carried more_waiting beside a cursor that, passed
+    // back as `since`, resolves past exactly those events.
+    const ev = fakeEvents({ ready: false });
+    const hub = new EventHub(new Api('com_test', BASE), ev.factory);
+    try {
+      const sub = hub.open('vm-1');
+      await until('the first connection', () => ev.sockets.length === 1);
+      ev.last().send(frame('window.opened', { id: '0x1' }, 'cur-1'));
+      // The other call on this computer, taking the event the wait matched.
+      expect(sub.read({ limit: 100 }).events).toHaveLength(1);
+      ev.last().send(frame('window.focused', { id: '0x1' }, 'cur-2'));
+      ev.last().send(frame('window.closed', { id: '0x1' }, 'cur-3'));
+
+      const d = sub.read({ limit: 100, through: 0 });
+      expect(d.events).toHaveLength(0);
+      expect(d.more).toBe(2);
+      expect(d.cursor).toBe('cur-1');
+      // Which is the whole point: round-tripping it hands over the two the
+      // answer said were waiting, rather than resolving past them in silence.
+      expect(sub.read({ since: d.cursor, limit: 100 }).events.map((e) => e.cursor)).toEqual([
+        'cur-2',
+        'cur-3',
+      ]);
+    } finally {
+      hub.closeAll();
+    }
+  });
+
+  it('counts one buffered event in the singular', async () => {
+    const { call, close, ev } = await attach({ ready: false });
+    ev.last().send(frame('window.opened', { id: '0x1' }, 'cur-1'));
+    ev.last().send(frame('window.closed', { id: '0x1' }, 'cur-2'));
+    const res = await call('poll_events', { limit: 1 });
+    // This module pluralises meticulously three lines away, in `stopped()`.
+    expect(textOf(res)).toContain('1 more is buffered — call again for it.');
+    await close();
+  });
+
+  it('publishes the capability list a capabilities frame left, not the one hello opened with', async () => {
+    // `can_emit` is shown exactly once, on the first read, and is what stops a
+    // model waiting for something the machine cannot produce. A `capabilities`
+    // frame replaces what `hello` advertised — a guest that turns out to have
+    // no watcher withdraws the half `hello` promised — and one landing in the
+    // window before that first read published a vocabulary contradicting the
+    // one every refusal path in this server already acts on.
+    const sockets: FakeSocket[] = [];
+    const factory = (url: string) => {
+      const socket = new FakeSocket(url);
+      sockets.push(socket);
+      setTimeout(() => {
+        if (socket.closed) return;
+        socket.open();
+        socket.send({ ...HELLO, ready: false });
+        socket.greeted = true;
+        socket.send({ type: 'capabilities', events: ['file.changed', 'process.exited'] });
+      }, 0);
+      return socket;
+    };
+    const { call, close } = await connect({ webSocket: factory });
+    const res = await call('poll_events');
+    expect(dataOf(res).can_emit).toEqual(['file.changed', 'process.exited']);
+    await close();
+  });
+
+  it('names only the reconciliation keys the reconciliation actually produced', async () => {
+    // `reconcile` assigns each key on a fulfilled read and swallows the rest,
+    // so `{}` is a real return value — the windows read 409s while the guest is
+    // busy, the computer read fails. The loss sentence named both regardless,
+    // pointing a model at two keys that are not in the payload, on the one
+    // answer that is already admitting a hole.
+    const { call, close } = await attach({ ready: false });
+    const real = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify({ error: 'guest busy' }), {
+        status: 409,
+        headers: { 'Content-Type': 'application/json' },
+      })) as typeof fetch;
+    try {
+      const res = await call('poll_events', { since: 'cur-nowhere' });
+      const text = textOf(res);
+      expect(text).toContain('there is a hole in the history here');
+      expect(text).not.toContain('windows_now');
+      expect(text).not.toContain('computer_now');
+      expect(text).toContain('call list_windows and get_computer');
+    } finally {
+      globalThis.fetch = real;
+    }
+    await close();
   });
 });
 

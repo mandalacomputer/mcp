@@ -667,8 +667,7 @@ export class Subscription {
       // Already on the wire and not under suspicion, so there is nothing to
       // reopen for. A tree being retried is neither.
       if (!retrying && this.#sent.includes(path)) return {};
-      this.#renominate = true;
-      this.#socket?.close();
+      this.#reopen();
       this.#wakeAll();
       return {};
     }
@@ -695,13 +694,32 @@ export class Subscription {
         // which is what `nominates` is for.
       }
     }
-    // Closed rather than aborted: `#loop` is still running and its next turn
-    // reads `#watches` for the new connection. The flag is what keeps that turn
-    // from paying the reconnect floor for a reconnection this side chose.
-    this.#renominate = true;
-    this.#socket?.close();
+    this.#reopen();
     this.#wakeAll();
     return { evicted };
+  }
+
+  /**
+   * End the current connection so the next one carries the new watch set.
+   *
+   * Closed rather than aborted: `#loop` is still running and its next turn
+   * reads `#watches` for the new connection. `#renominate` is what keeps that
+   * turn from paying the reconnect floor for a reconnection this side chose.
+   *
+   * The flag is set ONLY when there is a socket to close, because that is what
+   * it claims: the connection now ending was ended by this side. Between
+   * connections there is none — `finish()` clears `#socket` the moment one
+   * ends, and the loop then spends a `GET /computers/:id` and a sleep before
+   * assigning the next — and a flag set in that window is consumed by the
+   * outcome of a connection this side did not cut short. That connection's
+   * failure to reach its opening frame is genuine evidence about the host, and
+   * swallowing it skips the backoff step, the `#blamed()` that would eventually
+   * shed the tree responsible, and the floor in front of the immediate retry.
+   */
+  #reopen(): void {
+    if (!this.#socket) return;
+    this.#renominate = true;
+    this.#socket.close();
   }
 
   /** Open the socket, if it is not already open. Returns at once. */
@@ -958,11 +976,36 @@ export class Subscription {
     });
   }
 
-  /** The cursor for a position, or the connection's own when nothing was read. */
+  /**
+   * The cursor for a position — WHERE THE CALLER IS, which is not always where
+   * the socket is.
+   *
+   * The last event handed over answers it whenever there was one. When there was
+   * not, the answer is still the model's own place and not `#resume`, which is
+   * after the last event this connection RECEIVED. The two are the same on an
+   * ordinary empty poll, and that is why the difference went unnoticed: no
+   * `through`, an empty window means the position has caught up with the ring.
+   *
+   * A `through` read is the case where they part. A wait resolves on an event
+   * and reads up to it, and by then another call on the same computer — which
+   * these tools are built to allow — may already have taken it: the window comes
+   * back empty while `more` is still positive. Answering `#resume` there hands
+   * back `more_waiting: N` beside a cursor that, passed in as `since`, resolves
+   * PAST those N events, with no loss to say they were skipped. So the position
+   * is read off the ring at `#delivered`, which is the one place that agrees
+   * with the `more` in the same answer.
+   */
   #position(last?: Buffered): string {
     const cursor = last?.event.cursor;
     if (typeof cursor === 'string' && cursor) return cursor;
-    return this.#resume ?? this.#hello?.cursor ?? '';
+    const at = this.#ring.find((b) => b.index === this.#delivered - 1)?.event.cursor;
+    if (typeof at === 'string' && at) return at;
+    // Nothing in the ring to place it by: either nothing has been delivered on
+    // this stream at all, or the event the position sits after has been evicted.
+    // The last cursor DELIVERED before `#resume`, for the reason
+    // {@link resumeCursor} gives — a position behind the truth is re-read, a
+    // position ahead of it is a hole nothing reports.
+    return this.#deliveredCursor ?? this.#resume ?? this.#hello?.cursor ?? '';
   }
 
   #wakeAll(): void {
@@ -1680,10 +1723,23 @@ export class EventHub {
    * resume — reaped for idleness, stopped on a computer somebody suspended —
    * and one there is nothing left to resume: a deleted computer's cursor names
    * a position in a stream that no longer exists.
+   *
+   * `expect` is the subscription the caller drained, and dropping BY IDENTITY
+   * rather than by id is what makes this safe under the concurrency these tools
+   * are designed for. Two calls on one computer overlap by design — a
+   * `wait_for_event` parked while a `poll_events` runs — and each holds its own
+   * handle. Without the check: A finds its stream stopped, drains it and drops
+   * it; the model's next call opens a fresh, healthy S2; B, still holding the
+   * stale S1, wakes, sees the status it recorded, drains an empty ring and
+   * drops — closing S2, a stream nothing was wrong with, out from under whoever
+   * had just opened it. Looked up by id, `drop` had no way to tell the two
+   * apart. A caller with no handle to name (the idle sweep passes the entry it
+   * is iterating) still drops whatever is there.
    */
-  drop(computerId: string, reason: string, remember = false): void {
+  drop(computerId: string, reason: string, remember = false, expect?: Subscription): void {
     const sub = this.#subs.get(computerId);
     if (!sub) return;
+    if (expect !== undefined && sub !== expect) return;
     const at = sub.resumeCursor;
     const watches = sub.nominations;
     sub.close(reason);
@@ -1721,7 +1777,7 @@ export class EventHub {
         // reason it stopped — suspended, deleted, Windows — is still there to
         // be reported once. The idle window is what eventually takes it.
         if (sub.idleMs < IDLE_REAP_MS) continue;
-        this.drop(id, 'nothing asked about this computer for five minutes', true);
+        this.drop(id, 'nothing asked about this computer for five minutes', true, sub);
       }
       if (!this.#subs.size) this.#stopSweep();
     }, SWEEP_MS);

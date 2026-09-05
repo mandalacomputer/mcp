@@ -1,7 +1,13 @@
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { webhookBody } from '../src/paths.js';
-import { connect, installFakePlatform, WEBHOOK, WEBHOOK_CREATED } from './harness.js';
+import {
+  connect,
+  installFakePlatform,
+  WEBHOOK,
+  WEBHOOK_CREATED,
+  WEBHOOK_DELIVERY,
+} from './harness.js';
 
 // OPL-4300 on the platform, OPL-4306 here: the webhooks CRUD, and nothing that
 // receives one. What is pinned is the part a model acts on — the first line of
@@ -76,7 +82,9 @@ describe('the webhooks CRUD', () => {
   it('describes a delivery listing by state and says what the newest one did', async () => {
     const { call, close } = await connect();
     const text = textOf(await call('list_webhook_deliveries', { webhook_id: WEBHOOK.id }));
-    expect(text).toContain('1 deliveries');
+    // Singular, deliberately: this assertion pinned "1 deliveries", which was
+    // incidental to a case about state counts and the newest one's outcome.
+    expect(text).toContain('1 delivery for');
     expect(text).toContain('1 delivered');
     expect(text).toMatch(/process\.exited event, accepted after 1 attempt/);
     await close();
@@ -168,6 +176,116 @@ describe('the webhooks CRUD', () => {
     expect(text).toContain('Nothing was deleted');
     expect(text).not.toMatch(/^Deleted/);
     expect(text).toContain('list_webhooks');
+  });
+
+  // The shape-checking pass computers.ts, snapshots.ts and templates.ts got and
+  // this module did not. A body this server could not read is not an empty
+  // account, and the sentence in front of the JSON is what a model acts on.
+  it('refuses a listing body that is not a list rather than calling the account empty', async () => {
+    const res = await over({ error: 'gateway said no' }, 200, 'list_webhooks', {});
+    expect(res.isError).toBe(true);
+    const text = textOf(res);
+    expect(text).toContain('not a list of subscriptions');
+    expect(text).toContain('This is not an empty account');
+    // The sentence that invites the action is the one that must not be said
+    // over an unreadable body: a model that reads it subscribes a second
+    // endpoint on an account that may already have ten.
+    expect(text).not.toContain('create_webhook makes one');
+  });
+
+  it('refuses a delivery body that is not a list rather than saying nothing was delivered', async () => {
+    const res = await over({ error: 'gateway said no' }, 200, 'list_webhook_deliveries', {
+      webhook_id: WEBHOOK.id,
+    });
+    expect(res.isError).toBe(true);
+    expect(textOf(res)).toContain('not a list of deliveries');
+    // "Either nothing it subscribes to has happened, or it was created too
+    // recently" is a positive claim about an endpoint never having been called.
+    expect(textOf(res)).not.toContain('Either nothing it subscribes to');
+  });
+
+  // The same pass, one object down. `json()` throws only for an empty body, so
+  // a gateway answering 200 with a string, a number or a list reaches these
+  // three intact, and `{}` reads as a subscription with every field absent.
+  it('refuses a single subscription body that is not a record rather than reporting its health', async () => {
+    const res = await over('OK', 200, 'get_webhook', { webhook_id: WEBHOOK.id });
+    expect(res.isError).toBe(true);
+    const text = textOf(res);
+    expect(text).toContain('not a subscription');
+    // The claim that must not be made from a body this server could not read:
+    // that the endpoint is fine and has simply never been called.
+    expect(text).not.toContain('nothing delivered yet');
+  });
+
+  it('does not report an update as landed over a body it could not read', async () => {
+    const res = await over([], 200, 'update_webhook', {
+      webhook_id: WEBHOOK.id,
+      description: 'renamed',
+    });
+    expect(res.isError).toBe(true);
+    const text = textOf(res);
+    expect(text).toContain('THE CHANGE MAY HAVE LANDED');
+    // Not "Updated wh_… → ?" — and a model must not send it again blind,
+    // because a second update overwrites whatever the first one did.
+    expect(text).not.toMatch(/^Updated /);
+    expect(text).toContain('get_webhook');
+    // The shape it names is the shape that arrived. "answered with object, not
+    // a subscription" is what a list used to read as, and an object is what a
+    // subscription IS — a contradiction in the sentence a model acts on.
+    expect(text).toContain('answered with a list');
+    expect(text).not.toContain('answered with object');
+  });
+
+  it('does not report a test delivery as queued over a body it could not read', async () => {
+    const res = await over(5, 200, 'test_webhook', { webhook_id: WEBHOOK.id });
+    expect(res.isError).toBe(true);
+    const text = textOf(res);
+    expect(text).toContain('IT MAY HAVE BEEN QUEUED');
+    expect(text).not.toContain('the endpoint has not been called yet');
+  });
+
+  it('drops malformed webhook rows and says how many, rather than failing the whole listing', async () => {
+    // `list.map((w) => w.id ?? '?')` dereferences before the `??`, so one null
+    // row threw a TypeError and `guarded` reported the listing as an opaque
+    // failure — the rows this server could read going with it.
+    const res = await over([WEBHOOK, null, 'bad projection'], 200, 'list_webhooks', {});
+    expect(res.isError, textOf(res)).toBeFalsy();
+    expect(textOf(res)).toMatch(/ignored 2 malformed webhook entries/);
+    expect(textOf(res)).toContain(WEBHOOK.id);
+  });
+
+  it('drops malformed delivery rows the same way', async () => {
+    const res = await over([WEBHOOK_DELIVERY, null], 200, 'list_webhook_deliveries', {
+      webhook_id: WEBHOOK.id,
+    });
+    expect(res.isError, textOf(res)).toBeFalsy();
+    expect(textOf(res)).toMatch(/ignored 1 malformed delivery entry/);
+    expect(textOf(res)).toContain('1 delivery for');
+  });
+
+  it('will not say a secret is in an answer that has no secret in it', async () => {
+    // The sharpest of the four, and the reason this pass is not cosmetic. The
+    // secret is minted once and never readable again, so "SHOWN ONCE" over a
+    // body holding none tells the caller to store something that is not there.
+    const res = await over({ ...WEBHOOK }, 201, 'create_webhook', {
+      url: 'https://ci.example.com/mandala',
+    });
+    expect(res.isError).toBe(true);
+    expect(textOf(res)).not.toMatch(/SHOWN ONCE/);
+    expect(textOf(res)).toContain('MAY HAVE BEEN CREATED');
+    expect(textOf(res)).toContain('list_webhooks');
+  });
+
+  it('says a rotate may have happened, and names the 24-hour clock, when no secret came back', async () => {
+    // The old secret is already on its clock when this answer is written, so a
+    // caller told to save a secret that is not in the payload finds out a day
+    // later, as deliveries start failing signature checks.
+    const res = await over([], 200, 'rotate_webhook_secret', { webhook_id: WEBHOOK.id });
+    expect(res.isError).toBe(true);
+    expect(textOf(res)).not.toMatch(/SHOWN ONCE/);
+    expect(textOf(res)).toContain('MAY HAVE HAPPENED');
+    expect(textOf(res)).toContain('24-hour clock');
+    expect(textOf(res)).toContain('get_webhook');
   });
 
   it('reaches every route without a computer selected', async () => {

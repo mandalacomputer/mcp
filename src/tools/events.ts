@@ -137,6 +137,38 @@ async function reconcile(
 }
 
 /**
+ * The sentence that points at the reconciliation — naming only the keys it
+ * actually produced.
+ *
+ * `reconcile` assigns each key on a fulfilled read and swallows the rest, so
+ * `{}` is a real return value: the windows read 409s while the guest is busy,
+ * the computer read fails, or the caller's own signal aborts both. Naming
+ * `windows_now` and `computer_now` regardless sends a model looking for two
+ * keys that are not in the payload — a wasted turn on the one answer that is
+ * already admitting a hole, and the tool that has to be believed about holes.
+ */
+function reconciled(extras: Record<string, unknown>): string {
+  const reads = [
+    { key: 'windows_now', tool: 'list_windows' },
+    { key: 'computer_now', tool: 'get_computer' },
+  ];
+  const here = reads.filter((r) => r.key in extras).map((r) => r.key);
+  const absent = reads.filter((r) => !(r.key in extras)).map((r) => r.tool);
+  if (!here.length) {
+    return (
+      ' See lost for what is known about it. Where the computer actually stands could NOT be read ' +
+      'just now, so it is not in this answer — call list_windows and get_computer for what the ' +
+      'missing events would have told you.'
+    );
+  }
+  return (
+    ` See lost for what is known about it, and ${here.join(' and ')} for where the computer ` +
+    `actually stands, which is what the missing events would have told you.` +
+    (absent.length ? ` The other half could not be read just now — call ${absent[0]} for it.` : '')
+  );
+}
+
+/**
  * Why a computer is missing part of the guest half, in words.
  *
  * "The guest half" is not one thing, which is what a client gets wrong here and
@@ -233,7 +265,12 @@ function name(ev: ComputerEvent): string {
 }
 
 /** The body these tools answer with, minus the keys there is nothing to say about. */
-function body(id: string, d: Delivery, watching?: Watched[]): Record<string, unknown> {
+function body(
+  id: string,
+  d: Delivery,
+  sub: Subscription,
+  watching?: Watched[],
+): Record<string, unknown> {
   const out: Record<string, unknown> = { computer: id, events: d.events, cursor: d.cursor };
   if (d.more) out.more_waiting = d.more;
   if (d.loss) out.lost = d.loss;
@@ -247,8 +284,15 @@ function body(id: string, d: Delivery, watching?: Watched[]): Record<string, unk
   // something this machine will never produce, and the opening frame is the one
   // place that answer exists — but repeating it on every poll would be a field
   // that means nothing on the ninety-ninth call.
+  //
+  // Read from the LIVE list rather than from the greeting that seeded it. A
+  // `capabilities` frame replaces what `hello` advertised and goes both ways —
+  // a guest that turns out to have no watcher withdraws the half `hello`
+  // promised — and one landing between the opening frame and this subscription's
+  // first read would otherwise publish, exactly once and never again, a
+  // vocabulary that contradicts the one every refusal path here already acts on.
   if (d.attached && d.hello) {
-    out.can_emit = d.hello.events;
+    out.can_emit = sub.eventTypes ?? d.hello.events;
     if (d.hello.windows) out.windows_on_attach = d.hello.windows;
   }
   return out;
@@ -298,7 +342,21 @@ function stopped(
   const d = sub.read(read);
   const n = d.events.length;
   const drained = !d.more;
-  if (drained) session.events.drop(id, reason, true);
+  // The sub this call drained, named, so the drop cannot take a replacement.
+  // Two calls on one computer overlap by design here, and a second one holding
+  // a handle this one has already dropped would otherwise close the fresh
+  // stream opened in between.
+  if (drained) session.events.drop(id, reason, true, sub);
+  // KNOWN GAP on the `!drained` side of that same overlap: if this call is the
+  // one holding the older handle, "call again for them" is a promise this
+  // server cannot keep. The next call resolves through `EventHub.open()`, which
+  // returns the subscription now in `#subs` — the replacement — and the events
+  // still in THIS one's ring are unreachable from that moment. Reaching it
+  // needs two calls overlapping on one computer with the older one parked
+  // mid-wait, which is why it has no test. Anything written here has to be
+  // narrower than "a fresh stream is running, there is nothing to fix": that
+  // sentence was tried, and it both dropped the disclosure above and reported a
+  // replacement that had itself stopped as healthy.
   const held = n
     ? `${n} event${n === 1 ? '' : 's'} had already arrived before it stopped and ${n === 1 ? 'is' : 'are'} ` +
       (drained
@@ -318,7 +376,7 @@ function stopped(
     // Without the watch set, deliberately. This stream has stopped, so a tree
     // it was carrying is a tree nothing is watching — and `watching` reports
     // `armed` from the last opening frame, which would read as live.
-    n || d.loss ? body(id, d) : undefined,
+    n || d.loss ? body(id, d, sub) : undefined,
   );
 }
 
@@ -623,7 +681,7 @@ export const registerEvents: Registrar = (server, session) => {
               // happened" as covering a type nothing was ever going to send.
               (unwatched() ? ` One thing was NOT being waited for: ${nominate()}` : '') +
               (d.loss ? ' Some events were lost before they could be read — see lost.' : ''),
-            { ...body(id, d, sub.watching), ...extras },
+            { ...body(id, d, sub, sub.watching), ...extras },
           );
         }
 
@@ -640,7 +698,7 @@ export const registerEvents: Registrar = (server, session) => {
             `Something happened on ${id} and another call on this computer was handed it before ` +
               `this one could read it — the events are in that call's answer, not below. Nothing ` +
               `is lost; look there, or call again for whatever comes next.`,
-            { ...body(id, d, sub.watching), ...extras },
+            { ...body(id, d, sub, sub.watching), ...extras },
           );
         }
         return said(
@@ -653,7 +711,7 @@ export const registerEvents: Registrar = (server, session) => {
                 'happened before there was anything here to hear it, and waiting for it would have ' +
                 'waited forever.'
               : ''),
-          { ...body(id, d, sub.watching), ...extras },
+          { ...body(id, d, sub, sub.watching), ...extras },
         );
       }),
   );
@@ -1042,7 +1100,7 @@ export const registerEvents: Registrar = (server, session) => {
             return stopped(session, id, now.reason, sub, { since, limit });
           const d = sub.read({ since, limit });
           const extras = d.loss ? await reconcile(session, id, extra.signal) : {};
-          const answer = { ...body(id, d, sub.watching), watch: wire, ...extras };
+          const answer = { ...body(id, d, sub, sub.watching), watch: wire, ...extras };
           // THESE FIRST, and in this order, because each would otherwise be
           // described as something else. Evicting a tree does not reset its arm
           // generation — that is kept monotonic on purpose — but it does take
@@ -1052,7 +1110,7 @@ export const registerEvents: Registrar = (server, session) => {
           // the set for a quite different reason, which is why the refusal is
           // asked about ahead of the membership.
           const why = settled(sub, id, root, wire, () => interrupted() + evicted, {
-            ...body(id, d, sub.watching),
+            ...body(id, d, sub, sub.watching),
             ...extras,
           });
           if (why) return why;
@@ -1146,7 +1204,7 @@ export const registerEvents: Registrar = (server, session) => {
               interrupted() +
               renamed +
               evicted,
-            { ...body(id, d, sub.watching), watch: wire, ...extras },
+            { ...body(id, d, sub, sub.watching), watch: wire, ...extras },
           );
         }
         // A `through` read can come back empty when another call on this
@@ -1162,7 +1220,7 @@ export const registerEvents: Registrar = (server, session) => {
               interrupted() +
               renamed +
               evicted,
-            { ...body(id, d, sub.watching), watch: wire, ...extras },
+            { ...body(id, d, sub, sub.watching), watch: wire, ...extras },
           );
         }
         return said(
@@ -1172,7 +1230,7 @@ export const registerEvents: Registrar = (server, session) => {
             interrupted() +
             renamed +
             evicted,
-          { ...body(id, d, sub.watching), watch: wire, ...extras },
+          { ...body(id, d, sub, sub.watching), watch: wire, ...extras },
         );
       }),
   );
@@ -1237,23 +1295,23 @@ export const registerEvents: Registrar = (server, session) => {
           if (d.loss) {
             return said(
               `Nothing new on ${id} that survived — there is a hole in the history here, and what ` +
-                `was in it is gone. See lost for what is known about it, and windows_now and ` +
-                `computer_now for where the computer actually stands, which is what the missing ` +
-                `events would have told you.`,
-              { ...body(id, d, sub.watching), ...extras },
+                `was in it is gone.${reconciled(extras)}`,
+              { ...body(id, d, sub, sub.watching), ...extras },
             );
           }
           return said(
             `Nothing new on ${id}. The stream is open and buffering, so this is an answer rather ` +
               `than a gap: nothing has been reported since you last read.`,
-            { ...body(id, d, sub.watching), ...extras },
+            { ...body(id, d, sub, sub.watching), ...extras },
           );
         }
         const kinds = [...new Set(d.events.map((e) => e.type))].join(', ');
         return said(
           `${d.events.length} event${d.events.length === 1 ? '' : 's'} on ${id}: ${kinds}.` +
-            (d.more ? ` ${d.more} more are buffered — call again for them.` : ''),
-          { ...body(id, d, sub.watching), ...extras },
+            (d.more
+              ? ` ${d.more} more ${d.more === 1 ? 'is' : 'are'} buffered — call again for ${d.more === 1 ? 'it' : 'them'}.`
+              : ''),
+          { ...body(id, d, sub, sub.watching), ...extras },
         );
       }),
   );

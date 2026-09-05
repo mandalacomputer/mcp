@@ -4097,6 +4097,30 @@ describe('a done frame that is not a result', () => {
       globalThis.fetch = real;
     }
   });
+
+  it('does not hand back a result that is not a string as [object Object]', async () => {
+    // The file type-checks `done.stop` three lines earlier and put `done.text`
+    // through a bare `String()`. A content-block array — a plausible shape for
+    // an agent result — then rendered the run's whole output as
+    // `[object Object]`, in the sentence that carries it.
+    const real = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      new Response(
+        'event: done\ndata: {"stop":"end_turn","text":[{"type":"text","text":"Done"}]}\n\n',
+        { headers: { 'Content-Type': 'text/event-stream' } },
+      )) as typeof fetch;
+    try {
+      const { call, close } = await connect({ modelKey: 'sk-test' });
+      const res = await call('run_agent', { prompt: 'finish' });
+      expect(res.isError).toBeFalsy();
+      expect(said(res)).not.toMatch(/\[object Object\]/);
+      // Unfamiliar but readable beats confident and empty.
+      expect(said(res)).toContain('"Done"');
+      await close();
+    } finally {
+      globalThis.fetch = real;
+    }
+  });
 });
 
 describe('a Host allowlist written as an IPv6 address', () => {
@@ -4333,6 +4357,23 @@ describe('text typed at the keyboard', () => {
 
   it('still types a whole astral character', () => {
     expect(P.typeBody('a 😀 b')).toEqual({ action: 'type', text: 'a 😀 b' });
+  });
+
+  it('counts an astral character once rather than twice', async () => {
+    // `.length` is UTF-16 code units, so an emoji was announced as two
+    // characters typed — a number nothing acts on but a model may repeat to
+    // whoever asked. The neighbours here already count in units that mean
+    // something: hasUnpairedSurrogate in code points, clipboardBody in bytes.
+    const platform = installFakePlatform();
+    const { call, close } = await connect();
+    try {
+      const res = await call('type_text', { text: 'ok 👍' });
+      expect(res.isError).toBeFalsy();
+      expect(said(res)).toContain('Typed 4 character(s)');
+    } finally {
+      await close();
+      platform.restore();
+    }
   });
 });
 

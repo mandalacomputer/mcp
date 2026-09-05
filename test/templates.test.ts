@@ -849,6 +849,88 @@ describe('what the codex adversarial review found', () => {
   });
 
   /**
+   * A DELETE answering 204 is the ordinary REST shape and `json` raises on an
+   * empty body, so the handler's own refusal never ran and the model got a
+   * transport error instead — about the one call in this file that cannot be
+   * undone, and one whose refusal exists to say "do not repeat this".
+   */
+  it('does not report a 204 on the retire as a failed request', async () => {
+    const real = globalThis.fetch;
+    globalThis.fetch = (async () => new Response(null, { status: 204 })) as typeof fetch;
+    const { call, close } = await connect();
+    const res = await call('retire_template', {
+      namespace: 'acc-1',
+      name: 'devbox',
+      confirm: true,
+    });
+    globalThis.fetch = real;
+
+    expect(res.isError).toBe(true);
+    expect(textOf(res)).toMatch(/MAY HAVE HAPPENED/);
+    expect(textOf(res)).not.toMatch(/where a JSON value was expected/);
+    await close();
+  });
+
+  /**
+   * The lists were checked for being lists and their ELEMENTS for nothing, so a
+   * row that is an object enumerated the versions that went as `[object
+   * Object]` — in the clause a caller most needs after a call it cannot repeat.
+   */
+  it('does not enumerate an unreadable version identifier as [object Object]', async () => {
+    const real = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      answer({
+        retired: ['acc-1/devbox@1.0.0', { ref: 'acc-1/devbox@1.1.0' }],
+        versions: [],
+      })) as typeof fetch;
+    const { call, close } = await connect();
+    const res = await call('retire_template', {
+      namespace: 'acc-1',
+      name: 'devbox',
+      confirm: true,
+    });
+    globalThis.fetch = real;
+
+    expect(res.isError).toBeFalsy();
+    expect(textOf(res)).not.toMatch(/\[object Object\]/);
+    // The count is off what ARRIVED: two versions went whether or not this
+    // server could read both names.
+    expect(textOf(res)).toMatch(/Retired 2 version/);
+    expect(textOf(res)).toMatch(/1 version identifier the platform sent was not readable/);
+    await close();
+  });
+
+  it('counts the surviving versions the same way it counts the retired ones', async () => {
+    // The survivors clause enumerated the readable ones and agreed its verb
+    // with the full count, so an unreadable survivor gave "1.1.0 are still
+    // published under this name" — ungrammatical, and naming one version where
+    // two survive, in the half of the sentence about what the DELETE did NOT
+    // take.
+    const real = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      answer({
+        retired: ['acc-1/devbox@1.0.0'],
+        versions: ['acc-1/devbox@1.1.0', { ref: 'acc-1/devbox@1.2.0' }],
+      })) as typeof fetch;
+    const { call, close } = await connect();
+    const res = await call('retire_template', {
+      namespace: 'acc-1',
+      name: 'devbox',
+      confirm: true,
+    });
+    globalThis.fetch = real;
+
+    expect(res.isError).toBeFalsy();
+    const text = textOf(res);
+    expect(text).not.toMatch(/\[object Object\]/);
+    // Two survive, one of them unnameable — so the count says two, the
+    // enumeration names the one it could read, and the verb agrees with two.
+    expect(text).toMatch(/acc-1\/devbox@1\.1\.0 and 1 more are still published/);
+    expect(text).not.toMatch(/acc-1\/devbox@1\.1\.0 are still published/);
+    await close();
+  });
+
+  /**
    * The lists are the sentence that must not be wrong. The account counters
    * interpolated untyped became "undefined template(s)" in the prose a model
    * reads first (adversarial review, OPL-4314).
