@@ -23,6 +23,7 @@ export {
   PlanLimitError,
   RangeNotSatisfiableError,
   RateLimitError,
+  RedirectError,
   UnavailableError,
 } from './errors.js';
 export { type HttpConfig, runHttp } from './http.js';

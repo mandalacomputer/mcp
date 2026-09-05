@@ -230,6 +230,15 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
   // Which status a request ends at is unchanged as long as it stays under the
   // limit, because the body is still parsed: a non-initialize with no session
   // is still a 400, not a 401 about the key it also did not send.
+  //
+  // A body with NO usable Content-Length — a chunked upload, or a malformed
+  // header — is a third case, and the one the accounting used to get wrong. It
+  // was classed "may be large" and charged a slot on arrival, so a chunked call
+  // carrying a few hundred bytes held one for its whole tool lifetime and four
+  // of them 503'd every real write_file, on the strength of a missing header.
+  // It is metered instead: no slot while the body is small, one taken the
+  // moment the bytes prove otherwise. The cost is that its refusal arrives
+  // mid-upload rather than before the read; see `parseBody`.
   // 96mb rather than 80: the limit exists for write_file, and it could not
   // carry one. The platform caps a transfer at 64 MiB, base64 is four bytes for
   // every three, and the JSON-RPC envelope is on top of that — 89,478,488
@@ -239,39 +248,37 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
   // is not a number anybody would have found except by hitting it.
   const fullBody = express.json({ limit: '96mb' });
   const smallBody = express.json({ limit: '256kb' });
-  const parseBody = (req: Request, res: Response, next: express.NextFunction) => {
-    if (!wouldUseLargeParser(req, sessions)) return smallBody(req, res, next);
-    if (largeBodyParses >= maxLargeBodyParses) {
-      // Drain before answering so unread request bytes cannot be mistaken for
-      // the next request on a keep-alive connection. A peer that aborts the
-      // upload gets a closed response rather than a misleading reusable one.
-      const cleanup = () => {
-        req.off('end', drained);
-        req.off('aborted', failed);
-        req.off('error', failed);
-      };
-      const drained = () => {
-        cleanup();
-        if (!res.destroyed && !res.headersSent) {
-          unavailable(
-            res,
-            `This server is already parsing its maximum of ${maxLargeBodyParses} large request bodies. Retry shortly.`,
-          );
-        }
-      };
-      const failed = () => {
-        cleanup();
-        res.destroy();
-      };
-      if (req.readableEnded) drained();
-      else {
-        req.once('end', drained);
-        req.once('aborted', failed);
-        req.once('error', failed);
-        req.resume();
-      }
-      return;
+  const noSlotMessage = `This server is already parsing its maximum of ${maxLargeBodyParses} large request bodies. Retry shortly.`;
+
+  /** Refuse a request that has not started arriving yet, draining it first. */
+  const refuseBeforeRead = (req: Request, res: Response) => {
+    // Drain before answering so unread request bytes cannot be mistaken for
+    // the next request on a keep-alive connection. A peer that aborts the
+    // upload gets a closed response rather than a misleading reusable one.
+    const cleanup = () => {
+      req.off('end', drained);
+      req.off('aborted', failed);
+      req.off('error', failed);
+    };
+    const drained = () => {
+      cleanup();
+      if (!res.destroyed && !res.headersSent) unavailable(res, noSlotMessage);
+    };
+    const failed = () => {
+      cleanup();
+      res.destroy();
+    };
+    if (req.readableEnded) drained();
+    else {
+      req.once('end', drained);
+      req.once('aborted', failed);
+      req.once('error', failed);
+      req.resume();
     }
+  };
+
+  /** Take a slot. Callers must have checked there is one. */
+  const takeSlot = (): LargeBodyLease => {
     largeBodyParses++;
     let references = 1;
     const drop = () => {
@@ -279,7 +286,7 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
       references--;
       if (references === 0) largeBodyParses--;
     };
-    const lease: LargeBodyLease = {
+    return {
       retain: () => {
         if (references <= 0) return () => {};
         references++;
@@ -292,13 +299,74 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
       },
       release: drop,
     };
-    return fullBody(req, res, (err) => {
+  };
+
+  /** Run the 96mb parser under a lease, handing the lease to the route. */
+  const parseUnderLease = (
+    req: Request,
+    res: Response,
+    next: express.NextFunction,
+    lease: LargeBodyLease,
+  ) =>
+    fullBody(req, res, (err) => {
       // A failed parse never reaches the route that normally releases this
       // lease. A successful one keeps it for the route and tool lifetimes:
       // req.body is the large allocation being bounded, and express.json
       // finishing does not free it while asynchronous MCP work still uses it.
       if (err) lease.release();
       else res.locals.largeBodyLease = lease;
+      next(err);
+    });
+
+  const parseBody = (req: Request, res: Response, next: express.NextFunction) => {
+    if (!wouldUseLargeParser(req, sessions)) return smallBody(req, res, next);
+
+    // A DECLARED large body is known to be large before a byte arrives, so its
+    // slot is taken up front and a refusal costs nothing.
+    if (declaredLength(req) !== undefined) {
+      if (largeBodyParses >= maxLargeBodyParses) return refuseBeforeRead(req, res);
+      return parseUnderLease(req, res, next, takeSlot());
+    }
+
+    // An UNDECLARED length is not evidence of anything, and treating it as
+    // "may be large" is what made a chunked call the size of a mouse click hold
+    // one of four process-wide slots for a whole tool lifetime. Four of those
+    // and every genuine write_file 503s, on the strength of a missing header.
+    //
+    // So this path is metered instead: it holds no slot at all while the body
+    // is small, and takes one at the moment the bytes prove it is not. The
+    // guard exists to bound concurrent memory, and BYTES are what occupy
+    // memory — a header is only ever a claim about them.
+    //
+    // The counter is attached before `fullBody` reads, and both happen in this
+    // one synchronous block: a `data` listener does not consume chunks — every
+    // listener sees each one — and body-parser attaches its own reader
+    // synchronously, before the stream can deliver anything.
+    let seen = 0;
+    let lease: LargeBodyLease | undefined;
+    let refused = false;
+    req.on('data', (chunk: Buffer | string) => {
+      if (refused || lease) return;
+      seen += typeof chunk === 'string' ? Buffer.byteLength(chunk) : chunk.length;
+      if (seen <= SMALL_BODY_BYTES) return;
+      if (largeBodyParses < maxLargeBodyParses) {
+        lease = takeSlot();
+        return;
+      }
+      // Refused with the upload in flight, which is the one cost of metering.
+      // The connection goes rather than being drained: the remaining bytes are
+      // exactly the bandwidth this limit exists to not spend, and a socket that
+      // is closed cannot leave a half-read body looking like the next request.
+      refused = true;
+      if (!res.destroyed && !res.headersSent) unavailable(res, noSlotMessage);
+      res.destroy();
+      req.destroy();
+    });
+
+    return fullBody(req, res, (err) => {
+      if (refused) return;
+      if (err) lease?.release();
+      else if (lease) res.locals.largeBodyLease = lease;
       next(err);
     });
   };
@@ -819,10 +887,23 @@ function wouldUseLargeParser(req: Request, sessions: Map<string, Live>): boolean
   const live = id ? sessions.get(id) : undefined;
   const key = bearer(req);
   const verified = Boolean(live && key && sameKey(live.keyDigest, key));
-  const rawLength = req.header('content-length');
-  const mayBeLarge =
-    rawLength === undefined || !/^\d+$/.test(rawLength) || Number(rawLength) > SMALL_BODY_BYTES;
+  const declared = declaredLength(req);
+  const mayBeLarge = declared === undefined || declared > SMALL_BODY_BYTES;
   return verified && mayBeLarge;
+}
+
+/**
+ * The body's length as the request DECLARED it, or `undefined` for a request
+ * that did not declare one this server can use.
+ *
+ * A chunked upload sends no `Content-Length` at all, and a malformed one is
+ * worth no more than an absent one — so both answer `undefined`, and the
+ * distinction that matters downstream is "the size is known" against "it is
+ * not", never the raw header text.
+ */
+function declaredLength(req: Request): number | undefined {
+  const raw = req.header('content-length');
+  return raw !== undefined && /^\d+$/.test(raw) ? Number(raw) : undefined;
 }
 
 function tooLargeMessage(req: Request, sessions: Map<string, Live>): string {

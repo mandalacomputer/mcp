@@ -8,6 +8,7 @@ import {
   MandalaError,
   RangeNotSatisfiableError,
   RateLimitError,
+  RedirectError,
 } from './errors.js';
 
 export const DEFAULT_BASE_URL = 'https://app.mandala.computer/api/v1';
@@ -281,6 +282,13 @@ export class Api {
         headers,
         body,
         signal,
+        // Answered, not followed. `isTransientForPoll` has always documented
+        // this client as one that does not follow redirects — the `>= 500` rule
+        // is argued from it — and the default `'follow'` quietly made that
+        // false: up to twenty hops, with the bearer still attached on the
+        // same-origin ones, and an operator whose MANDALA_BASE_URL is wrong
+        // never finding out. See {@link RedirectError}.
+        redirect: 'manual',
         dispatcher: PLATFORM_DISPATCHER,
       };
       resp = await platformFetch()(this.#url(path, opts.query), init);
@@ -313,6 +321,21 @@ export class Api {
         `${method} /${path.replace(/^\/+/, '')} to ${this.#base.origin} failed after the request ` +
           `was sent: ${detail}. It may have been received, so treat anything it would have ` +
           'changed as unknown rather than undone.',
+      );
+    }
+    // Before the general mapping, because a 3xx carries no error body to read
+    // and its one useful field is a HEADER. Left to `#error` it would arrive as
+    // a bare `HTTP 301`, which says nothing about the value that has to change.
+    if (resp.status >= 300 && resp.status < 400) {
+      const to = resp.headers.get('location');
+      throw new RedirectError(
+        `${method} /${path.replace(/^\/+/, '')} was redirected (HTTP ${resp.status}${
+          to ? ` to ${to}` : ', with no Location header'
+        }). This client does not follow redirects, because a redirect says the ` +
+          `address it was given is not the address in use — set MANDALA_BASE_URL to ` +
+          `${to ? 'that URL' : 'the URL the platform actually serves'} rather than relying on ` +
+          `a hop on every request. Retrying this unchanged gets the same answer.`,
+        resp.status,
       );
     }
     if (!resp.ok) throw await this.#error(resp, method, path, signal);

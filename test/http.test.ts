@@ -825,6 +825,119 @@ describe('concurrent large request bodies', () => {
   }, 10_000);
 });
 
+describe('a body that declared no length', () => {
+  let server: Server;
+  let url: string;
+  let platform: ReturnType<typeof installFakePlatform>;
+
+  beforeAll(async () => {
+    platform = installFakePlatform();
+    // One slot, so "took a slot" and "did not" are the difference between a
+    // second request being served and being refused.
+    server = await runHttp({ port: 0, host: '127.0.0.1', baseUrl: BASE, maxLargeBodyParses: 1 });
+    url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  });
+
+  afterAll(async () => {
+    platform.restore();
+    await new Promise<void>((r) => server.close(() => r()));
+  });
+
+  /** A chunked POST: no Content-Length, written in two pieces. */
+  const chunked = (sessionId: string, body: string) => {
+    const target = new URL(url);
+    const req = httpRequest({
+      hostname: target.hostname,
+      port: target.port,
+      path: '/mcp',
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'application/json, text/event-stream',
+        Authorization: 'Bearer not-a-platform-key',
+        'mcp-session-id': sessionId,
+      },
+    });
+    const done = new Promise<number>((resolve, reject) => {
+      req.on('response', (res) => {
+        res.resume();
+        res.on('end', () => resolve(res.statusCode ?? 0));
+      });
+      req.on('error', reject);
+    });
+    return { req, done, body };
+  };
+
+  const openSession = async () => {
+    const opened = await fetch(`${url}/mcp`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'application/json, text/event-stream',
+        Authorization: 'Bearer not-a-platform-key',
+      },
+      body: JSON.stringify(INIT),
+    });
+    const id = opened.headers.get('mcp-session-id') as string;
+    await opened.text();
+    return id;
+  };
+
+  const parsesNow = async () =>
+    ((await (await fetch(`${url}/healthz`)).json()) as { largeBodyParses: number }).largeBodyParses;
+
+  it('does not charge a slot for a small one, however many are in flight', async () => {
+    // A missing Content-Length was read as "may be large", so a chunked call the
+    // size of a mouse click held one of the process's slots for its whole tool
+    // lifetime. With one slot configured, two such calls used to mean a 503 for
+    // the second — on the strength of an absent header, not of any bytes.
+    const sessionId = await openSession();
+    const small = JSON.stringify({ jsonrpc: '2.0', id: 21, method: 'tools/list' });
+
+    const a = chunked(sessionId, small);
+    const b = chunked(sessionId, small);
+    a.req.write(small.slice(0, 10));
+    b.req.write(small.slice(0, 10));
+    await new Promise((r) => setTimeout(r, 50));
+    // Neither has taken one, with both mid-flight.
+    expect(await parsesNow()).toBe(0);
+
+    a.req.end(small.slice(10));
+    b.req.end(small.slice(10));
+    expect(await a.done).not.toBe(503);
+    expect(await b.done).not.toBe(503);
+    expect(await parsesNow()).toBe(0);
+  }, 10_000);
+
+  it('charges one the moment the bytes say it is large', async () => {
+    // The other half: metering has to actually engage, or the cap it replaced
+    // would be bounding nothing at all.
+    const sessionId = await openSession();
+    const big = JSON.stringify({
+      jsonrpc: '2.0',
+      id: 22,
+      method: 'tools/list',
+      pad: 'x'.repeat(400_000),
+    });
+    const a = chunked(sessionId, big);
+    // WHEN the slot is taken is the whole point, so both sides are asserted.
+    // Under the old rule it was taken on arrival, before a byte had been read;
+    // now the first 10 bytes buy nothing.
+    a.req.write(big.slice(0, 10));
+    await new Promise((r) => setTimeout(r, 50));
+    expect(await parsesNow()).toBe(0);
+
+    // Past SMALL_BODY_BYTES (256KB) and not finished, so the slot is held here.
+    a.req.write(big.slice(10, 300_000));
+    for (let i = 0; i < 100 && (await parsesNow()) === 0; i++) {
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    expect(await parsesNow()).toBe(1);
+    a.req.end(big.slice(300_000));
+    await a.done;
+  }, 10_000);
+});
+
 describe('an initialize still in flight', () => {
   it('cannot be swept during the gap after its session becomes visible', async () => {
     const original = StreamableHTTPServerTransport.prototype.handleRequest;

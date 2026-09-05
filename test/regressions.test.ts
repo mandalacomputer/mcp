@@ -45,6 +45,7 @@ import {
   platformSaid,
   RangeNotSatisfiableError,
   RateLimitError,
+  RedirectError,
   UnavailableError,
 } from '../src/errors.js';
 import { failed, MAX_INLINE_IMAGE_BYTES, unwrapComputer } from '../src/format.js';
@@ -4673,4 +4674,86 @@ describe('a stdio server whose client closed the pipe', () => {
       if (realOut) Object.defineProperty(process, 'stdout', realOut);
     }
   }, 20000);
+});
+
+describe('a platform address that answers with a redirect', () => {
+  it('reports it instead of following it, and names what to set instead', async () => {
+    // The default `redirect: 'follow'` made isTransientForPoll's docstring
+    // false: it argues its `>= 500` bound from "Api does not follow redirects",
+    // and under 'follow' a 3xx never reached the predicate at all. Following one
+    // also carries the bearer on a same-origin hop and leaves an operator whose
+    // MANDALA_BASE_URL is wrong paying an extra round trip on every request
+    // forever, with nothing ever saying so.
+    const real = globalThis.fetch;
+    let calls = 0;
+    globalThis.fetch = (async () => {
+      calls++;
+      return new Response(null, {
+        status: 301,
+        headers: { Location: 'https://app.mandala.computer/api/v1/computers' },
+      });
+    }) as typeof fetch;
+    try {
+      await expect(new Api('com_test', BASE).json('GET', 'computers')).rejects.toBeInstanceOf(
+        RedirectError,
+      );
+      // One request, not two: the hop was answered, not taken.
+      expect(calls).toBe(1);
+    } finally {
+      globalThis.fetch = real;
+    }
+  });
+
+  it('names the Location, because that is the value the operator has to set', async () => {
+    const real = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      new Response(null, {
+        status: 308,
+        headers: { Location: 'https://elsewhere.example/api/v1/' },
+      })) as typeof fetch;
+    try {
+      await new Api('com_test', BASE).json('GET', 'computers');
+      expect.unreachable('a 3xx should not resolve');
+    } catch (err) {
+      const said = (err as Error).message;
+      expect(said).toContain('https://elsewhere.example/api/v1/');
+      expect(said).toContain('MANDALA_BASE_URL');
+      // A bare `HTTP 308` is what the general mapping would have produced, and
+      // it names nothing the operator can act on.
+      expect(said).not.toMatch(/^HTTP 308$/);
+    } finally {
+      globalThis.fetch = real;
+    }
+  });
+
+  it('asks fetch not to follow one, which is what the stubs above cannot show', async () => {
+    // The two tests above stand a stub in globalThis.fetch, and a stub ignores
+    // `init.redirect` — so they pin what this client DOES with a 3xx, and not
+    // that it asked for one in the first place. Under the default 'follow' a
+    // 3xx never reaches this client at all and both would still pass. The
+    // option itself is the thing isTransientForPoll's docstring argues from, so
+    // it is asserted where it is actually set.
+    const real = globalThis.fetch;
+    let sent: RequestInit | undefined;
+    globalThis.fetch = ((_input: string | URL | Request, init?: RequestInit) => {
+      sent = init;
+      return Promise.resolve(
+        new Response('{}', { headers: { 'Content-Type': 'application/json' } }),
+      );
+    }) as typeof fetch;
+    try {
+      await new Api('com_test', BASE).json('GET', 'computers');
+      expect(sent?.redirect).toBe('manual');
+    } finally {
+      globalThis.fetch = real;
+    }
+  });
+
+  it('files a 3xx with the 4xx, so a poll gives up instead of spending its deadline', async () => {
+    // The paragraph in isTransientForPoll that this makes true. A redirect
+    // repeats identically forever, so polling one to a deadline ends in a
+    // give-up that names nothing about the redirect.
+    expect(isTransientForPoll(new RedirectError('redirected', 301))).toBe(false);
+    expect(isTransientForPoll(new RedirectError('redirected', 308))).toBe(false);
+  });
 });
