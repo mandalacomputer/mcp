@@ -839,6 +839,17 @@ describe('a Content-Disposition with a language tag', () => {
     // actually sends.
     expect(filenameFrom("attachment; filename*=UTF-8''hello%20world.txt")).toBe('hello world.txt');
   });
+
+  it('takes the name from a filename parameter, not from one that merely ends in it', () => {
+    // Unanchored, the pattern matched the tail of any longer parameter name, so
+    // a header carrying `x-filename=` — from a proxy, or an origin that is not
+    // the platform — supplied the name a download is written under.
+    expect(filenameFrom('inline; x-filename=q.txt')).toBeUndefined();
+    expect(filenameFrom('attachment; myfilename=b.txt')).toBeUndefined();
+    // The real parameter is still read when both are there, whichever is first.
+    expect(filenameFrom('attachment; x-filename=q.txt; filename="real.txt"')).toBe('real.txt');
+    expect(filenameFrom("inline; xfilename*=UTF-8''q.txt; filename=real.txt")).toBe('real.txt');
+  });
 });
 
 describe('a listing the platform answered with no body at all', () => {
@@ -999,6 +1010,19 @@ describe('flags that are a yes-or-no', () => {
   it('still lets a value flag take its value', () => {
     expect(parse(['--port', '3000'])).toEqual({ port: '3000' });
     expect(parse(['--key', 'com_a'])).toEqual({ key: 'com_a' });
+  });
+
+  it('takes an empty value token as the value it is', () => {
+    // A truthiness test skipped `""` rather than consuming it, so the flag was
+    // set to the boolean `true` and the empty token came round again as a stray
+    // argument: `--key ""` died with `unexpected argument .`, naming nothing the
+    // user could act on, while `--key=` is the empty value `str()` documents.
+    // Both spellings are the same flag and now answer the same.
+    expect(parse(['--key', ''])).toEqual({ key: '' });
+    expect(parse(['--key='])).toEqual({ key: '' });
+    // The leftover-token refusal a boolean flag depends on is untouched: those
+    // are handled a branch above this one.
+    expect(() => parse(['--http', 'false'])).toThrow(/unexpected argument false/);
   });
 
   it('answers the short forms every CLI is expected to answer', () => {
@@ -1426,6 +1450,29 @@ describe('wait failures that are worth another poll', () => {
       globalThis.fetch = real;
     }
   });
+
+  it.each(['0x10', '1e3'])(
+    'does not honour Retry-After: %s, which the header grammar does not spell',
+    async (header) => {
+      // delta-seconds is digits, and everything else is an HTTP-date. `Number()`
+      // took `1e3` for 1000 seconds, so three characters from a broken or
+      // hostile intermediary put a poll loop to sleep for sixteen minutes.
+      // Nothing readable means nothing: the loop keeps its own interval.
+      const real = globalThis.fetch;
+      globalThis.fetch = (async () =>
+        new Response('{"error":"slow down"}', {
+          status: 429,
+          headers: { 'Content-Type': 'application/json', 'Retry-After': header },
+        })) as typeof fetch;
+      try {
+        const err = await new Api('com_test', BASE).json('GET', 'computers').catch((e) => e);
+        expect(err).toBeInstanceOf(RateLimitError);
+        expect((err as RateLimitError).retryAfterMs).toBeUndefined();
+      } finally {
+        globalThis.fetch = real;
+      }
+    },
+  );
 
   it('does not poll through anything that is not a failed request', () => {
     // The floor a deny-list needs, and it is narrower than "our error": only an
@@ -4286,6 +4333,21 @@ describe('text typed at the keyboard', () => {
 
   it('still types a whole astral character', () => {
     expect(P.typeBody('a 😀 b')).toEqual({ action: 'type', text: 'a 😀 b' });
+  });
+});
+
+describe('an environment entry with half a character in it', () => {
+  it("is refused rather than run with U+FFFD where the caller's text was", () => {
+    // The fourth path a caller's own characters take into the guest, and the
+    // one nothing was checking: `env` is a bare record of strings on the tool,
+    // so a model emitting half of a truncated emoji reaches Go's encoding/json,
+    // which decodes the escaped lone unit to U+FFFD. The process then runs with
+    // an environment value that is not the one asked for, and the exec is
+    // reported as an ordinary success.
+    expect(() => P.execEnv({ TOKEN: 'abc\ud83d' })).toThrow(/unpaired surrogate/);
+    expect(() => P.execEnv({ '\udc00NAME': 'x' })).toThrow(/unpaired surrogate/);
+    // A whole character is text, not corruption, and still goes.
+    expect(P.execEnv({ GREETING: 'hi 😀' })).toEqual({ GREETING: 'hi 😀' });
   });
 });
 

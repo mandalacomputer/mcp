@@ -321,6 +321,29 @@ function rawPost(
   });
 }
 
+/** A GET with a Host header of our choosing, for the reason `rawPost` exists. */
+function rawGet(
+  port: number,
+  host: string,
+  path: string,
+): Promise<{ status: number; body: string }> {
+  return new Promise((resolve, reject) => {
+    const req = httpRequest(
+      { host: '127.0.0.1', port, path, method: 'GET', headers: { Host: host } },
+      (res) => {
+        let text = '';
+        res.setEncoding('utf8');
+        res.on('data', (c) => {
+          text += c;
+        });
+        res.on('end', () => resolve({ status: res.statusCode ?? 0, body: text }));
+      },
+    );
+    req.on('error', reject);
+    req.end();
+  });
+}
+
 describe('a page that resolved its own name to this server', () => {
   let server: Server;
   let port: number;
@@ -368,6 +391,41 @@ describe('a page that resolved its own name to this server', () => {
   it('still turns away a name it was never reachable at, whatever its casing', async () => {
     const res = await rawPost(port, 'EVIL.example', { Authorization: 'Bearer com_alice' }, INIT);
     expect(res.status).toBe(403);
+  });
+
+  it('is told which of its requests was refused, like every other refusal here', async () => {
+    // The rebinding 403 was the one refusal on this route that answered with a
+    // null id, so a client with several requests in flight could not tell which
+    // call it belonged to. `parseBody` has already run, so the id is there.
+    const res = await rawPost(
+      port,
+      'evil.example',
+      { Authorization: 'Bearer com_alice' },
+      { ...INIT, id: 7 },
+    );
+    expect(res.status).toBe(403);
+    expect((JSON.parse(res.body) as { id: unknown }).id).toBe(7);
+  });
+
+  it('is not told the occupancy counters by /healthz either', async () => {
+    // The counters are withheld from an exposed bind because they time an
+    // exhaustion. A loopback bind withheld nothing, on the reasoning that its
+    // only readers are on this machine — and a rebound name is precisely a
+    // reader that is not, reading a same-origin response from the browser.
+    const evil = JSON.parse((await rawGet(port, 'evil.example', '/healthz')).body) as Record<
+      string,
+      unknown
+    >;
+    expect(evil.ok).toBe(true);
+    expect(evil.sessions).toBeUndefined();
+    expect(evil.largeBodyParses).toBeUndefined();
+    // Still counted for a caller that reached the server by a name it answers.
+    const ours = JSON.parse((await rawGet(port, `127.0.0.1:${port}`, '/healthz')).body) as Record<
+      string,
+      unknown
+    >;
+    expect(ours.sessions).toBeTypeOf('number');
+    expect(ours.largeBodyParses).toBeTypeOf('number');
   });
 });
 

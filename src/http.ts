@@ -457,18 +457,31 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
   // whether all four parse slots are taken right now. Unauthenticated, on an
   // exposed bind, that is a capacity oracle handed over on request.
   //
-  // Kept where they are useful and cannot be read from outside: a loopback
-  // bind, where the only readers are on this machine, and an operator who has
-  // configured a Host allowlist, which is the deliberate act that says who may
-  // reach this server at all. Everywhere else the endpoint still answers, still
-  // says the server is alive, and simply does not count out loud.
+  // Kept where they are useful and the reader is one the operator meant: a
+  // loopback bind, or a configured Host allowlist, which is the deliberate act
+  // that says who may reach this server at all. Everywhere else the endpoint
+  // still answers, still says the server is alive, and simply does not count
+  // out loud.
+  //
+  // Neither of those is "the only readers are on this machine", and reasoning
+  // that a loopback bind means that is what left this route counting for
+  // anybody. A page on evil.example that has rebound its own name to 127.0.0.1
+  // reaches a loopback bind through the browser, which treats the request as
+  // same-origin — so the page reads the body of whatever comes back. That is
+  // the exact reader the Host/Origin check on POST /mcp exists to turn away,
+  // arriving one route to the left of it, which is why this route runs the same
+  // check and counts only for a caller that passes it. Liveness stays public: a
+  // rebinding page learns nothing from `{ok, name, version}` that the
+  // connection succeeding has not already told it.
   const countsArePrivate = isLoopbackHost(cfg.host) || Boolean(cfg.allowedHosts?.length);
-  app.get('/healthz', (_req, res) => {
+  app.get('/healthz', (req, res) => {
+    const counts =
+      countsArePrivate && !dnsRebindingRefusal(req, allowedHosts(boundPort), allowedOrigins);
     res.json({
       ok: true,
       name: SERVER_NAME,
       version: SERVER_VERSION,
-      ...(countsArePrivate ? { sessions: sessions.size, largeBodyParses } : {}),
+      ...(counts ? { sessions: sessions.size, largeBodyParses } : {}),
     });
   });
 
@@ -518,7 +531,7 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
     // operator never served (adversarial review, OPL-4314).
     const hosts = allowedHosts(boundPort);
     const refused = dnsRebindingRefusal(req, hosts, allowedOrigins);
-    if (refused) return rpcError(res, 403, -32000, refused);
+    if (refused) return rpcError(res, 403, -32000, refused, rpcId(req));
     // Swept sessions free their slot on the timer; this is the backstop for the
     // case the timer cannot help with, which is arrivals faster than the TTL.
     if (sessions.size + pending >= maxSessions) {

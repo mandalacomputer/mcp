@@ -325,6 +325,15 @@ export function execBody(args: {
  * assignment written into the name, which is the same mistake as writing the
  * assignment into the command line — so the refusal says the shape rather than
  * just the rule.
+ *
+ * The UNPAIRED SURROGATE is not one of the platform's rules and is not being
+ * mirrored from it. It is this server's own refusal to send text that silently
+ * becomes something else, the one {@link clipboardBody}, {@link typeBody} and
+ * `write_file` already make: `JSON.stringify` escapes the lone code unit, Go's
+ * `encoding/json` decodes it to U+FFFD, and the guest gets an environment value
+ * that is not the one the caller asked for while the call reports success. A
+ * model emitting half of a truncated emoji is the ordinary way in, and env is
+ * the fourth path a caller's own characters take into the guest.
  */
 export function execEnv(env?: Record<string, string>): Json | undefined {
   if (!env) return undefined;
@@ -342,9 +351,19 @@ export function execEnv(env?: Record<string, string>): Json | undefined {
     if (name.includes('\0') || value.includes('\0')) {
       throw new Error(`env entry ${name} must not contain a NUL`);
     }
+    if (hasUnpairedSurrogate(name) || hasUnpairedSurrogate(value)) {
+      throw new Error(`env entry ${name}: ${envSurrogateRefusal}`);
+    }
   }
   return Object.fromEntries(entries);
 }
+
+const envSurrogateRefusal =
+  'that name or value has an unpaired surrogate in it — half of a character, usually from a ' +
+  'string cut through the middle of an emoji. It is not valid UTF-8: it reaches the guest as a ' +
+  'replacement character, so the command would run with an environment that is not the one you ' +
+  'asked for and the call would report success. Nothing was run. Send the whole character, or ' +
+  'cut the text on a character boundary.';
 
 // --- input ----------------------------------------------------------------
 //
@@ -756,8 +775,17 @@ export function webhookBody(args: {
     );
   }
   const events = args.events === undefined ? undefined : [...new Set(args.events)];
-  const computers = args.computers === undefined ? undefined : [...new Set(args.computers)];
-  if (computers?.some((c) => !c.trim())) {
+  // Trimmed BEFORE the de-duplication, and the trimmed ids are what is sent.
+  // The tool's schema is a bare array of strings, so whatever a model writes
+  // arrives verbatim: `['vm-1', ' vm-1']` deduped to two entries naming one
+  // machine, both counted against the platform's cap, and the second of them a
+  // filter that matches no computer — a subscription that silently delivers
+  // nothing for a machine the caller asked for. `segment()` normalises an id on
+  // every other route for the same reason, and `session.ts`'s `id()` lists what
+  // it costs not to.
+  const computers =
+    args.computers === undefined ? undefined : [...new Set(args.computers.map((c) => c.trim()))];
+  if (computers?.some((c) => !c)) {
     throw new Error('computers must not contain an empty id');
   }
   if (computers && computers.length > WEBHOOK_COMPUTERS_MAX) {

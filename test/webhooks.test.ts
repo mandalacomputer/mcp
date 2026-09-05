@@ -205,6 +205,17 @@ describe('webhookBody', () => {
     expect(() => webhookBody({ computers: ['vm-1', ''] })).toThrow(/empty id/);
   });
 
+  it('collapses two spellings of one computer, and sends the trimmed id', () => {
+    // The de-duplication ran over the raw strings and `trim()` was used only as
+    // an emptiness test, so `' vm-1'` survived as a second entry naming one
+    // machine: counted twice against the platform's cap, and a filter matching
+    // no computer, so the subscription silently delivered nothing for the
+    // machine the caller had asked for.
+    expect(webhookBody({ computers: ['vm-1', ' vm-1'] })).toEqual({ computers: ['vm-1'] });
+    expect(webhookBody({ computers: [' vm-2\n'] })).toEqual({ computers: ['vm-2'] });
+    expect(() => webhookBody({ computers: ['vm-1', '  '] })).toThrow(/empty id/);
+  });
+
   it('leaves the event vocabulary to the platform', () => {
     // The platform's 400 lists the current vocabulary; a list held here would
     // refuse a type the platform had started accepting.
