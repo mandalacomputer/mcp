@@ -1223,6 +1223,75 @@ describe('flags that are a yes-or-no', () => {
     expect(parse(['--http=true'])).toEqual({ http: true });
   });
 
+  it('refuses a spelling that is neither a yes nor a no', () => {
+    // "Anything that is not a no is a yes" turned a misspelled NO into a YES.
+    // `--http=ture` started a network listener the operator was trying not to
+    // start — the direction that is not fail-safe — and `--no-lifecycle=fasle`
+    // withheld the tools that make and destroy computers from someone who meant
+    // to keep them (OPL-4515).
+    expect(() => parse(['--http=ture'])).toThrow(/not a yes or a no/);
+    expect(() => parse(['--no-lifecycle=fasle'])).toThrow(/not a yes or a no/);
+    // Empty is neither, and `--port=` is already refused for being neither a
+    // number nor absent.
+    expect(() => parse(['--http='])).toThrow(/not a yes or a no/);
+    // The message names the flag and both vocabularies, since being told only
+    // that the value is wrong leaves the reader guessing at the right one.
+    expect(() => parse(['--http=maybe'])).toThrow(/--http=maybe/);
+    expect(() => parse(['--http=maybe'])).toThrow(/true, 1, yes, on/);
+    expect(() => parse(['--http=maybe'])).toThrow(/false, 0, no, off/);
+  });
+
+  it('reads the same vocabulary the environment half reads', () => {
+    // Two spellings of one control, so they agree about what yes means.
+    for (const yes of ['true', '1', 'yes', 'on', 'TRUE', ' On ']) {
+      expect(parse([`--http=${yes}`]), yes).toEqual({ http: true });
+    }
+    for (const no of ['false', '0', 'no', 'off', 'OFF', ' off ']) {
+      expect(parse([`--http=${no}`]), no).toEqual({ http: false });
+    }
+  });
+
+  it('does not turn --help into another error for someone already confused', () => {
+    // The vocabulary is checked only where a misread arms something. `--help`
+    // and `--version` print and exit either way, and refusing `--help=` — which
+    // is what a wrapper appending `=$SOMETHING` produces — would answer the one
+    // flag people reach for when they are stuck with a refusal (OPL-4515).
+    expect(parse(['--help='])).toEqual({ help: true });
+    expect(parse(['--help=ture'])).toEqual({ help: true });
+    expect(parse(['--version=x'])).toEqual({ version: true });
+    // The explicit no still works on them, as it did before.
+    expect(parse(['--help=false'])).toEqual({ help: false });
+  });
+
+  it('says what a bare flag does, and does not call it a way to say no', () => {
+    // The tail used to follow "to turn it off", but a bare `--no-lifecycle`
+    // turns it ON — an operator who typed `--no-lifecycle=nope` meaning "do not
+    // withhold" and followed the message got the opposite of what they wanted.
+    const message = (() => {
+      try {
+        parse(['--no-lifecycle=nope']);
+      } catch (e) {
+        return (e as Error).message;
+      }
+      throw new Error('expected a refusal');
+    })();
+    expect(message).toMatch(/--no-lifecycle with no value at all/);
+    expect(message).not.toMatch(/to turn it off, or just/);
+    // And the claim it makes is true.
+    expect(parse(['--no-lifecycle'])).toEqual({ 'no-lifecycle': true });
+  });
+
+  it('leaves the spellings this change was not about alone', () => {
+    // The three properties the tightening had to preserve.
+    expect(parse(['--http'])).toEqual({ http: true });
+    expect(parse(['--no-lifecycle'])).toEqual({ 'no-lifecycle': true });
+    // Presence of the flag is still what settles precedence, whatever it says.
+    expect(lifecycleEnabled(parse(['--no-lifecycle=false']), '1')).toBe(true);
+    // And a value flag's empty value is still a value, not a refusal — only the
+    // yes-or-no flags gained a vocabulary.
+    expect(parse(['--key='])).toEqual({ key: '' });
+  });
+
   it('still lets a value flag take its value', () => {
     expect(parse(['--port', '3000'])).toEqual({ port: '3000' });
     expect(parse(['--key', 'com_a'])).toEqual({ key: 'com_a' });
