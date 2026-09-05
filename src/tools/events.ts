@@ -482,6 +482,18 @@ export const registerEvents: Registrar = (server, session) => {
       // had already taken — the same defect one tool over, with a ring in this
       // session instead of a cursor in the guest. Nothing is created and nothing
       // is destroyed, which is what made the annotation look right.
+      // No readOnlyHint, for the reason above — and destructiveHint set
+      // explicitly, because the spec defaults it to TRUE the moment
+      // readOnlyHint is absent. Left out, this tool asks a host whether it may
+      // perform DESTRUCTIVE UPDATES in order to read; `cursor_position` and
+      // `read_file` set it for that reason and this was not revisited with them
+      // (OPL-4516).
+      //
+      // NOT idempotentHint, which is the difference from those two. Its default
+      // is false once readOnlyHint is gone, and false is correct here: this
+      // CONSUMES, so a second identical call does not answer what the first did
+      // — which is exactly what idempotentHint would be claiming.
+      annotations: { destructiveHint: false },
     },
     ({ computer_id, types, pid, timeout_s, since, limit }, extra) =>
       guarded(async () => {
@@ -871,6 +883,18 @@ export const registerEvents: Registrar = (server, session) => {
       // tree out of the watch set. A client treating the hint as licence to
       // retry a call that timed out would silently drop events and, on the
       // fifth distinct path, silently stop watching the first.
+      // No readOnlyHint, for the reason above — and destructiveHint set
+      // explicitly, because the spec defaults it to TRUE the moment
+      // readOnlyHint is absent. Left out, this tool asks a host whether it may
+      // perform DESTRUCTIVE UPDATES in order to read; `cursor_position` and
+      // `read_file` set it for that reason and this was not revisited with them
+      // (OPL-4516).
+      //
+      // NOT idempotentHint, which is the difference from those two. Its default
+      // is false once readOnlyHint is gone, and false is correct here: this
+      // CONSUMES, so a second identical call does not answer what the first did
+      // — which is exactly what idempotentHint would be claiming.
+      annotations: { destructiveHint: false },
     },
     ({ computer_id, path, timeout_s, since, limit }, extra) =>
       guarded(async () => {
@@ -1267,6 +1291,18 @@ export const registerEvents: Registrar = (server, session) => {
       // had already taken — the same defect one tool over, with a ring in this
       // session instead of a cursor in the guest. Nothing is created and nothing
       // is destroyed, which is what made the annotation look right.
+      // No readOnlyHint, for the reason above — and destructiveHint set
+      // explicitly, because the spec defaults it to TRUE the moment
+      // readOnlyHint is absent. Left out, this tool asks a host whether it may
+      // perform DESTRUCTIVE UPDATES in order to read; `cursor_position` and
+      // `read_file` set it for that reason and this was not revisited with them
+      // (OPL-4516).
+      //
+      // NOT idempotentHint, which is the difference from those two. Its default
+      // is false once readOnlyHint is gone, and false is correct here: this
+      // CONSUMES, so a second identical call does not answer what the first did
+      // — which is exactly what idempotentHint would be claiming.
+      annotations: { destructiveHint: false },
     },
     ({ computer_id, since, limit }, extra) =>
       guarded(async () => {

@@ -4771,20 +4771,34 @@ describe('a command with a NUL in it', () => {
   });
 });
 
-describe('the two event tools and what their annotations claim', () => {
-  it('does not call a consuming read read-only', async () => {
-    // exec_poll deliberately carries no readOnlyHint because a poll advances a
-    // cursor, and a client that treats the hint as licence to retry drops
-    // whatever the first attempt consumed. `sub.read()` is the same mechanics
-    // with a ring in this session instead of a cursor in the guest.
+describe('the event tools and what their annotations claim', () => {
+  it('does not call a consuming read read-only, or a consuming read destructive', async () => {
+    // No readOnlyHint because a poll advances a cursor, and a client that treats
+    // the hint as licence to retry drops whatever the first attempt consumed.
+    // `sub.read()` is the same mechanics with a ring in this session instead of
+    // a cursor in the guest.
+    //
+    // All FOUR of them, where this covered two: `exec_poll` and
+    // `wait_for_file_change` were never in this loop, which is what an invariant
+    // that names its members by hand looks like when two of them are added
+    // elsewhere.
     const platform = installFakePlatform();
     const { client, close } = await connect();
     try {
       const { tools } = await client.listTools();
-      for (const name of ['poll_events', 'wait_for_event']) {
+      for (const name of ['exec_poll', 'poll_events', 'wait_for_event', 'wait_for_file_change']) {
         const tool = tools.find((t) => t.name === name);
         expect(tool, name).toBeDefined();
         expect(tool?.annotations?.readOnlyHint, name).toBeFalsy();
+        // Set, because the spec defaults it to TRUE once readOnlyHint is gone —
+        // so without this these four asked a host whether they might perform
+        // destructive updates in order to read (OPL-4516).
+        expect(tool?.annotations?.destructiveHint, name).toBe(false);
+        // And NOT idempotent, which is where these differ from cursor_position
+        // and read_file. The default is false once readOnlyHint is absent, and
+        // false is right: a second identical call does not answer what the
+        // first did, because the first consumed it.
+        expect(tool?.annotations?.idempotentHint, name).toBeFalsy();
       }
     } finally {
       await close();
