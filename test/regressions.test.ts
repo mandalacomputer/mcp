@@ -4447,7 +4447,9 @@ describe('the two event tools and what their annotations claim', () => {
       platform.restore();
     }
   });
+});
 
+describe('tools that only read, but reach the computer to do it', () => {
   it('does not call a read that can start a machine read-only', async () => {
     // cursor_position reads as read-only — nothing is created, nothing is
     // destroyed, and the answer is a coordinate — but it POSTs the input drive

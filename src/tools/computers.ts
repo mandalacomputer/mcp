@@ -183,6 +183,7 @@ type Usage = {
     vcpu_hours?: number;
     ram_gb_hours?: number;
     disk_gb_months?: number;
+    snapshot_gb_months?: number;
   };
   degraded?: boolean;
   unmetered?: boolean;
@@ -205,14 +206,21 @@ type Usage = {
  * host running a daemon older than the meter, and telling a caller to wait for
  * that one is advice that never comes true.
  *
- * EVERY METERED DIMENSION IS IN THE LINE, `ram_gb_hours` included. This
- * sentence is what a model reads before it acts on cost, and a dimension the
- * account is billed on that appears only in the JSON underneath is a figure
- * nobody weighs. The tool's own description promises hours "weighted by cores
- * and memory", and for a while the memory half of that was true of the type and
- * of the platform but not of this line.
+ * EVERY DIMENSION THE PLATFORM PRICES IS IN THE LINE. This sentence is what a
+ * model reads before it acts on cost, and a dimension the account is billed on
+ * that appears only in the JSON underneath is a figure nobody weighs. Two were
+ * missing: `ram_gb_hours`, although the tool's own description promises hours
+ * "weighted by cores and memory", and `snapshot_gb_months`, which apidoc.ts
+ * calls "the unit snapshots are priced in" — the figure that explains the bill
+ * of an account holding many durable snapshots and running almost nothing.
  *
- * The zero is printed rather than omitted, like every other figure here: an
+ * The `_hours` twins of the two `_months` figures are deliberately NOT here.
+ * `disk_gb_hours` and `snapshot_gb_hours` are the same integral in the unit the
+ * platform does not price, so printing both spellings would double the length
+ * of the line to say each thing twice. Add to this line when the platform
+ * prices something new, not when it reports something new.
+ *
+ * Zeroes are printed rather than omitted, like every other figure here: an
  * account that ran nothing weighted by memory metered zero, and a clause that
  * disappears makes that indistinguishable from a platform that did not send the
  * figure at all — the distinction `get_usage` already refuses a missing totals
@@ -223,8 +231,8 @@ const usageLine = (u: Usage): string => {
   const window = u.from && u.to ? `${u.from} to ${u.to}` : 'this billing period';
   const head =
     `${t.vcpu_hours ?? 0} vCPU-hours, ${t.ram_gb_hours ?? 0} GB-hours of RAM, ` +
-    `${t.run_hours ?? 0} running hours and ` +
-    `${t.disk_gb_months ?? 0} GB-months of disk over ${window}.`;
+    `${t.run_hours ?? 0} running hours, ${t.disk_gb_months ?? 0} GB-months of disk ` +
+    `and ${t.snapshot_gb_months ?? 0} GB-months of snapshots over ${window}.`;
   const short = [
     u.degraded && 'a hypervisor could not be reached (retry — this one clears)',
     u.unmetered &&

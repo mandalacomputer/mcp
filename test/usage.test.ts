@@ -57,11 +57,13 @@ describe('get_usage', () => {
     expect(textOf(res)).toContain('"disk_gb_months": 0.66');
   });
 
-  it('puts every metered dimension in the sentence, memory included', async () => {
-    // The description promises hours "weighted by cores and memory", and the
-    // line carried the cores half only — so the dimension a model would have to
-    // weigh to understand a RAM-heavy bill was in the JSON underneath and
-    // nowhere in the sentence it reads first.
+  it('puts every priced dimension in the sentence, memory and snapshots included', async () => {
+    // Two were missing. The description promises hours "weighted by cores and
+    // memory" and the line carried the cores half only; and apidoc.ts calls
+    // snapshot_gb_months "the unit snapshots are priced in", which is the
+    // figure that explains the bill of an account holding many durable
+    // snapshots and running almost nothing. Both were in the JSON underneath
+    // and nowhere in the sentence a model reads first.
     const { call, close } = await connect();
     const res = await call('get_usage', {});
     await close();
@@ -69,10 +71,28 @@ describe('get_usage', () => {
     const text = textOf(res);
     expect(res.isError).toBeFalsy();
     expect(text).toContain('50 GB-hours of RAM');
-    // Still the whole line, not RAM in place of something else.
+    expect(text).toContain('0.13 GB-months of snapshots');
+    // Still the whole line, not one figure in place of another.
     expect(text).toContain('25 vCPU-hours');
     expect(text).toContain('12.5 running hours');
     expect(text).toContain('0.66 GB-months of disk');
+  });
+
+  it('does not print the hours twin of a figure the platform prices in months', async () => {
+    // disk_gb_hours and snapshot_gb_hours are the same integrals in the unit
+    // the platform does NOT price. The rule is "every dimension the platform
+    // prices", not "every number it sends" — otherwise the line says each thing
+    // twice and gets twice as easy to stop reading.
+    const { call, close } = await connect();
+    const res = await call('get_usage', {});
+    await close();
+
+    const head = textOf(res).split('\n\n')[0];
+    expect(head).not.toContain('GB-hours of disk');
+    expect(head).not.toContain('GB-hours of snapshots');
+    // 96 and 480 are snapshot_gb_hours and disk_gb_hours in the fixture.
+    expect(head).not.toContain('96');
+    expect(head).not.toContain('480');
   });
 
   it('prints a metered zero rather than dropping the clause', async () => {
@@ -85,7 +105,12 @@ describe('get_usage', () => {
       const { call, close } = await connect();
       const res = await call('get_usage', {});
       await close();
-      expect(textOf(res)).toContain('0 GB-hours of RAM');
+      // Anchored on the clause boundary, not on a substring: the default
+      // fixture's "50 GB-hours of RAM" contains "0 GB-hours of RAM" too, so a
+      // bare toContain would pass even if the override stopped taking effect
+      // and would then be pinning nothing.
+      expect(textOf(res)).toMatch(/(^|[^\d.])0 GB-hours of RAM/);
+      expect(textOf(res)).not.toContain('50 GB-hours of RAM');
     } finally {
       globalThis.fetch = restore;
     }

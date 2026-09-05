@@ -317,7 +317,7 @@ export const registerInput: Registrar = (server, session) => {
     {
       title: 'Where is the pointer',
       description:
-        'Where the pointer was last put. `known` is false on a computer nothing has moved it on yet — the guest cannot be asked, so there is no coordinate to report and a confident 0,0 would be a wrong answer dressed as a right one.',
+        'Where the pointer was last put. `known` is false on a computer nothing has moved it on yet — the guest cannot be asked, so there is no coordinate to report and a confident 0,0 would be a wrong answer dressed as a right one. This reads a coordinate but reaches the computer to do it: a suspended one is resumed to answer, and that resume is charged. read_clipboard, by contrast, refuses a suspended computer rather than starting it.',
       inputSchema: { ...idArg },
       // Deliberately not readOnlyHint, for the reason exec_poll is not. It reads
       // as one — nothing is created, nothing is destroyed, and the answer is a
