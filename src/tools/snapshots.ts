@@ -325,9 +325,23 @@ export const registerSnapshots: Registrar = (server, session, opts) => {
             await session.api.with(extra.signal).send('DELETE', path),
           );
         if (set) {
+          const at = `${String(set.hour).padStart(2, '0')}:${String(set.minute).padStart(2, '0')} ${set.tz}`;
+          const res = await session.api
+            .with(extra.signal)
+            .send('PUT', path, { body: P.scheduleBody(set) });
+          // `enabled` is a required field of `set`, and it is the one that
+          // decides whether backups happen at all — so the sentence has to read
+          // it. "Snapshot scheduled for 03:00 UTC" over `enabled: false` tells a
+          // model the opposite of what the call just did, in the line it acts
+          // on, and the hour it names is real, which is what makes the wrong
+          // reading easy to believe. The hour is kept on a disabled schedule, so
+          // it is worth naming: a model that reads "disabled" and nothing else
+          // calls this again to find out what it would have run at.
           return said(
-            `Snapshot scheduled for ${String(set.hour).padStart(2, '0')}:${String(set.minute).padStart(2, '0')} ${set.tz}.`,
-            await session.api.with(extra.signal).send('PUT', path, { body: P.scheduleBody(set) }),
+            set.enabled
+              ? `Snapshot scheduled for ${at}.`
+              : `The nightly snapshot on ${id} is now DISABLED — none will be taken automatically. ${at} is the time it holds, which is when it would resume if you set it again with enabled: true. To remove the schedule rather than turn it off, call this with clear.`,
+            res,
           );
         }
         return json(await session.api.with(extra.signal).json('GET', path));

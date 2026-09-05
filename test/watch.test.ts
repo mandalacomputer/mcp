@@ -524,6 +524,32 @@ describe('a tree the model nominates', () => {
     }
   });
 
+  it('still counts a failure when the nomination arrived between two connections', {
+    timeout: 30_000,
+  }, async () => {
+    // The other half of the same flag, and the case it gets wrong. `#socket`
+    // is undefined for the whole `GET /computers/:id` and the sleep in front
+    // of every connection — `finish()` clears it as soon as one ends — so a
+    // nomination made in that window closed nothing, and the flag was
+    // consumed by the outcome of a connection this side did not cut short.
+    // That connection's failure to greet is genuine evidence about the host,
+    // and swallowing it costs a whole extra round of the shed experiment.
+    const ev = drivenEvents();
+    ev.state.failWatched = true;
+    const hub = new EventHub(new Api('com_test', BASE), ev.factory);
+    try {
+      const sub = hub.open('vm-1');
+      // Synchronously, before the loop has read the URL, let alone opened
+      // anything: this is the window.
+      sub.nominate('/a');
+      await until('the tree to be shed', () => sub.watchWasRefused('/a'), 25_000);
+      // WATCH_SHED_AFTER is two, and both of them carried /a.
+      expect(ev.sockets.filter((s) => s.watches.includes('/a'))).toHaveLength(2);
+    } finally {
+      hub.closeAll();
+    }
+  });
+
   it('does not read a host that is simply down as a watch the host refused', {
     timeout: 30_000,
   }, async () => {

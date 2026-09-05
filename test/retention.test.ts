@@ -91,3 +91,36 @@ describe('get_retention', () => {
     expect(text).not.toMatch(/kept forever|deleted/);
   });
 });
+
+describe('snapshot_schedule', () => {
+  let platform: ReturnType<typeof installFakePlatform>;
+  beforeEach(() => {
+    platform = installFakePlatform();
+  });
+  afterEach(() => platform.restore());
+
+  it('says the nightly snapshot is off when the set turned it off', async () => {
+    // `enabled` is a required field of `set` and the sentence never read it, so
+    // a call that stopped automatic backups answered "Snapshot scheduled for
+    // 03:00 UTC" — the opposite of what it had just done, in the line a model
+    // acts on, and with a real hour in it, which is what made it believable.
+    const { call, close } = await connect();
+    const text = textOf(await call('snapshot_schedule', { set: { enabled: false, hour: 3 } }));
+    expect(text).toContain('DISABLED');
+    expect(text).not.toMatch(/^Snapshot scheduled/);
+    // The hour is still stored, so it is worth naming rather than leaving a
+    // model to call again to find out what it would have run at.
+    expect(text).toContain('03:00 UTC');
+    await close();
+  });
+
+  it('still says when the snapshot is scheduled for a set that turned it on', async () => {
+    const { call, close } = await connect();
+    const text = textOf(
+      await call('snapshot_schedule', { set: { enabled: true, hour: 3, minute: 30 } }),
+    );
+    expect(text).toContain('Snapshot scheduled for 03:30 UTC.');
+    expect(text).not.toContain('DISABLED');
+    await close();
+  });
+});

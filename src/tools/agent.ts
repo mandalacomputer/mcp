@@ -149,7 +149,20 @@ export const registerAgent: Registrar = (server, session) => {
               : stop === 'refusal'
                 ? 'the model declined the task'
                 : `ended: ${stop}`;
-        const result = `${verdict}\n\n${String(done.text ?? '')}\n\nWhat it did:\n${steps.join('\n')}`;
+        // Interpolated only when it IS a string, which is the same discipline
+        // `stop` gets three lines up. `String()` over a shape this build does
+        // not know — a content-block array is the plausible one — renders the
+        // run's whole output as `[object Object]` in the sentence that carries
+        // it, and a model reading that has lost the result while being told it
+        // finished. Serialized instead: unfamiliar but readable beats confident
+        // and empty.
+        const text =
+          typeof done.text === 'string'
+            ? done.text
+            : done.text === undefined || done.text === null
+              ? ''
+              : JSON.stringify(done.text);
+        const result = `${verdict}\n\n${text}\n\nWhat it did:\n${steps.join('\n')}`;
         return stop === 'end_turn' ? said(result, done) : refused(result, done);
       }),
   );

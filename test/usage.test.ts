@@ -100,6 +100,27 @@ describe('get_usage', () => {
     }
   });
 
+  it('names a list as a list when the totals object is one', async () => {
+    // The guard rejects an array explicitly, so an array is a shape that
+    // REACHES the refusal — and `typeof []` is 'object', which made the
+    // sentence say a body arrived as an object where the totals object goes.
+    // A model reading that has been told the shape it wanted is the shape that
+    // was wrong.
+    const restore = globalThis.fetch;
+    globalThis.fetch = answering({ usage: [] });
+    try {
+      const { call, close } = await connect();
+      const res = await call('get_usage', {});
+      await close();
+
+      expect(res.isError).toBe(true);
+      expect(textOf(res)).toContain('answered with a list where the totals object goes');
+      expect(textOf(res)).not.toContain('answered with object');
+    } finally {
+      globalThis.fetch = restore;
+    }
+  });
+
   it('refuses `to` without `from`, which both descriptions promise', async () => {
     // `to` alone is measured from the CURRENT billing period rather than from
     // the period it names, so it answers a different window instead of failing.
