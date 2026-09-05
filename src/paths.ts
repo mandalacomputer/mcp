@@ -260,6 +260,18 @@ export function openUrlCommand(url: string): string {
   // cannot stop the browser reading a leading dash as a flag, and no URL starts
   // with one, so that is refused outright rather than quoted.
   if (trimmed.startsWith('-')) throw new Error(`url must not start with '-': ${trimmed}`);
+  // Refused here, where the caller can act on it. `execBody` refuses the same
+  // text a moment later, but `open_url` takes no `command` — a refusal naming
+  // one, and telling the caller to cut it on a character boundary, names a
+  // parameter they cannot see and never passed. `z.string().url()` accepts an
+  // unpaired surrogate, so this is the check, not a second opinion.
+  if (hasUnpairedSurrogate(trimmed)) {
+    throw new Error(
+      'url must not contain an unpaired surrogate — half of a character, usually from a string cut ' +
+        'through the middle of an emoji. It is not valid UTF-8, so the browser would be asked for an ' +
+        'address other than the one you sent.',
+    );
+  }
   return `nohup firefox ${shellQuote(trimmed)} >/dev/null 2>&1 &`;
 }
 
@@ -289,6 +301,27 @@ export function execBody(args: {
     throw new Error(
       'command must not contain a NUL: a NUL ends a C string, so the guest would run only the part ' +
         'in front of it and report that as a success.',
+    );
+  }
+  // The other half of that same shape. A command cut through the middle of an
+  // emoji reaches the guest as U+FFFD — `JSON.stringify` escapes the lone code
+  // unit and Go's `encoding/json` decodes it to the replacement character — so
+  // a command that is not the one asked for runs, and its exit code is reported
+  // as an ordinary success. `cwd` names a directory that then does not exist,
+  // which fails loudly, but it is the same corruption and the same refusal.
+  if (hasUnpairedSurrogate(args.command)) {
+    throw new Error(
+      'command must not contain an unpaired surrogate — half of a character, usually from a string ' +
+        'cut through the middle of an emoji. It is not valid UTF-8: the guest would receive a ' +
+        'replacement character in its place and run a command other than the one you sent, then ' +
+        'report that as a success. Send the whole character, or cut the command on a character boundary.',
+    );
+  }
+  if (args.cwd !== undefined && hasUnpairedSurrogate(args.cwd)) {
+    throw new Error(
+      'cwd must not contain an unpaired surrogate — half of a character, usually from a string cut ' +
+        'through the middle of an emoji. It is not valid UTF-8, so the guest would look for a ' +
+        'directory whose name is not the one you sent.',
     );
   }
   const body: Json = { command: args.command };
@@ -325,6 +358,15 @@ export function execBody(args: {
  * assignment written into the name, which is the same mistake as writing the
  * assignment into the command line — so the refusal says the shape rather than
  * just the rule.
+ *
+ * The UNPAIRED SURROGATE is not one of the platform's rules and is not being
+ * mirrored from it. It is this server's own refusal to send text that silently
+ * becomes something else, the one {@link clipboardBody}, {@link typeBody} and
+ * `write_file` already make: `JSON.stringify` escapes the lone code unit, Go's
+ * `encoding/json` decodes it to U+FFFD, and the guest gets an environment value
+ * that is not the one the caller asked for while the call reports success. A
+ * model emitting half of a truncated emoji is the ordinary way in, and env is
+ * the fourth path a caller's own characters take into the guest.
  */
 export function execEnv(env?: Record<string, string>): Json | undefined {
   if (!env) return undefined;
@@ -342,9 +384,19 @@ export function execEnv(env?: Record<string, string>): Json | undefined {
     if (name.includes('\0') || value.includes('\0')) {
       throw new Error(`env entry ${name} must not contain a NUL`);
     }
+    if (hasUnpairedSurrogate(name) || hasUnpairedSurrogate(value)) {
+      throw new Error(`env entry ${name}: ${envSurrogateRefusal}`);
+    }
   }
   return Object.fromEntries(entries);
 }
+
+const envSurrogateRefusal =
+  'that name or value has an unpaired surrogate in it — half of a character, usually from a ' +
+  'string cut through the middle of an emoji. It is not valid UTF-8: it reaches the guest as a ' +
+  'replacement character, so the command would run with an environment that is not the one you ' +
+  'asked for and the call would report success. Nothing was run. Send the whole character, or ' +
+  'cut the text on a character boundary.';
 
 // --- input ----------------------------------------------------------------
 //
@@ -756,8 +808,17 @@ export function webhookBody(args: {
     );
   }
   const events = args.events === undefined ? undefined : [...new Set(args.events)];
-  const computers = args.computers === undefined ? undefined : [...new Set(args.computers)];
-  if (computers?.some((c) => !c.trim())) {
+  // Trimmed BEFORE the de-duplication, and the trimmed ids are what is sent.
+  // The tool's schema is a bare array of strings, so whatever a model writes
+  // arrives verbatim: `['vm-1', ' vm-1']` deduped to two entries naming one
+  // machine, both counted against the platform's cap, and the second of them a
+  // filter that matches no computer — a subscription that silently delivers
+  // nothing for a machine the caller asked for. `segment()` normalises an id on
+  // every other route for the same reason, and `session.ts`'s `id()` lists what
+  // it costs not to.
+  const computers =
+    args.computers === undefined ? undefined : [...new Set(args.computers.map((c) => c.trim()))];
+  if (computers?.some((c) => !c)) {
     throw new Error('computers must not contain an empty id');
   }
   if (computers && computers.length > WEBHOOK_COMPUTERS_MAX) {
