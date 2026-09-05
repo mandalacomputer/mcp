@@ -554,10 +554,13 @@ export const registerGuest: Registrar = (server, session) => {
       // marks `GET computers/:id/files` as spending, because reaching the guest
       // agent resumes a suspended computer and a resume is charged — its own
       // note says even reading a file out of an idle machine can come back 402.
-      // `destructiveHint: false` because it genuinely destroys nothing: once
-      // readOnlyHint is false the spec's default for that flag is true, and a
-      // host that warns on it would warn about reading a log.
-      annotations: { destructiveHint: false },
+      // The other two flags are set for the same reason, in opposite
+      // directions: once readOnlyHint is false the spec defaults
+      // destructiveHint to TRUE and idempotentHint to FALSE, and both defaults
+      // are wrong here. Reading a log destroys nothing, and reading it twice is
+      // reading it twice — a host that gates retry-of-a-timed-out-call on
+      // idempotentHint would refuse to retry a plain file read.
+      annotations: { destructiveHint: false, idempotentHint: true },
     },
     ({ computer_id, path, offset }, extra) =>
       guarded(async () => {

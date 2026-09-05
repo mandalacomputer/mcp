@@ -4474,6 +4474,10 @@ describe('tools that only read, but reach the computer to do it', () => {
         // warns on it would be asking about destructive updates in order to
         // read a log or a pointer coordinate.
         expect(tool?.annotations?.destructiveHint, name).toBe(false);
+        // And idempotent, which defaults the other way once readOnlyHint is
+        // gone: a host gating retry-of-a-timed-out-call on this flag would
+        // otherwise refuse to retry a plain read.
+        expect(tool?.annotations?.idempotentHint, name).toBe(true);
         // The description carries it too, for a caller that reads tools/list
         // text and never looks at annotations.
         expect(tool?.description, name).toMatch(/resum/i);

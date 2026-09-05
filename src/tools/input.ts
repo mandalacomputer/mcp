@@ -328,13 +328,16 @@ export const registerInput: Registrar = (server, session) => {
       // asked before a read starts a machine. `screenshot` above keeps its hint
       // because it is a GET and does no such thing.
       //
-      // `destructiveHint: false` rather than no annotations at all: the spec
-      // defaults that flag to TRUE once readOnlyHint is false, so dropping the
+      // The other two flags are set rather than left to default, because both
+      // defaults are wrong once readOnlyHint is false: the spec defaults
+      // destructiveHint to TRUE and idempotentHint to FALSE. Dropping the
       // object outright would trade an under-warning for an over-warning — a
-      // host asking whether it may perform destructive updates, in order to
-      // read a pointer coordinate. `create_computer` sets it for the same
-      // reason.
-      annotations: { destructiveHint: false },
+      // host asking whether it may perform destructive updates in order to read
+      // a pointer coordinate — and would tell a host not to retry a read it can
+      // safely retry. `create_computer` sets destructiveHint for this reason,
+      // and idempotentHint is set deliberately in computers.ts, snapshots.ts
+      // and templates.ts.
+      annotations: { destructiveHint: false, idempotentHint: true },
     },
     ({ computer_id }, extra) =>
       guarded(async () =>
