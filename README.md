@@ -146,7 +146,11 @@ rather than a result. The two reads are the surprising half of that list, and
 are why neither is annotated `readOnlyHint`: a host that auto-approves
 read-only tools would otherwise wake and bill a machine with nobody asked.
 `screenshot`, `read_clipboard` and `list_windows` genuinely do not start
-anything and keep the hint. When a stretch of work is over, `suspend_computer` (a pause:
+anything and keep the hint. `get_desktop_url` is the one tool that goes without
+one for a different reason: it neither starts a machine nor spends, but it hands
+back a credential — with `control: true`, a link that is root-equivalent on that
+desktop — and a host that auto-approves read-only tools would pass out control
+of a machine with nobody asked. When a stretch of work is over, `suspend_computer` (a pause:
 `start_computer` brings the same session back in about a second) or
 `stop_computer` (a shutdown: the disk is kept, the session is not). Idle
 suspend catches the ones a model forgets, but only after 30 minutes untouched.
