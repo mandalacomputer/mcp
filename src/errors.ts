@@ -77,6 +77,17 @@ export type ReasonKind = 'clears' | 'permanent';
  * embedder need not duplicate a table that lives here. A word it has never
  * heard of is `undefined` rather than a guess, which is the same contract
  * `reasonAdvice` keeps and the reason "absent means unclassified" exists.
+ *
+ * NOT A RETRY PREDICATE. It classifies the WORD, and an error is more than its
+ * word: {@link isTransient} answers `MoveRequiredError` and
+ * {@link ConnectivityInterruptedError} before it ever looks at `reason`, because
+ * both are subclasses of branches that would otherwise say yes (OPL-3775,
+ * OPL-3855). A move-required 409 whose body also carries `reason: 'contention'`
+ * classifies here as `'clears'` while `isTransient` correctly says no — it is a
+ * decision about the size that was asked for, and it answers the same forever.
+ * So `if (reasonKind(err.reason) !== 'permanent') retry()` is the loop this
+ * sentence exists to prevent; ask {@link isTransient} whether to retry, and ask
+ * this what the platform's word meant.
  */
 export function reasonKind(reason: string | undefined): ReasonKind | undefined {
   if (reason === undefined) return undefined;

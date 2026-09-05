@@ -80,6 +80,14 @@ const TRUTHY = new Set(['true', '1', 'yes', 'on']);
 function envFlag(name: string, raw: string | undefined): boolean {
   if (raw === undefined) return false;
   const v = raw.trim().toLowerCase();
+  // Here as well as in `env`, rather than only there. `env` folds an empty
+  // variable to undefined before this sees it, but that is the caller's
+  // behaviour and this reads as a general helper — `lifecycleEnabled` takes its
+  // value as a parameter, so a caller passing `process.env.X` straight in would
+  // otherwise refuse to start over `X=`, which is what an unquoted assignment
+  // in a compose file writes and what plugin.json's `${MANDALA_NO_LIFECYCLE:-}`
+  // expands to when it is unset.
+  if (!v) return false;
   if (TRUTHY.has(v)) return true;
   if (FALSEY.has(v)) return false;
   throw new Error(
@@ -161,9 +169,13 @@ export const wantsVersion = (flags: Flags): boolean => Boolean(flags.version || 
 export function lifecycleEnabled(flags: Flags, configured = env('MANDALA_NO_LIFECYCLE')): boolean {
   // Presence is what establishes precedence. `--no-lifecycle=false` carries a
   // false value deliberately and must not fall through to a true environment.
-  const disabled = Object.hasOwn(flags, 'no-lifecycle')
-    ? Boolean(flags['no-lifecycle'])
-    : envFlag('MANDALA_NO_LIFECYCLE', configured);
+  // Validated before precedence is applied, and that ordering is the point. A
+  // misspelling is a mistake to report whether or not a flag happens to sit in
+  // front of it: an operator who set MANDALA_NO_LIFECYCLE=ture meaning to
+  // withhold the tools, under a launcher that also passes --no-lifecycle=false,
+  // would otherwise get exactly the silent arming this refusal exists to stop.
+  const fromEnv = envFlag('MANDALA_NO_LIFECYCLE', configured);
+  const disabled = Object.hasOwn(flags, 'no-lifecycle') ? Boolean(flags['no-lifecycle']) : fromEnv;
   return !disabled;
 }
 

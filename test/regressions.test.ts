@@ -219,6 +219,26 @@ describe('explicit lifecycle flags', () => {
     expect(() => lifecycleEnabled(parse([]), 'maybe')).toThrow(/false, 0, no, off/);
   });
 
+  it('treats a set-but-empty variable as unset rather than refusing it', () => {
+    // `FOO=` is the ordinary shape of an unset value in a compose file, and it
+    // is what plugin.json's `${MANDALA_NO_LIFECYCLE:-}` expands to. `env` folds
+    // it away before the parser sees it, but `lifecycleEnabled` takes the value
+    // as a parameter, so the guard belongs where the refusal is.
+    expect(lifecycleEnabled(parse([]), '')).toBe(true);
+    expect(lifecycleEnabled(parse([]), '   ')).toBe(true);
+  });
+
+  it('reports a misspelled variable even when a flag overrides it', () => {
+    // Precedence and validation are separable, and conflating them reintroduces
+    // the silence. An operator who set MANDALA_NO_LIFECYCLE=ture meaning to
+    // withhold the tools, under a launcher that also passes --no-lifecycle=false,
+    // would otherwise be told nothing and get them.
+    expect(() => lifecycleEnabled(parse(['--no-lifecycle=false']), 'ture')).toThrow(
+      /not a yes or a no/,
+    );
+    expect(() => lifecycleEnabled(parse(['--no-lifecycle']), 'ture')).toThrow(/not a yes or a no/);
+  });
+
   it('still lets a present flag decide against any environment spelling', () => {
     // Widening the variable does not introduce a precedence question: presence
     // of the flag was already what settled it, and this pins that the wider
@@ -926,6 +946,21 @@ describe('the classification of a refusal, for whoever is embedding this (OPL-45
       expect(err.reason, reason).toBe(reason);
       expect(isTransient(err), reason).toBe(reasonKind(reason) === 'clears');
     }
+  });
+
+  it('classifies the word, which is not the same as deciding a retry', () => {
+    // The hazard the docstring warns about, kept honest here. `isTransient`
+    // answers MoveRequiredError before it looks at `reason` (OPL-3775), so an
+    // embedder reading `reasonKind(...) !== 'permanent'` as "retry" would send a
+    // resize refusal round forever — it is a decision about the size asked for
+    // and answers the same every time.
+    const err = errorForStatus(409, 'too big', {
+      reason: 'contention',
+      move: { required: true, possible: true },
+    });
+    expect(err.constructor.name).toBe('MoveRequiredError');
+    expect(reasonKind(err.reason)).toBe('clears');
+    expect(isTransient(err)).toBe(false);
   });
 
   it('is the same function through the public entrypoint', () => {
