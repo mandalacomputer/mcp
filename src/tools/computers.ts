@@ -1058,7 +1058,41 @@ export const registerComputers: Registrar = (server, session, opts) => {
             'Return the full-control URL instead of the watch-only one. It carries a token that is root-equivalent on that machine — the watch-only socket has input dropped by the platform, not merely hidden by the client.',
           ),
       },
-      annotations: { readOnlyHint: true },
+      // NO readOnlyHint, for a reason distinct from both the ones already in
+      // this codebase: the SPEND rule (OPL-4499 — cursor_position and read_file
+      // resume a suspended computer) and the CONSUMING-READ rule (exec_poll,
+      // poll_events and wait_for_event advance a cursor no later call can
+      // re-read, and wait_for_file_change also configures). This is a fourth,
+      // decided in OPL-4505 and written here so it is not re-litigated.
+      //
+      // `GET /computers/:id` modifies nothing and spends nothing, so under the
+      // rule as first written the hint was accurate. What the rule was missing
+      // is that the annotation does not only describe the route: clients treat
+      // it as licence to call without asking, which is the reading input.ts
+      // already states beside `cursor_position`. This call hands back a
+      // credential — with `control: true`, one that is root-equivalent on the
+      // machine — so under a host that auto-approves read-only tools, a model
+      // could pass out control of a desktop with nobody asked. The description
+      // says "these are credentials in a link", but a description is not a gate.
+      //
+      // So, added to the list: the hint is withheld from a tool that returns a
+      // CREDENTIAL-EQUIVALENT. This is the only one today; the next tool that
+      // hands back a token, a signed URL or a key belongs here with it rather
+      // than in an argument about whether a read is a read.
+      //
+      // Credential-equivalent, and deliberately not "sensitive". A screenshot
+      // of a desktop with a password on it is sensitive, and it is not
+      // something this call revealed the keys to — a rule drawn that wide would
+      // take the hint off every read there is, which is why `screenshot`,
+      // `read_clipboard` and `list_windows` keep theirs.
+      //
+      // The other two flags are set rather than left to default, for the reason
+      // `cursor_position` sets them: the spec defaults destructiveHint to TRUE
+      // and idempotentHint to FALSE once readOnlyHint is gone, so leaving them
+      // out would have a host asking whether it may perform destructive updates
+      // in order to read a URL, and refusing to retry a call that is safe to
+      // retry.
+      annotations: { destructiveHint: false, idempotentHint: true },
     },
     ({ computer_id, control }, extra) =>
       guarded(async () => {

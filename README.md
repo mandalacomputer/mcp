@@ -405,6 +405,10 @@ by default — the platform drops input on that socket, so it is safe to hand to
 somebody. `control: true` returns the full-control one, which is root-equivalent
 on that machine. Neither appears in any other tool's output, deliberately: a
 tool result lands in a model's context and from there in whatever captured it.
+It is also why `get_desktop_url` carries no `readOnlyHint` even though its route
+neither writes nor spends: hosts treat that hint as licence to call without
+asking, so keeping it would let a model pass out control of a desktop with
+nobody prompted.
 
 **Retiring a template cannot be undone, and takes more than it looks.**
 `retire_template` without a `version` retires **every** version of the name —
