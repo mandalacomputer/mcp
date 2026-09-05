@@ -850,6 +850,22 @@ describe('a Content-Disposition with a language tag', () => {
     expect(filenameFrom('attachment; x-filename=q.txt; filename="real.txt"')).toBe('real.txt');
     expect(filenameFrom("inline; xfilename*=UTF-8''q.txt; filename=real.txt")).toBe('real.txt');
   });
+
+  it('does not take a `;` inside a quoted value for a parameter boundary', () => {
+    // Anchoring to `;` is worth something only if a `;` means what the anchor
+    // takes it to mean. RFC 6266 lets a quoted value carry one, so a header
+    // whose own text spells a filename parameter inside quotes was read as two
+    // parameters — and the invented half is indistinguishable, to a pattern
+    // anchored on the character, from the one the platform actually sent.
+    expect(filenameFrom('attachment; note="a; filename=evil.txt"; filename=real.txt')).toBe(
+      'real.txt',
+    );
+    expect(filenameFrom('attachment; note="x; filename=evil.txt"')).toBeUndefined();
+    // A `;` inside the name is part of the name, not the end of the parameter.
+    expect(filenameFrom('attachment; filename="a; b.txt"')).toBe('a; b.txt');
+    // An escaped quote does not close the value it is inside.
+    expect(filenameFrom('attachment; note="say \\"hi\\"; filename=evil.txt"')).toBeUndefined();
+  });
 });
 
 describe('a listing the platform answered with no body at all', () => {
@@ -4360,6 +4376,22 @@ describe('a command with a NUL in it', () => {
     // ordinary success. execEnv has refused the same byte since it was written.
     expect(() => P.execBody({ command: 'echo hello\0rm -rf /' })).toThrow(/NUL/);
     expect(P.execBody({ command: 'echo hello' })).toEqual({ command: 'echo hello' });
+  });
+
+  it('refuses half a character in the command for the same reason it refuses a NUL', () => {
+    // The comment above that NUL refusal calls it "the same shape as the
+    // surrogate refusals", and the surrogate half of the shape was the one
+    // `command` did not have. A model emitting a command cut through the middle
+    // of an emoji reaches Go's encoding/json, which decodes the escaped lone
+    // unit to U+FFFD: a command other than the one asked for runs, and its exit
+    // code comes back as an ordinary success. `cwd` corrupts the same way and
+    // names a directory that is not there.
+    expect(() => P.execBody({ command: 'echo "hi \ud83d"' })).toThrow(/unpaired surrogate/);
+    expect(() => P.execBody({ command: 'ls', cwd: '/home/\udc00user' })).toThrow(
+      /unpaired surrogate/,
+    );
+    // A whole character is text, not corruption, and still goes.
+    expect(P.execBody({ command: 'echo "hi 😀"' })).toEqual({ command: 'echo "hi 😀"' });
   });
 });
 

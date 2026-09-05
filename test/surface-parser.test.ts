@@ -114,16 +114,18 @@ describe('the surface source scanner', () => {
  * assertion past its deadline. The real-time waits in http.test.ts are the same
  * hazard here. Awaiting the child gives the loop back while the process runs.
  */
-const scan = async (routes: string, docs: string) => {
+const scan = async (routes: string, docs: string, prelude = '') => {
   const dir = mkdtempSync(join(tmpdir(), 'surface-fixture-'));
   mkdirSync(join(dir, 'web/lib'), { recursive: true });
   writeFileSync(
     join(dir, 'web/lib/surface.ts'),
     `export const V1_ROUTES: Route[] = [${routes}];\n`,
   );
+  // `prelude` is what sits above DOCS in apidoc.ts — the shared `Query` consts a
+  // route can name instead of spelling its parameters out.
   writeFileSync(
     join(dir, 'web/lib/apidoc.ts'),
-    `export const DOCS: Record<string, Doc> = {${docs}};\n`,
+    `${prelude}\nexport const DOCS: Record<string, Doc> = {${docs}};\n`,
   );
   try {
     // Exits 1: a fixture matches none of the real mirror. The `+` lines are what
@@ -245,5 +247,30 @@ describe('the parameter reader', () => {
         },
       `),
     ).toEqual(['query:zzz']);
+  });
+
+  it('does not resolve a shared query const that is only quoted in a comment', async () => {
+    // The shared-const scan was the one read left over the raw source after the
+    // entry reader was fixed, and it is anchored to column 0 — which a block
+    // comment's own left margin satisfies exactly as a declaration does. The
+    // route then names a parameter the platform never documented.
+    //
+    // The comment goes AFTER the declaration it shadows, and that is the whole
+    // test: these land in a Map by name, so a phantom in front of the real one
+    // is overwritten by it and nothing is observable. Only the one that arrives
+    // second replaces a resolved parameter with an invented one.
+    const said = await scan(
+      `{ method: 'GET', pattern: 'computers' }`,
+      `'GET computers': { query: [SHARED] },`,
+      [
+        "const SHARED: Query = { name: 'real' };",
+        '/*',
+        "const SHARED: Query = { name: 'ghost' };",
+        '*/',
+      ].join('\n'),
+    );
+    expect([...said.matchAll(/^ {2}\+ [A-Z]+ \S+ {2}(\S+)$/gm)].map((m) => m[1])).toEqual([
+      'query:real',
+    ]);
   });
 });

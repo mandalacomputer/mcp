@@ -148,6 +148,15 @@ const mirrorRoutes = new Set(
 const docSource = readFileSync(join(platform, 'web/lib/apidoc.ts'), 'utf8');
 
 /**
+ * The same source with every comment blanked, which is what the scans below
+ * read. A declaration quoted inside a comment is not a declaration, and one
+ * written at column 0 in a block comment satisfies an anchored pattern exactly
+ * as the real thing does. `stripComments` blanks a comment rather than removing
+ * it, so an offset into this is still an offset into `docSource`.
+ */
+const docClean = stripComments(docSource);
+
+/**
  * Module-level `const NAME: Query = {...}` entries.
  *
  * A route's `query` array can reference one of these by identifier instead of
@@ -155,10 +164,8 @@ const docSource = readFileSync(join(platform, 'web/lib/apidoc.ts'), 'utf8');
  * has to resolve to a parameter name or those routes read as taking none.
  */
 const sharedQuery = new Map();
-for (const m of docSource.matchAll(/^const ([A-Z_]+): Query = \{/gm)) {
-  const named = stripComments(balanced(docSource, m.index + m[0].length - 1, '{', '}')).match(
-    /name:\s*'([^']+)'/,
-  );
+for (const m of docClean.matchAll(/^const ([A-Z_]+): Query = \{/gm)) {
+  const named = balanced(docClean, m.index + m[0].length - 1, '{', '}').match(/name:\s*'([^']+)'/);
   if (named) sharedQuery.set(m[1], named[1]);
 }
 

@@ -291,6 +291,27 @@ export function execBody(args: {
         'in front of it and report that as a success.',
     );
   }
+  // The other half of that same shape. A command cut through the middle of an
+  // emoji reaches the guest as U+FFFD — `JSON.stringify` escapes the lone code
+  // unit and Go's `encoding/json` decodes it to the replacement character — so
+  // a command that is not the one asked for runs, and its exit code is reported
+  // as an ordinary success. `cwd` names a directory that then does not exist,
+  // which fails loudly, but it is the same corruption and the same refusal.
+  if (hasUnpairedSurrogate(args.command)) {
+    throw new Error(
+      'command must not contain an unpaired surrogate — half of a character, usually from a string ' +
+        'cut through the middle of an emoji. It is not valid UTF-8: the guest would receive a ' +
+        'replacement character in its place and run a command other than the one you sent, then ' +
+        'report that as a success. Send the whole character, or cut the command on a character boundary.',
+    );
+  }
+  if (args.cwd !== undefined && hasUnpairedSurrogate(args.cwd)) {
+    throw new Error(
+      'cwd must not contain an unpaired surrogate — half of a character, usually from a string cut ' +
+        'through the middle of an emoji. It is not valid UTF-8, so the guest would look for a ' +
+        'directory whose name is not the one you sent.',
+    );
+  }
   const body: Json = { command: args.command };
   if (args.timeout_s !== undefined) body.timeout_s = args.timeout_s;
   // Omitted rather than sent empty: the platform's default is the system

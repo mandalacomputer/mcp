@@ -1052,9 +1052,44 @@ function parseEvent(chunk: string): SSEEvent | undefined {
   }
 }
 
+/**
+ * The header's parameters, split on the `;` that separate them rather than on
+ * every `;` in it.
+ *
+ * RFC 6266 lets a quoted value carry a `;`, so a split that does not know about
+ * quoting reads `note="a; filename=evil.txt"` as two parameters — and the
+ * second is indistinguishable, to a pattern anchored on `;`, from the one this
+ * module is looking for. Walking the string with a quoted flag is what makes
+ * the boundary a real parameter boundary rather than a character.
+ */
+function dispositionParams(disposition: string): string[] {
+  const params: string[] = [];
+  let start = 0;
+  let quoted = false;
+  for (let i = 0; i < disposition.length; i++) {
+    const ch = disposition[i];
+    // A backslash inside a quoted string escapes the next character, `"` and
+    // `;` included, so neither closes anything.
+    if (quoted && ch === '\\') i++;
+    else if (ch === '"') quoted = !quoted;
+    else if (ch === ';' && !quoted) {
+      params.push(disposition.slice(start, i));
+      start = i + 1;
+    }
+  }
+  params.push(disposition.slice(start));
+  return params;
+}
+
 /** The filename the platform put on a download, if it put one there. */
 export function filenameFrom(disposition: string | null): string | undefined {
   if (!disposition) return undefined;
+  // Read one PARAMETER at a time, and match each pattern anchored to the start
+  // of one. Run over the whole header instead, `filename` matched the tail of
+  // any longer parameter name — `inline; x-filename=q.txt` named the download
+  // `q.txt` — so a parameter this code has never heard of, from a proxy or an
+  // origin that is not the platform, supplied the name a file is written under.
+  const params = dispositionParams(disposition);
   // Any charset and any language, not only `UTF-8''`. RFC 5987 writes this
   // value as charset, language, then the text, with the language ordinarily
   // empty — and matching only the empty spelling meant that both
@@ -1063,14 +1098,9 @@ export function filenameFrom(disposition: string | null): string | undefined {
   // `filename=` in them — so a download the platform had named came back with
   // no name at all. Three groups, not two: the middle one is the language tag,
   // present or empty.
-  //
-  // Anchored to a PARAMETER BOUNDARY, either end of the header or a `;`, in
-  // both branches. Unanchored, `filename` matched the tail of any longer
-  // parameter name — `inline; x-filename=q.txt` named the download `q.txt` —
-  // so a parameter this code has never heard of, from a proxy or an origin
-  // that is not the platform, supplied the name a file is written under.
-  const star = /(?:^|;)\s*filename\*=([^']*)'([^']*)'([^;]+)/i.exec(disposition);
-  if (star) {
+  for (const param of params) {
+    const star = /^\s*filename\*=([^']*)'([^']*)'(.+)$/i.exec(param);
+    if (!star) continue;
     // A stray `%` in a guest filename is legal on disk and makes this throw.
     // Letting it out would turn a download whose bytes already arrived intact
     // into a failure, over the label on it.
@@ -1080,6 +1110,9 @@ export function filenameFrom(disposition: string | null): string | undefined {
       return star[3];
     }
   }
-  const plain = /(?:^|;)\s*filename\s*=\s*"?([^";]+)"?/i.exec(disposition);
-  return plain ? plain[1] : undefined;
+  for (const param of params) {
+    const plain = /^\s*filename\s*=\s*"?([^"]+)"?/i.exec(param);
+    if (plain) return plain[1];
+  }
+  return undefined;
 }
