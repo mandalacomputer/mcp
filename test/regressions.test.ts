@@ -4772,7 +4772,7 @@ describe('a command with a NUL in it', () => {
 });
 
 describe('the event tools and what their annotations claim', () => {
-  it('does not call a consuming read read-only, or a consuming read destructive', async () => {
+  it('does not call a consuming read read-only, destructive, or safe to retry', async () => {
     // No readOnlyHint because a poll advances a cursor, and a client that treats
     // the hint as licence to retry drops whatever the first attempt consumed.
     // `sub.read()` is the same mechanics with a ring in this session instead of
@@ -4780,7 +4780,7 @@ describe('the event tools and what their annotations claim', () => {
     //
     // All FOUR of them, where this covered two: `exec_poll` and
     // `wait_for_file_change` were never in this loop, which is what an invariant
-    // that names its members by hand looks like when two of them are added
+    // that names its members by hand looks like when members are added
     // elsewhere.
     const platform = installFakePlatform();
     const { client, close } = await connect();
@@ -4790,16 +4790,60 @@ describe('the event tools and what their annotations claim', () => {
         const tool = tools.find((t) => t.name === name);
         expect(tool, name).toBeDefined();
         expect(tool?.annotations?.readOnlyHint, name).toBeFalsy();
-        // Set, because the spec defaults it to TRUE once readOnlyHint is gone —
-        // so without this these four asked a host whether they might perform
-        // destructive updates in order to read (OPL-4516).
-        expect(tool?.annotations?.destructiveHint, name).toBe(false);
-        // And NOT idempotent, which is where these differ from cursor_position
-        // and read_file. The default is false once readOnlyHint is absent, and
-        // false is right: a second identical call does not answer what the
-        // first did, because the first consumed it.
-        expect(tool?.annotations?.idempotentHint, name).toBeFalsy();
+        // Asserted as an explicit false, not merely falsy. Left unset it would
+        // rely on the host applying the spec default — the same reliance this
+        // whole ticket is about not having.
+        expect(tool?.annotations?.idempotentHint, name).toBe(false);
       }
+      // Three read; the fourth also CONFIGURES, and a nomination past
+      // MAX_WATCHES evicts another tree's watch outright. `false` claims
+      // additive-only, so it would be a false all-clear on the one member of
+      // this set that can end event delivery somewhere else.
+      for (const name of ['exec_poll', 'poll_events', 'wait_for_event']) {
+        expect(tools.find((t) => t.name === name)?.annotations?.destructiveHint, name).toBe(false);
+      }
+      expect(
+        tools.find((t) => t.name === 'wait_for_file_change')?.annotations?.destructiveHint,
+      ).toBe(true);
+    } finally {
+      await close();
+      platform.restore();
+    }
+  });
+
+  it('claims non-destructive for exactly the tools that read', async () => {
+    // A CLOSED set rather than a per-name loop, which is the half a hand-listed
+    // invariant cannot do: this fails both when a tool stops declaring it and
+    // when one starts declaring it that should not.
+    //
+    // Deliberately not the wider rule "every tool without readOnlyHint must set
+    // destructiveHint". Thirty-one tools here set neither — `click`,
+    // `write_file`, `stop_computer` — and for every one of them the default of
+    // TRUE is correct, so that rule would demand an annotation on tools whose
+    // behaviour is already described. What is worth pinning is the exception:
+    // the tools that do NOT modify, which is a semantic nothing derivable from
+    // the tool list can decide for itself.
+    const platform = installFakePlatform();
+    const { client, close } = await connect();
+    try {
+      const { tools } = await client.listTools();
+      const nonDestructive = tools
+        .filter((t) => t.annotations?.destructiveHint === false)
+        .map((t) => t.name)
+        .sort();
+      expect(nonDestructive).toEqual(
+        [
+          'create_computer',
+          'cursor_position',
+          'exec_poll',
+          'get_desktop_url',
+          'poll_events',
+          'read_file',
+          'use_computer',
+          'wait_for_computer',
+          'wait_for_event',
+        ].sort(),
+      );
     } finally {
       await close();
       platform.restore();

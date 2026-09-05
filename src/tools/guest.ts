@@ -288,18 +288,21 @@ export const registerGuest: Registrar = (server, session) => {
       // as licence to call without asking and to retry a call that timed out,
       // and a retried "read-only" poll silently drops whatever the first
       // attempt had already consumed.
-      // No readOnlyHint, for the reason above — and destructiveHint set
-      // explicitly, because the spec defaults it to TRUE the moment
-      // readOnlyHint is absent. Left out, this tool asks a host whether it may
-      // perform DESTRUCTIVE UPDATES in order to read; `cursor_position` and
-      // `read_file` set it for that reason and this was not revisited with them
-      // (OPL-4516).
+      // No readOnlyHint, for the reason above — and BOTH other flags set,
+      // because the spec's defaults are wrong in one direction and unstated in
+      // the other the moment readOnlyHint is absent (OPL-4516).
       //
-      // NOT idempotentHint, which is the difference from those two. Its default
-      // is false once readOnlyHint is gone, and false is correct here: this
-      // CONSUMES, so a second identical call does not answer what the first did
-      // — which is exactly what idempotentHint would be claiming.
-      annotations: { destructiveHint: false },
+      // destructiveHint would default to TRUE, so without it this asks a host
+      // whether it may perform DESTRUCTIVE UPDATES in order to read.
+      // `cursor_position` and `read_file` set it for that reason; these were not
+      // revisited with them.
+      //
+      // idempotentHint is FALSE, which is the difference from those two, and it
+      // is set rather than left to its default for the same reason as the other:
+      // a host reading an absent flag as "unknown, safe to retry" would retry a
+      // timed-out poll and silently drop what the first attempt consumed, which
+      // is the harm the paragraph above it is about.
+      annotations: { destructiveHint: false, idempotentHint: false },
     },
     ({ computer_id, pid }, extra) =>
       guarded(async () => {
