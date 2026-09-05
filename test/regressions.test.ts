@@ -913,6 +913,24 @@ describe('a Content-Disposition whose parameters have to be parsed, not matched'
     expect(filenameFrom('attachment; filename="report.pdf')).toBe('report.pdf');
   });
 
+  it('does not stop at a repeated parameter it cannot read', () => {
+    // The regex this replaced walked on from an occurrence it could not read —
+    // `[^";]+` cannot match an empty value — and answered from the next one. A
+    // reader that stops at the first occurrence by name loses a name that was
+    // there. Malformed headers either way, and the platform sends none of them,
+    // but this direction is a regression rather than a defence: every parameter
+    // in the list is one the sender wrote at the top level, because a smuggled
+    // one never becomes a parameter at all.
+    expect(filenameFrom('attachment; filename=""; filename=real.txt')).toBe('real.txt');
+    expect(filenameFrom('attachment; filename=; filename=real.txt')).toBe('real.txt');
+    expect(filenameFrom('attachment; filename; filename=real.txt')).toBe('real.txt');
+    expect(filenameFrom("attachment; filename*=UTF-8''; filename*=UTF-8''real.txt")).toBe(
+      'real.txt',
+    );
+    // And the first one is still what answers when it can.
+    expect(filenameFrom('attachment; filename=real.txt; filename=second.txt')).toBe('real.txt');
+  });
+
   it('gives no name when an unterminated value swallows the filename after it', () => {
     // A DECIDED trade, not an oversight, and the one row of OPL-4495's table
     // this does not satisfy — it asked for `report.pdf` here.

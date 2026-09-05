@@ -1102,10 +1102,10 @@ function parseEvent(chunk: string): SSEEvent | undefined {
 /**
  * One `name=value` pair out of a header's parameter list.
  *
- * `quoted` is kept because the two forms mean different things about what has
- * already been consumed: a quoted value has had its delimiters and its
- * `quoted-pair` escapes resolved and may legitimately contain a `;`, where a
- * token value is the raw run and has not.
+ * The value has been resolved by the time it lands here: a quoted one has given
+ * up its delimiters and its `quoted-pair` escapes, a token one has given up the
+ * whitespace around it. What each spelling looked like is not kept, because
+ * nothing downstream asks — a name is a name however it was written.
  */
 type DispositionParam = { name: string; value: string };
 
@@ -1213,23 +1213,31 @@ export function filenameFrom(disposition: string | null): string | undefined {
   // empty. Any charset and any language, not only `UTF-8''` — matching the
   // empty spelling alone meant `ISO-8859-1''…` and `UTF-8'en'…` were read by
   // neither branch, and a download the platform had named came back unnamed.
-  const star = params.find((p) => p.name === 'filename*');
-  if (star) {
-    const ext = /^[^']*'[^']*'([\s\S]*)$/.exec(star.value);
-    // An empty `filename*` names nothing, and falling through to the plain
-    // `filename` beside it is better than answering with the empty string.
-    if (ext?.[1]) {
-      try {
-        return decodeURIComponent(ext[1]);
-      } catch {
-        // A stray `%` in a guest filename is legal on disk and makes this
-        // throw. Letting it out would turn a download whose bytes already
-        // arrived intact into a failure, over the label on it.
-        return ext[1];
-      }
+  // The FIRST USABLE one of each name, not the first one. A repeated parameter
+  // is malformed and the platform never sends one, but the regex this replaced
+  // walked on from an occurrence it could not read — `[^";]+` cannot match an
+  // empty value — and answered from the next. Stopping at the first occurrence
+  // instead means `filename=""; filename=real.txt` loses a name that was there,
+  // which is a regression on an already-invalid header rather than a defence:
+  // every parameter in this list is one the sender genuinely wrote at the top
+  // level, since a smuggled one never becomes a parameter at all.
+  for (const p of params) {
+    if (p.name !== 'filename*') continue;
+    const ext = /^[^']*'[^']*'([\s\S]*)$/.exec(p.value);
+    // An empty `filename*` names nothing, so keep looking — at another
+    // `filename*`, and then at the plain `filename` beside it. Either beats
+    // answering with the empty string.
+    if (!ext?.[1]) continue;
+    try {
+      return decodeURIComponent(ext[1]);
+    } catch {
+      // A stray `%` in a guest filename is legal on disk and makes this throw.
+      // Letting it out would turn a download whose bytes already arrived intact
+      // into a failure, over the label on it.
+      return ext[1];
     }
   }
 
-  const plain = params.find((p) => p.name === 'filename');
-  return plain?.value ? plain.value : undefined;
+  for (const p of params) if (p.name === 'filename' && p.value) return p.value;
+  return undefined;
 }
