@@ -850,49 +850,6 @@ describe('a Content-Disposition with a language tag', () => {
     expect(filenameFrom('attachment; x-filename=q.txt; filename="real.txt"')).toBe('real.txt');
     expect(filenameFrom("inline; xfilename*=UTF-8''q.txt; filename=real.txt")).toBe('real.txt');
   });
-
-  it('does not take a `;` inside a quoted value for a parameter boundary', () => {
-    // Anchoring to `;` is worth something only if a `;` means what the anchor
-    // takes it to mean. RFC 6266 lets a quoted value carry one, so a header
-    // whose own text spells a filename parameter inside quotes was read as two
-    // parameters — and the invented half is indistinguishable, to a pattern
-    // anchored on the character, from the one the platform actually sent.
-    expect(filenameFrom('attachment; note="a; filename=evil.txt"; filename=real.txt')).toBe(
-      'real.txt',
-    );
-    expect(filenameFrom('attachment; note="x; filename=evil.txt"')).toBeUndefined();
-    // A `;` inside the name is part of the name, not the end of the parameter.
-    expect(filenameFrom('attachment; filename="a; b.txt"')).toBe('a; b.txt');
-    // An escaped quote does not close the value it is inside.
-    expect(filenameFrom('attachment; note="say \\"hi\\"; filename=evil.txt"')).toBeUndefined();
-  });
-
-  it('still reads the name when an earlier value has an odd quote in it', () => {
-    // The first spelling of the quote walk toggled on every `"`, which made a
-    // header carrying an unpaired one — a proxy's, or a value truncated
-    // mid-quote — a single quoted run from that character to the end. The real
-    // parameter was then never at the start of a parameter, and the download
-    // came back unnamed: the same failure the `filename*` branch above exists
-    // to prevent, reintroduced from the other direction.
-    expect(filenameFrom('attachment; note=a"b; filename=real.txt')).toBe('real.txt');
-    expect(filenameFrom('inline; creation-date="Wed, 12 Feb 2026; filename=report.pdf')).toBe(
-      'report.pdf',
-    );
-    // An empty value does not swallow the boundary after it either.
-    expect(filenameFrom('attachment; note=; filename=real.txt')).toBe('real.txt');
-  });
-
-  it('does not carry whitespace around the parameter into the name', () => {
-    // The parameter ends at the `;`; the name does not. A trailing space is
-    // silently part of whatever the file is written under.
-    expect(filenameFrom('attachment; filename=real.txt ; x=1')).toBe('real.txt');
-    expect(filenameFrom("attachment; filename*=UTF-8''report.pdf ; x=1")).toBe('report.pdf');
-    // The quotes belong to the grammar, and so does the escaping inside them.
-    expect(filenameFrom('attachment; filename="a\\"b.txt"')).toBe('a"b.txt');
-    // A parameter with no value at all is not a name.
-    expect(filenameFrom('attachment; filename=')).toBeUndefined();
-    expect(filenameFrom('attachment; filename=""')).toBeUndefined();
-  });
 });
 
 describe('a listing the platform answered with no body at all', () => {

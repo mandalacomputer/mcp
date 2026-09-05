@@ -1052,77 +1052,9 @@ function parseEvent(chunk: string): SSEEvent | undefined {
   }
 }
 
-/**
- * The end of the quoted string that opens at `open`, or -1 if it never closes.
- *
- * A backslash inside one escapes the next character, `"` included, so an
- * escaped quote does not end the value.
- */
-function quotedEnd(text: string, open: number): number {
-  for (let i = open + 1; i < text.length; i++) {
-    if (text[i] === '\\') i++;
-    else if (text[i] === '"') return i;
-  }
-  return -1;
-}
-
-/**
- * The header's parameters, split on the `;` that separate them rather than on
- * every `;` in it.
- *
- * RFC 6266 lets a quoted value carry a `;`, so a split that does not know about
- * quoting reads `note="a; filename=evil.txt"` as two parameters — and the second
- * is indistinguishable, to a pattern anchored on `;`, from the one this module
- * is looking for.
- *
- * A `"` counts as opening a value only where the grammar puts one: immediately
- * after the `=`, and only if it closes. Treating every `"` as a delimiter is
- * worse than treating none as one, because a header a proxy wrote with an odd
- * quote in an earlier value — `note=a"b; filename=real.txt`, or a truncated
- * `creation-date="Wed, 12 Feb 2026` — then reads as one long quoted run, and
- * the real parameter is never at the start of a parameter again. That is the
- * unnamed download the `filename*` comment below says was already fixed once,
- * arriving from the other direction.
- */
-function dispositionParams(disposition: string): string[] {
-  const params: string[] = [];
-  let start = 0;
-  let i = 0;
-  while (i < disposition.length) {
-    const ch = disposition[i];
-    if (ch === ';') {
-      params.push(disposition.slice(start, i));
-      start = i + 1;
-      i++;
-    } else if (ch === '=') {
-      let value = i + 1;
-      while (disposition[value] === ' ' || disposition[value] === '\t') value++;
-      if (disposition[value] === '"') {
-        const close = quotedEnd(disposition, value);
-        // Past the value when it is quoted and closes. When it does not close,
-        // step over that one `"` and carry on: it is an ordinary character in
-        // an ordinary token, not the start of a run to the end of the header.
-        i = close === -1 ? value + 1 : close + 1;
-      } else {
-        // Resume AT the value rather than after it — a `;` here ends an empty
-        // value, and consuming it would drop the boundary.
-        i = value;
-      }
-    } else i++;
-  }
-  params.push(disposition.slice(start));
-  return params;
-}
-
 /** The filename the platform put on a download, if it put one there. */
 export function filenameFrom(disposition: string | null): string | undefined {
   if (!disposition) return undefined;
-  // Read one PARAMETER at a time, and match each pattern anchored to the start
-  // of one. Run over the whole header instead, `filename` matched the tail of
-  // any longer parameter name — `inline; x-filename=q.txt` named the download
-  // `q.txt` — so a parameter this code has never heard of, from a proxy or an
-  // origin that is not the platform, supplied the name a file is written under.
-  const params = dispositionParams(disposition);
   // Any charset and any language, not only `UTF-8''`. RFC 5987 writes this
   // value as charset, language, then the text, with the language ordinarily
   // empty — and matching only the empty spelling meant that both
@@ -1132,33 +1064,22 @@ export function filenameFrom(disposition: string | null): string | undefined {
   // no name at all. Three groups, not two: the middle one is the language tag,
   // present or empty.
   //
-  // Trailing whitespace is trimmed off both forms. It is the parameter that
-  // ends at the `;`, not the name, and a space carried out of here silently
-  // becomes part of whatever a caller writes the file under.
-  for (const param of params) {
-    const star = /^\s*filename\*=([^']*)'([^']*)'(.+)$/i.exec(param);
-    if (!star) continue;
-    const text = star[3].trimEnd();
+  // Anchored to a PARAMETER BOUNDARY, either end of the header or a `;`, in
+  // both branches. Unanchored, `filename` matched the tail of any longer
+  // parameter name — `inline; x-filename=q.txt` named the download `q.txt` —
+  // so a parameter this code has never heard of, from a proxy or an origin
+  // that is not the platform, supplied the name a file is written under.
+  const star = /(?:^|;)\s*filename\*=([^']*)'([^']*)'([^;]+)/i.exec(disposition);
+  if (star) {
     // A stray `%` in a guest filename is legal on disk and makes this throw.
     // Letting it out would turn a download whose bytes already arrived intact
     // into a failure, over the label on it.
     try {
-      return decodeURIComponent(text);
+      return decodeURIComponent(star[3]);
     } catch {
-      return text;
+      return star[3];
     }
   }
-  for (const param of params) {
-    const plain = /^\s*filename\s*=\s*(.*)$/i.exec(param);
-    if (!plain) continue;
-    const raw = plain[1].trim();
-    // A quoted value keeps its text exactly, minus the escaping — the quotes
-    // are the grammar's, not the name's. An unquoted one is a bare token.
-    const name =
-      raw.length >= 2 && raw.startsWith('"') && raw.endsWith('"')
-        ? raw.slice(1, -1).replaceAll(/\\(.)/g, '$1')
-        : raw;
-    if (name) return name;
-  }
-  return undefined;
+  const plain = /(?:^|;)\s*filename\s*=\s*"?([^";]+)"?/i.exec(disposition);
+  return plain ? plain[1] : undefined;
 }
