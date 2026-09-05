@@ -288,6 +288,21 @@ export const registerGuest: Registrar = (server, session) => {
       // as licence to call without asking and to retry a call that timed out,
       // and a retried "read-only" poll silently drops whatever the first
       // attempt had already consumed.
+      // No readOnlyHint, for the reason above — and BOTH other flags set,
+      // because the spec's defaults are wrong in one direction and unstated in
+      // the other the moment readOnlyHint is absent (OPL-4516).
+      //
+      // destructiveHint would default to TRUE, so without it this asks a host
+      // whether it may perform DESTRUCTIVE UPDATES in order to read.
+      // `cursor_position` and `read_file` set it for that reason; these were not
+      // revisited with them.
+      //
+      // idempotentHint is FALSE, which is the difference from those two, and it
+      // is set rather than left to its default for the same reason as the other:
+      // a host reading an absent flag as "unknown, safe to retry" would retry a
+      // timed-out poll and silently drop what the first attempt consumed, which
+      // is the harm the paragraph above it is about.
+      annotations: { destructiveHint: false, idempotentHint: false },
     },
     ({ computer_id, pid }, extra) =>
       guarded(async () => {

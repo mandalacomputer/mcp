@@ -482,6 +482,21 @@ export const registerEvents: Registrar = (server, session) => {
       // had already taken — the same defect one tool over, with a ring in this
       // session instead of a cursor in the guest. Nothing is created and nothing
       // is destroyed, which is what made the annotation look right.
+      // No readOnlyHint, for the reason above — and BOTH other flags set,
+      // because the spec's defaults are wrong in one direction and unstated in
+      // the other the moment readOnlyHint is absent (OPL-4516).
+      //
+      // destructiveHint would default to TRUE, so without it this asks a host
+      // whether it may perform DESTRUCTIVE UPDATES in order to read.
+      // `cursor_position` and `read_file` set it for that reason; these were not
+      // revisited with them.
+      //
+      // idempotentHint is FALSE, which is the difference from those two, and it
+      // is set rather than left to its default for the same reason as the other:
+      // a host reading an absent flag as "unknown, safe to retry" would retry a
+      // timed-out poll and silently drop what the first attempt consumed, which
+      // is the harm the paragraph above it is about.
+      annotations: { destructiveHint: false, idempotentHint: false },
     },
     ({ computer_id, types, pid, timeout_s, since, limit }, extra) =>
       guarded(async () => {
@@ -871,6 +886,21 @@ export const registerEvents: Registrar = (server, session) => {
       // tree out of the watch set. A client treating the hint as licence to
       // retry a call that timed out would silently drop events and, on the
       // fifth distinct path, silently stop watching the first.
+      // No readOnlyHint, for the two reasons above — and destructiveHint TRUE,
+      // which is where this parts company with the three consuming reads beside
+      // it (OPL-4516).
+      //
+      // The spec reads `false` as "performs only additive updates", and this does
+      // not: a nomination past MAX_WATCHES evicts the least recent tree and
+      // deletes its armed, lost and host state, so a fifth call ends event
+      // delivery on the first with nothing said. Claiming additive-only would be
+      // the same false all-clear the missing readOnlyHint already avoids — a host
+      // that auto-approves non-destructive tools would let the model do it with
+      // nobody asked. Same value the absent annotation defaulted to, said out
+      // loud so it reads as a decision rather than an omission.
+      //
+      // idempotentHint false for the reason the others set it: this consumes.
+      annotations: { destructiveHint: true, idempotentHint: false },
     },
     ({ computer_id, path, timeout_s, since, limit }, extra) =>
       guarded(async () => {
@@ -1267,6 +1297,21 @@ export const registerEvents: Registrar = (server, session) => {
       // had already taken — the same defect one tool over, with a ring in this
       // session instead of a cursor in the guest. Nothing is created and nothing
       // is destroyed, which is what made the annotation look right.
+      // No readOnlyHint, for the reason above — and BOTH other flags set,
+      // because the spec's defaults are wrong in one direction and unstated in
+      // the other the moment readOnlyHint is absent (OPL-4516).
+      //
+      // destructiveHint would default to TRUE, so without it this asks a host
+      // whether it may perform DESTRUCTIVE UPDATES in order to read.
+      // `cursor_position` and `read_file` set it for that reason; these were not
+      // revisited with them.
+      //
+      // idempotentHint is FALSE, which is the difference from those two, and it
+      // is set rather than left to its default for the same reason as the other:
+      // a host reading an absent flag as "unknown, safe to retry" would retry a
+      // timed-out poll and silently drop what the first attempt consumed, which
+      // is the harm the paragraph above it is about.
+      annotations: { destructiveHint: false, idempotentHint: false },
     },
     ({ computer_id, since, limit }, extra) =>
       guarded(async () => {
