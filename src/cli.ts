@@ -46,6 +46,19 @@ type Flags = Record<string, string | boolean>;
  */
 const BOOLEAN = new Set(['help', 'h', 'version', 'v', 'http', 'no-lifecycle']);
 
+/**
+ * The yes-or-no flags whose VALUE is checked against a vocabulary.
+ *
+ * Not all of them, because the argument for refusing an unrecognised spelling
+ * does not reach the other four. `--http` and `--no-lifecycle` decide what the
+ * server exposes, so reading a misspelled no as a yes arms something — a
+ * listener nobody asked for, or the withholding of tools somebody wanted.
+ * `--help` and `--version` print and exit: nothing is armed either way, and
+ * refusing `--help=` would turn the one flag people reach for when they are
+ * already confused into another error. They keep the older, looser reading.
+ */
+const CHECKED = new Set(['http', 'no-lifecycle']);
+
 const KNOWN = new Set([
   ...BOOLEAN,
   'port',
@@ -62,6 +75,26 @@ const FALSEY = new Set(['false', '0', 'no', 'off']);
 
 /** And its mirror, for the environment variables that are a yes-or-no. */
 const TRUTHY = new Set(['true', '1', 'yes', 'on']);
+
+/**
+ * The value of a yes-or-no FLAG, refusing a spelling it does not know.
+ *
+ * The same vocabulary and the same refusal as {@link envFlag} below, because
+ * `--no-lifecycle=…` and `MANDALA_NO_LIFECYCLE=…` are two spellings of one
+ * control and it would be a poor joke for them to disagree about what `yes`
+ * means. Only the wording of the message differs, since one names a flag and
+ * the other a variable.
+ */
+function boolFlag(name: string, inline: string): boolean {
+  const v = inline.trim().toLowerCase();
+  if (TRUTHY.has(v)) return true;
+  if (FALSEY.has(v)) return false;
+  throw new Error(
+    `--${name}=${inline} is not a yes or a no. Use one of ${[...TRUTHY].join(', ')} to turn it ` +
+      `on — as does --${name} with no value at all — or one of ${[...FALSEY].join(', ')} to ` +
+      'turn it off.',
+  );
+}
 
 /**
  * A yes-or-no environment variable, refusing a spelling it does not know.
@@ -138,9 +171,34 @@ export function parse(argv: string[]): Flags {
     // `--http=false` has to mean false. It is the one spelling that carries an
     // explicit answer, and reading it as the truthy string "false" would turn
     // the clearest way to say no into a yes.
-    if (BOOLEAN.has(name))
-      flags[name] = inline === undefined ? true : !FALSEY.has(inline.toLowerCase());
-    else if (inline !== undefined) flags[name] = inline;
+    //
+    // Matched against BOTH vocabularies rather than "anything that is not a no
+    // is a yes", which is what this was and which made a misspelling of a NO
+    // into a YES. `--http=ture` started a network listener the operator was
+    // trying not to start, and `--no-lifecycle=fasle` withheld the tools that
+    // make and destroy computers from someone who meant to keep them. The
+    // second fails safe and the first does not, so the loose reading had to go
+    // (OPL-4515).
+    //
+    // Refused rather than defaulted, which is the same call `envFlag` makes one
+    // screen up for the environment half of the same controls, and the message
+    // is deliberately its twin. An empty `--http=` is refused too: it is
+    // neither a yes nor a no, and `--port=` is already refused for being
+    // neither a number nor absent. Refusing is also the only answer to `--http=`
+    // that neither arms nor disarms — reading it as "off" would let a launcher
+    // template whose variable failed to expand quietly turn a safety control
+    // off, which is the failure this whole change is about.
+    //
+    // Only the flags in CHECKED: `--help` and `--version` arm nothing, so the
+    // argument does not reach them and they keep the looser reading.
+    if (BOOLEAN.has(name)) {
+      flags[name] =
+        inline === undefined
+          ? true
+          : CHECKED.has(name)
+            ? boolFlag(name, inline)
+            : !FALSEY.has(inline.trim().toLowerCase());
+    } else if (inline !== undefined) flags[name] = inline;
     // PRESENT, not truthy. `--key ""` is a value token like any other, and a
     // truthiness test skipped it: the flag became the boolean `true` and the
     // empty token came round again as a stray argument, so the two spellings of
