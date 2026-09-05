@@ -407,6 +407,28 @@ export class OriginUnreachableError extends APIError {
 }
 
 /**
+ * A 3xx, which this client answers rather than follows.
+ *
+ * Following one is the tempting default and it is wrong twice over. The bearer
+ * is the smaller half: `fetch` strips `Authorization` across origins but keeps
+ * it on a same-origin hop, so a redirect inside the configured origin carries
+ * the key to a path the operator did not name. The larger half is that a
+ * redirect is a CONFIGURATION fact — a `MANDALA_BASE_URL` missing its trailing
+ * path, an http URL for an https deployment, a tenant that has moved — and
+ * following it silently means the operator never learns the value they set is
+ * not the value in use, while every request pays an extra round trip forever.
+ *
+ * So it is surfaced, and it names the `Location`: the whole point is that the
+ * next thing the operator does is put that in `MANDALA_BASE_URL`. It is an
+ * `APIError` with the real status so {@link isTransientForPoll}'s `>= 500` rule
+ * files it with the 4xx, where it belongs — repeating the request unchanged
+ * cannot change the answer.
+ */
+export class RedirectError extends APIError {
+  override name = 'RedirectError';
+}
+
+/**
  * 502, 520 — a proxy had no usable answer from the platform.
  *
  * Sits between the other two and must not be filed with either, because the
@@ -876,6 +898,13 @@ export function isTransient(err: unknown): boolean {
  *   give-up that named nothing about the redirect. The mandala-computer-python
  *   SDK found that one; this is the same rule, and it is why all three now say
  *   `>= 500`.
+ *
+ *   "Does not follow redirects" is a claim about `#fetch`'s `redirect: 'manual'`
+ *   and is load-bearing HERE, in a way it was not while the default `'follow'`
+ *   silently made it untrue: under `'follow'` a 3xx never reaches this predicate
+ *   at all, so the paragraph above described a case that could not arise and the
+ *   `>= 500` bound rested on nothing. {@link RedirectError} is what a 3xx
+ *   becomes now. Change one and this paragraph is wrong again.
  *
  * {@link APIError.reason} is deliberately NOT consulted here, and that is the
  * one place this predicate and {@link isTransient} part company (OPL-3898).

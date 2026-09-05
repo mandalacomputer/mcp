@@ -1,5 +1,6 @@
 import { Agent as HttpAgent, request as httpRequest, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
+import { gzipSync } from 'node:zlib';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { runHttp } from '../src/http.js';
@@ -822,6 +823,266 @@ describe('concurrent large request bodies', () => {
       release();
       globalThis.fetch = fake;
     }
+  }, 10_000);
+});
+
+describe('a body that declared no length', () => {
+  let server: Server;
+  let url: string;
+  let platform: ReturnType<typeof installFakePlatform>;
+
+  beforeAll(async () => {
+    platform = installFakePlatform();
+    // One slot, so "took a slot" and "did not" are the difference between a
+    // second request being served and being refused.
+    server = await runHttp({ port: 0, host: '127.0.0.1', baseUrl: BASE, maxLargeBodyParses: 1 });
+    url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  });
+
+  afterAll(async () => {
+    platform.restore();
+    await new Promise<void>((r) => server.close(() => r()));
+  });
+
+  /** A chunked POST: no Content-Length, written in two pieces. */
+  const chunked = (sessionId: string, body: string) => {
+    const target = new URL(url);
+    const req = httpRequest({
+      hostname: target.hostname,
+      port: target.port,
+      path: '/mcp',
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'application/json, text/event-stream',
+        Authorization: 'Bearer not-a-platform-key',
+        'mcp-session-id': sessionId,
+      },
+    });
+    const done = new Promise<number>((resolve, reject) => {
+      req.on('response', (res) => {
+        res.resume();
+        res.on('end', () => resolve(res.statusCode ?? 0));
+      });
+      req.on('error', reject);
+    });
+    return { req, done, body };
+  };
+
+  const openSession = async () => {
+    const opened = await fetch(`${url}/mcp`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'application/json, text/event-stream',
+        Authorization: 'Bearer not-a-platform-key',
+      },
+      body: JSON.stringify(INIT),
+    });
+    const id = opened.headers.get('mcp-session-id') as string;
+    await opened.text();
+    return id;
+  };
+
+  const parsesNow = async () =>
+    ((await (await fetch(`${url}/healthz`)).json()) as { largeBodyParses: number }).largeBodyParses;
+
+  it('does not charge a slot for a small one, however many are in flight', async () => {
+    // A missing Content-Length was read as "may be large", so a chunked call the
+    // size of a mouse click held one of the process's slots for its whole tool
+    // lifetime. With one slot configured, two such calls used to mean a 503 for
+    // the second — on the strength of an absent header, not of any bytes.
+    const sessionId = await openSession();
+    const small = JSON.stringify({ jsonrpc: '2.0', id: 21, method: 'tools/list' });
+
+    const a = chunked(sessionId, small);
+    const b = chunked(sessionId, small);
+    a.req.write(small.slice(0, 10));
+    b.req.write(small.slice(0, 10));
+    await new Promise((r) => setTimeout(r, 50));
+    // Neither has taken one, with both mid-flight.
+    expect(await parsesNow()).toBe(0);
+
+    a.req.end(small.slice(10));
+    b.req.end(small.slice(10));
+    expect(await a.done).not.toBe(503);
+    expect(await b.done).not.toBe(503);
+    expect(await parsesNow()).toBe(0);
+  }, 10_000);
+
+  it('delivers the 503 to a caller still uploading', async () => {
+    // The refusal this path exists to give, asserted end to end — it had no
+    // test, and two attempts at tidying the socket afterwards both lost it
+    // entirely: the caller got zero bytes and EPIPE instead of a status line.
+    // Nothing is destroyed here now; body-parser drains the rest under its own
+    // ceiling and the socket ends the ordinary way.
+    const sessionId = await openSession();
+    const big = JSON.stringify({
+      jsonrpc: '2.0',
+      id: 24,
+      method: 'tools/list',
+      pad: 'x'.repeat(900_000),
+    });
+    // Hold the single slot with one request, mid-flight.
+    const holder = chunked(sessionId, big);
+    holder.req.write(big.slice(0, 300_000));
+    for (let i = 0; i < 100 && (await parsesNow()) === 0; i++) {
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    expect(await parsesNow()).toBe(1);
+
+    // A second one crosses the threshold with no slot left, still writing.
+    const refused = chunked(sessionId, big);
+    let status = 0;
+    let body = '';
+    const answered = new Promise<void>((resolve) => {
+      refused.req.on('response', (res) => {
+        status = res.statusCode ?? 0;
+        res.setEncoding('utf8');
+        res.on('data', (c: string) => {
+          body += c;
+        });
+        res.on('end', () => resolve());
+      });
+      // EPIPE is the failure this test exists to catch, not an excuse to skip.
+      refused.req.on('error', () => resolve());
+    });
+    // KEEPS WRITING while the answer comes back. That is the condition: a
+    // client that stops and waits races differently and gets the 503 even from
+    // a build that would have lost it, which is exactly how the first spelling
+    // of this test passed against the bug it was written for.
+    let writing = true;
+    const chunk = 'y'.repeat(256 * 1024);
+    const keepWriting = () => {
+      if (!writing) return;
+      if (!refused.req.write(chunk)) refused.req.once('drain', keepWriting);
+      else setImmediate(keepWriting);
+    };
+    refused.req.on('error', () => {
+      writing = false;
+    });
+    keepWriting();
+    await answered;
+    writing = false;
+
+    expect(status).toBe(503);
+    expect(body).toMatch(/maximum.*large request bodies/i);
+
+    holder.req.end(big.slice(300_000));
+    await holder.done;
+  }, 15_000);
+
+  it('reads an empty Content-Encoding as no encoding, the way body-parser does', async () => {
+    // `Content-Encoding:` with nothing after it inflates nothing, so metering it
+    // is exact — and treating the blank header as an encoding put the original
+    // bug back within reach of anyone who sends one: a mouse-click-sized
+    // chunked call holding a process-wide slot for its whole tool lifetime.
+    const sessionId = await openSession();
+    const small = JSON.stringify({ jsonrpc: '2.0', id: 25, method: 'tools/list' });
+    const target = new URL(url);
+    for (const value of ['', 'identity']) {
+      const req = httpRequest({
+        hostname: target.hostname,
+        port: target.port,
+        path: '/mcp',
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Content-Encoding': value,
+          Accept: 'application/json, text/event-stream',
+          Authorization: 'Bearer not-a-platform-key',
+          'mcp-session-id': sessionId,
+        },
+      });
+      const done = new Promise<number>((resolve, reject) => {
+        req.on('response', (res) => {
+          res.resume();
+          res.on('end', () => resolve(res.statusCode ?? 0));
+        });
+        req.on('error', reject);
+      });
+      req.write(small.slice(0, 10));
+      await new Promise((r) => setTimeout(r, 50));
+      expect(await parsesNow(), `Content-Encoding: '${value}'`).toBe(0);
+      req.end(small.slice(10));
+      await done;
+    }
+  }, 10_000);
+
+  it('charges a compressed body up front, since the wire says nothing about its size', async () => {
+    // body-parser inflates before applying its limit, so wire bytes are not
+    // what gets allocated: a few thousand gzipped bytes become megabytes of
+    // parsed JSON the meter never sees. Metering an encoded body would be a way
+    // AROUND the cap rather than a sharpening of it, so it keeps the old rule.
+    const sessionId = await openSession();
+    const big = JSON.stringify({
+      jsonrpc: '2.0',
+      id: 23,
+      method: 'tools/list',
+      pad: 'x'.repeat(5_000_000),
+    });
+    const squashed = gzipSync(Buffer.from(big));
+    // Comfortably under the 256KB threshold on the wire, and 5MB once inflated.
+    expect(squashed.length).toBeLessThan(256 * 1024);
+
+    const target = new URL(url);
+    const req = httpRequest({
+      hostname: target.hostname,
+      port: target.port,
+      path: '/mcp',
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Content-Encoding': 'gzip',
+        Accept: 'application/json, text/event-stream',
+        Authorization: 'Bearer not-a-platform-key',
+        'mcp-session-id': sessionId,
+      },
+    });
+    const done = new Promise<number>((resolve, reject) => {
+      req.on('response', (res) => {
+        res.resume();
+        res.on('end', () => resolve(res.statusCode ?? 0));
+      });
+      req.on('error', reject);
+    });
+    // Written in two pieces so the request is still in flight when the count is
+    // read: a body this small would otherwise be parsed before the check.
+    req.write(squashed.subarray(0, 100));
+    for (let i = 0; i < 100 && (await parsesNow()) === 0; i++) {
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    expect(await parsesNow()).toBe(1);
+    req.end(squashed.subarray(100));
+    await done;
+  }, 10_000);
+
+  it('charges one the moment the bytes say it is large', async () => {
+    // The other half: metering has to actually engage, or the cap it replaced
+    // would be bounding nothing at all.
+    const sessionId = await openSession();
+    const big = JSON.stringify({
+      jsonrpc: '2.0',
+      id: 22,
+      method: 'tools/list',
+      pad: 'x'.repeat(400_000),
+    });
+    const a = chunked(sessionId, big);
+    // WHEN the slot is taken is the whole point, so both sides are asserted.
+    // Under the old rule it was taken on arrival, before a byte had been read;
+    // now the first 10 bytes buy nothing.
+    a.req.write(big.slice(0, 10));
+    await new Promise((r) => setTimeout(r, 50));
+    expect(await parsesNow()).toBe(0);
+
+    // Past SMALL_BODY_BYTES (256KB) and not finished, so the slot is held here.
+    a.req.write(big.slice(10, 300_000));
+    for (let i = 0; i < 100 && (await parsesNow()) === 0; i++) {
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    expect(await parsesNow()).toBe(1);
+    a.req.end(big.slice(300_000));
+    await a.done;
   }, 10_000);
 });
 
