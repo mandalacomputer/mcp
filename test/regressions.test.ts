@@ -4449,6 +4449,51 @@ describe('the two event tools and what their annotations claim', () => {
   });
 });
 
+describe('tools that only read, but reach the computer to do it', () => {
+  it('does not call a read that can start a machine read-only', async () => {
+    // cursor_position reads as read-only — nothing is created, nothing is
+    // destroyed, and the answer is a coordinate — but it POSTs the input drive
+    // route, which resumes a suspended computer and bills for the time. Clients
+    // gate a consent prompt on this hint, so it is the field that decides
+    // whether anybody is asked before a read starts a machine.
+    const platform = installFakePlatform();
+    const { client, close } = await connect();
+    try {
+      const { tools } = await client.listTools();
+      // Every tool whose route the platform marks `spends: true`. Both reach
+      // the guest agent, and reaching it resumes a suspended computer — the
+      // apidoc note on the files routes says such a read can even come back
+      // 402. read_file was missed on the first pass, which is what an invariant
+      // announced in one file and violated in the next looks like.
+      for (const name of ['cursor_position', 'read_file']) {
+        const tool = tools.find((t) => t.name === name);
+        expect(tool, name).toBeDefined();
+        expect(tool?.annotations?.readOnlyHint, name).toBeFalsy();
+        // Not read-only, but not destructive either: the spec defaults
+        // destructiveHint to TRUE once readOnlyHint is false, and a host that
+        // warns on it would be asking about destructive updates in order to
+        // read a log or a pointer coordinate.
+        expect(tool?.annotations?.destructiveHint, name).toBe(false);
+        // And idempotent, which defaults the other way once readOnlyHint is
+        // gone: a host gating retry-of-a-timed-out-call on this flag would
+        // otherwise refuse to retry a plain read.
+        expect(tool?.annotations?.idempotentHint, name).toBe(true);
+        // The description carries it too, for a caller that reads tools/list
+        // text and never looks at annotations.
+        expect(tool?.description, name).toMatch(/resum/i);
+      }
+      // The ones whose routes do NOT spend keep their hint. The claim is about
+      // what the route does, not about reads as a class.
+      for (const name of ['screenshot', 'read_clipboard', 'list_windows']) {
+        expect(tools.find((t) => t.name === name)?.annotations?.readOnlyHint, name).toBe(true);
+      }
+    } finally {
+      await close();
+      platform.restore();
+    }
+  });
+});
+
 describe('delete_snapshot answering 404', () => {
   it('does not report the retry it invites as a failure', async () => {
     // idempotentHint invites a client to retry a lost 2xx, and every non-OK

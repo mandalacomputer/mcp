@@ -139,8 +139,14 @@ already supports for when they are.
 **A running computer costs money, and a forgotten one keeps costing it.**
 `create_computer` says so in its own description, and so does everything that
 starts a machine by a side door — `restore_snapshot` boots a stopped computer,
-`write_clipboard` resumes a suspended one, and each of those is charged like
-any other start. When a stretch of work is over, `suspend_computer` (a pause:
+and `write_clipboard`, `read_file` and `cursor_position` each resume a suspended
+one, because each has to reach the guest agent to do its job. All of them are
+charged like any other start, and on a plan at its limit can come back 402
+rather than a result. The two reads are the surprising half of that list, and
+are why neither is annotated `readOnlyHint`: a host that auto-approves
+read-only tools would otherwise wake and bill a machine with nobody asked.
+`screenshot`, `read_clipboard` and `list_windows` genuinely do not start
+anything and keep the hint. When a stretch of work is over, `suspend_computer` (a pause:
 `start_computer` brings the same session back in about a second) or
 `stop_computer` (a shutdown: the disk is kept, the session is not). Idle
 suspend catches the ones a model forgets, but only after 30 minutes untouched.
