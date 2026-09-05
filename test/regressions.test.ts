@@ -4749,6 +4749,26 @@ describe('a platform address that answers with a redirect', () => {
     }
   });
 
+  it('resolves a relative Location, because a path is not a value anyone can set', async () => {
+    // `redirect: 'manual'` hands back the raw header, and Location is very often
+    // relative. "set MANDALA_BASE_URL to /api/v1/computers" names something that
+    // is not a URL and would not work if pasted — and naming the value to paste
+    // is the whole reason this is not just a bare HTTP 301.
+    const real = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      new Response(null, { status: 301, headers: { Location: '/moved/api/v1' } })) as typeof fetch;
+    try {
+      await new Api('com_test', BASE).json('GET', 'computers');
+      expect.unreachable('a 3xx should not resolve');
+    } catch (err) {
+      const said = (err as Error).message;
+      expect(said).toContain(`${new URL(BASE).origin}/moved/api/v1`);
+      expect(said).not.toMatch(/to \/moved\/api\/v1\b/);
+    } finally {
+      globalThis.fetch = real;
+    }
+  });
+
   it('files a 3xx with the 4xx, so a poll gives up instead of spending its deadline', async () => {
     // The paragraph in isTransientForPoll that this makes true. A redirect
     // repeats identically forever, so polling one to a deadline ends in a

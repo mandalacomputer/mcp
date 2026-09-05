@@ -345,8 +345,16 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
     // would have charged before, which would make metering a way around it
     // rather than a sharpening of it. An encoded body has no cheap honest
     // measure, so it keeps the old rule and pays up front.
-    const encoding = req.header('content-encoding');
-    if (encoding !== undefined && encoding.trim().toLowerCase() !== 'identity') {
+    //
+    // An EMPTY header is not an encoding, and reading it as one put the very
+    // bug this branch exists to fix back within reach of anybody who sends
+    // `Content-Encoding:` with nothing after it: body-parser reads that header
+    // as `|| 'identity'`, so it inflates nothing, and a mouse-click-sized
+    // chunked call would have taken a process-wide slot for its whole tool
+    // lifetime again. Blank and absent are the same answer here, as they are
+    // there.
+    const encoding = (req.header('content-encoding') ?? '').trim().toLowerCase();
+    if (encoding && encoding !== 'identity') {
       if (largeBodyParses >= maxLargeBodyParses) return refuseBeforeRead(req, res);
       return parseUnderLease(req, res, next, takeSlot());
     }
@@ -378,18 +386,21 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
         return;
       }
       // Refused with the upload in flight, which is the one cost of metering.
-      // The response is flushed before the socket goes: `Connection: close`
-      // makes Node end it after the 503 is written, where destroying the
-      // response in this tick with request bytes still unread is the condition
-      // for an RST that loses the 503 and shows the caller a bare
-      // ECONNRESET. The remaining request bytes are not drained — they are
-      // exactly the bandwidth this limit exists not to spend.
+      //
+      // ANSWER AND THEN LEAVE THE SOCKET ALONE. Two attempts at being clever
+      // here both lost the 503 outright — the caller got zero bytes and EPIPE,
+      // where doing nothing delivers it. Destroying the response in this tick
+      // is the RST condition, and `Connection: close` is no better: Node's
+      // resOnFinish sees `_last` and closes while request bytes are still
+      // unread, which is the same race by another name. Measured, both of them,
+      // against a caller still writing.
+      //
+      // Nothing needs draining by hand: body-parser is still reading this
+      // request, and `refused` is what stops its callback continuing into the
+      // route. So the body is consumed and dropped under the parser's own 96mb
+      // ceiling, and the socket ends the ordinary way.
       refused = true;
-      if (!res.destroyed && !res.headersSent) {
-        res.setHeader('Connection', 'close');
-        unavailable(res, noSlotMessage);
-      }
-      res.once('finish', () => req.destroy());
+      if (!res.destroyed && !res.headersSent) unavailable(res, noSlotMessage);
     };
     req.on('data', meter);
 

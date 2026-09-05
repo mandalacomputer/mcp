@@ -910,6 +910,105 @@ describe('a body that declared no length', () => {
     expect(await parsesNow()).toBe(0);
   }, 10_000);
 
+  it('delivers the 503 to a caller still uploading', async () => {
+    // The refusal this path exists to give, asserted end to end — it had no
+    // test, and two attempts at tidying the socket afterwards both lost it
+    // entirely: the caller got zero bytes and EPIPE instead of a status line.
+    // Nothing is destroyed here now; body-parser drains the rest under its own
+    // ceiling and the socket ends the ordinary way.
+    const sessionId = await openSession();
+    const big = JSON.stringify({
+      jsonrpc: '2.0',
+      id: 24,
+      method: 'tools/list',
+      pad: 'x'.repeat(900_000),
+    });
+    // Hold the single slot with one request, mid-flight.
+    const holder = chunked(sessionId, big);
+    holder.req.write(big.slice(0, 300_000));
+    for (let i = 0; i < 100 && (await parsesNow()) === 0; i++) {
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    expect(await parsesNow()).toBe(1);
+
+    // A second one crosses the threshold with no slot left, still writing.
+    const refused = chunked(sessionId, big);
+    let status = 0;
+    let body = '';
+    const answered = new Promise<void>((resolve) => {
+      refused.req.on('response', (res) => {
+        status = res.statusCode ?? 0;
+        res.setEncoding('utf8');
+        res.on('data', (c: string) => {
+          body += c;
+        });
+        res.on('end', () => resolve());
+      });
+      // EPIPE is the failure this test exists to catch, not an excuse to skip.
+      refused.req.on('error', () => resolve());
+    });
+    // KEEPS WRITING while the answer comes back. That is the condition: a
+    // client that stops and waits races differently and gets the 503 even from
+    // a build that would have lost it, which is exactly how the first spelling
+    // of this test passed against the bug it was written for.
+    let writing = true;
+    const chunk = 'y'.repeat(256 * 1024);
+    const keepWriting = () => {
+      if (!writing) return;
+      if (!refused.req.write(chunk)) refused.req.once('drain', keepWriting);
+      else setImmediate(keepWriting);
+    };
+    refused.req.on('error', () => {
+      writing = false;
+    });
+    keepWriting();
+    await answered;
+    writing = false;
+
+    expect(status).toBe(503);
+    expect(body).toMatch(/maximum.*large request bodies/i);
+
+    holder.req.end(big.slice(300_000));
+    await holder.done;
+  }, 15_000);
+
+  it('reads an empty Content-Encoding as no encoding, the way body-parser does', async () => {
+    // `Content-Encoding:` with nothing after it inflates nothing, so metering it
+    // is exact — and treating the blank header as an encoding put the original
+    // bug back within reach of anyone who sends one: a mouse-click-sized
+    // chunked call holding a process-wide slot for its whole tool lifetime.
+    const sessionId = await openSession();
+    const small = JSON.stringify({ jsonrpc: '2.0', id: 25, method: 'tools/list' });
+    const target = new URL(url);
+    for (const value of ['', 'identity']) {
+      const req = httpRequest({
+        hostname: target.hostname,
+        port: target.port,
+        path: '/mcp',
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Content-Encoding': value,
+          Accept: 'application/json, text/event-stream',
+          Authorization: 'Bearer not-a-platform-key',
+          'mcp-session-id': sessionId,
+        },
+      });
+      const done = new Promise<number>((resolve, reject) => {
+        req.on('response', (res) => {
+          res.resume();
+          res.on('end', () => resolve(res.statusCode ?? 0));
+        });
+        req.on('error', reject);
+      });
+      req.write(small.slice(0, 10));
+      await new Promise((r) => setTimeout(r, 50));
+      expect(await parsesNow(), `Content-Encoding: '${value}'`).toBe(0);
+      req.end(small.slice(10));
+      await done;
+    }
+  }, 10_000);
+
   it('charges a compressed body up front, since the wire says nothing about its size', async () => {
     // body-parser inflates before applying its limit, so wire bytes are not
     // what gets allocated: a few thousand gzipped bytes become megabytes of

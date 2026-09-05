@@ -274,6 +274,8 @@ export class Api {
 
     const signal = opts.signal ?? this.#signal;
     let resp: Response;
+    /** Kept so a relative `Location` can be resolved against what was asked. */
+    let requested: URL | string = this.#base;
     try {
       // `dispatcher` is Node/undici's extension to RequestInit. It is kept on
       // a typed variable so the standard fetch signature can still be used.
@@ -291,7 +293,8 @@ export class Api {
         redirect: 'manual',
         dispatcher: PLATFORM_DISPATCHER,
       };
-      resp = await platformFetch()(this.#url(path, opts.query), init);
+      requested = this.#url(path, opts.query);
+      resp = await platformFetch()(requested, init);
     } catch (cause) {
       // Cancellation first, because it is not a connectivity failure and the
       // wrap below cannot tell the difference. An aborted fetch rejects with a
@@ -327,7 +330,22 @@ export class Api {
     // and its one useful field is a HEADER. Left to `#error` it would arrive as
     // a bare `HTTP 301`, which says nothing about the value that has to change.
     if (resp.status >= 300 && resp.status < 400) {
-      const to = resp.headers.get('location');
+      // Resolved against the request, because `Location` is very often relative
+      // and `redirect: 'manual'` hands back the raw header. "set
+      // MANDALA_BASE_URL to /api/v1/computers" names something that is not a URL
+      // and would not work — and naming the value to paste is the entire reason
+      // this branch exists rather than a bare `HTTP 301`.
+      const raw = resp.headers.get('location');
+      let to = raw ?? undefined;
+      if (raw) {
+        try {
+          to = new URL(raw, requested).toString();
+        } catch {
+          // A Location this client cannot parse is still worth repeating
+          // verbatim: the operator can see what the platform said.
+          to = raw;
+        }
+      }
       // Cancelled before the throw, the way every other exit in this file
       // cancels its reader. A 3xx body is nothing anybody wants, but an unread
       // one holds its undici connection open until the GC gets to it — and the
