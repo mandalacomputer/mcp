@@ -64,6 +64,25 @@ const FALSEY = new Set(['false', '0', 'no', 'off']);
 const TRUTHY = new Set(['true', '1', 'yes', 'on']);
 
 /**
+ * The value of a yes-or-no FLAG, refusing a spelling it does not know.
+ *
+ * The same vocabulary and the same refusal as {@link envFlag} below, because
+ * `--no-lifecycle=…` and `MANDALA_NO_LIFECYCLE=…` are two spellings of one
+ * control and it would be a poor joke for them to disagree about what `yes`
+ * means. Only the wording of the message differs, since one names a flag and
+ * the other a variable.
+ */
+function boolFlag(name: string, inline: string): boolean {
+  const v = inline.trim().toLowerCase();
+  if (TRUTHY.has(v)) return true;
+  if (FALSEY.has(v)) return false;
+  throw new Error(
+    `--${name}=${inline} is not a yes or a no. Use one of ${[...TRUTHY].join(', ')} to turn it ` +
+      `on, one of ${[...FALSEY].join(', ')} to turn it off, or just --${name} on its own.`,
+  );
+}
+
+/**
  * A yes-or-no environment variable, refusing a spelling it does not know.
  *
  * REFUSED rather than read as no, which is the decision worth recording.
@@ -138,8 +157,21 @@ export function parse(argv: string[]): Flags {
     // `--http=false` has to mean false. It is the one spelling that carries an
     // explicit answer, and reading it as the truthy string "false" would turn
     // the clearest way to say no into a yes.
-    if (BOOLEAN.has(name))
-      flags[name] = inline === undefined ? true : !FALSEY.has(inline.toLowerCase());
+    //
+    // Matched against BOTH vocabularies rather than "anything that is not a no
+    // is a yes", which is what this was and which made a misspelling of a NO
+    // into a YES. `--http=ture` started a network listener the operator was
+    // trying not to start, and `--no-lifecycle=fasle` withheld the tools that
+    // make and destroy computers from someone who meant to keep them. The
+    // second fails safe and the first does not, so the loose reading had to go
+    // (OPL-4515).
+    //
+    // Refused rather than defaulted, which is the same call `envFlag` makes one
+    // screen up for the environment half of the same controls, and the message
+    // is deliberately its twin. An empty `--http=` is refused too: it is
+    // neither a yes nor a no, and `--port=` is already refused for being
+    // neither a number nor absent.
+    if (BOOLEAN.has(name)) flags[name] = inline === undefined ? true : boolFlag(name, inline);
     else if (inline !== undefined) flags[name] = inline;
     // PRESENT, not truthy. `--key ""` is a value token like any other, and a
     // truthiness test skipped it: the flag became the boolean `true` and the
