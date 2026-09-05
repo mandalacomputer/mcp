@@ -328,6 +328,12 @@ export class Api {
     // a bare `HTTP 301`, which says nothing about the value that has to change.
     if (resp.status >= 300 && resp.status < 400) {
       const to = resp.headers.get('location');
+      // Cancelled before the throw, the way every other exit in this file
+      // cancels its reader. A 3xx body is nothing anybody wants, but an unread
+      // one holds its undici connection open until the GC gets to it — and the
+      // whole point of this branch is a misconfigured base URL, which means
+      // EVERY request takes it.
+      await resp.body?.cancel().catch(() => {});
       throw new RedirectError(
         `${method} /${path.replace(/^\/+/, '')} was redirected (HTTP ${resp.status}${
           to ? ` to ${to}` : ', with no Location header'

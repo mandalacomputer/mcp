@@ -1,5 +1,6 @@
 import { Agent as HttpAgent, request as httpRequest, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
+import { gzipSync } from 'node:zlib';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { runHttp } from '../src/http.js';
@@ -907,6 +908,54 @@ describe('a body that declared no length', () => {
     expect(await a.done).not.toBe(503);
     expect(await b.done).not.toBe(503);
     expect(await parsesNow()).toBe(0);
+  }, 10_000);
+
+  it('charges a compressed body up front, since the wire says nothing about its size', async () => {
+    // body-parser inflates before applying its limit, so wire bytes are not
+    // what gets allocated: a few thousand gzipped bytes become megabytes of
+    // parsed JSON the meter never sees. Metering an encoded body would be a way
+    // AROUND the cap rather than a sharpening of it, so it keeps the old rule.
+    const sessionId = await openSession();
+    const big = JSON.stringify({
+      jsonrpc: '2.0',
+      id: 23,
+      method: 'tools/list',
+      pad: 'x'.repeat(5_000_000),
+    });
+    const squashed = gzipSync(Buffer.from(big));
+    // Comfortably under the 256KB threshold on the wire, and 5MB once inflated.
+    expect(squashed.length).toBeLessThan(256 * 1024);
+
+    const target = new URL(url);
+    const req = httpRequest({
+      hostname: target.hostname,
+      port: target.port,
+      path: '/mcp',
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Content-Encoding': 'gzip',
+        Accept: 'application/json, text/event-stream',
+        Authorization: 'Bearer not-a-platform-key',
+        'mcp-session-id': sessionId,
+      },
+    });
+    const done = new Promise<number>((resolve, reject) => {
+      req.on('response', (res) => {
+        res.resume();
+        res.on('end', () => resolve(res.statusCode ?? 0));
+      });
+      req.on('error', reject);
+    });
+    // Written in two pieces so the request is still in flight when the count is
+    // read: a body this small would otherwise be parsed before the check.
+    req.write(squashed.subarray(0, 100));
+    for (let i = 0; i < 100 && (await parsesNow()) === 0; i++) {
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    expect(await parsesNow()).toBe(1);
+    req.end(squashed.subarray(100));
+    await done;
   }, 10_000);
 
   it('charges one the moment the bytes say it is large', async () => {
