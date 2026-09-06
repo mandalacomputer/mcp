@@ -1146,12 +1146,12 @@ function decodeExec(res: unknown, continued: boolean): { body: unknown; note: st
     body[name] = stream.text;
     if (stream.head.length > 0) {
       notes.push(
-        `${name} began with ${stream.head.length} byte(s) (hex ${hex(stream.head)}) finishing a character an earlier read cut in half; they are not in the text above.`,
+        `${name} began with ${stream.head.length} byte(s) (hex ${hex(stream.head)}) finishing a character an earlier read cut in half; they are not in \`${name}\` below.`,
       );
     }
     if (stream.tail.length > 0) {
       notes.push(
-        `${name} stops ${stream.tail.length} byte(s) (hex ${hex(stream.tail)}) into a character this chunk cut in half; they are not in the text above, and the rest of it starts the next read.`,
+        `${name} stops ${stream.tail.length} byte(s) (hex ${hex(stream.tail)}) into a character this chunk cut in half; the \u{fffd} in \`${name}\` below stands in their place, and the rest of the character starts the next read.`,
       );
     }
   }

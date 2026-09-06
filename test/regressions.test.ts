@@ -5383,6 +5383,32 @@ describe('exec output arrives as base64', () => {
     expect(bodyOf(res).stdout).toBe('GOOD\n');
   });
 
+  it('can receive an exec answer as large as the guest agent will send one', async () => {
+    // The ceiling one layer down. The guest agent caps its capture at 16 MiB per
+    // stream, and base64 is four characters for every three bytes, so a command
+    // that filled both streams arrives as roughly 42.7 MiB of JSON. The JSON
+    // body ceiling was 16 MiB — sized when these fields were strings of the
+    // decoded bytes — and a body over it is REFUSED rather than truncated, so
+    // the whole answer was lost somewhere north of 12 MiB of output, truncation
+    // sentence included. Asserted through the API layer rather than the tool:
+    // the point is the body arriving, not what a tool result does with it.
+    const output = Buffer.alloc(13 * 1024 * 1024, 0x78);
+    const body = JSON.stringify({ exit_code: 0, stdout_b64: output.toString('base64') });
+    expect(body.length).toBeGreaterThan(16 * 1024 * 1024);
+    const real = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      new Response(body, { headers: { 'Content-Type': 'application/json' } })) as typeof fetch;
+    try {
+      const res = await new Api('com_test', BASE).json<Record<string, string>>(
+        'POST',
+        'computers/vm-1/exec',
+      );
+      expect(Buffer.from(res.stdout_b64, 'base64')).toHaveLength(output.length);
+    } finally {
+      globalThis.fetch = real;
+    }
+  });
+
   it('names which stream the 16 MiB cap cut, because the flags are per stream', async () => {
     answering({
       exit_code: 0,
