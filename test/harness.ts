@@ -282,6 +282,9 @@ const BUILD_STREAM =
   `event: progress\ndata: ${JSON.stringify({ ...BUILD_PROGRESS, done: false, status: 'running', phase: 'copying' })}\n\n` +
   `event: done\ndata: ${JSON.stringify(BUILD_PROGRESS)}\n\n`;
 
+/** Exec output, encoded the way the platform encodes it. */
+export const b64 = (s: string) => Buffer.from(s, 'utf8').toString('base64');
+
 function respond(
   method: string,
   path: string,
@@ -308,11 +311,27 @@ function respond(
     // reading of a response is the thing under test.
     return download('hello', headers.range);
   }
+  // Output as base64, the way the platform now sends it (OPL-4542). A fixture
+  // still holding plain `stdout` would let a server that never decodes pass —
+  // and against a current daemon that server reads every command as empty.
   if (path.endsWith('/exec')) {
-    return json({ exit_code: 0, stdout: 'ok\n', stderr: '', timed_out: false, pid: 4242 });
+    return json({
+      exit_code: 0,
+      stdout_b64: b64('ok\n'),
+      stderr_b64: '',
+      timed_out: false,
+      pid: 4242,
+    });
   }
   if (/\/exec\/\d+$/.test(path)) {
-    return json({ pid: 4242, running: false, exited: true, exit_code: 0, stdout: 'done\n' });
+    return json({
+      pid: 4242,
+      running: false,
+      exited: true,
+      exit_code: 0,
+      stdout_b64: b64('done\n'),
+      stdout_offset: 5,
+    });
   }
   if (path.endsWith('/input')) return json({ ok: true, x: 1, y: 2, known: true });
   // Both verbs on one path, told apart by the method: the read answers text and

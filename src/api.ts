@@ -75,8 +75,22 @@ export type Bytes = {
  */
 const MAX_SSE_BUFFER = 8 * 1024 * 1024;
 
-/** Finite response-body ceilings for the two paths that decode text. */
-const MAX_JSON_BODY_BYTES = 16 * 1024 * 1024;
+/**
+ * Finite response-body ceilings for the two paths that decode text.
+ *
+ * The JSON one is sized off the largest legitimate response on any route, which
+ * is an exec answer (OPL-4542). The guest agent caps its capture at 16 MiB PER
+ * STREAM, and both streams now travel as base64 — four characters for every
+ * three bytes — so a foreground command that filled both arrives as about
+ * 42.7 MiB of JSON. This used to be 16 MiB, sized when those fields were JSON
+ * strings of the decoded bytes, and a body over it is not truncated but
+ * REFUSED: the model would have lost the whole answer, truncation sentence
+ * included, somewhere north of 12 MiB of output. Under the platform's own
+ * 64 MiB transfer cap, and still finite, which is the only thing this guard is
+ * for — it exists to refuse an unbounded body, not to set a policy on a large
+ * one.
+ */
+const MAX_JSON_BODY_BYTES = 48 * 1024 * 1024;
 const MAX_ERROR_BODY_BYTES = 1024 * 1024;
 
 /**
