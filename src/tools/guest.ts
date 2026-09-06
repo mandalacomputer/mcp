@@ -193,7 +193,7 @@ export const registerGuest: Registrar = (server, session) => {
     {
       title: 'Run a command in the guest',
       description:
-        'Run a shell command inside the computer. Runs as root with no display by default — anything that opens a window needs desktop: true, anything slower than a few seconds needs background: true, and anything that needs an environment variable takes env rather than an assignment written into the command. Against the hosted platform, waiting here is capped at about two minutes by a proxy in front of it, not by timeout_s. One computer runs at most sixteen background commands at once: the seventeenth is refused rather than queued, and exec_kill on a pid you already hold is what makes room.',
+        'Run a shell command inside the computer. Runs as root with no display by default — anything that opens a window needs desktop: true, anything slower than a few seconds needs background: true, and anything that needs an environment variable takes env rather than an assignment written into the command. Against the hosted platform, waiting here is capped at about two minutes by a proxy in front of it, not by timeout_s. One computer runs at most sixteen background commands at once: the seventeenth is refused rather than queued, and exec_kill on a pid you already hold is what makes room. What the command printed comes back as `stdout` and `stderr` when it is text, and as `stdout_b64` and `stderr_b64` — base64 of the exact bytes — when it is not, so a command that emits binary is never quietly turned into replacement characters.',
       inputSchema: {
         ...idArg,
         command: z.string().describe('A shell command line.'),
@@ -256,18 +256,22 @@ export const registerGuest: Registrar = (server, session) => {
           // is nothing to poll and nothing to kill. Reported as a success, "pid
           // undefined" sends the model to exec_poll with a handle that cannot
           // exist, and the command goes on running in the guest unattended.
+          // Decoded on every branch of this route: the 202 that hands back a
+          // handle carries the same two output fields as the 200 that waited.
+          const { body, note } = decodeExec(res, false);
           if (!Number.isSafeInteger(res.pid) || (res.pid as number) <= 0) {
             return refused(
               `The command was accepted but the guest reported no pid that is a usable positive safe integer, so there is no safe handle to poll or kill it with. It may still be running inside the computer — check with exec "ps aux".`,
-              res,
+              body,
             );
           }
           return said(
-            `Started as pid ${res.pid}. Read its output with exec_poll, stop it with exec_kill.`,
-            res,
+            `Started as pid ${res.pid}. Read its output with exec_poll, stop it with exec_kill.${note}`,
+            body,
           );
         }
-        return said(execSummary(res), res);
+        const { body, note } = decodeExec(res, false);
+        return said(`${execSummary(res)}${note}`, body);
       }),
   );
 
@@ -276,7 +280,7 @@ export const registerGuest: Registrar = (server, session) => {
     {
       title: 'Read a background command',
       description:
-        "What a backgrounded command has printed since the last time you asked, and whether it has finished. The output is a cursor, not a buffer: each poll gives you only the new bytes, so two readers on one pid split the output between them rather than each seeing all of it. Finishing is also what releases a computer's background slot, so this is how you tell which of your handles still hold one — the poll itself frees nothing.",
+        "What a backgrounded command has printed since the last time you asked, and whether it has finished. The output is a cursor, not a buffer: each poll gives you only the new bytes, so two readers on one pid split the output between them rather than each seeing all of it. Finishing is also what releases a computer's background slot, so this is how you tell which of your handles still hold one — the poll itself frees nothing. Output comes back as `stdout` and `stderr` when it is text and as `stdout_b64` and `stderr_b64` when it is not; a chunk cut through the middle of a character keeps both halves, with the text stopping at the last whole one and a note naming the bytes the next poll begins with.",
       inputSchema: {
         ...idArg,
         pid: pidSchema,
@@ -313,7 +317,11 @@ export const registerGuest: Registrar = (server, session) => {
         const more = res.more
           ? '\n\n`more` is set — there is further output waiting; poll again straight away.'
           : '';
-        return said(`${execSummary(res)}${more}`, res);
+        // `continued`, because a poll reads from wherever the last one stopped:
+        // a character the previous chunk cut in half arrives here as leading
+        // continuation bytes, and those are not the start of binary output.
+        const { body, note } = decodeExec(res, true);
+        return said(`${execSummary(res)}${more}${note}`, body);
       }),
   );
 
@@ -336,7 +344,10 @@ export const registerGuest: Registrar = (server, session) => {
         const res = await session.api
           .with(extra.signal)
           .send<Record<string, unknown>>('DELETE', P.execHandle(id, pid));
-        return said(`Killed pid ${pid}.`, res);
+        // Also a cursor read — the kill answers with whatever the command
+        // printed that no poll had taken yet.
+        const { body, note } = decodeExec(res, true);
+        return said(`Killed pid ${pid}.${note}`, body);
       }),
   );
 
@@ -356,9 +367,13 @@ export const registerGuest: Registrar = (server, session) => {
           .json<Record<string, unknown>>('POST', P.computerAction(id, 'exec'), {
             body: P.execBody({ command: P.openUrlCommand(url), timeout_s: 30, desktop: true }),
           });
+        // The exec route, so the exec output fields, even though a nohup'd
+        // browser prints nothing worth reading: left raw they would put a
+        // base64 field in front of a model for no reason at all.
+        const { body, note } = decodeExec(res, false);
         return said(
-          `Asked the desktop to open ${url}. Give it a few seconds, then screenshot — the browser draws after the command returns.`,
-          res,
+          `Asked the desktop to open ${url}. Give it a few seconds, then screenshot — the browser draws after the command returns.${note}`,
+          body,
         );
       }),
   );
@@ -942,6 +957,159 @@ function utf8Page(bytes: Uint8Array): Uint8Array {
   } catch {
     return bytes;
   }
+}
+
+/**
+ * The two output fields every exec route now carries, and what each is called
+ * once it is bytes again (OPL-4542).
+ *
+ * The platform sends command output as `stdout_b64` and `stderr_b64`, always
+ * base64 and never conditionally. It used to send `stdout` and `stderr` as JSON
+ * strings, so any byte that was not valid UTF-8 arrived as U+FFFD with no way
+ * back — and the case that reaches an ordinary caller is not a binary artifact
+ * but a plain text log: a poll is cut at 1 MiB on a BYTE offset, so a multi-byte
+ * character straddling the cut was destroyed in both halves. The field was
+ * renamed rather than given an `encoding` discriminator precisely so that a
+ * client which had not been updated fails on a missing field instead of quietly
+ * reporting every command's output as empty.
+ *
+ * `stdout_offset` and `stderr_offset` kept their names and count DECODED bytes.
+ * Nothing here has to move a cursor by them — the guest holds the cursor and
+ * exec_poll sends no offset — so they pass through untouched, still describing
+ * the bytes this server hands over rather than the base64 it was given.
+ */
+const EXEC_STREAMS: Record<string, { name: string; truncated: string }> = {
+  stdout_b64: { name: 'stdout', truncated: 'out_truncated' },
+  stderr_b64: { name: 'stderr', truncated: 'err_truncated' },
+};
+
+/**
+ * What this server puts in front of a model: text when the bytes are text, and
+ * base64 when they are not.
+ *
+ * An SDK ought to expose `bytes` and let its caller decide, because decoding to
+ * a string at the library boundary reintroduces exactly the corruption the
+ * rename removed. That is right, and it is not available here: a tool result is
+ * JSON in a conversation, so there is no `bytes` to hand over and a model cannot
+ * read one. The surface that keeps the guarantee instead is read_file's, already
+ * established one tool along — text comes back as text, and anything that is not
+ * text keeps its base64 field rather than being decoded into replacement
+ * characters. So a model reading `stdout` knows it is reading what the command
+ * wrote, and one reading `stdout_b64` knows the bytes are not text and that
+ * nothing was lost on the way to telling it so.
+ */
+type ExecStream =
+  | { kind: 'text'; text: string; head: Uint8Array; tail: Uint8Array }
+  | { kind: 'bytes' }
+  | { kind: 'undecodable' };
+
+const NO_BYTES = new Uint8Array(0);
+
+/**
+ * How many bytes at the start finish a character an earlier read cut in half.
+ *
+ * A UTF-8 stream never begins with a continuation byte, so leading ones in a
+ * chunk that follows another chunk are the remainder of a split character and
+ * nothing else. At most three, which is the most a character can owe; a run
+ * longer than that is not a split character, and leaving the extras in place
+ * makes the decode below fail and the whole chunk stay base64 — which is the
+ * right answer for output that was never text.
+ */
+function orphanUtf8Tail(bytes: Uint8Array): number {
+  let n = 0;
+  while (n < bytes.length && n < 3 && bytes[n] >= 0x80 && bytes[n] <= 0xbf) n++;
+  return n;
+}
+
+/**
+ * One output field, decoded — with the character halves the chunking cut off.
+ *
+ * `continued` and `continues` are what make a partial character at either end a
+ * casualty of the cut rather than proof the command wrote bytes. A whole stream
+ * that ends mid-character IS binary and stays base64; a 1 MiB poll that does is
+ * a text log the guest sliced on a byte boundary, and the missing half arrives
+ * on the next poll.
+ */
+function decodeExecStream(raw: string, continued: boolean, continues: boolean): ExecStream {
+  // Node's base64 decoder drops what it does not recognise, so a field that is
+  // not base64 would decode to a shorter, plausible-looking string. It cannot
+  // happen against a platform that always encodes; if it does, it is not output
+  // and must not be presented as any.
+  if (!isBase64(raw)) return { kind: 'undecodable' };
+  const bytes = new Uint8Array(Buffer.from(raw, 'base64'));
+  const start = continued ? orphanUtf8Tail(bytes) : 0;
+  const rest = bytes.subarray(start);
+  const lead = continues ? incompleteUtf8Lead(rest) : undefined;
+  const middle = lead === undefined ? rest : rest.subarray(0, lead);
+  // A NUL is legal UTF-8 and is never in output anybody meant to read as text —
+  // the same line `decodeUtf8` draws for a file, drawn here for a stream.
+  if (middle.includes(0)) return { kind: 'bytes' };
+  try {
+    return {
+      kind: 'text',
+      text: new TextDecoder('utf-8', { fatal: true }).decode(middle),
+      head: bytes.subarray(0, start),
+      tail: lead === undefined ? NO_BYTES : rest.subarray(lead),
+    };
+  } catch {
+    return { kind: 'bytes' };
+  }
+}
+
+/** `e2 80` — a few bytes named exactly, for a note about the ones not shown. */
+const hex = (bytes: Uint8Array) => Buffer.from(bytes).toString('hex').replace(/../g, '$& ').trim();
+
+/**
+ * An exec answer with its output decoded, and the sentences that go above it.
+ *
+ * `continued` is whether bytes may precede this chunk — true for the two routes
+ * that read a cursor an earlier poll may already have moved, false for the two
+ * that answer a command's output from its beginning.
+ */
+function decodeExec(res: unknown, continued: boolean): { body: unknown; note: string } {
+  if (!res || typeof res !== 'object' || Array.isArray(res)) return { body: res, note: '' };
+  const source = res as Record<string, unknown>;
+  // Whether more of a stream can still arrive: the command has not exited, the
+  // guest says it is holding more, or the guest agent's 16 MiB capture cap cut
+  // this one short. `more` is one flag for both streams on the poll routes —
+  // the platform ORs them — while the truncation flags are per stream, which is
+  // why this is asked per field rather than once.
+  const flowing = source.more === true || source.running === true;
+  const body: Record<string, unknown> = {};
+  const notes: string[] = [];
+  for (const [key, value] of Object.entries(source)) {
+    const field = EXEC_STREAMS[key];
+    if (field === undefined || typeof value !== 'string') {
+      body[key] = value;
+      continue;
+    }
+    const { name, truncated } = field;
+    const stream = decodeExecStream(value, continued, flowing || source[truncated] === true);
+    if (stream.kind !== 'text') {
+      // Left under the name it arrived with, which is the whole signal: the
+      // field says base64, so a reader knows to decode it and knows the bytes
+      // are exactly what the command wrote.
+      body[key] = value;
+      notes.push(
+        stream.kind === 'bytes'
+          ? `${name} is not text, so it is left as \`${key}\` — base64 of the bytes the command wrote, unchanged.`
+          : `${key} did not decode as base64 and is left exactly as it arrived. Treat it as unread output rather than as ${name}.`,
+      );
+      continue;
+    }
+    body[name] = stream.text;
+    if (stream.head.length > 0) {
+      notes.push(
+        `${name} began with ${stream.head.length} byte(s) (hex ${hex(stream.head)}) finishing a character an earlier read cut in half; they are not in the text above.`,
+      );
+    }
+    if (stream.tail.length > 0) {
+      notes.push(
+        `${name} stops ${stream.tail.length} byte(s) (hex ${hex(stream.tail)}) into a character this chunk cut in half; they are not in the text above, and the rest of it starts the next read.`,
+      );
+    }
+  }
+  return { body, note: notes.length > 0 ? `\n\n${notes.join('\n')}` : '' };
 }
 
 /** The one line a model needs off an exec result, before the JSON. */

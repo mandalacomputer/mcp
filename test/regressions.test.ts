@@ -3332,6 +3332,11 @@ describe('the tools our own prose tells a model to call', () => {
     'build_id',
     'workspace_id',
     'exit_code',
+    // The two output fields on every exec route (OPL-4542). Response fields —
+    // named in prose because a model that gets one has to know it is holding
+    // base64 rather than the text the sibling field carries.
+    'stdout_b64',
+    'stderr_b64',
     'view_url',
     'view_token',
     'embed_url',
@@ -5208,5 +5213,197 @@ describe('a platform address that answers with a redirect', () => {
     // give-up that names nothing about the redirect.
     expect(isTransientForPoll(new RedirectError('redirected', 301))).toBe(false);
     expect(isTransientForPoll(new RedirectError('redirected', 308))).toBe(false);
+  });
+});
+
+describe('exec output arrives as base64', () => {
+  const real = globalThis.fetch;
+  afterEach(() => {
+    globalThis.fetch = real;
+  });
+
+  /** Answer each call with the next body in the queue, as the platform would. */
+  const answering = (...bodies: unknown[]) => {
+    let n = 0;
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify(bodies[Math.min(n++, bodies.length - 1)]), {
+        headers: { 'Content-Type': 'application/json' },
+      })) as typeof fetch;
+  };
+
+  const b64 = (bytes: number[] | string) =>
+    Buffer.from(typeof bytes === 'string' ? Buffer.from(bytes, 'utf8') : bytes).toString('base64');
+
+  /** The JSON a tool put under its sentence. */
+  const bodyOf = (res: CallToolResult) => {
+    const text = said(res);
+    return JSON.parse(text.slice(text.indexOf('{'))) as Record<string, unknown>;
+  };
+
+  it('decodes both streams, so a model reads output rather than base64', async () => {
+    answering({
+      exit_code: 0,
+      stdout_b64: b64('hello\n'),
+      stderr_b64: b64('warn\n'),
+      timed_out: false,
+    });
+    const { call, close } = await connect();
+    const res = await call('exec', { command: 'echo hello' });
+    await close();
+
+    const body = bodyOf(res);
+    expect(body.stdout).toBe('hello\n');
+    expect(body.stderr).toBe('warn\n');
+    // Gone, not left beside the decoded copy: two fields holding the same
+    // output is an invitation to read the unreadable one.
+    expect(body).not.toHaveProperty('stdout_b64');
+    expect(body).not.toHaveProperty('stderr_b64');
+  });
+
+  it('keeps bytes that are not text as base64 rather than as U+FFFD', async () => {
+    // The defect this closes, and the test that has to exist for it: a command
+    // emitting a byte sequence that is not valid UTF-8. Anything testing only
+    // `echo hi` passes against a server that decodes straight to a string and
+    // destroys every byte the JSON encoder cannot carry.
+    const bytes = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0xff, 0xfe];
+    answering({ exit_code: 0, stdout_b64: b64(bytes), stderr_b64: '', timed_out: false });
+    const { call, close } = await connect();
+    const res = await call('exec', { command: 'cat /bin/true' });
+    await close();
+
+    const body = bodyOf(res);
+    expect(body.stdout_b64).toBe(b64(bytes));
+    expect(body).not.toHaveProperty('stdout');
+    // Byte for byte, which is the whole promise: what the model can decode is
+    // exactly what the command wrote.
+    expect([...Buffer.from(body.stdout_b64 as string, 'base64')]).toEqual(bytes);
+    expect(said(res)).not.toContain('�');
+    expect(said(res)).toContain('stdout is not text');
+  });
+
+  it('will not read a NUL-bearing stream as text', async () => {
+    const bytes = [0x41, 0x00, 0x42];
+    answering({ exit_code: 0, stdout_b64: b64(bytes), stderr_b64: '', timed_out: false });
+    const { call, close } = await connect();
+    const res = await call('exec', { command: 'head -c3 /dev/zero' });
+    await close();
+
+    expect(bodyOf(res).stdout_b64).toBe(b64(bytes));
+  });
+
+  it('carries a character split across two polls without corrupting either half', async () => {
+    // The reachable case, and the reason the platform renamed the field rather
+    // than adding an `encoding` discriminator: the guest cuts a poll on a BYTE
+    // offset, so an ordinary UTF-8 log has a character straddling the cut. Read
+    // as a JSON string, both halves came back as U+FFFD.
+    answering(
+      { pid: 4242, running: true, more: true, stdout_b64: b64([0x61, 0xf0, 0x9f]) },
+      {
+        pid: 4242,
+        running: false,
+        exited: true,
+        exit_code: 0,
+        stdout_b64: b64([0x98, 0x80, 0x62]),
+      },
+    );
+    const { call, close } = await connect();
+    const first = await call('exec_poll', { pid: 4242 });
+    const second = await call('exec_poll', { pid: 4242 });
+    await close();
+
+    // The valid part of each chunk, as text — not the whole chunk dumped back
+    // as base64 because three of its bytes belong to the other poll.
+    expect(bodyOf(first).stdout).toBe('a');
+    expect(bodyOf(second).stdout).toBe('b');
+    for (const res of [first, second]) expect(said(res)).not.toContain('�');
+    // And the halves are named rather than silently dropped, in both directions.
+    expect(said(first)).toContain('f0 9f');
+    expect(said(second)).toContain('98 80');
+  });
+
+  it('reads a stream that ends mid-character as bytes once nothing more can arrive', async () => {
+    // The same three bytes, with no continuation to expect. A completed command
+    // whose output stops inside a character did not write text.
+    answering({ exit_code: 0, stdout_b64: b64([0x61, 0xf0, 0x9f]), timed_out: false });
+    const { call, close } = await connect();
+    const res = await call('exec', { command: 'printf' });
+    await close();
+
+    expect(bodyOf(res).stdout_b64).toBe(b64([0x61, 0xf0, 0x9f]));
+  });
+
+  it('asks about truncation per stream, because the two flags are separate', async () => {
+    // The 16 MiB capture cap cuts each stream on its own byte offset and sets
+    // its own flag. Reading `out_truncated` for both would call stderr's last
+    // character a casualty of a cut that happened to stdout.
+    const cut = [0x61, 0xf0, 0x9f];
+    answering({
+      exit_code: 0,
+      stdout_b64: b64(cut),
+      stderr_b64: b64(cut),
+      out_truncated: true,
+      err_truncated: false,
+      timed_out: false,
+    });
+    const { call, close } = await connect();
+    const res = await call('exec', { command: 'cat big.log' });
+    await close();
+
+    const body = bodyOf(res);
+    expect(body.stdout).toBe('a');
+    expect(body).not.toHaveProperty('stderr');
+    expect(body.stderr_b64).toBe(b64(cut));
+  });
+
+  it('leaves the byte offsets alone, because they already count decoded bytes', async () => {
+    answering({
+      pid: 4242,
+      running: true,
+      more: false,
+      stdout_b64: b64('héllo'),
+      stdout_offset: 6,
+      stderr_offset: 0,
+    });
+    const { call, close } = await connect();
+    const res = await call('exec_poll', { pid: 4242 });
+    await close();
+
+    const body = bodyOf(res);
+    // Six decoded bytes for five characters. Nothing here scales an offset by
+    // 4/3 or by the length of the base64 it arrived in.
+    expect(body.stdout_offset).toBe(6);
+    expect(body.stderr_offset).toBe(0);
+    expect(body.stdout).toBe('héllo');
+  });
+
+  it('decodes what a kill hands back, which is output no poll had taken', async () => {
+    answering({ pid: 4242, killed: true, exit_code: null, stdout_b64: b64('half a build\n') });
+    const { call, close } = await connect();
+    const res = await call('exec_kill', { pid: 4242 });
+    await close();
+
+    expect(bodyOf(res).stdout).toBe('half a build\n');
+  });
+
+  it('decodes the 202 as well, since a background start carries the same fields', async () => {
+    answering({ pid: 4242, running: true, stdout_b64: b64('starting\n') });
+    const { call, close } = await connect();
+    const res = await call('exec', { command: 'npm run dev', background: true });
+    await close();
+
+    expect(bodyOf(res).stdout).toBe('starting\n');
+    expect(said(res)).toContain('Started as pid 4242');
+  });
+
+  it('says so rather than guessing when a field is not base64 at all', async () => {
+    // Node's decoder drops what it does not recognise, so decoding this anyway
+    // would hand over a shorter, entirely plausible string.
+    answering({ exit_code: 0, stdout_b64: 'not base64 !!!', timed_out: false });
+    const { call, close } = await connect();
+    const res = await call('exec', { command: 'true' });
+    await close();
+
+    expect(bodyOf(res).stdout_b64).toBe('not base64 !!!');
+    expect(said(res)).toContain('did not decode as base64');
   });
 });
