@@ -261,7 +261,7 @@ export const registerGuest: Registrar = (server, session) => {
           const { body, note } = decodeExec(res, false);
           if (!Number.isSafeInteger(res.pid) || (res.pid as number) <= 0) {
             return refused(
-              `The command was accepted but the guest reported no pid that is a usable positive safe integer, so there is no safe handle to poll or kill it with. It may still be running inside the computer — check with exec "ps aux".`,
+              `The command was accepted but the guest reported no pid that is a usable positive safe integer, so there is no safe handle to poll or kill it with. It may still be running inside the computer — check with exec "ps aux".${note}`,
               body,
             );
           }
@@ -1030,14 +1030,32 @@ function orphanUtf8Tail(bytes: Uint8Array): number {
  * a text log the guest sliced on a byte boundary, and the missing half arrives
  * on the next poll.
  */
-function decodeExecStream(raw: string, continued: boolean, continues: boolean): ExecStream {
+function decodeExecStream(
+  raw: string,
+  continued: boolean,
+  offset: unknown,
+  continues: boolean,
+): ExecStream {
   // Node's base64 decoder drops what it does not recognise, so a field that is
   // not base64 would decode to a shorter, plausible-looking string. It cannot
   // happen against a platform that always encodes; if it does, it is not output
   // and must not be presented as any.
   if (!isBase64(raw)) return { kind: 'undecodable' };
   const bytes = new Uint8Array(Buffer.from(raw, 'base64'));
-  const start = continued ? orphanUtf8Tail(bytes) : 0;
+  // Whether anything actually precedes these bytes. The route says only whether
+  // anything CAN — a cursor read may follow an earlier one — and the FIRST poll
+  // of a pid is a cursor read that nothing precedes, where stripping leading
+  // bytes would delete output the command really wrote and explain it with a cut
+  // that never happened. The offset settles it: it counts decoded bytes and
+  // names the end of this chunk, so the chunk began at `offset - length`. A
+  // chunk that begins at zero is the head of the stream. Absent or not a number,
+  // the route's answer stands; a start that does not come out positive is read
+  // as the head of the stream, which strips nothing and at worst leaves a
+  // genuine split character in the base64.
+  const mid =
+    continued &&
+    (typeof offset !== 'number' || !Number.isFinite(offset) || offset - bytes.length > 0);
+  const start = mid ? orphanUtf8Tail(bytes) : 0;
   const rest = bytes.subarray(start);
   const lead = continues ? incompleteUtf8Lead(rest) : undefined;
   const middle = lead === undefined ? rest : rest.subarray(0, lead);
@@ -1045,11 +1063,19 @@ function decodeExecStream(raw: string, continued: boolean, continues: boolean): 
   // the same line `decodeUtf8` draws for a file, drawn here for a stream.
   if (middle.includes(0)) return { kind: 'bytes' };
   try {
+    const tail = lead === undefined ? NO_BYTES : rest.subarray(lead);
     return {
       kind: 'text',
-      text: new TextDecoder('utf-8', { fatal: true }).decode(middle),
+      // U+FFFD where the chunk was cut, and only there — one marker for one
+      // character, on the side that lost it, so text concatenated across polls
+      // has the character missing rather than nothing at all to say a character
+      // was. This is not the corruption the rename removed: those bytes were
+      // consumed and gone, while these are named in hex beside the text and
+      // arrive whole on the next read. read_file marks a cut file the same way.
+      text:
+        new TextDecoder('utf-8', { fatal: true }).decode(middle) + (tail.length ? '\ufffd' : ''),
       head: bytes.subarray(0, start),
-      tail: lead === undefined ? NO_BYTES : rest.subarray(lead),
+      tail,
     };
   } catch {
     return { kind: 'bytes' };
@@ -1070,21 +1096,41 @@ function decodeExec(res: unknown, continued: boolean): { body: unknown; note: st
   if (!res || typeof res !== 'object' || Array.isArray(res)) return { body: res, note: '' };
   const source = res as Record<string, unknown>;
   // Whether more of a stream can still arrive: the command has not exited, the
-  // guest says it is holding more, or the guest agent's 16 MiB capture cap cut
-  // this one short. `more` is one flag for both streams on the poll routes —
+  // guest says it is holding more, the deadline passed while it was still
+  // printing, or the guest agent's 16 MiB capture cap cut this one short. The
+  // timeout belongs here for the reason execSummary says one line down — the
+  // command is still running inside the guest, so a character its last chunk
+  // cut in half is a cut and not evidence that a build log is binary. `more` is one flag for both streams on the poll routes —
   // the platform ORs them — while the truncation flags are per stream, which is
   // why this is asked per field rather than once.
-  const flowing = source.more === true || source.running === true;
+  const flowing = source.more === true || source.running === true || source.timed_out === true;
+  // Names a `_b64` field on this response will claim. A daemon sending both —
+  // one mid-rollout, or an older self-hosted one — would otherwise decide which
+  // wins by JSON key order, and a `stdout` that came later would quietly replace
+  // the decoded bytes with the U+FFFD-bearing string this whole change exists to
+  // stop reading. The base64 field is the authoritative one; its plain twin is
+  // dropped rather than raced.
+  const claimed = new Set(
+    Object.entries(EXEC_STREAMS)
+      .filter(([key]) => typeof source[key] === 'string')
+      .map(([, field]) => field.name),
+  );
   const body: Record<string, unknown> = {};
   const notes: string[] = [];
   for (const [key, value] of Object.entries(source)) {
+    if (claimed.has(key)) continue;
     const field = EXEC_STREAMS[key];
     if (field === undefined || typeof value !== 'string') {
       body[key] = value;
       continue;
     }
     const { name, truncated } = field;
-    const stream = decodeExecStream(value, continued, flowing || source[truncated] === true);
+    const stream = decodeExecStream(
+      value,
+      continued,
+      source[`${name}_offset`],
+      flowing || source[truncated] === true,
+    );
     if (stream.kind !== 'text') {
       // Left under the name it arrived with, which is the whole signal: the
       // field says base64, so a reader knows to decode it and knows the bytes
@@ -1125,9 +1171,15 @@ function execSummary(res: Record<string, unknown>): string {
       'TIMED OUT — the command is still running inside the guest; nothing killed it. Re-run with background: true if you need its output',
     );
   }
-  if (res.out_truncated) {
+  // Named per stream, because the flags are per stream (OPL-4542). Reading only
+  // `out_truncated` left a command whose STDERR hit the cap reporting a clean
+  // `exit 0` — the shape this sentence exists to prevent.
+  const cut = [res.out_truncated ? 'STDOUT' : '', res.err_truncated ? 'STDERR' : ''].filter(
+    Boolean,
+  );
+  if (cut.length > 0) {
     bits.push(
-      "OUTPUT TRUNCATED at the guest agent's 16 MiB cap — the exit code is not the signal here, the flag is",
+      `${cut.join(' AND ')} TRUNCATED at the guest agent's 16 MiB cap — the exit code is not the signal here, the flag is`,
     );
   }
   if (res.killed) bits.push('killed');

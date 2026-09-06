@@ -5297,13 +5297,20 @@ describe('exec output arrives as base64', () => {
     // offset, so an ordinary UTF-8 log has a character straddling the cut. Read
     // as a JSON string, both halves came back as U+FFFD.
     answering(
-      { pid: 4242, running: true, more: true, stdout_b64: b64([0x61, 0xf0, 0x9f]) },
+      {
+        pid: 4242,
+        running: true,
+        more: true,
+        stdout_b64: b64([0x61, 0xf0, 0x9f]),
+        stdout_offset: 3,
+      },
       {
         pid: 4242,
         running: false,
         exited: true,
         exit_code: 0,
         stdout_b64: b64([0x98, 0x80, 0x62]),
+        stdout_offset: 6,
       },
     );
     const { call, close } = await connect();
@@ -5313,12 +5320,83 @@ describe('exec output arrives as base64', () => {
 
     // The valid part of each chunk, as text — not the whole chunk dumped back
     // as base64 because three of its bytes belong to the other poll.
-    expect(bodyOf(first).stdout).toBe('a');
+    expect(bodyOf(first).stdout).toBe('a�');
     expect(bodyOf(second).stdout).toBe('b');
-    for (const res of [first, second]) expect(said(res)).not.toContain('�');
-    // And the halves are named rather than silently dropped, in both directions.
+    // One marker for one character, on the side that lost it. A model pasting
+    // the two together gets the character missing and MARKED, rather than an
+    // 'ab' that reads as everything the command printed.
+    const joined = `${bodyOf(first).stdout}${bodyOf(second).stdout}`;
+    expect(joined).toBe('a�b');
+    expect([...joined].filter((c) => c === '�')).toHaveLength(1);
+    // And both halves are named rather than dropped, so the character itself is
+    // recoverable from the two answers.
     expect(said(first)).toContain('f0 9f');
     expect(said(second)).toContain('98 80');
+    expect(Buffer.from('f09f9880', 'hex').toString('utf8')).toBe('\u{1f600}');
+  });
+
+  it('does not call the first poll of a pid a continuation of anything', async () => {
+    // `continued` says a cursor read MAY follow an earlier one. The first poll
+    // of a pid is a cursor read that nothing precedes, and the offset — which
+    // counts decoded bytes and names the end of this chunk — is what tells the
+    // two apart. Stripping here would delete a byte the command really wrote and
+    // explain it with a cut that never happened.
+    answering({ pid: 4242, running: true, stdout_b64: b64([0x80, 0x41, 0x42]), stdout_offset: 3 });
+    const { call, close } = await connect();
+    const res = await call('exec_poll', { pid: 4242 });
+    await close();
+
+    const body = bodyOf(res);
+    expect(body).not.toHaveProperty('stdout');
+    expect(body.stdout_b64).toBe(b64([0x80, 0x41, 0x42]));
+    expect(said(res)).not.toContain('an earlier read cut in half');
+  });
+
+  it('reads a stream whose deadline passed as cut rather than as binary', async () => {
+    // A foreground timeout leaves the command running inside the guest, so its
+    // last chunk stops wherever the deadline fell — on a byte offset, like every
+    // other cut. Read as the whole of the output, a plain build log ending in
+    // half a character would be declared binary.
+    answering({ exit_code: -1, timed_out: true, stdout_b64: b64([0x6f, 0x6b, 0xf0, 0x9f]) });
+    const { call, close } = await connect();
+    const res = await call('exec', { command: 'sleep 600' });
+    await close();
+
+    expect(bodyOf(res).stdout).toBe('ok�');
+    expect(said(res)).toContain('TIMED OUT');
+  });
+
+  it('will not let a legacy plain field overwrite the bytes it decoded', async () => {
+    // A daemon sending both would otherwise decide which wins by JSON key order,
+    // and the plain one is the U+FFFD-bearing string this change exists to stop
+    // reading. Sent second, which is the order that used to lose.
+    answering({
+      exit_code: 0,
+      stdout_b64: b64('GOOD\n'),
+      stdout: 'LEGACY�\n',
+      timed_out: false,
+    });
+    const { call, close } = await connect();
+    const res = await call('exec', { command: 'true' });
+    await close();
+
+    expect(bodyOf(res).stdout).toBe('GOOD\n');
+  });
+
+  it('names which stream the 16 MiB cap cut, because the flags are per stream', async () => {
+    answering({
+      exit_code: 0,
+      stderr_b64: b64('boom\n'),
+      err_truncated: true,
+      out_truncated: false,
+    });
+    const { call, close } = await connect();
+    const res = await call('exec', { command: 'noisy' });
+    await close();
+
+    // `exit 0` on its own is the shape this sentence exists to prevent.
+    expect(said(res)).toContain('STDERR TRUNCATED');
+    expect(said(res)).not.toContain('STDOUT');
   });
 
   it('reads a stream that ends mid-character as bytes once nothing more can arrive', async () => {
@@ -5350,7 +5428,7 @@ describe('exec output arrives as base64', () => {
     await close();
 
     const body = bodyOf(res);
-    expect(body.stdout).toBe('a');
+    expect(body.stdout).toBe('a�');
     expect(body).not.toHaveProperty('stderr');
     expect(body.stderr_b64).toBe(b64(cut));
   });
