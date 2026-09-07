@@ -281,6 +281,26 @@ they are doing — it does not receive them and has no `verify`, because a
 server with no endpoint has nothing to verify. `list_webhook_deliveries` is
 where a delivery that ran out of retries shows up; nothing is dropped silently.
 
+**A capture outlives the request that starts it.** `POST /computers/:id/snapshots`
+answers `202` with a placeholder row and copies the disk afterwards, which takes
+minutes and scales with how much has been written — longer than any HTTP request
+survives. So `create_snapshot` polls: it holds the id the platform allocated
+before the copy, watches `list_snapshots` for that row to stop reading
+`capturing`, and answers with the finished snapshot. It waits for *not
+capturing* rather than for `pending`, because replication can carry a small
+snapshot straight on to `durable` between two polls; and it matches on the id
+rather than on the newest row for the computer, because a scheduled capture
+finishing in the same window makes that wrong on exactly the long captures where
+it matters. `wait: false` hands back the id instead, for a caller that would
+rather poll on its own schedule.
+
+The three answers it can end on are kept apart deliberately. A capture that
+lands is the snapshot. A capture that FAILS mid-copy leaves no snapshot and no
+row — the `capturing` row simply disappears, and that absence is the only signal
+there is, which is why an incomplete listing is never allowed to decide it. A
+wait that runs out says the capture is still running and names the id to follow,
+because that one asks for a look rather than for another attempt.
+
 **A schedule says when, not how long.** `snapshot_schedule` sets the window a
 computer's automatic snapshot is taken in; `get_retention` is what says how many
 of them survive, and it takes no computer because the window belongs to the

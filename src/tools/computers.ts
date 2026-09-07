@@ -1,11 +1,5 @@
 import { z } from 'zod';
-import {
-  CancelledError,
-  isTransientForPoll,
-  MoveRequiredError,
-  NotFoundError,
-  RateLimitError,
-} from '../errors.js';
+import { CancelledError, isTransientForPoll, MoveRequiredError, NotFoundError } from '../errors.js';
 import {
   type Computer,
   describe,
@@ -18,6 +12,7 @@ import {
   withoutCredentials,
 } from '../format.js';
 import * as P from '../paths.js';
+import { POLL_MS, pollDelay, sleep } from '../poll.js';
 import type { Registrar } from './types.js';
 
 const idArg = {
@@ -26,44 +21,6 @@ const idArg = {
     .optional()
     .describe('Which computer. Defaults to the one selected with use_computer.'),
 };
-
-/**
- * A pause that ends early when the caller gives up.
- *
- * The wait loops check the signal at the top of each turn, so a sleep that
- * ignored it would still hold a cancelled call for its remaining seconds.
- */
-const sleep = (ms: number, signal?: AbortSignal) =>
-  new Promise<void>((resolve) => {
-    if (signal?.aborted) return resolve();
-    const t = setTimeout(done, ms);
-    function done() {
-      clearTimeout(t);
-      signal?.removeEventListener('abort', done);
-      resolve();
-    }
-    signal?.addEventListener('abort', done, { once: true });
-  });
-
-/** How long these loops leave between polls. */
-const POLL_MS = 2_000;
-
-/**
- * The same interval, unless the platform asked for longer.
- *
- * A 429 is the one failure that says how long to wait, and
- * {@link isTransientForPoll} now polls through it — so a loop that ignored
- * `Retry-After` and asked again in two seconds would be spending a rate limit
- * to discover it was still rate limited. The floor stays {@link POLL_MS}: the
- * header can say zero, and a poll loop with no interval is a request storm.
- *
- * Only reached from a failed poll, which is why it takes the error rather than
- * living in {@link sleep}: an ordinary turn has nothing to honour.
- */
-const pollDelay = (err: unknown): number =>
-  err instanceof RateLimitError && err.retryAfterMs !== undefined
-    ? Math.max(POLL_MS, err.retryAfterMs)
-    : POLL_MS;
 
 /**
  * The answer to a wait the caller ended.

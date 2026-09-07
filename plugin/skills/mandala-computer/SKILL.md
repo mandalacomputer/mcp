@@ -185,11 +185,17 @@ application — stops being something you redo.
   is charged. `clone_snapshot` and `clone_computer` make a *new* computer
   instead, which bills like any other: the cheap way to get five identical
   desktops, and an easy way to leave five of them running.
-- Read `state` in `list_snapshots` before acting: a capture still being taken
-  is listed first, reads `capturing`, and restore, clone and delete all fail on
-  one. Only automatic snapshots age out — `get_retention` is the window, and
-  one you took yourself with `create_snapshot` is kept until somebody deletes
-  it.
+- A capture outlives the call that starts it: the platform accepts it and copies
+  the disk over the next several minutes. `create_snapshot` waits that out for
+  you and answers with the finished snapshot — pass `wait: false` only when you
+  have other work to do meanwhile, and then poll `list_snapshots` for the id it
+  gave you.
+- Read `state` in `list_snapshots` before acting, on every row rather than on
+  the newest: a capture still being taken reads `capturing` and restore, clone
+  and delete all fail on one. A row that vanishes without ever leaving
+  `capturing` is a capture that failed. Only automatic snapshots age out —
+  `get_retention` is the window, and one you took yourself with
+  `create_snapshot` is kept until somebody deletes it.
 
 ## Refusals: which are worth a second try
 
