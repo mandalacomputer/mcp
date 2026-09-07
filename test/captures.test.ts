@@ -220,6 +220,38 @@ describe('a capture the platform only accepted', () => {
     expect(textOf(res)).toContain('The capture landed');
   }, 10_000);
 
+  it('waits on an acceptance whose state it cannot read, rather than calling it landed', async () => {
+    // OPL-4578. The acceptance check asks "is there anything to wait for", and
+    // every unreadable answer has to mean yes. Read as a deny-list — anything
+    // but the literal `capturing` — a misspelt or renamed state returned the
+    // PLACEHOLDER as a finished snapshot: size_bytes 0, and an id restore,
+    // clone and delete all 404 on. That is OPL-4568's defect reached through a
+    // typo instead of an omission.
+    const { res, seen } = await capture(
+      [() => listing([{ ...PLACEHOLDER, state: 'pending' }])],
+      {},
+      { ...PLACEHOLDER, state: 'capturin' },
+    );
+    expect(res.isError).toBeFalsy();
+    expect(seen).toContain('GET /api/v1/snapshots');
+    expect(textOf(res)).toContain('The capture landed');
+    expect(textOf(res)).not.toContain('It is capturin');
+  });
+
+  it('still skips the wait for a state it can read as landed', async () => {
+    // The other half: the allow-list has to allow. A capture with nothing to
+    // copy is answered finished, and polling for a row already in hand would be
+    // a request spent learning what the answer said.
+    const { res, seen } = await capture(
+      [() => listing([])],
+      {},
+      { ...PLACEHOLDER, state: 'durable' },
+    );
+    expect(res.isError).toBeFalsy();
+    expect(textOf(res)).toContain('It is durable');
+    expect(seen).toEqual(['POST /api/v1/computers/vm-1/snapshots']);
+  });
+
   it('hands back the placeholder and polls nothing when wait is false', async () => {
     const { res, seen } = await capture([() => listing([PLACEHOLDER])], { wait: false });
     expect(res.isError).toBeFalsy();
