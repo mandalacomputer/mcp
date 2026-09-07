@@ -289,6 +289,80 @@ describe('a tree the model nominates', () => {
     await close();
   });
 
+  it('re-nominates a tree the guest called unwatchable, because the directory may since exist', {
+    timeout: 30_000,
+  }, async () => {
+    const sockets: FakeSocket[] = [];
+    // The guest decides watchability when it is ASKED, which is at nomination
+    // time — so this is the directory being created between the two calls.
+    const state = { exists: false };
+    const factory = (url: string) => {
+      const socket = new FakeSocket(url);
+      sockets.push(socket);
+      setTimeout(() => {
+        if (socket.closed) return;
+        socket.open();
+        const watches = socket.watches;
+        socket.send({
+          ...HELLO,
+          ...(watches.length
+            ? { watching: watches.map((path) => ({ path, armed: state.exists })) }
+            : {}),
+        });
+        socket.greeted = true;
+        if (!state.exists) {
+          for (const path of watches) {
+            socket.send(frame({ watch: path, lost: 'unwatchable' }, 'c-1'));
+          }
+        }
+      }, 0);
+      return socket;
+    };
+    const { call, close } = await connect({ webSocket: factory });
+    await call('poll_events');
+
+    const first = await call('wait_for_file_change', { path: '/a', timeout_s: 2 });
+    expect(first.isError).toBe(true);
+    expect(textOf(first)).toContain('not there yet');
+    // The refusal's own closing promise, which is what the rest of this holds
+    // to: a nomination stands and calling again finds the tree armed.
+    expect(textOf(first)).toContain('calling again later will find it armed');
+
+    const before = sockets.length;
+    state.exists = true;
+    const second = await call('wait_for_file_change', { path: '/a', timeout_s: 5 });
+    // The guest can only answer again if the nomination goes out again. Left in
+    // `#sent` with nothing marking it as a retry, the tree took the early return
+    // in `nominate` and no connection ever carried the question — so the tool
+    // refused every later call on a directory that by then existed.
+    expect(sockets.length, 'a connection carrying the re-nomination').toBeGreaterThan(before);
+    expect(second.isError, textOf(second)).toBeFalsy();
+    expect(textOf(second)).toContain('being watched now');
+    await close();
+  });
+
+  it('does not answer a re-nomination with the unwatchable it already reported', {
+    timeout: 30_000,
+  }, async () => {
+    const { call, close, ev } = await attach({}, false);
+    const answer = call('wait_for_file_change', { path: '/a', timeout_s: 5 });
+    const socket = await nominated(ev);
+    socket.send(frame({ watch: '/a', lost: 'unwatchable' }, 'cur-1'));
+    expect((await answer).isError).toBe(true);
+    // Nothing read that marker out of the ring — the refusal came from the flag
+    // it set — so it is still there to be matched by the next wait. Once the
+    // tree is armed again it describes a watch that has been replaced, and
+    // handing it back refuses a second time over a directory that now exists.
+    const again = call('wait_for_file_change', { path: '/a', timeout_s: 5 });
+    const reopened = await nominated(ev);
+    reopened.send(frame({ watch: '/a', armed: true }, 'cur-2'));
+    const res = await again;
+    expect(res.isError, textOf(res)).toBeFalsy();
+    expect(textOf(res)).toContain('being watched now');
+    expect(textOf(res)).toContain('Reporting starts HERE');
+    await close();
+  });
+
   it('ends a wait on a re-arm, because reporting starts there and the gap was never reported', async () => {
     const { call, close, ev } = await attach();
     const answer = call('wait_for_file_change', { path: '/a', timeout_s: 5 });

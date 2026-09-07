@@ -1229,8 +1229,36 @@ export const registerEvents: Registrar = (server, session) => {
         // It arrives as an ordinary file.changed and would otherwise be
         // described by changeLine, which has nothing useful to say about it.
         if (((last?.data as Record<string, unknown> | undefined)?.lost ?? '') === 'unwatchable') {
-          return refused(
-            `${unwatchable(wire)} It was being watched until now; from here it is not.` +
+          // Only when the tree is not being watched NOW. An `unwatchable` sits
+          // in the ring until something reads it, and a caller who created the
+          // directory and called again re-nominates: the guest answers the new
+          // nomination with an arm, and this marker — already reported to the
+          // call that refused on it — is then describing a watch that has since
+          // been replaced. Handed back as the answer it refuses a second time
+          // over a directory that plainly exists, which is the same false
+          // "not there yet" the re-nomination exists to clear, one call later.
+          //
+          // `isArmed` is what tells the two apart, and it is exact rather than a
+          // proxy: `unwatchable` is the one `lost` that disarms, so a tree still
+          // carrying this marker as its live state reads false here, while one
+          // the guest has since armed reads true. Said with the re-arm's own
+          // sentence, because that is what happened and the window is genuinely
+          // unreported either way.
+          if (!sub.isArmed(root)) {
+            return refused(
+              `${unwatchable(wire)} It was being watched until now; from here it is not.` +
+                interrupted() +
+                renamed +
+                evicted,
+              { ...body(id, d, sub, sub.watching), watch: wire, ...extras },
+            );
+          }
+          return said(
+            `${wire} on ${id} was not watchable when this stream last asked — it was reported ` +
+              `missing or unreadable — and it is being watched now: the nomination was retried and ` +
+              `the guest armed it. Reporting starts HERE, so nothing that happened under it before ` +
+              `this was reported or ever will be. Re-read the directory with exec if that window ` +
+              `matters, then call again to wait for what comes next.` +
               interrupted() +
               renamed +
               evicted,
