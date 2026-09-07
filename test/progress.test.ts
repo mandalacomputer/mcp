@@ -270,7 +270,11 @@ describe('a guest that has not come up yet', () => {
     // turn produced.
     expect(seen.length).toBeGreaterThan(0);
     expect(seen.length).toBeLessThanOrEqual(3);
-    expect(seen[0].message).toContain('the guest is not answering yet');
+    // The line beat in FRONT of the probe, which the 409 branch then repeats so
+    // the throttle holds it. It is the beat that has to survive: the probe is
+    // the longest call in the loop, and a stall there is exactly when the
+    // client needs to have heard something.
+    expect(seen[0].message).toContain('asking the guest');
     expect(seen.map((b) => b.progress)).toEqual(seen.map((_, i) => i + 1));
   }, 20_000);
 
@@ -299,8 +303,41 @@ describe('a guest that has not come up yet', () => {
     );
     await close();
 
-    expect(seen.length).toBeGreaterThan(0);
-    expect(seen[0].message).toContain('the platform could not be asked');
+    expect(seen.some((b) => (b.message ?? '').includes('the platform could not be asked'))).toBe(
+      true,
+    );
     expect(seen.some((b) => (b.message ?? '').includes('guest is not answering'))).toBe(false);
+  }, 20_000);
+
+  it('names the hypervisor in the give-up sentence, not just in the beats', async () => {
+    // The contradiction the other way round: the progress channel reported the
+    // 503 for the whole window while the refusal said only "was last seen
+    // running" and named nothing, because the probe's transient branch never
+    // set `blocked` — not before this work and not after the first version of
+    // it (/code-review). A hypervisor unreachable for the whole wait is the
+    // single most useful thing the give-up message can carry.
+    globalThis.fetch = (async (input: string | URL | Request) => {
+      const url = new URL(typeof input === 'string' ? input : input.toString());
+      const ok = (v: unknown, status = 200) =>
+        new Response(JSON.stringify(v), {
+          status,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      if (url.pathname.endsWith('/exec')) return ok({ error: 'no hypervisor answered' }, 503);
+      return ok({ id: 'vm-1', name: 'desk', status: 'running', resolution: '1280x800x24' });
+    }) as typeof globalThis.fetch;
+
+    const { call, close } = await connect();
+    const res = await call('wait_for_computer', { computer_id: 'vm-1', timeout_s: 6 });
+    await close();
+
+    const text = res.content
+      .filter((c): c is { type: 'text'; text: string } => c.type === 'text')
+      .map((c) => c.text)
+      .join('\n');
+    expect(res.isError).toBe(true);
+    expect(text).toContain('the platform could not be asked');
+    expect(text).toContain('no hypervisor answered');
+    expect(text).not.toMatch(/was last seen running\. Nothing was changed/);
   }, 20_000);
 });

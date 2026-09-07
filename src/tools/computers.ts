@@ -651,7 +651,7 @@ export const registerComputers: Registrar = (server, session, opts) => {
     {
       title: 'Move a computer to a host that can run a bigger size',
       description:
-        'Grow a computer past what its current host can run, by moving it to another host in the same region first. Only call this after update_computer has refused a resize and said a move is possible: it is the second half of that refusal and nothing else. THIS MOVES THE MACHINE TO DIFFERENT HARDWARE and copies its disk to get there — say so before you call it. The computer must be STOPPED (suspended is not stopped here: a saved desktop only loads on the host that wrote it, so resume and stop it, or discard the session). One move runs per account at a time. Everything is decided again when this runs, so it can still refuse. Waits for the outcome and reports it, reporting progress on every poll so a client that sends a progressToken and sets resetTimeoutOnProgress can hold the request open; list_moves reads the outcome if the wait runs out, and is the answer for a client that cannot.',
+        'Grow a computer past what its current host can run, by moving it to another host in the same region first. Only call this after update_computer has refused a resize and said a move is possible: it is the second half of that refusal and nothing else. THIS MOVES THE MACHINE TO DIFFERENT HARDWARE and copies its disk to get there — say so before you call it. The computer must be STOPPED (suspended is not stopped here: a saved desktop only loads on the host that wrote it, so resume and stop it, or discard the session). One move runs per account at a time. Everything is decided again when this runs, so it can still refuse. Waits for the outcome and reports it, reporting progress while it waits so a client that sends a progressToken and sets resetTimeoutOnProgress can hold the request open; list_moves reads the outcome if the wait runs out, and is the answer for a client that cannot.',
       inputSchema: {
         ...idArg,
         // Required, unlike every other field here, and unlike the same argument
@@ -897,7 +897,7 @@ export const registerComputers: Registrar = (server, session, opts) => {
     {
       title: 'Wait for a computer to be ready',
       description:
-        'Poll until the computer is running, or until the software inside it answers. Use "guest" before exec, files or windows, and before expecting a screenshot to show a desktop rather than a boot screen. Reports progress on every poll, so a client that sends a progressToken and sets resetTimeoutOnProgress can hold the request open; a client that cannot should lower timeout_s and call again rather than watch its own default timeout cancel the wait.',
+        'Poll until the computer is running, or until the software inside it answers. Use "guest" before exec, files or windows, and before expecting a screenshot to show a desktop rather than a boot screen. Reports progress while it waits, so a client that sends a progressToken and sets resetTimeoutOnProgress can hold the request open; a client that cannot should lower timeout_s and call again rather than watch its own default timeout cancel the wait.',
       inputSchema: {
         ...idArg,
         until: z
@@ -990,11 +990,20 @@ export const registerComputers: Registrar = (server, session, opts) => {
           // notifications per poll — and because the two lines DIFFER, each read
           // as news to the throttle and neither was ever held, so the steady
           // state of the commonest long wait was twice the per-poll rate the
-          // interval exists to avoid (/code-review). The probe's outcome is the
-          // more informative of the two, so it is the one that speaks.
-          if (!(until === 'guest' && last === 'running')) {
-            await beat(`Waiting for ${id} — ${last}.`);
-          }
+          // interval exists to avoid (/code-review).
+          //
+          // Fixed by making the two say the SAME thing rather than by silencing
+          // this one, which was the first attempt and dropped the wrong half of
+          // the pair (/code-review again). The probe below is the longest call
+          // in the loop — an undici header timeout or a proxy 524 can hold it
+          // for minutes — so the beat that must survive is the one IN FRONT of
+          // it. The 409 branch repeats this line and the throttle holds it; a
+          // probe that fails some other way says so, which is news and goes out.
+          await beat(
+            until === 'guest' && last === 'running'
+              ? `Waiting for ${id} — running; asking the guest.`
+              : `Waiting for ${id} — ${last}.`,
+          );
           if (last === 'build-failed') {
             // `refused`, for the reason `cancelled` is: the wait never reached
             // what it was told to wait for, and this one never will. A caller
@@ -1060,15 +1069,27 @@ export const registerComputers: Registrar = (server, session, opts) => {
               if (!isTransientForPoll(err)) throw err;
               // What actually refused, rather than one sentence for every
               // failure. A 409 IS the guest not being up yet — that is the
-              // probe working — but a 503 is a hypervisor nobody can reach, and
-              // a transport abort is neither. Saying "the guest is not
-              // answering" over those tells the person watching the log the one
-              // thing this channel exists to get right, and names a cause the
-              // give-up message will then contradict (/code-review).
+              // probe working, and it repeats the line beat in front of the
+              // probe so the throttle holds it. A 503 is a hypervisor nobody
+              // can reach and a transport abort is neither: saying "the guest
+              // is not answering" over those tells the person watching the log
+              // the one thing this channel exists to get right.
+              //
+              // And it SETS `blocked`, which it never did — not before this
+              // change and not after the first version of it. A wait that spent
+              // its whole window failing the probe on 503s gave up saying "was
+              // last seen running" and named nothing, while the progress
+              // channel had been reporting the hypervisor the entire time: the
+              // same contradiction this comment set out to remove, pointed the
+              // other way (/code-review). Deliberately not for the 409, where
+              // the platform did answer and `blocked` would be a lie about it.
+              if (!(err instanceof ConflictError)) {
+                blocked = err instanceof Error ? err.message : String(err);
+              }
               await beat(
                 err instanceof ConflictError
-                  ? `Waiting for ${id} — running; the guest is not answering yet.`
-                  : `Waiting for ${id} — running; the platform could not be asked: ${err instanceof Error ? err.message : String(err)}`,
+                  ? `Waiting for ${id} — running; asking the guest.`
+                  : `Waiting for ${id} — running; the platform could not be asked: ${blocked}`,
               );
               // The guest probe's own failure decides this turn's interval, for
               // pollDelay's reason. The ordinary path below keeps POLL_MS.
