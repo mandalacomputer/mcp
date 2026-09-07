@@ -345,7 +345,7 @@ export const registerComputers: Registrar = (server, session, opts) => {
     {
       title: 'List computers',
       description:
-        'Every computer on this account. Desktop credentials are deliberately not included — use get_desktop_url for those.',
+        "Every computer on this account that exists or may exist. Desktop credentials are deliberately not included — use get_desktop_url for those. Read `state` before acting on a row: it is the platform's record of whether the machine exists, which is a different question from `status`, what its host says the guest is doing. A row reading `deleting` is on its way out and is not one to bind, start or wait for, and one reading `unreachable` is a row served from the record because the host did not answer — the computer is most likely fine, but nothing only its host knows is on it, `status` included. The two terminal states are not here at all: `deleted` and `lost` come back only when asked for with `state`.",
       inputSchema: {
         allow_partial: z
           .boolean()

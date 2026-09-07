@@ -382,14 +382,6 @@ list reads exactly like the missing things were deleted.
 keeps no record of which hypervisor ran which build, so a short build listing
 simply has fewer rows, an unknown number missing and nothing marking the gap.
 
-A computer also has a lifecycle of its own, separate from what its guest is
-doing. `state` is the control plane's record — `live`, `deleting`, `deleted`,
-`lost`, or `unreachable` when a listing could not confirm the row against its
-host — while `status` is the host's answer, and a row served from the record has
-the first and not the second. `list_computers` prints both when both are there,
-and takes `state:` to ask for one of them; an empty answer to that is a fact
-about the filter rather than about the account, and says so.
-
 The other two append a row marked `unreachable` for each thing they could not
 reach — but only for a key that spans the account. A WORKSPACE-SCOPED key gets
 no marked rows either, because naming the missing ids would mean reading them
@@ -397,6 +389,20 @@ out of a placement cache that has no workspace column, and handing a confined
 credential ids from the workspaces it is confined away from. For such a key all
 three listings are the `INCOMPLETE:` line and nothing else, which is why that
 line is written first and in prose.
+
+**A computer has a lifecycle of its own, separate from what its guest is
+doing.** `state` is the platform's record of whether the machine exists —
+`live`, `deleting`, `deleted`, `lost`, or `unreachable` when a listing could not
+confirm the row against its host — while `status` is the host's answer about the
+guest. A row served from the record has the first and not the second, so
+`list_computers` prints both when both are there: a computer can be running and
+being deleted at once.
+
+An unfiltered listing is `live`, `unreachable` and `deleting`. The two terminal
+states are withheld from it, so `list_computers(state: 'deleted')` is the only
+way a computer that has gone is ever shown — and an empty answer to a filtered
+listing is a fact about the filter rather than about the account, which is what
+it says rather than inviting you to create one.
 
 **Snapshots mid-deletion are billed but hidden.** A deletion that began and did
 not finish still holds objects and still counts against storage, and the default
