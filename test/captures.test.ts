@@ -238,6 +238,21 @@ describe('a capture the platform only accepted', () => {
     expect(textOf(res)).toContain('THE CAPTURE IS RUNNING');
     expect(seen).toEqual(['POST /api/v1/computers/vm-1/snapshots']);
   });
+
+  it('refuses the same way when nobody was waiting either', async () => {
+    // `wait: false` is the answer whose whole content is an id. Handed back
+    // without one it reported success and said to poll list_snapshots for
+    // "the id " — the same nothing, dressed as an instruction (codex review).
+    const { res } = await capture(
+      [() => listing([])],
+      { wait: false },
+      { state: 'capturing', name: 'before the upgrade' },
+    );
+    expect(res.isError).toBe(true);
+    expect(textOf(res)).toContain('no snapshot id back');
+    expect(textOf(res)).not.toContain('the id :');
+    expect(textOf(res)).not.toContain('Poll list_snapshots for the id .');
+  });
 });
 
 describe('what a capture sends', () => {

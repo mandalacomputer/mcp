@@ -333,23 +333,29 @@ export const registerSnapshots: Registrar = (server, session, opts) => {
           `lands — do not wait for "pending" specifically, since replication can carry it straight on to ` +
           `"durable" — and a row that DISAPPEARS without ever leaving "${CAPTURING}" is a capture that failed.`;
 
-        if (!wait) {
-          return said(
-            `${startedLine} It is NOT a snapshot yet: while its row reads "${CAPTURING}" it is a ` +
-              `placeholder, and restore, clone and delete all fail on it. ${byHand}`,
-            started,
-          );
-        }
         // A capture accepted under an id nobody was told cannot be polled for,
         // and it cannot be found again either — every later call takes the id.
         // `refused`, for clone_snapshot's reason one route over: the platform
         // did something billable and the caller has no handle on it, which is
         // not a result to report as success.
+        //
+        // BEFORE the wait: false branch, not after it, and Codex caught that it
+        // was the other way round. `wait: false` is the answer whose whole
+        // content is an id — handed back without one it reported success and
+        // told the caller to poll list_snapshots for "the id ", which is the
+        // same nothing dressed as an instruction.
         if (!sid) {
           return refused(
-            `${startedLine} THE CAPTURE IS RUNNING, but the platform sent no snapshot id back, so this wait has ` +
-              `nothing to poll on and the snapshot cannot be named. list_snapshots on ${id} will show it ` +
-              `when it lands.`,
+            `${startedLine} THE CAPTURE IS RUNNING, but the platform sent no snapshot id back, so there ` +
+              `is nothing to poll on and the snapshot cannot be named — every call that acts on one takes ` +
+              `its id. list_snapshots on ${id} will show it when it lands.`,
+            started,
+          );
+        }
+        if (!wait) {
+          return said(
+            `${startedLine} It is NOT a snapshot yet: while its row reads "${CAPTURING}" it is a ` +
+              `placeholder, and restore, clone and delete all fail on it. ${byHand}`,
             started,
           );
         }
