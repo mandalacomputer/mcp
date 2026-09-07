@@ -353,10 +353,19 @@ export const registerComputers: Registrar = (server, session, opts) => {
           .describe(
             'Accept a short list when a hypervisor cannot be reached, instead of the 503 the platform answers by default. The answer then says it is short — a short list reads exactly like the missing computers were deleted.',
           ),
+        // The control plane's own record, not the guest's (platform OPL-4554).
+        // Read where the listing is assembled and never forwarded to a host, so
+        // a filtered listing is as complete as an unfiltered one.
+        state: z
+          .enum(['live', 'unreachable', 'deleting', 'deleted', 'lost'])
+          .optional()
+          .describe(
+            "Only computers the control plane records in this state. 'live' is an ordinary machine; 'deleting', 'deleted' and 'lost' are what became of one; 'unreachable' is per-request and means this listing could not reach the host, so the row is what the control plane has on record rather than what the machine says it is doing. Omitted, every state comes back.",
+          ),
       },
       annotations: { readOnlyHint: true },
     },
-    ({ allow_partial }, extra) =>
+    ({ allow_partial, state }, extra) =>
       guarded(async () => {
         // listing, not json: with allow_partial the platform will hand over an
         // inventory it knows is short, and says so in X-GC-Incomplete. Reading
@@ -365,7 +374,7 @@ export const registerComputers: Registrar = (server, session, opts) => {
         const { items, incomplete } = await session.api
           .with(extra.signal)
           .listing<unknown[]>(P.COMPUTERS, {
-            query: { allow_partial: allow_partial ? 1 : undefined },
+            query: { allow_partial: allow_partial ? 1 : undefined, state },
           });
         // Checked rather than asserted. `listing<unknown[]>` is a claim about
         // what the platform sends, not a guarantee — a proxy or a future
@@ -422,6 +431,18 @@ export const registerComputers: Registrar = (server, session, opts) => {
           if (incomplete !== null) {
             return said(
               `${warning}No computers came back from the part of the fleet that answered. This is NOT an empty account — do not create a computer on the strength of it. Retry in a moment.`,
+            );
+          }
+          // A filtered listing that came back empty is a fact about the FILTER,
+          // and the sentence below is a fact about the account. Saying the
+          // account is empty because nothing is `deleted` is the same
+          // duplicate-create the incomplete branch above guards against,
+          // arrived at from a third direction — and this one is silent, since
+          // the platform answers a filter that matches nothing exactly as it
+          // answers an account with nothing in it.
+          if (state) {
+            return said(
+              `${warning}No computers on this account are ${state}. Other computers may exist — this listing asked only for that state. Call list_computers without \`state\` to see the account.`,
             );
           }
           // Named only when it is there to call. Under MANDALA_NO_LIFECYCLE

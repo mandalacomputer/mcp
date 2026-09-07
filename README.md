@@ -382,6 +382,14 @@ list reads exactly like the missing things were deleted.
 keeps no record of which hypervisor ran which build, so a short build listing
 simply has fewer rows, an unknown number missing and nothing marking the gap.
 
+A computer also has a lifecycle of its own, separate from what its guest is
+doing. `state` is the control plane's record — `live`, `deleting`, `deleted`,
+`lost`, or `unreachable` when a listing could not confirm the row against its
+host — while `status` is the host's answer, and a row served from the record has
+the first and not the second. `list_computers` prints both when both are there,
+and takes `state:` to ask for one of them; an empty answer to that is a fact
+about the filter rather than about the account, and says so.
+
 The other two append a row marked `unreachable` for each thing they could not
 reach — but only for a key that spans the account. A WORKSPACE-SCOPED key gets
 no marked rows either, because naming the missing ids would mean reading them

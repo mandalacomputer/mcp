@@ -48,7 +48,9 @@ const EXERCISE: Record<string, Record<string, unknown>[]> = {
   get_build: [{ build_id: 'bld-1' }],
   watch_build: [{ build_id: 'bld-1' }],
   list_sizes: [{}],
-  list_computers: [{}, { allow_partial: true }],
+  // The third shape is `state` (platform OPL-4554): a filter the control plane
+  // reads off the listing, and one no other call would send.
+  list_computers: [{}, { allow_partial: true }, { state: 'deleted' }],
   get_computer: [{}],
   use_computer: [{ computer_id: 'vm-1' }],
   start_computer: [{}],

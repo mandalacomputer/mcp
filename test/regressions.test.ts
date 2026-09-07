@@ -5511,3 +5511,141 @@ describe('exec output arrives as base64', () => {
     expect(said(res)).toContain('did not decode as base64');
   });
 });
+
+/**
+ * The computer's own lifecycle, which is a different fact from what its guest
+ * is doing (platform OPL-4554).
+ *
+ * `state` is the control plane's record — live, deleting, deleted, lost, or
+ * `unreachable` when this listing could not confirm the row against its host —
+ * and `status` is the host's answer. A row served from the record has the first
+ * and not the second, which is the case this server had no word for: it read
+ * every one of them as `unknown`.
+ */
+describe('a computer described by the record rather than by its host', () => {
+  const real = globalThis.fetch;
+  afterEach(() => {
+    globalThis.fetch = real;
+  });
+
+  /** Whatever rows the test wants, and the query they were asked for. */
+  const rows = (items: unknown[]) => {
+    const seen: URLSearchParams[] = [];
+    globalThis.fetch = (async (input: string | URL | Request) => {
+      seen.push(new URL(typeof input === 'string' ? input : input.toString()).searchParams);
+      return new Response(JSON.stringify(items), {
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }) as typeof fetch;
+    return seen;
+  };
+
+  it('names the state of a row that has no status, instead of calling it unknown', async () => {
+    // The whole defect: a deleting, deleted or lost computer arrived with a
+    // state and no status, and `c.status ?? 'unknown'` printed the one word
+    // that tells a reader nothing about a machine that is on its way out.
+    rows([
+      { id: 'vm-1', name: 'gone', state: 'deleted', deleted_at: '2026-09-01T00:00:00Z' },
+      { id: 'vm-2', name: 'missing', state: 'lost', lost_at: '2026-09-02T00:00:00Z' },
+    ]);
+    const { call, close } = await connect();
+    const res = await call('list_computers');
+    await close();
+
+    const lines = said(res)
+      .split('\n')
+      .filter((l) => l.startsWith('- '));
+    expect(lines).toEqual(['- gone · vm-1 · deleted', '- missing · vm-2 · lost']);
+  });
+
+  it('keeps the status when there is one, because a running computer can be deleting', async () => {
+    // `c.state ?? c.status` would have read this row as "deleting" and dropped
+    // the fact that the guest is still up — which is the half that says a
+    // command sent to it now would still land.
+    rows([{ id: 'vm-1', name: 'going', status: 'running', state: 'deleting' }]);
+    const { call, close } = await connect();
+    const res = await call('list_computers');
+    await close();
+
+    expect(said(res)).toContain('going · vm-1 · running · deleting');
+  });
+
+  it('says nothing extra for the state every ordinary computer is in', async () => {
+    rows([{ id: 'vm-1', name: 'fine', status: 'running', state: 'live' }]);
+    const { call, close } = await connect();
+    const res = await call('list_computers');
+    await close();
+
+    // The one-line summary only: the JSON that follows it is the platform's
+    // row verbatim, `state: "live"` and all.
+    const line = said(res)
+      .split('\n')
+      .find((l) => l.startsWith('- '));
+    expect(line).toBe('- fine · vm-1 · running');
+  });
+
+  it('describes an unreachable row from the identity fields it now carries', async () => {
+    // The placeholder stopped being a bare `{id, unreachable: true}` stub: it
+    // arrives with the name, the shape and the state the control plane has on
+    // record, and only `status` is missing because there was nobody to ask.
+    rows([
+      {
+        id: 'vm-9',
+        name: 'elsewhere',
+        os: 'linux',
+        state: 'unreachable',
+        unreachable: true,
+      },
+    ]);
+    const { call, close } = await connect();
+    const res = await call('list_computers');
+    await close();
+
+    expect(said(res)).toContain('elsewhere · vm-9 · unreachable');
+    expect(said(res)).toContain('UNREACHABLE');
+  });
+
+  it('forwards the state filter, and sends nothing when none was asked for', async () => {
+    const seen = rows([{ id: 'vm-1', name: 'gone', state: 'deleted' }]);
+    const { call, close } = await connect();
+    await call('list_computers', { state: 'deleted' });
+    await call('list_computers');
+    await close();
+
+    expect(seen[0].get('state')).toBe('deleted');
+    expect(seen[1].has('state')).toBe(false);
+  });
+
+  it('does not read an empty filtered listing as an empty account', async () => {
+    // The platform answers a filter that matches nothing exactly as it answers
+    // an account with nothing in it, so "no computers yet, create one" here is
+    // the duplicate-create the rest of this handler guards against — reached by
+    // asking whether anything is `deleted`.
+    rows([]);
+    const { call, close } = await connect();
+    const res = await call('list_computers', { state: 'deleted' });
+    await close();
+
+    expect(said(res)).not.toMatch(/No computers on this account yet/);
+    expect(said(res)).toContain('deleted');
+  });
+
+  it('still invites a create when the account itself is empty', async () => {
+    rows([]);
+    const { call, close } = await connect();
+    const res = await call('list_computers');
+    await close();
+
+    expect(said(res)).toContain('No computers on this account yet');
+  });
+
+  it('refuses a state the platform does not define, rather than sending it', async () => {
+    const seen = rows([]);
+    const { call, close } = await connect();
+    const res = await call('list_computers', { state: 'zombie' });
+    await close();
+
+    expect(res.isError).toBe(true);
+    expect(seen).toHaveLength(0);
+  });
+});
