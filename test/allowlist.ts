@@ -162,7 +162,10 @@ export const PARAMETERS: ReadonlyMap<string, readonly string[]> = new Map([
   ['GET builds/:id/events', []],
   ['GET sizes', []],
 
-  ['GET computers', ['query:allow_partial']],
+  // `state` narrows the listing to the control plane's own record of a machine
+  // — live, unreachable, deleting, deleted, lost (platform OPL-4554). Read
+  // where the listing is assembled and never forwarded to a host.
+  ['GET computers', ['query:allow_partial', 'query:state']],
   [
     'POST computers',
     [

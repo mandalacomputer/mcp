@@ -345,7 +345,7 @@ export const registerComputers: Registrar = (server, session, opts) => {
     {
       title: 'List computers',
       description:
-        'Every computer on this account. Desktop credentials are deliberately not included — use get_desktop_url for those.',
+        "Every computer on this account that exists or may exist. Desktop credentials are deliberately not included — use get_desktop_url for those. Read `state` before acting on a row: it is the platform's record of whether the machine exists, which is a different question from `status`, what its host says the guest is doing. A row reading `deleting` is on its way out and is not one to bind, start or wait for, and one reading `unreachable` is a row served from the record because the host did not answer — the computer is most likely fine, but nothing only its host knows is on it, `status` included. The two terminal states are not here at all: `deleted` and `lost` come back only when asked for with `state`.",
       inputSchema: {
         allow_partial: z
           .boolean()
@@ -353,10 +353,25 @@ export const registerComputers: Registrar = (server, session, opts) => {
           .describe(
             'Accept a short list when a hypervisor cannot be reached, instead of the 503 the platform answers by default. The answer then says it is short — a short list reads exactly like the missing computers were deleted.',
           ),
+        // The control plane's own record, not the guest's (platform OPL-4554).
+        // Read where the listing is assembled and never forwarded to a host, so
+        // a filtered listing is as complete as an unfiltered one.
+        //
+        // Said in the description rather than assumed: omitting this is NOT
+        // "every computer". `deleted` and `lost` are terminal and withheld from
+        // an unfiltered listing, so this parameter is the only way a caller ever
+        // sees one — which is the question somebody asks when a computer they
+        // remember is not in the list.
+        state: z
+          .enum(['live', 'unreachable', 'deleting', 'deleted', 'lost'])
+          .optional()
+          .describe(
+            "Only computers the platform's own record puts in this state — a different question from what the machine is doing, which is `status`. 'live': its host lists it. 'unreachable': its host did not answer THIS request, so the row is the identity on record and not what the machine says; the computer is most likely fine. 'deleting': a delete was sent and not answered yet. 'deleted' and 'lost' are terminal, and asking here is the ONLY way to see one — an unfiltered listing is live, unreachable and deleting, so a computer missing from it may still have a record.",
+          ),
       },
       annotations: { readOnlyHint: true },
     },
-    ({ allow_partial }, extra) =>
+    ({ allow_partial, state }, extra) =>
       guarded(async () => {
         // listing, not json: with allow_partial the platform will hand over an
         // inventory it knows is short, and says so in X-GC-Incomplete. Reading
@@ -365,7 +380,7 @@ export const registerComputers: Registrar = (server, session, opts) => {
         const { items, incomplete } = await session.api
           .with(extra.signal)
           .listing<unknown[]>(P.COMPUTERS, {
-            query: { allow_partial: allow_partial ? 1 : undefined },
+            query: { allow_partial: allow_partial ? 1 : undefined, state },
           });
         // Checked rather than asserted. `listing<unknown[]>` is a claim about
         // what the platform sends, not a guarantee — a proxy or a future
@@ -422,6 +437,18 @@ export const registerComputers: Registrar = (server, session, opts) => {
           if (incomplete !== null) {
             return said(
               `${warning}No computers came back from the part of the fleet that answered. This is NOT an empty account — do not create a computer on the strength of it. Retry in a moment.`,
+            );
+          }
+          // A filtered listing that came back empty is a fact about the FILTER,
+          // and the sentence below is a fact about the account. Saying the
+          // account is empty because nothing is `deleted` is the same
+          // duplicate-create the incomplete branch above guards against,
+          // arrived at from a third direction — and this one is silent, since
+          // the platform answers a filter that matches nothing exactly as it
+          // answers an account with nothing in it.
+          if (state) {
+            return said(
+              `${warning}No computers on this account are ${state}. Other computers may exist — this listing asked only for that state. Call list_computers without \`state\` to see the account.`,
             );
           }
           // Named only when it is there to call. Under MANDALA_NO_LIFECYCLE

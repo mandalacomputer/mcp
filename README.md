@@ -390,6 +390,20 @@ credential ids from the workspaces it is confined away from. For such a key all
 three listings are the `INCOMPLETE:` line and nothing else, which is why that
 line is written first and in prose.
 
+**A computer has a lifecycle of its own, separate from what its guest is
+doing.** `state` is the platform's record of whether the machine exists —
+`live`, `deleting`, `deleted`, `lost`, or `unreachable` when a listing could not
+confirm the row against its host — while `status` is the host's answer about the
+guest. A row served from the record has the first and not the second, so
+`list_computers` prints both when both are there: a computer can be running and
+being deleted at once.
+
+An unfiltered listing is `live`, `unreachable` and `deleting`. The two terminal
+states are withheld from it, so `list_computers(state: 'deleted')` is the only
+way a computer that has gone is ever shown — and an empty answer to a filtered
+listing is a fact about the filter rather than about the account, which is what
+it says rather than inviting you to create one.
+
 **Snapshots mid-deletion are billed but hidden.** A deletion that began and did
 not finish still holds objects and still counts against storage, and the default
 listing leaves it out — every ordinary caller is asking "what can I restore".

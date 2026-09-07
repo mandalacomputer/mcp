@@ -127,6 +127,19 @@ export type Computer = {
   id?: string;
   name?: string;
   status?: string;
+  /**
+   * The platform's own record of whether the machine exists (platform
+   * OPL-4554): `live | unreachable | deleting | deleted | lost`.
+   *
+   * A different axis from `status`, which is what the machine's host says the
+   * guest is doing. `unreachable` is the only one of the five that is per
+   * request — it says this listing could not reach the host — and it is exactly
+   * the case where `status` is absent, because there was nobody to ask.
+   *
+   * On listing rows only. A single computer is served by its host, so anything
+   * that answers is live and carries no state at all.
+   */
+  state?: string;
   os?: string;
   template?: string;
   cpu?: number;
@@ -140,6 +153,9 @@ export type Computer = {
   idle_suspend_min?: number;
   snapshot_schedule?: unknown;
   unreachable?: boolean;
+  /** RFC 3339, present once the record has said `deleted` or `lost` respectively. */
+  deleted_at?: string;
+  lost_at?: string;
   start_error?: string;
   vnc?: Record<string, unknown>;
 };
@@ -207,7 +223,16 @@ export function incompleteWarning(noun: string, incomplete: number | null): stri
 
 /** The one-line version, for lists and for confirmations. */
 export function describe(c: Computer): string {
-  const bits = [c.name ?? '(unnamed)', c.id ?? '(no id)', c.status ?? 'unknown'];
+  // `status` is the guest's, `state` is the record's, and a row served from the
+  // record has only the second — which is why a deleting, deleted or lost
+  // computer used to read as `unknown` here, the one word that says nothing.
+  //
+  // Both when there are both: a computer can be running and being deleted at
+  // the same time, and neither half of that is the answer on its own. `live`
+  // is dropped, being what every ordinary row says and so worth no column.
+  const state = c.state === 'live' ? undefined : c.state;
+  const bits = [c.name ?? '(unnamed)', c.id ?? '(no id)', c.status ?? state ?? 'unknown'];
+  if (c.status && state) bits.push(state);
   if (c.resolution) bits.push(c.resolution);
   if (c.suspended?.at) bits.push(`suspended ${c.suspended.at}`);
   if (c.unreachable) bits.push('UNREACHABLE — its hypervisor could not be reached');
