@@ -128,13 +128,16 @@ export type Computer = {
   name?: string;
   status?: string;
   /**
-   * The control plane's own record of the machine (platform OPL-4554):
-   * `live | unreachable | deleting | deleted | lost`.
+   * The platform's own record of whether the machine exists (platform
+   * OPL-4554): `live | unreachable | deleting | deleted | lost`.
    *
    * A different axis from `status`, which is what the machine's host says the
    * guest is doing. `unreachable` is the only one of the five that is per
    * request — it says this listing could not reach the host — and it is exactly
    * the case where `status` is absent, because there was nobody to ask.
+   *
+   * On listing rows only. A single computer is served by its host, so anything
+   * that answers is live and carries no state at all.
    */
   state?: string;
   os?: string;
@@ -150,7 +153,7 @@ export type Computer = {
   idle_suspend_min?: number;
   snapshot_schedule?: unknown;
   unreachable?: boolean;
-  /** When the record was marked deleted or lost. RFC 3339, set with the state. */
+  /** RFC 3339, present once the record has said `deleted` or `lost` respectively. */
   deleted_at?: string;
   lost_at?: string;
   start_error?: string;

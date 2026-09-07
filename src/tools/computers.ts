@@ -356,11 +356,17 @@ export const registerComputers: Registrar = (server, session, opts) => {
         // The control plane's own record, not the guest's (platform OPL-4554).
         // Read where the listing is assembled and never forwarded to a host, so
         // a filtered listing is as complete as an unfiltered one.
+        //
+        // Said in the description rather than assumed: omitting this is NOT
+        // "every computer". `deleted` and `lost` are terminal and withheld from
+        // an unfiltered listing, so this parameter is the only way a caller ever
+        // sees one — which is the question somebody asks when a computer they
+        // remember is not in the list.
         state: z
           .enum(['live', 'unreachable', 'deleting', 'deleted', 'lost'])
           .optional()
           .describe(
-            "Only computers the control plane records in this state. 'live' is an ordinary machine; 'deleting', 'deleted' and 'lost' are what became of one; 'unreachable' is per-request and means this listing could not reach the host, so the row is what the control plane has on record rather than what the machine says it is doing. Omitted, every state comes back.",
+            "Only computers the platform's own record puts in this state — a different question from what the machine is doing, which is `status`. 'live': its host lists it. 'unreachable': its host did not answer THIS request, so the row is the identity on record and not what the machine says; the computer is most likely fine. 'deleting': a delete was sent and not answered yet. 'deleted' and 'lost' are terminal, and asking here is the ONLY way to see one — an unfiltered listing is live, unreachable and deleting, so a computer missing from it may still have a record.",
           ),
       },
       annotations: { readOnlyHint: true },
