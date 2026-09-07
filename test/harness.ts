@@ -191,6 +191,13 @@ export function installFakePlatform(): {
 } {
   const calls: Recorded[] = [];
   const state = { status: 'running' };
+  // Snapshots a DELETE has been accepted for, so that `GET /snapshots` stops
+  // listing them. A deletion is a 202 now and the row going is the only thing
+  // that means it finished (OPL-4572), so a fixture whose row never
+  // goes is one where a tool that waits for it hangs and a tool that does not
+  // wait passes — the fixture bug OPL-4568 found on the capture side, in the
+  // mirror. Per-instance, like `state`: installFakePlatform is called per test.
+  const deleted = new Set<string>();
   const real = globalThis.fetch;
 
   globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
@@ -216,7 +223,7 @@ export function installFakePlatform(): {
       headers[k.toLowerCase()] = v;
     });
     calls.push({ method, path, body, query: url.searchParams, headers });
-    return respond(method, path, headers, state.status);
+    return respond(method, path, headers, state.status, deleted);
   }) as typeof fetch;
 
   return {
@@ -302,6 +309,7 @@ function respond(
   path: string,
   headers: Record<string, string>,
   status = 'running',
+  deleted: Set<string> = new Set(),
 ): Response {
   const json = (v: unknown, status = 200) =>
     new Response(JSON.stringify(v), { status, headers: { 'Content-Type': 'application/json' } });
@@ -428,7 +436,15 @@ function respond(
   }
   if (path === '/moves') return json({ moves: [MOVE_DONE] });
   if (path.endsWith('/move')) return json(MOVE_STARTED, 202);
-  if (path === '/snapshots') return json([SNAPSHOT]);
+  // A deletion is accepted, not done: 202 with the row that goes when the work
+  // finishes, and the listing stops carrying it from then on. Two segments
+  // exactly, so `/snapshots/:id/restore` and `/snapshots/:id/clone` are not this.
+  if (method === 'DELETE' && /^\/snapshots\/[^/]+$/.test(path)) {
+    const id = path.slice('/snapshots/'.length);
+    deleted.add(decodeURIComponent(id));
+    return json({ ...SNAPSHOT, id: decodeURIComponent(id) }, 202);
+  }
+  if (path === '/snapshots') return json(deleted.has(SNAPSHOT.id) ? [] : [SNAPSHOT]);
   if (path.endsWith('/snapshots')) {
     return method === 'GET' ? json(HOLDINGS) : json(CAPTURING_SNAPSHOT, 202);
   }

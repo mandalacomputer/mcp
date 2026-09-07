@@ -301,6 +301,24 @@ there is, which is why an incomplete listing is never allowed to decide it. A
 wait that runs out says the capture is still running and names the id to follow,
 because that one asks for a look rather than for another attempt.
 
+**A deletion outlives its request too, and reads the other way round.**
+`DELETE /snapshots/:id` answers `202` and then detaches the dependent snapshots
+and removes the stored objects. There is no state that means deleted, so
+`delete_snapshot` polls for the row to **go** — the mirror of a capture, which
+polls for a row to stay and change. A row that stays is one that STALLED, and it
+sits in `deleting`, a state a bare listing hides: the poll asks with
+`include=unfinished` for exactly that reason, since without it a half-deleted
+snapshot is indistinguishable from a deleted one. The platform retries a stalled
+deletion itself every fifteen minutes, so the give-up sentence says to watch
+rather than to repeat.
+
+Because absence is the success signal here, "Deleted" is said only off a listing
+read **whole**. A row missing because a hypervisor did not answer is not a row
+that is gone, and that mistake is unrecoverable in a way the others are not:
+nobody goes looking for a snapshot they have been told was destroyed. A `409`
+saying the snapshot is already being deleted is progress, not a fault — the
+answer is to watch that deletion finish, never to go and delete something else.
+
 **A schedule says when, not how long.** `snapshot_schedule` sets the window a
 computer's automatic snapshot is taken in; `get_retention` is what says how many
 of them survive, and it takes no computer because the window belongs to the
