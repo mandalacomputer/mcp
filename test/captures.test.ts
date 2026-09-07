@@ -55,7 +55,11 @@ const SOMEONE_ELSES = {
  * those are not values. The last entry repeats once the script runs out, so a
  * test that is about the deadline does not have to count polls.
  */
-const platformThat = (listings: (() => Response)[], accepted: unknown = PLACEHOLDER) => {
+const platformThat = (
+  listings: (() => Response)[],
+  accepted: unknown = PLACEHOLDER,
+  hangPost = false,
+) => {
   const seen: string[] = [];
   let n = 0;
   const stub = (async (input: string | URL | Request, init?: RequestInit) => {
@@ -63,6 +67,21 @@ const platformThat = (listings: (() => Response)[], accepted: unknown = PLACEHOL
     const method = (init?.method ?? 'GET').toUpperCase();
     seen.push(`${method} ${url.pathname}`);
     if (method === 'POST') {
+      // A request that never answers, ending the way a real one ends: when the
+      // signal the client armed says to stop. Rejecting on its own would be a
+      // different failure — `Api` reads a transport error whose signal is
+      // intact as one that happened AFTER the request was sent — and the
+      // cancellation path is reached only when the watched signal is what
+      // fired.
+      if (hangPost) {
+        return new Promise<Response>((_resolve, reject) => {
+          const abort = () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' }));
+          const signal = init?.signal;
+          if (!signal) return;
+          if (signal.aborted) return abort();
+          signal.addEventListener('abort', abort, { once: true });
+        });
+      }
       return new Response(JSON.stringify(accepted), {
         status: 202,
         headers: { 'Content-Type': 'application/json' },
@@ -98,8 +117,9 @@ describe('a capture the platform only accepted', () => {
     listings: (() => Response)[],
     args: Record<string, unknown> = {},
     accepted: unknown = PLACEHOLDER,
+    hangPost = false,
   ) => {
-    const p = platformThat(listings, accepted);
+    const p = platformThat(listings, accepted, hangPost);
     globalThis.fetch = p.stub;
     const { call, close } = await connect();
     const res = await call('create_snapshot', { name: 'before the upgrade', ...args });
@@ -251,6 +271,20 @@ describe('a capture the platform only accepted', () => {
     expect(textOf(res)).toContain('It is durable');
     expect(seen).toEqual(['POST /api/v1/computers/vm-1/snapshots']);
   });
+
+  it('says a capture may be running when the request itself was cut short', async () => {
+    // The deadline arriving while the POST is in flight. What was lost is the
+    // answer that carried the id, so there is nothing to poll on — and the
+    // obvious next move is wrong, because a second capture while one is running
+    // is refused. Both halves have to be said (codex review, gpt-5.6-sol).
+    const { res, seen } = await capture([() => listing([])], { timeout_s: 5 }, PLACEHOLDER, true);
+    expect(res.isError).toBe(true);
+    expect(textOf(res)).toContain('MAY BE RUNNING');
+    expect(textOf(res)).toContain('Do not simply call this again');
+    expect(textOf(res)).toContain('list_snapshots');
+    // Nothing was polled: there is no id to poll for.
+    expect(seen).toEqual(['POST /api/v1/computers/vm-1/snapshots']);
+  }, 15_000);
 
   it('hands back the placeholder and polls nothing when wait is false', async () => {
     const { res, seen } = await capture([() => listing([PLACEHOLDER])], { wait: false });

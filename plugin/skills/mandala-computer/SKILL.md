@@ -190,6 +190,11 @@ application — stops being something you redo.
   you and answers with the finished snapshot — pass `wait: false` only when you
   have other work to do meanwhile, and then poll `list_snapshots` for the id it
   gave you.
+- `delete_snapshot` waits too, and for the opposite thing: a deletion is
+  finished when the row **goes**, and one that stays is one that stalled. The
+  platform retries those itself, so a wait that runs out is something to watch
+  rather than repeat — and a 409 saying the snapshot is already being deleted
+  means the platform is doing it, not that you should delete something else.
 - Read `state` in `list_snapshots` before acting, on every row rather than on
   the newest: a capture still being taken reads `capturing` and restore, clone
   and delete all fail on one. A row that vanishes without ever leaving
