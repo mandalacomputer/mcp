@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { NotFoundError } from '../errors.js';
+import { CancelledError, isTransientForPoll, NotFoundError } from '../errors.js';
 import {
   describe,
   guarded,
@@ -11,6 +11,7 @@ import {
   withoutCredentials,
 } from '../format.js';
 import * as P from '../paths.js';
+import { POLL_MS, pollDelay, sleep } from '../poll.js';
 import type { Registrar } from './types.js';
 
 const idArg = {
@@ -19,6 +20,24 @@ const idArg = {
     .optional()
     .describe('Which computer. Defaults to the one selected with use_computer.'),
 };
+
+/** One row of `GET /snapshots`, before anything has been read off it. */
+type Row = Record<string, unknown>;
+
+const isRow = (v: unknown): v is Row => v !== null && typeof v === 'object' && !Array.isArray(v);
+
+/**
+ * The state a capture that has not finished is in, and the ONLY one the poll
+ * below waits out.
+ *
+ * Waiting for `pending` specifically is the bug the platform's own reference
+ * warns about: `pending` is where a finished capture lands, but replication can
+ * carry it on to `durable` between two polls, so a loop matching the literal
+ * string can watch a small snapshot go past and never match. Every state that
+ * is not this one is a state the snapshot can be restored, cloned and deleted
+ * from.
+ */
+const CAPTURING = 'capturing';
 
 /**
  * The sentence in front of a retention window, for the reason every tool here
@@ -66,7 +85,7 @@ export const registerSnapshots: Registrar = (server, session, opts) => {
     {
       title: 'List snapshots',
       description:
-        'Every snapshot on this account. `orphaned` means its computer is gone: such a snapshot can still be cloned into a new computer, but cannot be restored, because a restore puts the disk back on a source that no longer exists. Read `state` before acting on a row: a capture still being taken is listed FIRST and is not a snapshot yet — it reads `capturing` and its id begins `cap-`, and restore, clone and delete all fail on one. `pending` is the point at which it can be acted on, and `durable` means it has reached backup storage as well.',
+        'Every snapshot on this account. `orphaned` means its computer is gone: such a snapshot can still be cloned into a new computer, but cannot be restored, because a restore puts the disk back on a source that no longer exists. Read `state` ON EVERY ROW before acting, rather than on the newest one — this is one answer per hypervisor concatenated in a fixed host order that has nothing to do with time, so a capture running on one host routinely appears after finished snapshots from another. A row reading `capturing` is not a snapshot yet: the copy is still being taken and restore, clone and delete all fail on it. It carries the id the finished snapshot will keep, so this is also the route to poll after create_snapshot: the row stops reading `capturing` in place rather than being replaced under another id, and a row that vanishes without ever leaving `capturing` is a capture that failed. `pending` is the point at which it can be acted on, and `durable` means it has reached backup storage as well.',
       inputSchema: {
         computer_id: z
           .string()
@@ -217,7 +236,7 @@ export const registerSnapshots: Registrar = (server, session, opts) => {
     {
       title: 'Snapshot a computer',
       description:
-        'Capture a computer so it can be restored or forked later. A disk snapshot is the filesystem; a memory snapshot also saves the running session, so a fork of it comes up with the same processes and windows already open. Name it after the step it is about — that name is what picks it out of the list later.',
+        'Capture a computer so it can be restored or forked later. A disk snapshot is the filesystem; a memory snapshot also saves the running session, so a fork of it comes up with the same processes and windows already open. Name it after the step it is about — that name is what picks it out of the list later. THE CAPTURE OUTLIVES THE REQUEST that starts it: the platform accepts it and copies the disk afterwards, which takes minutes and scales with how much has been written. This waits for the copy to land by default and answers with the finished snapshot; pass wait: false to get the id straight back and poll list_snapshots yourself. Everything that can refuse a capture — no such computer, one already running, a memory snapshot of a computer that is not running, an allowance that will not stretch — is refused by this call, so anything else is a capture that started.',
       inputSchema: {
         ...idArg,
         name: z
@@ -240,24 +259,220 @@ export const registerSnapshots: Registrar = (server, session, opts) => {
           .describe(
             'Include the running session. A memory snapshot is a saved machine, so it only loads back into the shape it came off: resize the computer afterwards and the restore is refused, because the vCPU count and the memory size are part of the state rather than decoration around it. Clone it instead in that case, which restores the disk and boots fresh.',
           ),
+        wait: z
+          .boolean()
+          .default(true)
+          .describe(
+            'Wait for the copy to finish, and answer with the snapshot rather than with the placeholder. Set it false to get the id back at once — useful when the capture is a side errand and there is other work to do meanwhile — and then poll list_snapshots for that id, which is what this does for you.',
+          ),
+        timeout_s: z
+          .number()
+          .int()
+          .min(5)
+          .max(1800)
+          .default(300)
+          .describe(
+            'How long to wait for the capture before handing back and letting you poll. Ignored when wait is false. Giving up on the wait does not stop the capture.',
+          ),
       },
     },
-    ({ computer_id, name, memory }, extra) =>
+    ({ computer_id, name, memory, wait, timeout_s }, extra) =>
       guarded(async () => {
         const id = session.resolve(computer_id);
-        const res = await session.api
-          .with(extra.signal)
-          .json<Record<string, unknown>>('POST', P.computerAction(id, 'snapshots'), {
-            body: P.snapshotBody({ memory, name }),
-          });
+        // One deadline for the whole call, armed before the POST, exactly as
+        // move_computer arms its own: timeout_s is a promise about when this
+        // comes back, and a POST left on undici's own five-minute header clock
+        // could break that promise before the poll ever ran. Nothing is armed
+        // when nobody is waiting — a caller who asked for the id and no wait
+        // was promised no deadline, so imposing one would cancel a POST that
+        // was still perfectly capable of starting a capture.
+        const untilDeadline = wait ? AbortSignal.timeout(timeout_s * 1000) : undefined;
+        const signal = !untilDeadline
+          ? extra.signal
+          : extra.signal
+            ? AbortSignal.any([extra.signal, untilDeadline])
+            : untilDeadline;
+        const api = session.api.with(signal);
+        // The 202. Its body is a Snapshot row in `state: "capturing"` — a
+        // placeholder rather than a snapshot, on which restore, clone and delete
+        // all answer 404 until the copy lands (OPL-4562). It is kept whatever
+        // happens next, because it is the only description of this capture that
+        // does not depend on a later read succeeding.
+        const started = await api.json<Row>('POST', P.computerAction(id, 'snapshots'), {
+          body: P.snapshotBody({ memory, name }),
+        });
         // The name read back rather than the one sent, because the interesting
         // case is the one that was not sent: the platform generates
         // "<computer> <timestamp>" when `name` is absent, and that generated
         // name is what a later list_snapshots will show. Saying it here is the
         // difference between a caller that can find this capture again and one
         // that has to go looking for it.
-        const called = typeof res?.name === 'string' && res.name.trim() ? ` as "${res.name}"` : '';
-        return said(`Snapshotted ${id}${memory ? ' with its memory' : ''}${called}.`, res);
+        const called =
+          typeof started?.name === 'string' && started.name.trim() ? ` as "${started.name}"` : '';
+        // Two sentences for the two things that can be true, and keeping them
+        // apart is the whole of OPL-4568. "Snapshotted vm-1" over a 202 is the
+        // defect: it is said before a byte has been copied, and a model reads it
+        // as a snapshot it may now restore. So the past tense is reserved for a
+        // capture this call watched land, and everything that hands back with
+        // the copy still running leads with `startedLine` instead.
+        const took = `Snapshotted ${id}${memory ? ' with its memory' : ''}${called}.`;
+        const startedLine = `Capture of ${id}${memory ? ' with its memory' : ''} started${called}.`;
+        // The id allocated before the copy begins, and the whole reason a poll
+        // is possible: it is the SNAPSHOT'S own id and does not change when the
+        // capture lands, so the row stops reading `capturing` in place rather
+        // than being replaced by something under another id.
+        const sid = typeof started?.id === 'string' && started.id.trim() ? started.id.trim() : '';
+        const startedState = typeof started?.state === 'string' ? started.state : undefined;
+        // How to follow it by hand — said wherever this hands back with the
+        // capture still running, because "poll list_snapshots" without the two
+        // rules under it is an instruction a model gets wrong in both
+        // directions: by waiting for the literal `pending`, and by reading a
+        // row that vanished as a row that has not appeared yet.
+        const byHand =
+          `Poll list_snapshots for the id ${sid}: the row stops reading "${CAPTURING}" when the capture ` +
+          `lands — do not wait for "pending" specifically, since replication can carry it straight on to ` +
+          `"durable" — and a row that DISAPPEARS without ever leaving "${CAPTURING}" is a capture that failed.`;
+
+        if (!wait) {
+          return said(
+            `${startedLine} It is NOT a snapshot yet: while its row reads "${CAPTURING}" it is a ` +
+              `placeholder, and restore, clone and delete all fail on it. ${byHand}`,
+            started,
+          );
+        }
+        // A capture accepted under an id nobody was told cannot be polled for,
+        // and it cannot be found again either — every later call takes the id.
+        // `refused`, for clone_snapshot's reason one route over: the platform
+        // did something billable and the caller has no handle on it, which is
+        // not a result to report as success.
+        if (!sid) {
+          return refused(
+            `${startedLine} THE CAPTURE IS RUNNING, but the platform sent no snapshot id back, so this wait has ` +
+              `nothing to poll on and the snapshot cannot be named. list_snapshots on ${id} will show it ` +
+              `when it lands.`,
+            started,
+          );
+        }
+        // Already finished when it was answered for — a `201` from a platform
+        // that has not taken the 202 yet, or a capture with nothing to copy.
+        // Not a state to poll out of, and a loop that did would ask for a row it
+        // already holds. An answer with no `state` at all falls through to the
+        // poll instead: absence is not evidence that it landed.
+        if (startedState !== undefined && startedState !== CAPTURING) {
+          return said(`${took} It is ${startedState} — snapshot ${sid}.`, started);
+        }
+
+        let blocked: string | undefined;
+        // `untilDeadline &&` rather than `!untilDeadline?.aborted`: the early
+        // return above is what guarantees it is armed here, and the optional
+        // form would turn a later edit that broke that guarantee into a loop
+        // with no deadline at all rather than into a visible mistake.
+        while (untilDeadline && !untilDeadline.aborted) {
+          // The caller giving up ends the wait. The signal aborts the request in
+          // flight, but nothing about an aborted request stops the next
+          // iteration from starting one.
+          if (extra.signal?.aborted) {
+            return refused(
+              `Cancelled while waiting for the capture of ${id}. THE CAPTURE IS STILL RUNNING — nothing ` +
+                `was stopped, because a disk copy already under way cannot be called back. ${byHand}`,
+              started,
+            );
+          }
+          let items: unknown;
+          let incomplete: number | null = null;
+          try {
+            ({ items, incomplete } = await api.listing<unknown>(P.SNAPSHOTS));
+          } catch (err) {
+            if (extra.signal?.aborted) continue;
+            // A body stream can fail without either signal firing, so the
+            // deadline's own arrival is what tells a real timeout from an
+            // undici idle abort. Same shape as the two loops in computers.ts.
+            if (err instanceof CancelledError) {
+              if (untilDeadline?.aborted) break;
+              blocked = err.message;
+              await sleep(POLL_MS, signal);
+              continue;
+            }
+            // A poll that failed for a reason worth riding out is weather; one
+            // that failed for any other reason is a real failure with a capture
+            // still running behind it, and a thrown error's handler has no way
+            // to say so. So it is said here rather than rethrown.
+            if (!isTransientForPoll(err)) {
+              return refused(
+                `${err instanceof Error ? err.message : String(err)}\n\nTHE CAPTURE IS STILL RUNNING — ` +
+                  `this was the poll failing, not the capture. ${byHand}`,
+                started,
+              );
+            }
+            blocked = err instanceof Error ? err.message : String(err);
+            await sleep(pollDelay(err), signal);
+            continue;
+          }
+          // Absence is the ONLY signal a failed capture leaves, which is what
+          // makes the two guards below load-bearing rather than tidy. A body
+          // that is not a list of snapshots, and a list the platform had to
+          // answer short, are both the platform failing to answer — and read as
+          // "the row is not there" they would announce that somebody's backup
+          // failed while it was still being taken.
+          if (!Array.isArray(items)) {
+            const got =
+              items === undefined ? 'no body at all' : items === null ? 'null' : typeof items;
+            blocked = `GET /snapshots answered with ${got}, not a list of snapshots`;
+            await sleep(POLL_MS, signal);
+            continue;
+          }
+          if (incomplete !== null) {
+            blocked =
+              'GET /snapshots answered short — a hypervisor did not report, so a row missing from it ' +
+              'establishes nothing';
+            await sleep(POLL_MS, signal);
+            continue;
+          }
+          const row = items.find((r) => isRow(r) && r.id === sid);
+          if (!isRow(row)) {
+            return refused(
+              `THE CAPTURE OF ${id} FAILED and nothing was saved. Snapshot ${sid} is no longer listed and ` +
+                `nothing took its place, which is what a capture that starts and then fails leaves behind — ` +
+                `this is a failure during the copy, not a wait that ran out. The computer itself is ` +
+                `untouched and can be snapshotted again.`,
+              started,
+            );
+          }
+          // A row served from the placement cache because its host did not
+          // answer. It carries an id and nothing else — its `state` is
+          // last-known or absent — so it can neither confirm the capture landed
+          // nor deny it, and reading a stale `capturing` off one would be the
+          // same mistake as reading absence as failure.
+          if (row.unreachable) {
+            blocked = `the hypervisor holding ${sid} did not answer, so its state could not be read`;
+            await sleep(POLL_MS, signal);
+            continue;
+          }
+          blocked = undefined;
+          const state = typeof row.state === 'string' ? row.state : undefined;
+          if (state === CAPTURING) {
+            await sleep(POLL_MS, signal);
+            continue;
+          }
+          return said(
+            `${took} The capture landed: snapshot ${sid} reads "${state ?? 'no state'}" and can now be ` +
+              `restored, cloned or deleted.`,
+            row,
+          );
+        }
+        // A refusal, for the reason move_computer's is: the wait never reached
+        // what it was told to wait for. What it must not do is read as a capture
+        // that failed — that is a different answer with a different id in it,
+        // and the difference between calling this again and going looking for a
+        // snapshot that is on its way.
+        return refused(
+          blocked
+            ? `${startedLine} Gave up watching after ${timeout_s}s; the platform could not be asked — the ` +
+                `last attempt said: ${blocked}. THE CAPTURE IS STILL RUNNING. ${byHand}`
+            : `${startedLine} Still capturing after ${timeout_s}s, which a large disk takes. THE CAPTURE IS ` +
+                `STILL RUNNING and nothing was changed by giving up on the wait. ${byHand}`,
+          started,
+        );
       }),
   );
 

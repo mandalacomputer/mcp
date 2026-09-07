@@ -80,6 +80,18 @@ const MOVE_DONE = {
 
 const SNAPSHOT = { id: 'snap-1', computer_id: 'vm-1', name: 's', kind: 'disk', state: 'durable' };
 
+/**
+ * The same capture as the POST answers it: a 202 and a placeholder (OPL-4562).
+ *
+ * Two fixtures for one snapshot, for the reason the two moves above are two
+ * fixtures. The route and the poll answer different moments of the same
+ * operation, and a stub that returned the finished row for both would let a
+ * tool that never polls at all pass — which is precisely the defect this
+ * server had. The id is SNAPSHOT's, because the id allocated before the copy is
+ * the one the finished snapshot keeps, and matching on it is the whole poll.
+ */
+const CAPTURING_SNAPSHOT = { ...SNAPSHOT, state: 'capturing' };
+
 const HOLDINGS = { count: 2, size_bytes: 6_100_000_000, fingerprint: 'fp-abc123' };
 
 /** The plan's retention window. Every tier non-zero, so a tool that drops one shows it. */
@@ -417,7 +429,9 @@ function respond(
   if (path === '/moves') return json({ moves: [MOVE_DONE] });
   if (path.endsWith('/move')) return json(MOVE_STARTED, 202);
   if (path === '/snapshots') return json([SNAPSHOT]);
-  if (path.endsWith('/snapshots')) return json(method === 'GET' ? HOLDINGS : SNAPSHOT);
+  if (path.endsWith('/snapshots')) {
+    return method === 'GET' ? json(HOLDINGS) : json(CAPTURING_SNAPSHOT, 202);
+  }
   if (path.endsWith('/computers'))
     return json(method === 'GET' ? [{ ...COMPUTER, status }] : COMPUTER);
   // The four power actions answer the platform's Ack and not a computer record
