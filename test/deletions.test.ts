@@ -49,7 +49,10 @@ const unavailable = () =>
  * refusal as easily as a 202. The last listing repeats once the script runs
  * out, so a test about the deadline does not have to count polls.
  */
-const platformThat = (listings: (() => Response)[], accepted?: () => Response) => {
+const platformThat = (
+  listings: (() => Response)[],
+  accepted?: (init?: RequestInit) => Response | Promise<Response>,
+) => {
   const seen: string[] = [];
   let n = 0;
   const stub = (async (input: string | URL | Request, init?: RequestInit) => {
@@ -58,7 +61,7 @@ const platformThat = (listings: (() => Response)[], accepted?: () => Response) =
     seen.push(`${method} ${url.pathname}${url.search}`);
     if (method === 'DELETE') {
       return (
-        accepted?.() ??
+        accepted?.(init) ??
         new Response(JSON.stringify(ROW), {
           status: 202,
           headers: { 'Content-Type': 'application/json' },
@@ -70,6 +73,25 @@ const platformThat = (listings: (() => Response)[], accepted?: () => Response) =
   }) as typeof globalThis.fetch;
   return { stub, seen };
 };
+
+/**
+ * A request that never answers, and ends the way a real one ends: when the
+ * signal the client armed says to stop.
+ *
+ * Rejecting on its own would be a different failure — `Api` classifies a
+ * transport error whose signal is intact as one that happened AFTER the request
+ * was sent, which is a true statement about a different thing. The cancellation
+ * path is reached only when the WATCHED SIGNAL is what fired, so the stub has to
+ * honour it exactly as fetch does.
+ */
+const hangs = (init?: RequestInit): Promise<Response> =>
+  new Promise((_resolve, reject) => {
+    const abort = () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' }));
+    const signal = init?.signal;
+    if (!signal) return;
+    if (signal.aborted) return abort();
+    signal.addEventListener('abort', abort, { once: true });
+  });
 
 describe('a deletion the platform only accepted', () => {
   let real: typeof globalThis.fetch;
@@ -83,7 +105,7 @@ describe('a deletion the platform only accepted', () => {
   const del = async (
     listings: (() => Response)[],
     args: Record<string, unknown> = {},
-    accepted?: () => Response,
+    accepted?: (init?: RequestInit) => Response | Promise<Response>,
   ) => {
     const p = platformThat(listings, accepted);
     globalThis.fetch = p.stub;
@@ -181,6 +203,21 @@ describe('a deletion the platform only accepted', () => {
     // deletion that never began.
     expect(seen).toEqual(['DELETE /api/v1/snapshots/snap-7']);
   });
+
+  it('says the deletion may be running when the request itself was cut short', async () => {
+    // The deadline arriving while the DELETE is in flight. The generic
+    // cancellation sentence says the request may have been received; what it
+    // cannot say is that the work it starts OUTLIVES the request, so
+    // "cancelled" reads as a deletion that did not happen while the objects are
+    // being removed. Claiming less than happened, which on a destructive call is
+    // its own kind of wrong answer (codex review, gpt-5.6-sol).
+    const { res } = await del([() => listing([ROW])], { timeout_s: 5 }, hangs);
+    expect(res.isError).toBe(true);
+    expect(textOf(res)).toContain('MAY BE RUNNING');
+    expect(textOf(res)).toContain('snap-7');
+    // And the one thing that makes it recoverable.
+    expect(textOf(res)).toContain('Calling this again is safe');
+  }, 15_000);
 
   it('still reads a 404 as nothing to delete rather than as a deletion', async () => {
     const { res } = await del(

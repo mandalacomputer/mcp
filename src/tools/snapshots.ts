@@ -423,9 +423,32 @@ export const registerSnapshots: Registrar = (server, session, opts) => {
         // all answer 404 until the copy lands (OPL-4562). It is kept whatever
         // happens next, because it is the only description of this capture that
         // does not depend on a later read succeeding.
-        const started = await api.json<Row>('POST', P.computerAction(id, 'snapshots'), {
-          body: P.snapshotBody({ memory, name }),
-        });
+        let started: Row;
+        try {
+          started = await api.json<Row>('POST', P.computerAction(id, 'snapshots'), {
+            body: P.snapshotBody({ memory, name }),
+          });
+        } catch (err) {
+          // The deadline, or the caller, arriving while the POST is in flight.
+          // The generic sentence for this says the request may have been
+          // received and to treat what it would have changed as unknown, which
+          // is true and is not enough here: a capture that started is billable,
+          // takes minutes, and — because the answer that carried its id is the
+          // thing that was lost — cannot be polled for at all. Worse, the
+          // obvious next move is wrong. A second capture while one is running is
+          // refused 409, so a model that simply retries reads that as a failure
+          // on top of a capture that is fine (observed live, OPL-4577).
+          if (err instanceof CancelledError) {
+            return refused(
+              `${why(err)}\n\nA CAPTURE OF ${id} MAY BE RUNNING. What was lost is the answer that carried ` +
+                `its id, so there is nothing here to poll on — look instead: list_snapshots on ${id} shows ` +
+                `a row reading "${CAPTURING}" if one started, and that row's id is the one to follow. Do ` +
+                `not simply call this again; a second capture while one is running is refused, and the ` +
+                `refusal will be about the capture this call may have started.`,
+            );
+          }
+          throw err;
+        }
         // The name read back rather than the one sent, because the interesting
         // case is the one that was not sent: the platform generates
         // "<computer> <timestamp>" when `name` is absent, and that generated
@@ -811,6 +834,26 @@ export const registerSnapshots: Registrar = (server, session, opts) => {
           // no `reason` for these, and keying on prose is the mistake OPL-3724
           // took out of three clients. So both readings are named and the
           // platform's own words are printed with them.
+          // The deadline, or the caller, arriving while the DELETE is in
+          // flight. The generic cancellation sentence says the request may have
+          // been received; what it cannot say is that the work it started
+          // OUTLIVES the request, so "cancelled" here reads as a deletion that
+          // did not happen while the objects are being removed. Claiming less
+          // than happened, which on a destructive call is its own kind of wrong
+          // answer (codex review, gpt-5.6-sol).
+          //
+          // The retry rule is worth saying in the same breath, because it is
+          // the one thing that makes this recoverable: repeating the call is
+          // safe. A snapshot already being deleted answers 409, and one that is
+          // gone answers 404, and this tool has a sentence for each.
+          if (err instanceof CancelledError) {
+            return refused(
+              `${why(err)}\n\nTHE DELETION OF ${snapshot_id} MAY BE RUNNING: the request may have reached ` +
+                `the platform and been accepted, and nothing about the answer being lost calls it back. ` +
+                `${byHand} Calling this again is safe either way — a snapshot already being deleted ` +
+                `answers a conflict, and one that is gone answers that there is nothing to delete.`,
+            );
+          }
           if (err instanceof ConflictError) {
             return refused(
               `${why(err)}\n\nNOTHING WAS DELETED and nothing is broken. If that says the snapshot is ` +
