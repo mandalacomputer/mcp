@@ -40,6 +40,38 @@ const isRow = (v: unknown): v is Row => v !== null && typeof v === 'object' && !
 const CAPTURING = 'capturing';
 
 /**
+ * The states a capture is OVER in, and the reason this is a list of names
+ * rather than "anything but {@link CAPTURING}".
+ *
+ * It is read in one place: the check on the acceptance body, which asks "is
+ * there something to wait for". An answer nobody can classify has to mean YES
+ * there — a 202 whose `state` arrives misspelt, renamed, or under another key
+ * would otherwise read as a snapshot that had landed, and what came back would
+ * be the placeholder: `size_bytes: 0` and an id restore, clone and delete all
+ * 404 on, reported as a snapshot that can be acted on. That is the defect
+ * OPL-4568 removed, reached through a typo instead of an omission and
+ * reinstated by drift this server cannot see. An ABSENT state was already
+ * handled; `"capturin"` is every bit as unreadable and was not.
+ *
+ * The POLL LOOP reads the opposite way round and is right to — a row it cannot
+ * classify is not a claim, so it asks again rather than deciding, where the
+ * alternative is a wait that ends on a state nobody could read. Both directions
+ * are the safe one for where they sit, and they are safe in opposite
+ * directions.
+ *
+ * The three names `web/lib/apidoc` documents beside `capturing`. `deleting` is
+ * among them because a row in it is a row the capture is over for, whatever
+ * else is true of it. A platform that invents a fourth costs one listing: the
+ * poll finds the row already there, carrying whatever state it really has, and
+ * returns it at once. So this list going stale costs a round trip, and the
+ * other spelling costs the bug.
+ *
+ * The TypeScript SDK settled here first, under `acceptedCapture` (OPL-4568,
+ * `33c47b3`).
+ */
+const LANDED = ['pending', 'durable', 'deleting'];
+
+/**
  * The sentence in front of a retention window, for the reason every tool here
  * leads with one: the model reads the text, and three integers in a JSON blob
  * do not say what they select.
@@ -362,9 +394,13 @@ export const registerSnapshots: Registrar = (server, session, opts) => {
         // Already finished when it was answered for — a `201` from a platform
         // that has not taken the 202 yet, or a capture with nothing to copy.
         // Not a state to poll out of, and a loop that did would ask for a row it
-        // already holds. An answer with no `state` at all falls through to the
-        // poll instead: absence is not evidence that it landed.
-        if (startedState !== undefined && startedState !== CAPTURING) {
+        // already holds.
+        //
+        // An ALLOW-LIST, for the reason {@link LANDED} gives: this asks whether
+        // there is anything to wait for, and every unreadable answer — absent,
+        // misspelt, renamed, moved — has to mean yes. Only a state this server
+        // can read AS a landed one skips the wait.
+        if (startedState !== undefined && LANDED.includes(startedState)) {
           return said(`${took} It is ${startedState} — snapshot ${sid}.`, started);
         }
 
