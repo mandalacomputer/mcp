@@ -12,7 +12,7 @@ import {
   withoutCredentials,
 } from '../format.js';
 import * as P from '../paths.js';
-import { POLL_MS, pollDelay, sleep } from '../poll.js';
+import { heartbeat, POLL_MS, pollDelay, sleep } from '../poll.js';
 import type { Registrar } from './types.js';
 
 const idArg = {
@@ -361,7 +361,7 @@ export const registerSnapshots: Registrar = (server, session, opts) => {
     {
       title: 'Snapshot a computer',
       description:
-        'Capture a computer so it can be restored or forked later. A disk snapshot is the filesystem; a memory snapshot also saves the running session, so a fork of it comes up with the same processes and windows already open. Name it after the step it is about — that name is what picks it out of the list later. THE CAPTURE OUTLIVES THE REQUEST that starts it: the platform accepts it and copies the disk afterwards, which takes minutes and scales with how much has been written. This waits for the copy to land by default and answers with the finished snapshot; pass wait: false to get the id straight back and poll list_snapshots yourself. Everything that can refuse a capture — no such computer, one already running, a memory snapshot of a computer that is not running, an allowance that will not stretch — is refused by this call, so anything else is a capture that started.',
+        'Capture a computer so it can be restored or forked later. A disk snapshot is the filesystem; a memory snapshot also saves the running session, so a fork of it comes up with the same processes and windows already open. Name it after the step it is about — that name is what picks it out of the list later. THE CAPTURE OUTLIVES THE REQUEST that starts it: the platform accepts it and copies the disk afterwards, which takes minutes and scales with how much has been written. This waits for the copy to land by default and answers with the finished snapshot; pass wait: false to get the id straight back and poll list_snapshots yourself. Everything that can refuse a capture — no such computer, one already running, a memory snapshot of a computer that is not running, an allowance that will not stretch — is refused by this call, so anything else is a capture that started. A wait reports progress on every poll, so a client that sends a progressToken and sets resetTimeoutOnProgress can hold the request open; a client that cannot should pass wait: false and poll list_snapshots, rather than watch its own default timeout cancel a call while the capture goes on running.',
       inputSchema: {
         ...idArg,
         name: z
@@ -520,6 +520,12 @@ export const registerSnapshots: Registrar = (server, session, opts) => {
           return said(`${took} It is ${startedState} — snapshot ${sid}.`, started);
         }
 
+        // The keepalive. Armed after the 202, because everything before it is a
+        // single short request and there is nothing to report until there is a
+        // capture to report on.
+        const beat = heartbeat(extra, server.server);
+        await beat(`Capturing ${sid} of ${id} — the copy has started.`);
+
         let blocked: string | undefined;
         // `untilDeadline &&` rather than `!untilDeadline?.aborted`: the early
         // return above is what guarantees it is armed here, and the optional
@@ -560,6 +566,7 @@ export const registerSnapshots: Registrar = (server, session, opts) => {
           }
           if (turn.kind === 'blocked') {
             blocked = turn.why;
+            await beat(`Capturing ${sid} of ${id} — the platform could not be asked: ${turn.why}`);
             await sleep(turn.after ?? POLL_MS, signal);
             continue;
           }
@@ -582,6 +589,7 @@ export const registerSnapshots: Registrar = (server, session, opts) => {
           const state = typeof row.state === 'string' ? row.state : undefined;
           if (state === CAPTURING) {
             blocked = undefined;
+            await beat(`Capturing ${sid} of ${id} — still copying.`);
             await sleep(POLL_MS, signal);
             continue;
           }
@@ -593,6 +601,7 @@ export const registerSnapshots: Registrar = (server, session, opts) => {
           // deadline reports that the platform could not be asked.
           if (state === undefined) {
             blocked = `the row for ${sid} carried no state, so nothing said whether the capture had landed`;
+            await beat(`Capturing ${sid} of ${id} — its row carried no state to read.`);
             await sleep(POLL_MS, signal);
             continue;
           }
@@ -774,7 +783,7 @@ export const registerSnapshots: Registrar = (server, session, opts) => {
     {
       title: 'Delete a snapshot',
       description:
-        'Remove a snapshot permanently. Later snapshots in the same chain are unaffected. THE DELETION OUTLIVES THE REQUEST that starts it: the platform accepts it and then detaches the dependent snapshots and removes the stored objects, which takes time that scales with the chain and with how much is stored. This waits for it by default and reports what actually happened; pass wait: false to hand back as soon as it is accepted. A 409 saying the snapshot is ALREADY BEING DELETED is progress rather than a fault — the platform is doing what you asked, and the answer is to watch that one finish, never to go and delete something else.',
+        'Remove a snapshot permanently. Later snapshots in the same chain are unaffected. THE DELETION OUTLIVES THE REQUEST that starts it: the platform accepts it and then detaches the dependent snapshots and removes the stored objects, which takes time that scales with the chain and with how much is stored. This waits for it by default and reports what actually happened; pass wait: false to hand back as soon as it is accepted. A 409 saying the snapshot is ALREADY BEING DELETED is progress rather than a fault — the platform is doing what you asked, and the answer is to watch that one finish, never to go and delete something else. A wait reports progress on every poll, so a client that sends a progressToken and sets resetTimeoutOnProgress can hold the request open; a client that cannot should pass wait: false and poll list_snapshots.',
       inputSchema: {
         snapshot_id: z.string(),
         confirm: z.literal(true).describe('Must be true.'),
@@ -895,6 +904,9 @@ export const registerSnapshots: Registrar = (server, session, opts) => {
           );
         }
 
+        const beat = heartbeat(extra, server.server);
+        await beat(`Deleting ${snapshot_id} — the platform has accepted it.`);
+
         let blocked: string | undefined;
         let seen: string | undefined;
         while (untilDeadline && !untilDeadline.aborted) {
@@ -926,6 +938,7 @@ export const registerSnapshots: Registrar = (server, session, opts) => {
           }
           if (turn.kind === 'blocked') {
             blocked = turn.why;
+            await beat(`Deleting ${snapshot_id} — the platform could not be asked: ${turn.why}`);
             await sleep(turn.after ?? POLL_MS, signal);
             continue;
           }
@@ -935,6 +948,7 @@ export const registerSnapshots: Registrar = (server, session, opts) => {
           if (turn.kind === 'absent') return said(`Deleted snapshot ${snapshot_id}.`, accepted);
           blocked = undefined;
           seen = typeof turn.row.state === 'string' ? turn.row.state : undefined;
+          await beat(`Deleting ${snapshot_id} — still listed${seen ? `, reading "${seen}"` : ''}.`);
           await sleep(POLL_MS, signal);
         }
         // Still listed. Three different things that can mean, and they are not

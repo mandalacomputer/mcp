@@ -490,7 +490,17 @@ default request timeout is 60 seconds and only a progress notification can reset
 it — but the SDK resets it only for a caller that passed that option, so a client
 which merely accepts progress is still cancelled a minute into a fifteen-minute
 build. `get_build` is the answer for a client that cannot hold a request open:
-it reads once and returns. A build that *failed* is a normal answer from
+it reads once and returns.
+
+**The same applies to every tool here that waits.** `wait_for_computer`,
+`move_computer`, `create_snapshot` and `delete_snapshot` all poll, and all report
+progress on every poll — a changed line at once, an unchanged one on a ten-second
+heartbeat, so the request stays open without flooding the client. A live capture
+took 107 seconds and was cancelled at 60 before this existed, which turned every
+carefully-worded answer about what had actually happened into a transport error.
+Each of them has a way out for a client that cannot opt in: `wait: false` on the
+two snapshot tools, `list_moves` after a move, a shorter `timeout_s` and a second
+call on the wait. A build that *failed* is a normal answer from
 `watch_build`, not an error — it names the step that stopped it, which is the
 thing to fix. An `error` event is the *stream* failing and says nothing about the
 build, and the tool says so rather than letting a model rewrite a document that

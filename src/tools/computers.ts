@@ -12,7 +12,7 @@ import {
   withoutCredentials,
 } from '../format.js';
 import * as P from '../paths.js';
-import { POLL_MS, pollDelay, sleep } from '../poll.js';
+import { heartbeat, POLL_MS, pollDelay, sleep } from '../poll.js';
 import type { Registrar } from './types.js';
 
 const idArg = {
@@ -645,7 +645,7 @@ export const registerComputers: Registrar = (server, session, opts) => {
     {
       title: 'Move a computer to a host that can run a bigger size',
       description:
-        'Grow a computer past what its current host can run, by moving it to another host in the same region first. Only call this after update_computer has refused a resize and said a move is possible: it is the second half of that refusal and nothing else. THIS MOVES THE MACHINE TO DIFFERENT HARDWARE and copies its disk to get there — say so before you call it. The computer must be STOPPED (suspended is not stopped here: a saved desktop only loads on the host that wrote it, so resume and stop it, or discard the session). One move runs per account at a time. Everything is decided again when this runs, so it can still refuse. Waits for the outcome and reports it; list_moves reads it if the wait runs out.',
+        'Grow a computer past what its current host can run, by moving it to another host in the same region first. Only call this after update_computer has refused a resize and said a move is possible: it is the second half of that refusal and nothing else. THIS MOVES THE MACHINE TO DIFFERENT HARDWARE and copies its disk to get there — say so before you call it. The computer must be STOPPED (suspended is not stopped here: a saved desktop only loads on the host that wrote it, so resume and stop it, or discard the session). One move runs per account at a time. Everything is decided again when this runs, so it can still refuse. Waits for the outcome and reports it, reporting progress on every poll so a client that sends a progressToken and sets resetTimeoutOnProgress can hold the request open; list_moves reads the outcome if the wait runs out, and is the answer for a client that cannot.',
       inputSchema: {
         ...idArg,
         // Required, unlike every other field here, and unlike the same argument
@@ -706,6 +706,12 @@ export const registerComputers: Registrar = (server, session, opts) => {
         // does not depend on a later read succeeding.
         const started = (await api.json('POST', P.computerAction(id, 'move'), { body })) as Move;
 
+        // The keepalive. A disk crossing between two hosts is minutes, and a
+        // tool that says nothing for minutes is one a client cancels — see
+        // heartbeat, and OPL-4579 for the wait that proved it.
+        const beat = heartbeat(extra, server.server);
+        await beat(`Moving ${id} — the platform has accepted it.`);
+
         let last: Move = started;
         let blocked: string | undefined;
         while (!untilDeadline.aborted) {
@@ -743,6 +749,7 @@ export const registerComputers: Registrar = (server, session, opts) => {
               );
             }
             blocked = err instanceof Error ? err.message : String(err);
+            await beat(`Moving ${id} — the platform could not be asked: ${blocked}`);
             await sleep(pollDelay(err), signal);
             continue;
           }
@@ -752,6 +759,7 @@ export const registerComputers: Registrar = (server, session, opts) => {
           // not be asked rather than claiming a deletion nothing established.
           if (!table) {
             blocked = `GET /moves answered with ${shapeOf((raw as { moves?: unknown } | null)?.moves)}, not a list of moves`;
+            await beat(`Moving ${id} — the platform could not be asked: ${blocked}`);
             await sleep(POLL_MS, signal);
             continue;
           }
@@ -781,6 +789,7 @@ export const registerComputers: Registrar = (server, session, opts) => {
           }
           last = mine;
           if (!mine.live) return finishedMove(id, mine);
+          await beat(`Moving ${id} — ${mine.state}${mine.detail ? `: ${mine.detail}` : ''}`);
           await sleep(POLL_MS, signal);
         }
         return refused(
@@ -880,7 +889,7 @@ export const registerComputers: Registrar = (server, session, opts) => {
     {
       title: 'Wait for a computer to be ready',
       description:
-        'Poll until the computer is running, or until the software inside it answers. Use "guest" before exec, files or windows, and before expecting a screenshot to show a desktop rather than a boot screen.',
+        'Poll until the computer is running, or until the software inside it answers. Use "guest" before exec, files or windows, and before expecting a screenshot to show a desktop rather than a boot screen. Reports progress on every poll, so a client that sends a progressToken and sets resetTimeoutOnProgress can hold the request open; a client that cannot should lower timeout_s and call again rather than watch its own default timeout cancel the wait.',
       inputSchema: {
         ...idArg,
         until: z
@@ -919,6 +928,7 @@ export const registerComputers: Registrar = (server, session, opts) => {
           ? AbortSignal.any([extra.signal, untilDeadline])
           : untilDeadline;
         const api = session.api.with(signal);
+        const beat = heartbeat(extra, server.server);
         let last = 'unknown';
         // Kept so the give-up message can name it. A hypervisor that was
         // unreachable for the whole window is the single most useful thing to
@@ -954,17 +964,20 @@ export const registerComputers: Registrar = (server, session, opts) => {
                 break;
               }
               blocked = err.message;
+              await beat(`Waiting for ${id} — the platform could not be asked: ${blocked}`);
               await sleep(POLL_MS, signal);
               continue;
             }
             if (!isTransientForPoll(err)) throw err;
             blocked = err instanceof Error ? err.message : String(err);
+            await beat(`Waiting for ${id} — the platform could not be asked: ${blocked}`);
             await sleep(pollDelay(err), signal);
             continue;
           }
           blocked = undefined;
           session.noteResolution(id, c.resolution);
           last = c.status ?? 'unknown';
+          await beat(`Waiting for ${id} — ${last}.`);
           if (last === 'build-failed') {
             // `refused`, for the reason `cancelled` is: the wait never reached
             // what it was told to wait for, and this one never will. A caller
@@ -1021,10 +1034,12 @@ export const registerComputers: Registrar = (server, session, opts) => {
                   break;
                 }
                 blocked = err.message;
+                await beat(`Waiting for ${id} — running; the guest is not answering yet.`);
                 await sleep(POLL_MS, signal);
                 continue;
               }
               if (!isTransientForPoll(err)) throw err;
+              await beat(`Waiting for ${id} — running; the guest is not answering yet.`);
               // The guest probe's own failure decides this turn's interval, for
               // pollDelay's reason. The ordinary path below keeps POLL_MS.
               await sleep(pollDelay(err), signal);
