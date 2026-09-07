@@ -448,15 +448,26 @@ export const registerSnapshots: Registrar = (server, session, opts) => {
             await sleep(POLL_MS, signal);
             continue;
           }
-          blocked = undefined;
           const state = typeof row.state === 'string' ? row.state : undefined;
           if (state === CAPTURING) {
+            blocked = undefined;
+            await sleep(POLL_MS, signal);
+            continue;
+          }
+          // A row with no readable `state` is the platform failing to describe
+          // it, and it must not be read as "not capturing, therefore landed" —
+          // that sentence says a placeholder may be restored, which is the
+          // defect this whole tool is here to stop. Only a state that SAYS it is
+          // no longer capturing ends the wait; anything else rides out, and the
+          // deadline reports that the platform could not be asked.
+          if (state === undefined) {
+            blocked = `the row for ${sid} carried no state, so nothing said whether the capture had landed`;
             await sleep(POLL_MS, signal);
             continue;
           }
           return said(
-            `${took} The capture landed: snapshot ${sid} reads "${state ?? 'no state'}" and can now be ` +
-              `restored, cloned or deleted.`,
+            `${took} The capture landed: snapshot ${sid} reads "${state}" and can now be restored, ` +
+              `cloned or deleted.`,
             row,
           );
         }

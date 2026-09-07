@@ -196,6 +196,30 @@ describe('a capture the platform only accepted', () => {
     expect(textOf(res)).toContain('STILL RUNNING');
   }, 15_000);
 
+  it('does not read a row with no state as one that stopped capturing', async () => {
+    // "Not capturing, therefore landed" over a row the platform could not
+    // describe is the same sentence this whole tool exists to stop: it says a
+    // placeholder may be restored. Only a state that says so ends the wait.
+    const { res } = await capture([() => listing([{ id: 'snap-7', computer_id: 'vm-1' }])], {
+      timeout_s: 5,
+    });
+    expect(res.isError).toBe(true);
+    expect(textOf(res)).toContain('carried no state');
+    expect(textOf(res)).toContain('STILL RUNNING');
+    expect(textOf(res)).not.toContain('The capture landed');
+  }, 15_000);
+
+  it('does not read an unreachable row as one that landed either', async () => {
+    // The same case one level down: a row served from the placement cache
+    // carries an id and a last-known state and can settle nothing.
+    const { res } = await capture([
+      () => listing([{ id: 'snap-7', unreachable: true }]),
+      () => listing([{ ...PLACEHOLDER, state: 'pending' }]),
+    ]);
+    expect(res.isError).toBeFalsy();
+    expect(textOf(res)).toContain('The capture landed');
+  }, 10_000);
+
   it('hands back the placeholder and polls nothing when wait is false', async () => {
     const { res, seen } = await capture([() => listing([PLACEHOLDER])], { wait: false });
     expect(res.isError).toBeFalsy();
