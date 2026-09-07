@@ -1,5 +1,11 @@
 import { z } from 'zod';
-import { CancelledError, isTransientForPoll, MoveRequiredError, NotFoundError } from '../errors.js';
+import {
+  CancelledError,
+  ConflictError,
+  isTransientForPoll,
+  MoveRequiredError,
+  NotFoundError,
+} from '../errors.js';
 import {
   type Computer,
   describe,
@@ -733,6 +739,7 @@ export const registerComputers: Registrar = (server, session, opts) => {
             if (err instanceof CancelledError) {
               if (untilDeadline.aborted) break;
               blocked = err.message;
+              await beat(`Moving ${id} — the platform could not be asked: ${blocked}`);
               await sleep(POLL_MS, signal);
               continue;
             }
@@ -777,6 +784,7 @@ export const registerComputers: Registrar = (server, session, opts) => {
           // instead of claiming a deletion nothing showed.
           if (!mine && table.dropped) {
             blocked = `GET /moves answered with ${table.dropped} unreadable row(s), so this move may be among them`;
+            await beat(`Moving ${id} — the platform could not be asked: ${blocked}`);
             await sleep(POLL_MS, signal);
             continue;
           }
@@ -977,7 +985,16 @@ export const registerComputers: Registrar = (server, session, opts) => {
           blocked = undefined;
           session.noteResolution(id, c.resolution);
           last = c.status ?? 'unknown';
-          await beat(`Waiting for ${id} — ${last}.`);
+          // ONE beat per turn, and this is not it when a guest probe is about to
+          // run. Beating here and again in the probe's failure branch sent two
+          // notifications per poll — and because the two lines DIFFER, each read
+          // as news to the throttle and neither was ever held, so the steady
+          // state of the commonest long wait was twice the per-poll rate the
+          // interval exists to avoid (/code-review). The probe's outcome is the
+          // more informative of the two, so it is the one that speaks.
+          if (!(until === 'guest' && last === 'running')) {
+            await beat(`Waiting for ${id} — ${last}.`);
+          }
           if (last === 'build-failed') {
             // `refused`, for the reason `cancelled` is: the wait never reached
             // what it was told to wait for, and this one never will. A caller
@@ -1034,12 +1051,25 @@ export const registerComputers: Registrar = (server, session, opts) => {
                   break;
                 }
                 blocked = err.message;
-                await beat(`Waiting for ${id} — running; the guest is not answering yet.`);
+                await beat(
+                  `Waiting for ${id} — running; the platform could not be asked: ${blocked}`,
+                );
                 await sleep(POLL_MS, signal);
                 continue;
               }
               if (!isTransientForPoll(err)) throw err;
-              await beat(`Waiting for ${id} — running; the guest is not answering yet.`);
+              // What actually refused, rather than one sentence for every
+              // failure. A 409 IS the guest not being up yet — that is the
+              // probe working — but a 503 is a hypervisor nobody can reach, and
+              // a transport abort is neither. Saying "the guest is not
+              // answering" over those tells the person watching the log the one
+              // thing this channel exists to get right, and names a cause the
+              // give-up message will then contradict (/code-review).
+              await beat(
+                err instanceof ConflictError
+                  ? `Waiting for ${id} — running; the guest is not answering yet.`
+                  : `Waiting for ${id} — running; the platform could not be asked: ${err instanceof Error ? err.message : String(err)}`,
+              );
               // The guest probe's own failure decides this turn's interval, for
               // pollDelay's reason. The ordinary path below keeps POLL_MS.
               await sleep(pollDelay(err), signal);

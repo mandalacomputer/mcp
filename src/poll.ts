@@ -121,16 +121,26 @@ export function heartbeat(
 ): (line: string) => Promise<void> {
   const progressToken = extra._meta?.progressToken;
   let sent = 0;
+  let spoken = false;
   let last = '';
   let at = 0;
   return async (line: string) => {
     const now = Date.now();
     // A changed line is news and goes out at once; an unchanged one is a
-    // keepalive and goes out on the interval. `sent === 0` covers the first
-    // turn, which is the one that establishes the channel — a client that will
-    // not hear anything for ten seconds has already spent a sixth of its
-    // default budget.
-    if (sent > 0 && line === last && now - at < everyMs) return;
+    // keepalive and goes out on the interval. `spoken` covers the first turn,
+    // which is the one that establishes the channel — a client that will not
+    // hear anything for ten seconds has already spent a sixth of its default
+    // budget.
+    //
+    // Its own flag rather than `sent > 0`, which is the notification COUNT and
+    // is therefore stuck at zero for the whole of a wait whose client minted no
+    // token (/code-review). The throttle then never applied to the one channel
+    // still running: ~900 identical "still copying" log lines across a
+    // half-hour capture, which is the flood the comment above says is avoided.
+    // The two are different questions — whether anything has been said, and how
+    // many progress frames have gone out — and only the first gates this.
+    if (spoken && line === last && now - at < everyMs) return;
+    spoken = true;
     last = line;
     at = now;
     if (progressToken !== undefined) {

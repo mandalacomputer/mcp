@@ -88,11 +88,12 @@ describe('the keepalive itself', () => {
   });
 
   it('does not let a notification nobody could take end the wait', async () => {
-    const beats: string[] = [];
+    let calls = 0;
     const beat = heartbeat(
       {
         _meta: { progressToken: 'tok' },
         sendNotification: async () => {
+          calls += 1;
           throw new Error('the client went away');
         },
       },
@@ -103,7 +104,27 @@ describe('the keepalive itself', () => {
       },
     );
     await expect(beat('working')).resolves.toBeUndefined();
-    expect(beats).toEqual([]);
+    // And the wait goes ON working afterwards, which is the actual claim — the
+    // first spelling asserted an array nothing ever appended to, so it could
+    // not have failed (/code-review).
+    await expect(beat('still working')).resolves.toBeUndefined();
+    expect(calls).toBe(2);
+  });
+
+  it('throttles the log channel too, not only the notifications', async () => {
+    // The throttle used to hang off the notification COUNT, which is stuck at
+    // zero for the whole of a wait whose client minted no token — so the one
+    // channel still running was the one with no interval on it: a line per
+    // two-second poll, ~900 of them across a half-hour capture, which is the
+    // flood the design says it avoids (/code-review).
+    const r = recorder(undefined);
+    const beat = heartbeat(r.extra, r.log);
+    for (let i = 0; i < 30; i += 1) await beat('still copying');
+    expect(r.logs).toEqual(['still copying']);
+
+    vi.setSystemTime(Date.now() + HEARTBEAT_MS + 1);
+    await beat('still copying');
+    expect(r.logs).toHaveLength(2);
   });
 });
 
@@ -139,7 +160,16 @@ describe('the waits that send it', () => {
   }, 20_000);
 
   it('opens the channel from wait_for_computer', async () => {
-    const seen = await beatsOf('wait_for_computer', { computer_id: 'vm-1', timeout_s: 10 });
+    // `until: "running"`, because the default asks the guest as well and this
+    // fixture's guest answers on the first turn — a wait that finishes at once
+    // has nothing to keep alive, and beating anyway would be a notification for
+    // a call that never came close to a timeout. The wait that DOES need the
+    // channel is the one below.
+    const seen = await beatsOf('wait_for_computer', {
+      computer_id: 'vm-1',
+      until: 'running',
+      timeout_s: 10,
+    });
     expect(seen.length).toBeGreaterThan(0);
     expect(seen[0].message).toContain('Waiting for vm-1');
   }, 20_000);
@@ -191,5 +221,86 @@ describe('a capture that takes more than one poll', () => {
     expect(seen.length).toBeGreaterThan(1);
     expect(seen.some((b) => (b.message ?? '').includes('still copying'))).toBe(true);
     expect(seen.map((b) => b.progress)).toEqual([...seen.map((_, i) => i + 1)]);
+  }, 20_000);
+});
+
+describe('a guest that has not come up yet', () => {
+  let real: typeof globalThis.fetch;
+  beforeEach(() => {
+    real = globalThis.fetch;
+  });
+  afterEach(() => {
+    globalThis.fetch = real;
+  });
+
+  it('reports once per poll while the guest boots, not twice', async () => {
+    // The commonest long wait, and the one that got the rate wrong. The status
+    // read and the guest probe each used to beat, with DIFFERENT lines — so
+    // every frame read as news, the interval never applied, and the steady
+    // state was two notifications per two-second poll (/code-review).
+    let probes = 0;
+    globalThis.fetch = (async (input: string | URL | Request) => {
+      const url = new URL(typeof input === 'string' ? input : input.toString());
+      const ok = (v: unknown, status = 200) =>
+        new Response(JSON.stringify(v), {
+          status,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      if (url.pathname.endsWith('/exec')) {
+        // The platform's own answer for a guest agent that is not up yet.
+        probes += 1;
+        if (probes <= 3) return ok({ error: 'the guest agent is not answering yet' }, 409);
+        return ok({ ok: true });
+      }
+      return ok({ id: 'vm-1', name: 'desk', status: 'running', resolution: '1280x800x24' });
+    }) as typeof globalThis.fetch;
+
+    const { client, close } = await connect();
+    const seen: Beat[] = [];
+    await client.callTool(
+      { name: 'wait_for_computer', arguments: { computer_id: 'vm-1', timeout_s: 30 } },
+      undefined,
+      { onprogress: (p) => seen.push(p as Beat), timeout: 60_000 },
+    );
+    await close();
+
+    // Three failed probes over three polls. One line each at most, and since
+    // the line does not change across them the interval holds all but the
+    // first: what must never happen is the six that two differing beats per
+    // turn produced.
+    expect(seen.length).toBeGreaterThan(0);
+    expect(seen.length).toBeLessThanOrEqual(3);
+    expect(seen[0].message).toContain('the guest is not answering yet');
+    expect(seen.map((b) => b.progress)).toEqual(seen.map((_, i) => i + 1));
+  }, 20_000);
+
+  it('says what actually refused, rather than blaming the guest for a 503', async () => {
+    // A 409 IS the guest not being up — that is the probe working. A 503 is a
+    // hypervisor nobody can reach, and saying "the guest is not answering" over
+    // it tells the person watching the log the one thing this channel exists to
+    // get right (/code-review).
+    globalThis.fetch = (async (input: string | URL | Request) => {
+      const url = new URL(typeof input === 'string' ? input : input.toString());
+      const ok = (v: unknown, status = 200) =>
+        new Response(JSON.stringify(v), {
+          status,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      if (url.pathname.endsWith('/exec')) return ok({ error: 'no hypervisor answered' }, 503);
+      return ok({ id: 'vm-1', name: 'desk', status: 'running', resolution: '1280x800x24' });
+    }) as typeof globalThis.fetch;
+
+    const { client, close } = await connect();
+    const seen: Beat[] = [];
+    await client.callTool(
+      { name: 'wait_for_computer', arguments: { computer_id: 'vm-1', timeout_s: 6 } },
+      undefined,
+      { onprogress: (p) => seen.push(p as Beat), timeout: 60_000 },
+    );
+    await close();
+
+    expect(seen.length).toBeGreaterThan(0);
+    expect(seen[0].message).toContain('the platform could not be asked');
+    expect(seen.some((b) => (b.message ?? '').includes('guest is not answering'))).toBe(false);
   }, 20_000);
 });

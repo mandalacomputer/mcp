@@ -550,6 +550,7 @@ export const registerSnapshots: Registrar = (server, session, opts) => {
           if (turn.kind === 'cancelled') {
             if (untilDeadline?.aborted) break;
             blocked = turn.why;
+            await beat(`Capturing ${sid} of ${id} — the platform could not be asked: ${turn.why}`);
             await sleep(POLL_MS, signal);
             continue;
           }
@@ -926,6 +927,7 @@ export const registerSnapshots: Registrar = (server, session, opts) => {
           if (turn.kind === 'cancelled') {
             if (untilDeadline.aborted) break;
             blocked = turn.why;
+            await beat(`Deleting ${snapshot_id} — the platform could not be asked: ${turn.why}`);
             await sleep(POLL_MS, signal);
             continue;
           }
