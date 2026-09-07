@@ -190,6 +190,11 @@ application — stops being something you redo.
   you and answers with the finished snapshot — pass `wait: false` only when you
   have other work to do meanwhile, and then poll `list_snapshots` for the id it
   gave you.
+- Both waits report progress on every poll, so a client that sets
+  `resetTimeoutOnProgress` can hold the request open through a capture that
+  takes minutes. If yours cannot, pass `wait: false` and poll `list_snapshots`
+  rather than letting a 60-second default cancel a call while the platform goes
+  on copying.
 - `delete_snapshot` waits too, and for the opposite thing: a deletion is
   finished when the row **goes**, and one that stays is one that stalled. The
   platform retries those itself, so a wait that runs out is something to watch
