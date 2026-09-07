@@ -2671,8 +2671,13 @@ describe('a snapshot with a reason attached to it', () => {
       })) as typeof fetch;
     try {
       const { call, close } = await connect();
-      const out = said(await call('create_snapshot', { name: 'clean install' }));
-      expect(out).toContain('Snapshotted');
+      // `wait: false`, because this is a question about the ACCEPTANCE and the
+      // stub answers every request with the same nameless body — a waiting call
+      // would spend its whole timeout polling a `/snapshots` that answers an
+      // object rather than a list. The sentence under test is the one the 202
+      // produces (OPL-4568).
+      const out = said(await call('create_snapshot', { name: 'clean install', wait: false }));
+      expect(out).toContain('Capture of vm-1 started');
       expect(out).not.toContain(' as "');
       await close();
     } finally {
