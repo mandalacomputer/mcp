@@ -652,7 +652,28 @@ export class Subscription {
     // its tree limit, and the directory may since exist. "Call again" is the
     // advice every one of those refusals gives, so calling again has to mean
     // something.
-    const retrying = this.#watchRefused.delete(path) || this.#shedCandidate === path;
+    // `unwatchable` belongs in this list and was the one condition missing from
+    // it. It is the only standing loss a nomination can lift — the guest decides
+    // watchability when it is ASKED, which is at nomination time, so a directory
+    // that has since been created is answered for only by asking again. Left
+    // out, the tree stayed in `#sent`, the early return below skipped the
+    // reopen, and the clearing on the next connection's `hello` was unreachable:
+    // `wait_for_file_change` refused every later call on a tree that was by then
+    // perfectly watchable, while its own refusal ended by promising that calling
+    // again would find it armed.
+    //
+    // Deleted here, exactly as `#watchRefused` is, and for the same reason: the
+    // reopen below IS the act of asking again, so the old answer must not still
+    // be standing while the new one is in flight. Left in place it reopens and
+    // then defeats itself — `armedWait` returns on a standing `unwatchable`
+    // before the new connection can greet, so the retry costs a round trip and
+    // changes nothing. Nothing is carried forward wrongly by dropping it: a
+    // guest whose directory is still missing answers `unwatchable` again on the
+    // connection this opens, and a reopen that never greets leaves the wait to
+    // end on its own deadline, which is what the refused retry beside it does.
+    const unwatchable = this.#watchLost.get(path) === 'unwatchable';
+    if (unwatchable) this.#watchLost.delete(path);
+    const retrying = this.#watchRefused.delete(path) || this.#shedCandidate === path || unwatchable;
     if (this.#shedCandidate === path) this.#shedCandidate = undefined;
     this.#upgradeFailures = 0;
     this.#shedRuledOut = false;
