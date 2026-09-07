@@ -1,5 +1,6 @@
 import { z } from 'zod';
-import { CancelledError, isTransientForPoll, NotFoundError } from '../errors.js';
+import type { Api } from '../api.js';
+import { CancelledError, ConflictError, isTransientForPoll, NotFoundError } from '../errors.js';
 import {
   describe,
   guarded,
@@ -72,6 +73,98 @@ const CAPTURING = 'capturing';
 const LANDED = ['pending', 'durable', 'deleting'];
 
 /**
+ * The state the platform marks a snapshot with once a deletion has detached its
+ * dependents and is removing the stored objects.
+ *
+ * Left out of a bare listing, because a half-deleted snapshot is not one you can
+ * restore or clone — so a poll that wants to SEE one has to ask for
+ * `include=unfinished`. There is no state that means deleted: the row going is
+ * the deletion having finished, and a row that stays in this state is one that
+ * stalled.
+ */
+const DELETING = 'deleting';
+
+/**
+ * What one turn of a snapshot poll established about one id.
+ *
+ * The two waits in this file ask opposite questions of the same listing — a
+ * capture waits for its row to stop reading `capturing`, a deletion waits for
+ * its row to GO — and everything between the request and that question is the
+ * same: the deadline, the cancellation, the failure worth riding out, the body
+ * that is not a list, the listing the platform had to answer short.
+ *
+ * One reader for that, rather than a second copy of it (OPL-4577). The copy is
+ * the part that would drift, and it is the part where drift is dangerous: both
+ * waits READ ABSENCE, and they read it as opposite outcomes — a capture that
+ * failed, a deletion that finished. A guard that stopped `blocked` from being
+ * mistaken for `absent` in one loop and not the other would report someone's
+ * snapshot deleted because a hypervisor was slow.
+ *
+ * `blocked` is therefore the answer to everything that did not establish
+ * something, and the two loops are left with only their own question and their
+ * own sentences.
+ */
+type Turn =
+  /** A row for this id, read whole, off a listing that was complete. */
+  | { kind: 'row'; row: Row }
+  /** A complete, well-formed listing that did not carry this id. */
+  | { kind: 'absent' }
+  /** Nothing was established this turn. Ask again. */
+  | { kind: 'blocked'; why: string; after?: number }
+  /** The request was cancelled — by the caller, by the deadline, or by the transport. */
+  | { kind: 'cancelled'; why: string }
+  /** A failure that will not clear by asking again. */
+  | { kind: 'broken'; why: string };
+
+const why = (err: unknown) => (err instanceof Error ? err.message : String(err));
+
+/**
+ * One listing, and what it says about `sid`.
+ *
+ * Asked WITHOUT `allow_partial`, deliberately: the platform then answers a short
+ * inventory with a 503, which arrives here as a failure to ride out rather than
+ * as a 200 whose missing rows could be read as an answer. The `incomplete`
+ * check below is the second line of that defence, for a deployment that sends
+ * the header anyway.
+ */
+const snapshotTurn = async (api: Api, sid: string, unfinished: boolean): Promise<Turn> => {
+  let items: unknown;
+  let incomplete: number | null = null;
+  try {
+    ({ items, incomplete } = await api.listing<unknown>(P.SNAPSHOTS, {
+      query: { include: unfinished ? 'unfinished' : undefined },
+    }));
+  } catch (err) {
+    if (err instanceof CancelledError) return { kind: 'cancelled', why: why(err) };
+    if (!isTransientForPoll(err)) return { kind: 'broken', why: why(err) };
+    return { kind: 'blocked', why: why(err), after: pollDelay(err) };
+  }
+  if (!Array.isArray(items)) {
+    const got = items === undefined ? 'no body at all' : items === null ? 'null' : typeof items;
+    return { kind: 'blocked', why: `GET /snapshots answered with ${got}, not a list of snapshots` };
+  }
+  if (incomplete !== null) {
+    return {
+      kind: 'blocked',
+      why: 'GET /snapshots answered short — a hypervisor did not report, so a row missing from it establishes nothing',
+    };
+  }
+  const row = items.find((r) => isRow(r) && r.id === sid);
+  if (!isRow(row)) return { kind: 'absent' };
+  // A row served from the placement cache because its host did not answer. It
+  // carries an id and nothing else — its `state` is last-known or absent — so it
+  // can confirm neither what a capture is doing nor that a deletion has not
+  // finished.
+  if (row.unreachable) {
+    return {
+      kind: 'blocked',
+      why: `the hypervisor holding ${sid} did not answer, so its row could not be read`,
+    };
+  }
+  return { kind: 'row', row };
+};
+
+/**
  * The sentence in front of a retention window, for the reason every tool here
  * leads with one: the model reads the text, and three integers in a JSON blob
  * do not say what they select.
@@ -127,7 +220,7 @@ export const registerSnapshots: Registrar = (server, session, opts) => {
           .boolean()
           .default(false)
           .describe(
-            'Also return deletions that began and did not finish. They are not usable — their state is "deleting" and nothing can be restored or cloned from one — but they still hold objects and are still billed, so this is the flag to set when the question is about storage rather than about what can be restored.',
+            'Also return deletions that began and did not finish. They are not usable — their state is "deleting" and nothing can be restored or cloned from one — but they still hold objects and are still billed, so this is the flag to set when the question is about storage rather than about what can be restored. It is also the flag to set when following a deletion: without it a snapshot stuck half-deleted is hidden, and a poll watching for the row to go cannot tell that from one that finished.',
           ),
         allow_partial: z
           .boolean()
@@ -420,58 +513,40 @@ export const registerSnapshots: Registrar = (server, session, opts) => {
               started,
             );
           }
-          let items: unknown;
-          let incomplete: number | null = null;
-          try {
-            ({ items, incomplete } = await api.listing<unknown>(P.SNAPSHOTS));
-          } catch (err) {
-            if (extra.signal?.aborted) continue;
-            // A body stream can fail without either signal firing, so the
-            // deadline's own arrival is what tells a real timeout from an
-            // undici idle abort. Same shape as the two loops in computers.ts.
-            if (err instanceof CancelledError) {
-              if (untilDeadline?.aborted) break;
-              blocked = err.message;
-              await sleep(POLL_MS, signal);
-              continue;
-            }
-            // A poll that failed for a reason worth riding out is weather; one
-            // that failed for any other reason is a real failure with a capture
-            // still running behind it, and a thrown error's handler has no way
-            // to say so. So it is said here rather than rethrown.
-            if (!isTransientForPoll(err)) {
-              return refused(
-                `${err instanceof Error ? err.message : String(err)}\n\nTHE CAPTURE IS STILL RUNNING — ` +
-                  `this was the poll failing, not the capture. ${byHand}`,
-                started,
-              );
-            }
-            blocked = err instanceof Error ? err.message : String(err);
-            await sleep(pollDelay(err), signal);
+          const turn = await snapshotTurn(api, sid, false);
+          if (extra.signal?.aborted) continue;
+          // A body stream can fail without either signal firing, so the
+          // deadline's own arrival is what tells a real timeout from an undici
+          // idle abort. Same shape as the two loops in computers.ts.
+          if (turn.kind === 'cancelled') {
+            if (untilDeadline?.aborted) break;
+            blocked = turn.why;
+            await sleep(POLL_MS, signal);
+            continue;
+          }
+          // A poll that failed for a reason worth riding out is weather; one
+          // that failed for any other reason is a real failure with a capture
+          // still running behind it, and a thrown error's handler has no way to
+          // say so. So it is said here rather than rethrown.
+          if (turn.kind === 'broken') {
+            return refused(
+              `${turn.why}\n\nTHE CAPTURE IS STILL RUNNING — this was the poll failing, not the ` +
+                `capture. ${byHand}`,
+              started,
+            );
+          }
+          if (turn.kind === 'blocked') {
+            blocked = turn.why;
+            await sleep(turn.after ?? POLL_MS, signal);
             continue;
           }
           // Absence is the ONLY signal a failed capture leaves, which is what
-          // makes the two guards below load-bearing rather than tidy. A body
-          // that is not a list of snapshots, and a list the platform had to
-          // answer short, are both the platform failing to answer — and read as
+          // makes snapshotTurn's guards load-bearing rather than tidy: a body
+          // that is not a list, and a listing the platform had to answer short,
+          // both come back `blocked` there rather than as this, because read as
           // "the row is not there" they would announce that somebody's backup
           // failed while it was still being taken.
-          if (!Array.isArray(items)) {
-            const got =
-              items === undefined ? 'no body at all' : items === null ? 'null' : typeof items;
-            blocked = `GET /snapshots answered with ${got}, not a list of snapshots`;
-            await sleep(POLL_MS, signal);
-            continue;
-          }
-          if (incomplete !== null) {
-            blocked =
-              'GET /snapshots answered short — a hypervisor did not report, so a row missing from it ' +
-              'establishes nothing';
-            await sleep(POLL_MS, signal);
-            continue;
-          }
-          const row = items.find((r) => isRow(r) && r.id === sid);
-          if (!isRow(row)) {
+          if (turn.kind === 'absent') {
             return refused(
               `THE CAPTURE OF ${id} FAILED and nothing was saved. Snapshot ${sid} is no longer listed and ` +
                 `nothing took its place, which is what a capture that starts and then fails leaves behind — ` +
@@ -480,16 +555,7 @@ export const registerSnapshots: Registrar = (server, session, opts) => {
               started,
             );
           }
-          // A row served from the placement cache because its host did not
-          // answer. It carries an id and nothing else — its `state` is
-          // last-known or absent — so it can neither confirm the capture landed
-          // nor deny it, and reading a stale `capturing` off one would be the
-          // same mistake as reading absence as failure.
-          if (row.unreachable) {
-            blocked = `the hypervisor holding ${sid} did not answer, so its state could not be read`;
-            await sleep(POLL_MS, signal);
-            continue;
-          }
+          const row = turn.row;
           const state = typeof row.state === 'string' ? row.state : undefined;
           if (state === CAPTURING) {
             blocked = undefined;
@@ -685,18 +751,75 @@ export const registerSnapshots: Registrar = (server, session, opts) => {
     {
       title: 'Delete a snapshot',
       description:
-        'Remove a snapshot permanently. Later snapshots in the same chain are unaffected.',
+        'Remove a snapshot permanently. Later snapshots in the same chain are unaffected. THE DELETION OUTLIVES THE REQUEST that starts it: the platform accepts it and then detaches the dependent snapshots and removes the stored objects, which takes time that scales with the chain and with how much is stored. This waits for it by default and reports what actually happened; pass wait: false to hand back as soon as it is accepted. A 409 saying the snapshot is ALREADY BEING DELETED is progress rather than a fault — the platform is doing what you asked, and the answer is to watch that one finish, never to go and delete something else.',
       inputSchema: {
         snapshot_id: z.string(),
         confirm: z.literal(true).describe('Must be true.'),
+        wait: z
+          .boolean()
+          .default(true)
+          .describe(
+            'Wait for the snapshot to stop being listed, which is the only thing that means it is gone. Set it false to hand back as soon as the platform accepts the deletion, and then poll list_snapshots yourself.',
+          ),
+        timeout_s: z
+          .number()
+          .int()
+          .min(5)
+          .max(1800)
+          .default(300)
+          .describe(
+            'How long to wait for the deletion before handing back. Ignored when wait is false. Giving up on the wait does not stop the deletion.',
+          ),
       },
       annotations: { destructiveHint: true, idempotentHint: true },
     },
-    ({ snapshot_id }, extra) =>
+    ({ snapshot_id, wait, timeout_s }, extra) =>
       guarded(async () => {
+        // The deadline is armed before the DELETE, as create_snapshot arms its
+        // own and for the same reason: timeout_s is a promise about when this
+        // comes back. Nothing is armed when nobody is waiting.
+        const untilDeadline = wait ? AbortSignal.timeout(timeout_s * 1000) : undefined;
+        const signal = !untilDeadline
+          ? extra.signal
+          : extra.signal
+            ? AbortSignal.any([extra.signal, untilDeadline])
+            : untilDeadline;
+        const api = session.api.with(signal);
+        // How to follow it by hand, said wherever this hands back with the
+        // deletion still running. The polarity is the whole of it and it is the
+        // opposite of a capture's: there is no state that means deleted, so the
+        // row GOING is the finish, and a row that stays is one that stalled.
+        // `include_unfinished` is not a nicety either — the platform marks a
+        // half-finished deletion `deleting` and leaves that state out of a bare
+        // listing, so without the flag a stalled deletion looks exactly like a
+        // finished one.
+        const byHand =
+          `Poll list_snapshots with include_unfinished: true and watch for ${snapshot_id} to stop being ` +
+          `listed — its absence is the deletion having finished, and there is no state that means deleted. ` +
+          `A row that STAYS is one that stalled; the platform retries those itself every fifteen minutes.`;
+        let accepted: unknown;
         try {
-          await session.api.with(extra.signal).send('DELETE', P.snapshot(snapshot_id));
+          accepted = await api.send('DELETE', P.snapshot(snapshot_id));
         } catch (err) {
+          // Every refusal is still decided before the 202 — no such snapshot, a
+          // capture reading through it, a clone or a migration holding it, a
+          // deletion of this id already running — so a 409 here is a statement
+          // about state that clears itself, and the model needs to be told
+          // which way to read it rather than left to invent a way round it.
+          //
+          // Matched on the CLASS and never on the sentence: the platform sends
+          // no `reason` for these, and keying on prose is the mistake OPL-3724
+          // took out of three clients. So both readings are named and the
+          // platform's own words are printed with them.
+          if (err instanceof ConflictError) {
+            return refused(
+              `${why(err)}\n\nNOTHING WAS DELETED and nothing is broken. If that says the snapshot is ` +
+                `already being deleted, the platform is doing what you asked — watch it finish rather ` +
+                `than deleting anything else: ${byHand} If it says something is reading through the ` +
+                `snapshot — a restore, a clone, a capture chaining onto it — that finishes on its own and ` +
+                `the same call works afterwards.`,
+            );
+          }
           // A 404 means the snapshot is not there, which is the state this call
           // was asking for. `idempotentHint` above invites a client to retry a
           // lost 2xx, and `#fetch` throws on every non-OK — so that invited
@@ -719,7 +842,79 @@ export const registerSnapshots: Registrar = (server, session, opts) => {
               'this is.',
           );
         }
-        return said(`Deleted snapshot ${snapshot_id}.`);
+        // The 202 and its body: the snapshot's row as it stood when the deletion
+        // was accepted — the row that GOES when the work finishes.
+        if (!wait) {
+          return said(
+            `Deletion of ${snapshot_id} accepted and RUNNING — it is not gone yet, and this call did not ` +
+              `wait to find out. ${byHand}`,
+            accepted,
+          );
+        }
+
+        let blocked: string | undefined;
+        let seen: string | undefined;
+        while (untilDeadline && !untilDeadline.aborted) {
+          if (extra.signal?.aborted) {
+            return refused(
+              `Cancelled while waiting for ${snapshot_id} to be deleted. THE DELETION IS STILL RUNNING — ` +
+                `nothing was called back, and objects it has already removed are already gone. ${byHand}`,
+              accepted,
+            );
+          }
+          // `unfinished`, because the state a stalled deletion sits in is the
+          // one a bare listing hides. Asking without it would read a snapshot
+          // stuck half-deleted as a snapshot successfully deleted, which is the
+          // one wrong answer this tool must not give.
+          const turn = await snapshotTurn(api, snapshot_id, true);
+          if (extra.signal?.aborted) continue;
+          if (turn.kind === 'cancelled') {
+            if (untilDeadline.aborted) break;
+            blocked = turn.why;
+            await sleep(POLL_MS, signal);
+            continue;
+          }
+          if (turn.kind === 'broken') {
+            return refused(
+              `${turn.why}\n\nTHE DELETION IS STILL RUNNING — this was the poll failing, not the ` +
+                `deletion. ${byHand}`,
+              accepted,
+            );
+          }
+          if (turn.kind === 'blocked') {
+            blocked = turn.why;
+            await sleep(turn.after ?? POLL_MS, signal);
+            continue;
+          }
+          // The row is gone from a listing that was read whole and that ASKED
+          // for the unfinished ones. Both halves are what make this sentence
+          // true rather than merely likely.
+          if (turn.kind === 'absent') return said(`Deleted snapshot ${snapshot_id}.`, accepted);
+          blocked = undefined;
+          seen = typeof turn.row.state === 'string' ? turn.row.state : undefined;
+          await sleep(POLL_MS, signal);
+        }
+        // Still listed. Three different things that can mean, and they are not
+        // one sentence: the platform could not be asked, the deletion got part
+        // way and stalled, or it never got started on — which is the shape the
+        // one conflict that arrives AFTER the 202 leaves behind, a dependent
+        // that is itself being deleted and so cannot be detached.
+        return refused(
+          blocked
+            ? `Gave up watching after ${timeout_s}s; the platform could not be asked whether ${snapshot_id} ` +
+                `is gone — the last attempt said: ${blocked}. THE DELETION IS STILL RUNNING. ${byHand}`
+            : seen === DELETING
+              ? `${snapshot_id} is still listed after ${timeout_s}s and reads "${DELETING}": the deletion ` +
+                `started and has not finished. Nothing was undone by giving up on the wait, and the ` +
+                `platform retries a stalled deletion itself every fifteen minutes — so this usually needs ` +
+                `watching rather than repeating. ${byHand}`
+              : `${snapshot_id} is still listed after ${timeout_s}s${seen ? `, reading "${seen}"` : ''} — ` +
+                `the deletion has not reached the point of marking it "${DELETING}". That is what a big ` +
+                `chain looks like early on, and it is also what the one conflict that arrives after the ` +
+                `deletion is accepted looks like: a dependent snapshot that is ITSELF being deleted cannot ` +
+                `be detached, so this one waits for that one. Nothing was destroyed either way. ${byHand}`,
+          accepted,
+        );
       }),
   );
 };
