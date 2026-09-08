@@ -6,6 +6,7 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
 import express, { type Request, type Response } from 'express';
 import { Api, MODEL_KEY_HEADER } from './api.js';
+import { MeteredBody } from './http-body.js';
 import { createServer, SERVER_NAME, SERVER_VERSION, type ServerConfig } from './server.js';
 
 export type HttpConfig = Omit<ServerConfig, 'apiKey' | 'activity'> & {
@@ -359,73 +360,45 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
       return parseUnderLease(req, res, next, takeSlot());
     }
 
-    // The counter is attached before `fullBody` reads, and both happen in this
-    // one synchronous block: a `data` listener does not consume chunks — every
-    // listener sees each one — and body-parser attaches its own reader
-    // synchronously, before the stream can deliver anything.
     let seen = 0;
     let lease: LargeBodyLease | undefined;
     let refused = false;
-    // Belt and braces, not a fix for anything reproduced. A review argued that
-    // a parser which hands back WITHOUT reading — a content-type it does not
-    // handle goes straight to `next()` — leaves this listener attached to a body
-    // still arriving, so a later crossing of the threshold would take a slot no
-    // route was ever given. It could not be reproduced: every content-type that
-    // makes body-parser skip is one the MCP route then refuses, and the refusal
-    // ends the request well before the threshold. Kept anyway, because it costs
-    // a boolean and makes "a slot taken here is always released" true by
-    // construction rather than by an argument about which content-types reach
-    // which branch.
-    let settled = false;
-    const meter = (chunk: Buffer | string) => {
-      if (settled || refused || lease) return;
-      seen += typeof chunk === 'string' ? Buffer.byteLength(chunk) : chunk.length;
-      if (seen <= SMALL_BODY_BYTES) return;
-      if (largeBodyParses < maxLargeBodyParses) {
+    const input = new MeteredBody(
+      req,
+      (bytes) => {
+        if (lease) return true;
+        seen += bytes;
+        if (seen <= SMALL_BODY_BYTES) return true;
+        if (largeBodyParses >= maxLargeBodyParses) return false;
         lease = takeSlot();
-        return;
-      }
-      // Refused with the upload in flight, which is the one cost of metering.
-      //
-      // ANSWER AND THEN LEAVE THE SOCKET ALONE. Two attempts at being clever
-      // here both lost the 503 outright — the caller got zero bytes and EPIPE,
-      // where doing nothing delivers it. Destroying the response in this tick
-      // is the RST condition, and `Connection: close` is no better: Node's
-      // resOnFinish sees `_last` and closes while request bytes are still
-      // unread, which is the same race by another name. Measured, both of them,
-      // against a caller still writing.
-      //
-      // Nothing needs draining by hand: body-parser is still reading this
-      // request, and `refused` is what stops its callback continuing into the
-      // route. So the body is consumed and dropped under the parser's own 96mb
-      // ceiling, and the socket ends the ordinary way.
-      refused = true;
-      if (!res.destroyed && !res.headersSent) unavailable(res, noSlotMessage);
-    };
-    req.on('data', meter);
+        return true;
+      },
+      () => {
+        refused = true;
+        if (!res.destroyed && !res.headersSent) unavailable(res, noSlotMessage);
+      },
+    );
 
-    // The lease belongs to whoever ends up holding the parsed body. If nobody
-    // does — the parse failed, the route never ran, the client vanished — it
-    // comes back here rather than being lost with the request.
-    //
-    // Tracked as a flag rather than by comparing `res.locals`: once the route
-    // has it, `releaseLargeBody` owns it, and a tool may have `retain`ed it for
-    // work still running. Reading the (already deleted) local would call
-    // `release` a second time and could take the count off a holder that is
-    // still using the body.
+    // A disconnected response can outlive its tool, so only the parser's
+    // original ownership is released here; handed-off leases follow the tool.
     let handedOff = false;
     res.once('close', () => {
-      req.off('data', meter);
       if (!handedOff) lease?.release();
     });
 
-    return fullBody(req, res, (err) => {
-      settled = true;
+    // Express still owns JSON/charset validation. Only its input stream is
+    // replaced so a refused upload cannot continue filling raw-body's buffer.
+    const parsed = input as unknown as Request;
+    return fullBody(parsed, res, (err) => {
+      input.destroy();
       if (refused) return;
       if (err) lease?.release();
-      else if (lease) {
-        res.locals.largeBodyLease = lease;
-        handedOff = true;
+      else {
+        req.body = parsed.body;
+        if (lease) {
+          res.locals.largeBodyLease = lease;
+          handedOff = true;
+        }
       }
       next(err);
     });
@@ -856,7 +829,13 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
 
   return new Promise((resolve, reject) => {
     let listening = false;
-    const http = app.listen(cfg.port, cfg.host, () => {
+    const http = app.listen(cfg.port, cfg.host, (err?: Error) => {
+      // Express 5 also calls this listener on a bind error.
+      if (err) {
+        clearInterval(sweeper);
+        reject(err);
+        return;
+      }
       listening = true;
       // The bound port, not the requested one. `port()` deliberately accepts 0,
       // which means "any free port" — and printing it back gives the operator
