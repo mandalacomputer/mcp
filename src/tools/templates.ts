@@ -517,7 +517,7 @@ export const registerTemplates: Registrar = (server, session, opts) => {
       title: 'Watch a build until it finishes',
       description:
         "Follow a build to its end and report what happened. Streams the platform's own progress — each event is sent only when something actually moved — and logs each one as it arrives, so a long build is visibly alive rather than indistinguishable from a hang. A build that FAILED is a normal answer here, not an error: read `status` and the failed step. Attaching to a build that has already finished is fine and returns immediately.",
-      inputSchema: { build_id: z.string().describe('The id build_template returned.') },
+      inputSchema: { build_id: z.string().trim().describe('The id build_template returned.') },
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
     ({ build_id }, extra) =>
