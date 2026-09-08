@@ -1121,8 +1121,16 @@ describe('a body that declared no length', () => {
     expect(await parsesNow()).toBe(0);
 
     const next = chunked(sessionId, '');
-    next.req.write('{');
-    next.req.end(`"jsonrpc":"2.0","id":26,"method":"tools/list","pad":"${'x'.repeat(300_000)}"}`);
+    // JSON-RPC rejects unknown top-level fields; request metadata carries the
+    // padding without turning this recovery check into an invalid request.
+    const body = JSON.stringify({
+      jsonrpc: '2.0',
+      id: 26,
+      method: 'tools/list',
+      params: { _meta: { pad: 'x'.repeat(300_000) } },
+    });
+    next.req.write(body.slice(0, 1));
+    next.req.end(body.slice(1));
     expect(await next.done).toBe(200);
   }, 10_000);
 
