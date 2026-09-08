@@ -929,18 +929,10 @@ function decodeUtf8(bytes: Uint8Array): string | undefined {
   try {
     return fatal.decode(bytes);
   } catch {
-    // A truncated read can cut a multi-byte character in half. One incomplete
-    // sequence at the very end is a casualty of the cap rather than proof the
-    // file is binary. A real U+FFFD (EF BF BD) is valid UTF-8 and decodes
-    // fatally above. Stray 0xff/0xfe (or any other invalid suffix) must not
-    // be stripped until the prefix happens to decode.
-    const lead = incompleteUtf8Lead(bytes);
-    if (lead === undefined) return undefined;
-    try {
-      return `${fatal.decode(bytes.subarray(0, lead))}\ufffd`;
-    } catch {
-      return undefined;
-    }
+    // utf8Page already leaves a split character for the next page when it
+    // can. At EOF, or on a tiny page containing only part of one character,
+    // keep the exact bytes as base64 instead of inventing replacement text.
+    return undefined;
   }
 }
 
