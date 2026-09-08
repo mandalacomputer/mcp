@@ -286,7 +286,15 @@ export const registerComputers: Registrar = (server, session, opts) => {
       annotations: { readOnlyHint: true },
     },
     (_args, extra) =>
-      guarded(async () => json(await session.api.with(extra.signal).json('GET', P.TEMPLATES))),
+      guarded(async () => {
+        const { items, incomplete } = await session.api.with(extra.signal).listing(P.TEMPLATES);
+        if (items === undefined || items === null) {
+          return refused('The platform did not return a template catalogue. Retry list_templates.');
+        }
+        return incomplete === null
+          ? json(items)
+          : said(incompleteWarning('templates', incomplete).trimEnd(), items);
+      }),
   );
 
   server.registerTool(
@@ -1460,7 +1468,32 @@ export const registerComputers: Registrar = (server, session, opts) => {
           // Unbound BEFORE the rethrow-or-report decision, because it is true
           // either way: whatever this answers, the caller must not be left
           // selected on a computer the platform says is gone.
-          if (!(err instanceof NotFoundError)) throw err;
+          if (!(err instanceof NotFoundError)) {
+            // The VM is destroyed before snapshots are purged, so a failed
+            // DELETE does not establish whether it survived. Ask once, with
+            // the same account/workspace scope, and preserve the primary error
+            // even if this read fails. Neither error prose nor a lost or
+            // unreachable record proves deletion. The short deadline includes
+            // reading the body; reconciliation must not hold the error hostage
+            // to the transport's much longer foreground-exec allowance.
+            if (!extra.signal.aborted) {
+              const signal = AbortSignal.any([extra.signal, AbortSignal.timeout(5_000)]);
+              let absent = false;
+              try {
+                const c = unwrapComputer(
+                  await session.api.with(signal).json('GET', P.computer(computer_id)),
+                );
+                absent =
+                  c.id === computer_id.trim() && c.state === 'deleted' && c.unreachable !== true;
+              } catch (readError) {
+                absent = readError instanceof NotFoundError;
+              }
+              // unbind also drops events and invalidates pending selections
+              // of this id, while preserving a different selected computer.
+              if (absent && !signal.aborted) session.unbind(computer_id);
+            }
+            throw err;
+          }
           session.unbind(computer_id);
           // Reported as a success rather than an error, and deliberately not as
           // a plain "Deleted": a caller retrying cannot be told its snapshots

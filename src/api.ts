@@ -94,10 +94,10 @@ const MAX_JSON_BODY_BYTES = 48 * 1024 * 1024;
 const MAX_ERROR_BODY_BYTES = 1024 * 1024;
 
 /**
- * The longest guest exec waits 300 seconds before it answers. Node's bundled
- * fetch also gives response headers 300 seconds by default, so the client can
- * lose that race while the command is still finishing in the guest. Keep the
- * public exec limit and give the platform enough time to report its timeout.
+ * The longest foreground guest exec waits 600 seconds before it answers.
+ * Node's bundled fetch gives response headers 300 seconds by default, so the
+ * client can lose that race while the command is still finishing in the guest.
+ * Allow 30 seconds beyond the public exec limit for the timeout response.
  *
  * The body is a different clock. undici's default `bodyTimeout` is 300 seconds
  * of silence *between chunks*, and `run_agent` SSE (or a long exec that has
@@ -106,7 +106,7 @@ const MAX_ERROR_BODY_BYTES = 1024 * 1024;
  * disables it: a quiet gap is not a dead connection, and the caller's
  * AbortSignal is what ends a request nobody is waiting for.
  */
-export const PLATFORM_HEADERS_TIMEOUT_MS = 330_000;
+export const PLATFORM_HEADERS_TIMEOUT_MS = 630_000;
 /** Disabled. A finite idle limit is what used to kill a quiet SSE stream. */
 export const PLATFORM_BODY_TIMEOUT_MS = 0;
 export const PLATFORM_DISPATCHER = new Agent({
