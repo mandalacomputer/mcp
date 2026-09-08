@@ -649,6 +649,8 @@ export class Api {
     });
     const contentType = mediaType(resp.headers.get('content-type'));
     if (contentType !== 'text/event-stream') {
+      // No reader owns this body yet; release a rejected response ourselves.
+      await resp.body?.cancel().catch(() => {});
       throw new MandalaError(
         `${method} ${path} expected text/event-stream, but the platform answered ${contentType}`,
       );
