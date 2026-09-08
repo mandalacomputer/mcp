@@ -60,7 +60,7 @@ const CAPTURING = 'capturing';
  * are the safe one for where they sit, and they are safe in opposite
  * directions.
  *
- * The three names `web/the platform's reference` documents beside `capturing`. `deleting` is
+ * The three names the platform documents beside `capturing`. `deleting` is
  * among them because a row in it is a row the capture is over for, whatever
  * else is true of it. A platform that invents a fourth costs one listing: the
  * poll finds the row already there, carrying whatever state it really has, and
@@ -307,7 +307,7 @@ export const registerSnapshots: Registrar = (server, session, opts) => {
         //
         // They cannot be attributed to a computer, so keeping them over-reports
         // for this one. That is the trade the platform itself makes and writes
-        // down in the platform's host routing: an extra unreachable row is visible and is
+        // down on the platform side: an extra unreachable row is visible and is
         // corrected by the next complete answer, while a withheld one makes a
         // row vanish mid-outage, which is the failure worth preventing.
         // A filter that was GIVEN and trims to nothing is refused, not dropped.

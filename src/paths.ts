@@ -204,7 +204,7 @@ export const buildAction = (id: string, action: string) => `${build(id)}/${actio
  * `enum: ['true']`, so `true` is the only value the reference admits.
  *
  * This said the platform reads the key's PRESENCE, which is false —
- * the platform's own source reads `Get("no_reuse") == "true"`. The request was right
+ * the platform reads `no_reuse == "true"`. The request was right
  * either way; the stated reason was not (/code-review, OPL-3835).
  */
 export const buildQuery = (noReuse?: boolean): Record<string, string> =>
@@ -292,7 +292,7 @@ export function execBody(args: {
   // reaches the guest without anything checking it. `execEnv` below refuses one
   // for this exact reason, and the platform refuses one in `cwd` and in every
   // file path — `validGuestPath` rejects the whole control range — but its only
-  // test on `command` is that it is not empty (the platform's own source). So a command
+  // test on `command` is that it is not empty. So a command
   // carrying a NUL is truncated at the guest's argv boundary: a shorter command
   // than the caller wrote runs, and its exit code is reported as an ordinary
   // success. The same shape as the surrogate refusals — a call that works and
@@ -340,7 +340,7 @@ export function execBody(args: {
  * The environment for one command, refused here rather than at the platform.
  *
  * An empty object is dropped rather than sent, for the reason `desktop` is
- * dropped: `the platform` returns nil for `len(env) == 0`, so an empty object and
+ * dropped: the platform drops an empty list of its own accord, so an empty object and
  * an absent one are already the same request, and the one that says so in fewer
  * fields is the one worth sending.
  *
@@ -432,7 +432,7 @@ function wholePoint(x?: number, y?: number): void {
  * No coordinate means "where the pointer already is", which is a real and
  * different request from clicking (0, 0) — the corner of the screen. So the
  * keys are omitted rather than sent as zeros; the platform carries that
- * distinction all the way down to `the platform's input wire format` in the platform's own source.
+ * distinction all the way down to the platform's own input wire format.
  */
 export function clickBody(
   action: string,
@@ -520,8 +520,8 @@ export function scrollBody(args: {
  *
  * What happens NEXT is this route's own, and it is worth stating precisely
  * rather than borrowing the clipboard's sentence. The platform's `type` handler
- * walks runes and looks each one up in `a printable-ASCII key map` — a printable-ASCII map — and
- * `continue`s past anything it does not find (the platform's own source). So the
+ * walks runes and looks each one up in a printable-ASCII map — and
+ * `continue`s past anything it does not find. So the
  * replacement character is not typed onto the desktop; it is DROPPED, and the
  * tool goes on to report `Typed N character(s).` counting the character that
  * never arrived. Either way the screen does not hold what the caller asked for
@@ -617,7 +617,7 @@ export function windowBody(args: {
  *
  * Mirrored so a request that can only fail is not made. NOT machine-checked —
  * `scripts/check-surface.mjs` reads the platform's `web/lib`, and this number
- * lives in its the platform's own source as `its own clipboard cap`. It is not
+ * lives in the platform's own source as a constant. It is not
  * arbitrary: the platform puts the text inside one argument of one command,
  * Linux caps a single argv string at 128 KiB, and two layers of base64 stand
  * between the text and that ceiling, so each byte costs about 1.8 of it. Past
@@ -720,7 +720,7 @@ export function clipboardBody(text: string): Json {
  * A name that is only whitespace is dropped rather than sent, and that is the
  * one case worth spelling out. The daemon defaults an EMPTY name to
  * "<computer> <timestamp>" and stores anything else exactly as it arrives (see
- * `the platform's snapshot metadata` in the platform's the platform's own source), so "   " is the single
+ * the platform's own snapshot metadata), so "   " is the single
  * input that produces a snapshot nobody can pick out of a list — a blank row
  * where the generated name it displaced would have said something.
  */
@@ -756,7 +756,7 @@ export const webhook = (id: string) => `${WEBHOOKS}/${segment('webhook_id', id)}
 /** rotate | test | deliveries */
 export const webhookAction = (id: string, action: string) => `${webhook(id)}/${action}`;
 
-/** The platform's own caps (`DESCRIPTION_MAX`, `COMPUTERS_MAX` in its the platform's webhook limits). */
+/** The platform's own caps (`DESCRIPTION_MAX` and `COMPUTERS_MAX` on the platform side). */
 export const WEBHOOK_DESCRIPTION_MAX = 200;
 export const WEBHOOK_COMPUTERS_MAX = 64;
 

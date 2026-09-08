@@ -467,7 +467,7 @@ function respond(
  * with `bytes *\/<size>` for one that does not, 200 for a request without a
  * range. The window is trimmed rather than refused when it runs past the end,
  * because that is the behaviour a caller has to be able to survive — see
- * `resolve` in the platform's the platform's own source.
+ * the platform's own guest-file path resolution.
  */
 export function download(content: string | Uint8Array, range?: string): Response {
   const body = typeof content === 'string' ? Buffer.from(content) : Buffer.from(content);

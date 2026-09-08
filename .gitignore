@@ -8,3 +8,6 @@ coverage/
 
 # Reports written by the /grok-bug-hunt skill.
 .grok-bug-hunt/
+
+# Local issue-tracker wiring. Names a workspace, and no build reads it.
+.claude/linear-sync.json

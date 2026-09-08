@@ -356,7 +356,7 @@ export const registerTemplates: Registrar = (server, session, opts) => {
       guarded(async () => {
         // `listing`, not `json` (OPL-3840). This route fans out, and like every
         // other fan-out on the v1 surface it FAILS CLOSED: `forward` in
-        // the platform's surface layer turns a response carrying X-GC-Incomplete into a 503. So
+        // The platform turns a response carrying X-GC-Incomplete into a 503. So
         // without the flag a short list still cannot arrive — but WITH it one
         // can, and then the header is the only news there is.
         //
@@ -432,7 +432,7 @@ export const registerTemplates: Registrar = (server, session, opts) => {
     ({ build_id }, extra) =>
       guarded(async () => {
         // BOTH routes, because neither answer contains the other. The two
-        // projectors in the platform's the platform's projection layer overlap only on `id`,
+        // projectors on the platform side overlap only on `id`,
         // `status` and `error`: publicTemplateBuild carries `ref` and both
         // timestamps, publicBuildProgress carries the phase and the steps. This
         // tool was pinned as "progress is a superset", which was simply untrue —

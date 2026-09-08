@@ -112,7 +112,7 @@ export const registerAgent: Registrar = (server, session) => {
             // Terminal means it SAYS SO, which is watch_build's discipline
             // (OPL-3835) applied to this stream's own vocabulary: `stop` is the
             // field the platform always sends on a result — the AgentResult type
-            // in its the platform's agent layer requires it, and every `done` it yields carries
+            // on the platform side requires it, and every `done` it yields carries
             // one — and it is the field the verdict below reads. A record
             // without it is not a result, so it is kept, in case nothing better
             // arrives, but it does not end the loop and discard the frame that

@@ -41,7 +41,7 @@ const cancelled = (id: string, last: string) =>
 /**
  * What a move looks like on the wire (OPL-3766).
  *
- * Mirrors the platform's `Move` schema, which mirrors its move view in its the platform's move schema
+ * Mirrors the platform's `Move` schema, which mirrors its own move view
  * — deliberately not the whole row: `from_host` and `to_host` are recorded there
  * and never sent, because which machine a computer is on is the platform's
  * business and not a tenant's.

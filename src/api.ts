@@ -588,7 +588,7 @@ export class Api {
     // because assuming is the exact failure the status exists to prevent, and
     // because nothing downstream can tell the difference afterwards.
     //
-    // The platform always sends the header (`bytes %d-%d/%d` in the platform's own source).
+    // The platform always sends the header, formatted `bytes %d-%d/%d`.
     // A hop in front of it that drops the header is the case this is for, and
     // the same one mandala-computer-typescript's toFileChunk refuses.
     if (resp.status === 206 && !window) {
