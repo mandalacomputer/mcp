@@ -438,6 +438,8 @@ export class Subscription {
    */
   #sent: string[] = [];
   #greeted = false;
+  /** Monotonic so overlapping waits can each detect a connection interruption. */
+  #connectionVersion = 0;
   /**
    * Whether the socket now closing was closed by THIS side to re-nominate.
    *
@@ -512,6 +514,15 @@ export class Subscription {
 
   get state(): SubscriptionState {
     return this.#state;
+  }
+
+  /** Cached capabilities survive a disconnect; this describes the current connection. */
+  get connected(): boolean {
+    return this.#greeted && this.#state.status === 'open';
+  }
+
+  get connectionVersion(): number {
+    return this.#connectionVersion;
   }
 
   get idleMs(): number {
@@ -1317,6 +1328,7 @@ export class Subscription {
         // A connection that has ended is not carrying anything, whatever it was
         // greeted with. Without this the window between one connection ending
         // and the next opening reads as a tree still on the wire.
+        if (opened) this.#connectionVersion++;
         this.#greeted = false;
         if (this.#socket === socket) this.#socket = undefined;
         try {

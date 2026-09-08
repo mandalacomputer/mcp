@@ -77,6 +77,9 @@ const MAX_WAIT_S = 55;
 /** How long a first call gives the socket to reach its opening frame. */
 const ATTACH_MS = 20_000;
 
+/** Optional context must not hold an already-consumed event answer indefinitely. */
+const RECONCILE_MS = 2_000;
+
 /**
  * Wait for a subscription to say something about itself, inside a budget.
  *
@@ -121,19 +124,60 @@ async function attached(
 async function reconcile(
   session: Session,
   id: string,
-  signal?: AbortSignal,
+  cancel?: AbortSignal,
+  deadline?: AbortSignal,
 ): Promise<Record<string, unknown>> {
-  const api = session.api.with(signal);
-  const state: Record<string, unknown> = {};
-  const [windows, computer] = await Promise.allSettled([
-    api.json('GET', P.computerAction(id, 'windows')),
-    api.json('GET', P.computer(id)),
+  const signal = AbortSignal.any([
+    AbortSignal.timeout(RECONCILE_MS),
+    ...(cancel ? [cancel] : []),
+    ...(deadline ? [deadline] : []),
   ]);
-  if (windows.status === 'fulfilled') state.windows_now = windows.value;
-  if (computer.status === 'fulfilled') {
-    state.computer_now = withoutCredentials(unwrapComputer(computer.value) as Computer);
+  const state: Record<string, unknown> = {};
+  if (!signal.aborted) {
+    const api = session.api.with(signal);
+    let end: () => void = () => {};
+    const expired = new Promise<void>((resolve) => {
+      end = resolve;
+      signal.addEventListener('abort', end, { once: true });
+    });
+    try {
+      // Keep whichever half arrived before the deadline. The race also bounds
+      // embedders whose fetch implementation does not honour cancellation.
+      await Promise.race([
+        expired,
+        Promise.allSettled([
+          api.json('GET', P.computerAction(id, 'windows')).then((windows) => {
+            if (!signal.aborted) state.windows_now = windows;
+          }),
+          api.json('GET', P.computer(id)).then((computer) => {
+            if (!signal.aborted) {
+              state.computer_now = withoutCredentials(unwrapComputer(computer) as Computer);
+            }
+          }),
+        ]),
+      ]);
+    } finally {
+      signal.removeEventListener('abort', end);
+    }
+  }
+  if (!('windows_now' in state) || !('computer_now' in state)) {
+    state.reconciliation_note = reconciled(state).trim();
   }
   return state;
+}
+
+/** No continuity claim based solely on capabilities cached from an old socket. */
+function connectionNote(sub: Subscription, version?: number): string {
+  if (sub.state.status === 'stopped') {
+    return 'The event stream has stopped. These are the events buffered so far; call again for the remaining events and the reason it stopped.';
+  }
+  if (!sub.connected) {
+    return 'The event stream is reconnecting. These are the events buffered so far; more history may arrive on replay, so silence here is not an answer about what the computer did. Call again.';
+  }
+  if (version === undefined || version !== sub.connectionVersion) {
+    return 'The event stream was interrupted during this wait and has reopened. These are the events buffered so far; replayed events will be returned as they arrive. Call again to keep waiting.';
+  }
+  return '';
 }
 
 /**
@@ -279,7 +323,9 @@ function body(
   // another call can evict it, and a reconnect can find it disarmed. A reader
   // that had to remember which of four trees was live from a call several turns
   // ago is a reader that will get it wrong.
-  if (watching?.length) out.watching = watching;
+  if (watching?.length) {
+    out.watching = watching.map((watch) => ({ ...watch, armed: watch.armed && sub.connected }));
+  }
   // Only where it is news. `can_emit` is what stops a model waiting for
   // something this machine will never produce, and the opening frame is the one
   // place that answer exists — but repeating it on every poll would be a field
@@ -522,6 +568,7 @@ export const registerEvents: Registrar = (server, session) => {
         // A caller who hung up is not a stream that failed to open.
         if (extra.signal?.aborted) return cancelledDuringAttach(id);
         if (!sub.eventTypes) return unattached(id, Date.now() - started);
+        const connection = sub.connected ? sub.connectionVersion : undefined;
 
         // A `pid` on its own means the exit of THAT command. Without this the
         // filter below reads "anything that is not a process.exited passes",
@@ -653,8 +700,8 @@ export const registerEvents: Registrar = (server, session) => {
         if (hit === undefined) {
           if (extra.signal?.aborted) {
             return refused(
-              `Cancelled while waiting on ${id}. The stream is still open and still buffering — ` +
-                `nothing was missed.`,
+              `Cancelled while waiting on ${id}. Buffered events remain available on the next call. ` +
+                (connectionNote(sub, connection) || 'The stream is still open and buffering.'),
             );
           }
           const now = sub.state;
@@ -675,7 +722,7 @@ export const registerEvents: Registrar = (server, session) => {
           // again cost nothing. Reporting it as a failure would teach a model to
           // stop asking — back to the screenshot loop this tool exists to end.
           const d = sub.read({ since, limit });
-          const extras = d.loss ? await reconcile(session, id, extra.signal) : {};
+          const extras = d.loss ? await reconcile(session, id, extra.signal, deadline) : {};
           // What did NOT match still happened, and this read has just handed it
           // over — so the sentence has to name it. Saying "nothing happened"
           // over a payload holding three events is the one thing a model must
@@ -686,6 +733,14 @@ export const registerEvents: Registrar = (server, session) => {
             ? ` ${d.events.length} other event${d.events.length === 1 ? '' : 's'} did happen and ` +
               `${d.events.length === 1 ? 'is' : 'are'} below.`
             : '';
+          const interrupted = connectionNote(sub, connection);
+          if (interrupted || d.loss) {
+            return said(
+              `${interrupted || `No matching event is buffered on ${id}.`}${others}` +
+                (d.loss ? reconciled(extras) : ''),
+              { ...body(id, d, sub, sub.watching), ...extras },
+            );
+          }
           return said(
             `Nothing ${wanted ? `matching ${[...wanted].join(' or ')} ` : ''}happened on ${id} in ` +
               `${timeout_s}s.${others} This server kept listening the whole time and is still ` +
@@ -702,7 +757,7 @@ export const registerEvents: Registrar = (server, session) => {
 
         const d = sub.read({ since, limit, through: hit });
         const last = d.events[d.events.length - 1];
-        const extras = d.loss ? await reconcile(session, id, extra.signal) : {};
+        const extras = d.loss ? await reconcile(session, id, extra.signal, deadline) : {};
         const before = d.events.length - 1;
         // Empty when another call on this computer consumed the matched event
         // first: the ring is one buffer with one delivered cursor, and two
@@ -1038,6 +1093,7 @@ export const registerEvents: Registrar = (server, session) => {
         // whatever happened in between was never reported and the tree has to
         // be re-read.
         const generation = sub.armGeneration(root);
+        const connection = sub.connected ? sub.connectionVersion : undefined;
         // Said once, on the first answer about a tree this subscription
         // inherited from one that went away. A tree is watched by the
         // CONNECTION, so the idle reap that took the previous subscription also
@@ -1129,7 +1185,7 @@ export const registerEvents: Registrar = (server, session) => {
           if (now.status === 'stopped')
             return stopped(session, id, now.reason, sub, { since, limit });
           const d = sub.read({ since, limit });
-          const extras = d.loss ? await reconcile(session, id, extra.signal) : {};
+          const extras = d.loss ? await reconcile(session, id, extra.signal, deadline) : {};
           const answer = { ...body(id, d, sub, sub.watching), watch: wire, ...extras };
           // THESE FIRST, and in this order, because each would otherwise be
           // described as something else. Evicting a tree does not reset its arm
@@ -1198,6 +1254,18 @@ export const registerEvents: Registrar = (server, session) => {
               answer,
             );
           }
+          const connectionChanged = connectionNote(sub, connection);
+          if (connectionChanged || d.loss) {
+            return said(
+              `${connectionChanged || `No file change is buffered for ${wire}.`} ` +
+                `A quiet directory cannot be confirmed for this whole wait.` +
+                (d.loss ? reconciled(extras) : '') +
+                interrupted() +
+                renamed +
+                evicted,
+              answer,
+            );
+          }
           // NOT an error, for the reason wait_for_event's timeout is not: the
           // tree was being watched for the whole of it, so "nothing changed" is
           // an answer rather than an absence of one. This is the sentence the
@@ -1222,7 +1290,7 @@ export const registerEvents: Registrar = (server, session) => {
 
         const d = sub.read({ since, limit, through: hit });
         const last = d.events[d.events.length - 1];
-        const extras = d.loss ? await reconcile(session, id, extra.signal) : {};
+        const extras = d.loss ? await reconcile(session, id, extra.signal, deadline) : {};
         const earlier = d.events.length - 1;
         // The one `lost` that is not a re-read: it says the tree is not being
         // watched, so it is the request failing rather than the watch reporting.
@@ -1358,8 +1426,16 @@ export const registerEvents: Registrar = (server, session) => {
         if (extra.signal?.aborted) return cancelledDuringAttach(id);
         if (!sub.eventTypes) return unattached(id, Date.now() - started);
 
+        const connection = sub.connected ? sub.connectionVersion : undefined;
         const d = sub.read({ since, limit });
         const extras = d.loss ? await reconcile(session, id, extra.signal) : {};
+        const interruption = connectionNote(sub, connection);
+        if (interruption) {
+          return said(interruption + (d.loss ? reconciled(extras) : ''), {
+            ...body(id, d, sub, sub.watching),
+            ...extras,
+          });
+        }
         if (!d.events.length) {
           // The one case where "this is an answer rather than a gap" is exactly
           // wrong: a gap whose surviving events were all read already leaves an
