@@ -365,9 +365,12 @@ nothing; `background: true` is the only thing that works. The abandoned command
 keeps running, so the call after one of these often reports the guest agent as
 busy — that is the first failure continuing, not a second one.
 
-The ceiling belongs to that proxy rather than to the platform, which is why
-`timeout_s` still accepts up to 300: a `MANDALA_BASE_URL` pointed at an origin
-reached without the proxy in front of it does not have one.
+That roughly two-minute ceiling belongs to the hosted proxy. The server accepts
+integer foreground `timeout_s` values from 1 through 600 seconds (default 30),
+and the tool exposes that range for a `MANDALA_BASE_URL` reached without the
+proxy. The HTTP client allows 630 seconds for response headers so the server can
+report a 600-second timeout. Use `background: true` and poll the handle for
+longer work.
 
 **`list_windows` sees what a screenshot cannot.** It is how you tell an
 application that failed to start from one that has not painted yet. Match on

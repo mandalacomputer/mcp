@@ -201,10 +201,10 @@ export const registerGuest: Registrar = (server, session) => {
           .number()
           .int()
           .min(1)
-          .max(300)
+          .max(600)
           .default(30)
           .describe(
-            'How long to wait for it to exit. A command that outlives this keeps running inside the guest — your deadline passing means you stopped waiting, not that the work was destroyed. Against the hosted app.mandala.computer, do not reach past about 120 here: a proxy in front of the platform abandons the request at roughly two minutes and answers 524 whatever this says, so a larger number buys no time and only delays the failure. Use background: true for anything slower. The range above 120 is for a self-hosted MANDALA_BASE_URL reached without that proxy.',
+            'How long to wait for it to exit, up to the server limit of 600 seconds. A command that outlives this keeps running inside the guest — your deadline passing means you stopped waiting, not that the work was destroyed. Against the hosted app.mandala.computer, do not reach past about 120 here: a proxy in front of the platform abandons the request at roughly two minutes and answers 524 whatever this says, so a larger number buys no time and only delays the failure. Use background: true for anything slower. The range above 120 is for a self-hosted MANDALA_BASE_URL reached without that proxy.',
           ),
         desktop: z
           .boolean()
