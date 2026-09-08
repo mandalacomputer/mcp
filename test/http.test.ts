@@ -1,9 +1,15 @@
-import { Agent as HttpAgent, request as httpRequest, type Server } from 'node:http';
-import type { AddressInfo } from 'node:net';
+import {
+  Agent as HttpAgent,
+  request as httpRequest,
+  IncomingMessage,
+  type Server,
+} from 'node:http';
+import { type AddressInfo, connect, Socket } from 'node:net';
 import { gzipSync } from 'node:zlib';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { runHttp } from '../src/http.js';
+import { MeteredBody } from '../src/http-body.js';
 import { BASE, installFakePlatform } from './harness.js';
 
 const INIT = {
@@ -16,6 +22,45 @@ const INIT = {
     clientInfo: { name: 'test', version: '0' },
   },
 };
+
+it('stops forwarding and retaining chunks when the body reader refuses admission', async () => {
+  const socket = new Socket();
+  const request = new IncomingMessage(socket);
+  let seen = 0;
+  let forwarded = 0;
+  const refused = vi.fn();
+  const input = new MeteredBody(
+    request,
+    (bytes) => {
+      seen += bytes;
+      return seen <= 256 * 1024;
+    },
+    refused,
+  );
+  input.on('data', (chunk: Buffer) => {
+    forwarded += chunk.length;
+  });
+  input.on('error', () => {});
+  const closed = new Promise<void>((resolve) => input.once('close', resolve));
+  const drained = new Promise<void>((resolve) => request.once('end', resolve));
+  try {
+    request.push(Buffer.alloc(256 * 1024));
+    request.push(Buffer.alloc(1));
+    await closed;
+    request.push(Buffer.alloc(1024 * 1024));
+    request.complete = true;
+    request.push(null);
+    await drained;
+    expect(refused).toHaveBeenCalledOnce();
+    expect(forwarded).toBe(256 * 1024);
+    expect(input.readableLength).toBe(0);
+    expect(input.writableLength).toBe(0);
+    expect(input.destroyed).toBe(true);
+  } finally {
+    request.destroy();
+    socket.destroy();
+  }
+});
 
 describe('the hosted transport', () => {
   let server: Server;
@@ -972,6 +1017,56 @@ describe('a body that declared no length', () => {
     await holder.done;
   }, 15_000);
 
+  it('never parses a refused chunked body, including bytes sent after the 503', async () => {
+    const sessionId = await openSession();
+    const holder = chunked(sessionId, '');
+    void holder.done.catch(() => {});
+    holder.req.write(`{"pad":"${'x'.repeat(300_000)}`);
+    for (let i = 0; i < 100 && (await parsesNow()) === 0; i++) {
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    expect(await parsesNow()).toBe(1);
+
+    const marker = 'refused-body-must-never-be-parsed';
+    const parse = vi.spyOn(JSON, 'parse');
+    const socket = connect((server.address() as AddressInfo).port, '127.0.0.1');
+    socket.setTimeout(5_000, () => socket.destroy(new Error('upload test timed out')));
+    let received = '';
+    const answered = new Promise<void>((resolve, reject) => {
+      socket.on('data', (data) => {
+        received += data.toString();
+        if (received.includes('HTTP/1.1 503')) resolve();
+      });
+      socket.on('error', reject);
+    });
+    const drained = new Promise<void>((resolve, reject) => {
+      socket.on('data', () => {
+        if (received.includes('"ok":true')) resolve();
+      });
+      socket.on('error', reject);
+    });
+    void drained.catch(() => {});
+    const writeChunk = (body: string) =>
+      socket.write(`${Buffer.byteLength(body).toString(16)}\r\n${body}\r\n`);
+    try {
+      socket.write(
+        `POST /mcp HTTP/1.1\r\nHost: 127.0.0.1:${(server.address() as AddressInfo).port}\r\nContent-Type: application/json\r\nAccept: application/json, text/event-stream\r\nAuthorization: Bearer not-a-platform-key\r\nmcp-session-id: ${sessionId}\r\nTransfer-Encoding: chunked\r\nConnection: keep-alive\r\n\r\n`,
+      );
+      writeChunk(`{"pad":"${marker}${'x'.repeat(300_000)}`);
+      await answered;
+      writeChunk(`${'y'.repeat(1024 * 1024)}"}`);
+      socket.write(
+        `0\r\n\r\nGET /healthz HTTP/1.1\r\nHost: 127.0.0.1:${(server.address() as AddressInfo).port}\r\nConnection: close\r\n\r\n`,
+      );
+      await drained;
+      expect(parse.mock.calls.some(([body]) => body.includes(marker))).toBe(false);
+    } finally {
+      parse.mockRestore();
+      socket.destroy();
+      holder.req.destroy();
+    }
+  }, 10_000);
+
   it('reads an empty Content-Encoding as no encoding, the way body-parser does', async () => {
     // `Content-Encoding:` with nothing after it inflates nothing, so metering it
     // is exact — and treating the blank header as an encoding put the original
@@ -1008,6 +1103,45 @@ describe('a body that declared no length', () => {
       await done;
     }
   }, 10_000);
+
+  it('releases a chunked upload lease when its client aborts', async () => {
+    const sessionId = await openSession();
+    const abandoned = chunked(sessionId, '');
+    const stopped = abandoned.done.catch(() => {});
+    abandoned.req.write(`{"pad":"${'x'.repeat(300_000)}`);
+    for (let i = 0; i < 100 && (await parsesNow()) === 0; i++) {
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    expect(await parsesNow()).toBe(1);
+    abandoned.req.destroy();
+    await stopped;
+    for (let i = 0; i < 100 && (await parsesNow()) !== 0; i++) {
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    expect(await parsesNow()).toBe(0);
+
+    const next = chunked(sessionId, '');
+    // JSON-RPC rejects unknown top-level fields; request metadata carries the
+    // padding without turning this recovery check into an invalid request.
+    const body = JSON.stringify({
+      jsonrpc: '2.0',
+      id: 26,
+      method: 'tools/list',
+      params: { _meta: { pad: 'x'.repeat(300_000) } },
+    });
+    next.req.write(body.slice(0, 1));
+    next.req.end(body.slice(1));
+    expect(await next.done).toBe(200);
+  }, 10_000);
+
+  it('still rejects malformed JSON arriving through the metered reader', async () => {
+    const sessionId = await openSession();
+    const malformed = chunked(sessionId, '');
+    malformed.req.write('{');
+    malformed.req.end('"jsonrpc":');
+    expect(await malformed.done).toBe(400);
+    expect(await parsesNow()).toBe(0);
+  });
 
   it('charges a compressed body up front, since the wire says nothing about its size', async () => {
     // body-parser inflates before applying its limit, so wire bytes are not

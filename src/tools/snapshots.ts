@@ -150,7 +150,17 @@ const snapshotTurn = async (api: Api, sid: string, unfinished: boolean): Promise
     };
   }
   const row = items.find((r) => isRow(r) && r.id === sid);
-  if (!isRow(row)) return { kind: 'absent' };
+  if (!isRow(row)) {
+    // An unreadable identity could be the target. Only a list whose rows can
+    // all be identified establishes absence; a readable target still wins.
+    if (items.some((r) => !isRow(r) || typeof r.id !== 'string' || !r.id.trim())) {
+      return {
+        kind: 'blocked',
+        why: 'GET /snapshots contained rows without readable ids, so a missing snapshot establishes nothing',
+      };
+    }
+    return { kind: 'absent' };
+  }
   // A row served from the placement cache because its host did not answer. It
   // carries an id and nothing else — its `state` is last-known or absent — so it
   // can confirm neither what a capture is doing nor that a deletion has not
@@ -786,7 +796,7 @@ export const registerSnapshots: Registrar = (server, session, opts) => {
       description:
         'Remove a snapshot permanently. Later snapshots in the same chain are unaffected. THE DELETION OUTLIVES THE REQUEST that starts it: the platform accepts it and then detaches the dependent snapshots and removes the stored objects, which takes time that scales with the chain and with how much is stored. This waits for it by default and reports what actually happened; pass wait: false to hand back as soon as it is accepted. A 409 saying the snapshot is ALREADY BEING DELETED is progress rather than a fault — the platform is doing what you asked, and the answer is to watch that one finish, never to go and delete something else. A wait reports progress while it runs, so a client that sends a progressToken and sets resetTimeoutOnProgress can hold the request open; a client that cannot should pass wait: false and poll list_snapshots.',
       inputSchema: {
-        snapshot_id: z.string(),
+        snapshot_id: z.string().trim(),
         confirm: z.literal(true).describe('Must be true.'),
         wait: z
           .boolean()
