@@ -499,11 +499,25 @@ export const registerComputers: Registrar = (server, session, opts) => {
               `${c.id ?? computer_id} was deleted while it was being selected. The session selection was not changed.`,
             );
           }
+          // The advice has to know the difference the two waits know, or it
+          // sends a model to start a computer that is already starting — which
+          // is the whole of OPL-4631, in the one place a model is most likely
+          // to act on the sentence immediately. A machine whose start the
+          // platform has admitted is one to WAIT for; only one it is holding
+          // nothing for wants start_computer. An unknown pool says neither, so
+          // it names the state and stops there.
+          const advice = () => {
+            if (c.status === 'running') return '';
+            const idle = nothingAdmitted(c);
+            if (idle)
+              return `\n\nIt is ${c.status ?? 'not running'} — start_computer before driving it.`;
+            if (c.running_ram_mb !== undefined) {
+              return `\n\nIt is ${c.status ?? 'not running'}, and its start has already been admitted — wait_for_computer, not start_computer.`;
+            }
+            return `\n\nIt is ${c.status ?? 'not running'} — wait_for_computer says when it is usable.`;
+          };
           return said(
-            `Selected ${describe(c)}. Later calls need no computer_id.` +
-              (c.status === 'running'
-                ? ''
-                : `\n\nIt is ${c.status ?? 'not running'} — start_computer before driving it.`),
+            `Selected ${describe(c)}. Later calls need no computer_id.` + advice(),
             withoutCredentials(c),
           );
         } finally {

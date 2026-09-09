@@ -955,8 +955,11 @@ export function isTransient(err: unknown): boolean {
  * may not be, since a computer coming up passes through it. The same generosity
  * as every unmapped 5xx below, for the same reason: this only ever replays a
  * read, and the loops above return a refusal of their own the moment the status
- * they are watching says stopped or suspended. mandala-computer-python's
- * `_is_transient_for_poll` draws the line in the same place.
+ * they are watching says stopped or suspended AND the platform says it is
+ * holding nothing for the machine — the qualification OPL-4631 added, because
+ * a start that has been admitted reads as stopped or suspended until its guest
+ * process exists. mandala-computer-python's `_is_transient_for_poll` draws the
+ * line in the same place.
  *
  * Everything at 5xx polls through, 502 and 520-523 included: they mean the
  * outcome is unknown, and a read whose outcome is unknown can simply be read

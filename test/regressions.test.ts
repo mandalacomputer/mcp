@@ -5717,20 +5717,83 @@ describe('a start the platform has already admitted', () => {
   // not said nothing is coming — so the wait goes on rather than refusing on a
   // sentence nobody uttered. It costs the timeout, which is the cheaper of the
   // two wrong answers.
-  it('waits rather than refusing when the platform did not say', async () => {
+  //
+  // `timeout_s: 5` is the schema's minimum and is load-bearing: the first cut
+  // of this test passed 2, which the input schema rejects, so it asserted on a
+  // validation error and made ZERO platform reads while appearing to prove the
+  // wait's behaviour (Codex review).
+  it.each(['stopped', 'suspended'])(
+    'waits through a %s computer when the platform did not say',
+    async (status) => {
+      const real = globalThis.fetch;
+      let reads = 0;
+      globalThis.fetch = (async () => {
+        reads += 1;
+        return new Response(JSON.stringify({ id: 'vm-1', status }), {
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }) as typeof fetch;
+      try {
+        const { call, close } = await connect();
+        const res = await call('wait_for_computer', { until: 'running', timeout_s: 5 });
+        expect(res.isError).toBe(true);
+        // The wait ran, rather than the schema refusing the arguments.
+        expect(reads).toBeGreaterThan(1);
+        expect(said(res)).toMatch(/still|last/i);
+        expect(said(res)).not.toMatch(/start_computer boots it|does not clear by itself/);
+        await close();
+      } finally {
+        globalThis.fetch = real;
+      }
+    },
+    // The wait really does spend its five seconds here — that is the assertion —
+    // so the per-test budget has to be longer than the thing under test.
+    20_000,
+  );
+});
+
+describe('what use_computer tells a model about a machine that is not running', () => {
+  // The same inference as the two waits, in the place a model acts on soonest:
+  // "start_computer before driving it" said to a computer whose start is
+  // already admitted is an instruction to start it twice (Codex review).
+  const serve = (body: Record<string, unknown>) => {
     const real = globalThis.fetch;
     globalThis.fetch = (async () =>
-      new Response(JSON.stringify({ id: 'vm-1', status: 'stopped' }), {
+      new Response(JSON.stringify({ id: 'vm-1', name: 'desk', os: 'linux', ...body }), {
         headers: { 'Content-Type': 'application/json' },
       })) as typeof fetch;
+    return () => {
+      globalThis.fetch = real;
+    };
+  };
+
+  it.each([
+    ['stopped', 0, /start_computer before driving it/],
+    ['suspended', 0, /start_computer before driving it/],
+    ['stopped', 2048, /wait_for_computer, not start_computer/],
+    ['suspended', 2048, /wait_for_computer, not start_computer/],
+  ])('a %s computer with a pool of %s', async (status, pool, says) => {
+    const restore = serve({ status, running_ram_mb: pool });
     try {
       const { call, close } = await connect();
-      const res = await call('wait_for_computer', { until: 'running', timeout_s: 2 });
-      expect(res.isError).toBe(true);
-      expect(said(res)).not.toMatch(/start_computer boots it/);
+      const res = await call('use_computer', { computer_id: 'vm-1' });
+      expect(said(res)).toMatch(says);
       await close();
     } finally {
-      globalThis.fetch = real;
+      restore();
+    }
+  });
+
+  it('names the state and points at the wait when the platform did not say', async () => {
+    const restore = serve({ status: 'stopped' });
+    try {
+      const { call, close } = await connect();
+      const res = await call('use_computer', { computer_id: 'vm-1' });
+      expect(said(res)).toMatch(/wait_for_computer says when it is usable/);
+      expect(said(res)).not.toMatch(/start_computer before driving it/);
+      await close();
+    } finally {
+      restore();
     }
   });
 });

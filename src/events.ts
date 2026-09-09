@@ -1205,10 +1205,25 @@ export class Subscription {
           'start_computer, then ask again.',
       );
     }
+    // A computer whose disk was unlinked by a deletion that stopped partway
+    // will never start again — the reference says so, and says deleting it
+    // again is what clears it — so it belongs with the terminal states rather
+    // than in the backoff below (Codex review).
+    if (status === 'half-removed') {
+      throw new SettledError(
+        `${this.computerId} is half-removed: its disk is gone, it will never start again, and ` +
+          'only deleting it again clears it. There is nothing to stream.',
+      );
+    }
     if (status !== 'running') {
-      // Everything left is a state that clears on its own, so it gets the
-      // backoff rather than the refusal — `building`, and now a `stopped` or
-      // `suspended` computer whose start has been admitted and is loading.
+      // What is left is a state that MAY clear, which is a weaker claim than
+      // the one this comment used to make and the honest one: `building`; a
+      // `stopped` or `suspended` computer whose start has been admitted and is
+      // loading; and the two readings that are not answers at all — a status
+      // this client does not know, and a stopped or suspended computer whose
+      // pool the host did not report. Retrying those is right for the same
+      // reason waiting is: nothing here has said the machine will not come up.
+      // What it is not is a promise that one will.
       //
       // That last pair is what this branch was FOR, and it could not reach it.
       // The comment here used to name `starting`, `moving` and `creating`; the
