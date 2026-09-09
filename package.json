@@ -41,7 +41,8 @@
     "lint": "biome check .",
     "format": "biome check --write .",
     "prepublishOnly": "npm run build",
-    "check:surface": "node scripts/check-surface.mjs"
+    "check:surface": "node scripts/check-surface.mjs",
+    "check:internals": "node scripts/check-internals.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",

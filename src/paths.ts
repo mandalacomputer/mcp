@@ -291,8 +291,8 @@ export function execBody(args: {
   // A NUL ends a C string, and the command is the one field on this route that
   // reaches the guest without anything checking it. `execEnv` below refuses one
   // for this exact reason, and the platform refuses one in `cwd` and in every
-  // file path — `validGuestPath` rejects the whole control range — but its only
-  // test on `command` is that it is not empty. So a command
+  // file path — it rejects the whole control range there — but its only test
+  // on `command` is that it is not empty. So a command
   // carrying a NUL is truncated at the guest's argv boundary: a shorter command
   // than the caller wrote runs, and its exit code is reported as an ordinary
   // success. The same shape as the surrogate refusals — a call that works and

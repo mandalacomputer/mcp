@@ -472,8 +472,8 @@ describe('what /code-review found', () => {
 
   /**
    * `progress` is not a superset of the job record. The two projectors overlap
-   * only on id, status and error: publicTemplateBuild carries `ref` and both
-   * timestamps, publicBuildProgress carries the phase and the steps. Read as
+   * only on id, status and error: the job record carries `ref` and both
+   * timestamps, and the progress record carries the phase and the steps. Read as
    * progress alone, get_build could not say which template a build was for.
    */
   it('tells the model which template a build was for, and where it got to', async () => {

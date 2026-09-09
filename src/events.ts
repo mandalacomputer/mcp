@@ -25,8 +25,8 @@
  * doorbell an addition to this file rather than a replacement for it, and one
  * whose bell nothing on the other end rings yet.
  *
- * Written against the `events_url` entry in the platform's `web/lib/apidoc.ts`,
- * which is the reference this must not contradict.
+ * Written against the `events_url` entry in the platform's API reference,
+ * which is what this must not contradict.
  */
 
 import { posix } from 'node:path';

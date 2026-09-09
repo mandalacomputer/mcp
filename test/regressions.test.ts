@@ -4762,9 +4762,8 @@ describe('an environment entry with half a character in it', () => {
 
 describe('a command with a NUL in it', () => {
   it('is refused rather than truncated at the guest and reported as a success', () => {
-    // The platform refuses a NUL in `cwd` and in every file path —
-    // validGuestPath rejects the whole control range — and checks `command`
-    // only for emptiness. So a NUL there truncates the command at the guest's
+    // The platform refuses a NUL in `cwd` and in every file path — it rejects
+    // the whole control range there — and checks `command` only for emptiness. So a NUL there truncates the command at the guest's
     // argv boundary: a shorter command runs and its exit code is reported as an
     // ordinary success. execEnv has refused the same byte since it was written.
     expect(() => P.execBody({ command: 'echo hello\0rm -rf /' })).toThrow(/NUL/);
