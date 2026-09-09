@@ -29,6 +29,10 @@ jobs:
         node: ['20', '22', '24', '26']
     steps:
       - uses: actions/checkout@v4
+        with:
+          # The commit-message half of check-internals needs the base branch to
+          # diff against; the default shallow clone has no origin/main.
+          fetch-depth: 0
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node }}
@@ -41,6 +45,11 @@ jobs:
       # scrubbed two by hand and left nothing behind to catch the next
       # (OPL-4637).
       - run: npm run check:internals
+      # Both halves. A commit message is public the moment it is pushed, and
+      # three of the five references found in the batch that prompted this were
+      # in messages and PR descriptions — which the file scan cannot see.
+      - run: node scripts/check-internals.mjs --messages origin/${{ github.event.pull_request.base.ref || 'main' }}..HEAD
+        if: github.event_name == 'pull_request'
       - run: npm run typecheck
       - run: npx vitest run
       - run: npm run build

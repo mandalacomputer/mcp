@@ -432,9 +432,9 @@ export const registerTemplates: Registrar = (server, session, opts) => {
     ({ build_id }, extra) =>
       guarded(async () => {
         // BOTH routes, because neither answer contains the other. The two
-        // projectors on the platform side overlap only on `id`,
-        // `status` and `error`: publicTemplateBuild carries `ref` and both
-        // timestamps, publicBuildProgress carries the phase and the steps. This
+        // projectors on the platform side overlap only on `id`, `status` and
+        // `error`: the job record carries `ref` and both timestamps, and the
+        // progress record carries the phase and the steps. This
         // tool was pinned as "progress is a superset", which was simply untrue —
         // read that way it could not tell a model WHICH TEMPLATE a build was for
         // (/code-review, OPL-3835).
