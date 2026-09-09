@@ -351,8 +351,8 @@ export function execBody(args: {
  * to be told no. They are also the rules that will not drift: they are what an
  * entry IS in the list the guest agent takes, `NAME=value` strings separated by
  * NULs, rather than policy. The ceilings on how many entries and how long one
- * may be (64 and 4096 bytes, execbg.go) are policy, are the platform's to
- * change, and are deliberately not repeated here.
+ * may be are policy, are the platform's to change, and are deliberately not
+ * repeated here.
  *
  * The `=` case is the one a model actually gets wrong. `{'FOO=bar': ''}` is the
  * assignment written into the name, which is the same mistake as writing the
@@ -617,10 +617,10 @@ export function windowBody(args: {
  *
  * Mirrored so a request that can only fail is not made. NOT machine-checked —
  * `scripts/check-surface.mjs` reads the platform's `web/lib`, and this number
- * lives in the platform's own source as a constant. It is not
- * arbitrary: the platform puts the text inside one argument of one command,
- * Linux caps a single argv string at 128 KiB, and two layers of base64 stand
- * between the text and that ceiling, so each byte costs about 1.8 of it. Past
+ * is not part of the table it reads. It is not arbitrary: the platform puts
+ * the text inside one argument of one command, Linux caps a single argv
+ * string at 128 KiB, and two layers of base64 stand between the text and
+ * that ceiling, so each byte costs about 1.8 of it. Past
  * the cap `execve` fails with E2BIG rather than truncating.
  *
  * The READ cap is 128 KiB, a different bound on a different channel, and is
