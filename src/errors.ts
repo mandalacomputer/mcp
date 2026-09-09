@@ -118,10 +118,10 @@ export function reasonAdvice(reason: string | undefined): string | undefined {
     case 'unavailable':
       // Softened from "does NOT clear by waiting", which was false of exactly
       // the case OPL-4631 is about and is the sentence a model actually sees:
-      // the platform raises this from a bare `pid == 0` check (clipboard.go),
-      // so a start that has been admitted but has not launched QEMU yet lands
-      // here too, and telling that caller to start_computer is telling them to
-      // start it twice. This refusal cannot see the reservation — it is a
+      // the platform raises this whenever no guest process is up, so a start
+      // that has been admitted but has not launched yet lands here too, and
+      // telling that caller to start_computer is telling them to start it
+      // twice. This refusal cannot see the reservation — it is a
       // reason code, not a computer — so it names the call that CAN.
       return 'the computer is not running; if nothing is starting it this will not clear on its own and start_computer is the fix, and if a start is already under way wait_for_computer says so without starting a second one';
     case 'unsupported':

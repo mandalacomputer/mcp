@@ -506,9 +506,9 @@ export const registerComputers: Registrar = (server, session, opts) => {
           // STATUS FIRST, THEN THE POOL, and that order is the correction: the
           // first cut asked only about the pool, so it told a caller to start a
           // build-failed computer, a half-removed one and a build still running
-          // — three machines the platform refuses to start at all (buildErr in
-          // server/vm.go). A reservation is only ever the difference between
-          // "start it" and "wait for it" on a machine that COULD be started.
+          // — three machines the platform refuses to start at all. A
+          // reservation is only ever the difference between "start it" and
+          // "wait for it" on a machine that COULD be started.
           const advice = () => {
             const status = c.status ?? 'not running';
             if (status === 'running') return '';

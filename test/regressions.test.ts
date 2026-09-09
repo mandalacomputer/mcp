@@ -5812,7 +5812,7 @@ describe('what use_computer tells a model about a machine that is not running', 
     ['half-removed', /cannot be started or used again/],
     ['building', /wait_for_computer, then start_computer/],
   ])('a %s computer is never told to start', async (status, says) => {
-    // The platform refuses to start all three (buildErr in server/vm.go), so
+    // The platform refuses to start all three, so
     // "start_computer before driving it" sends a model at a call that will
     // refuse it. The zero pool is what the first cut keyed on, and is exactly
     // what these three report.
