@@ -833,7 +833,7 @@ describe('a desktop link request that produced no link', () => {
 
   it('says isError rather than reporting the absence as a success', async () => {
     globalThis.fetch = (async () =>
-      new Response(JSON.stringify({ id: 'vm-1', status: 'stopped' }), {
+      new Response(JSON.stringify({ id: 'vm-1', status: 'stopped', running_ram_mb: 0 }), {
         headers: { 'Content-Type': 'application/json' },
       })) as typeof fetch;
     const { call, close } = await connect();
@@ -1822,8 +1822,11 @@ describe('wait failures that are worth another poll', () => {
 describe('results that did not reach their requested condition', () => {
   it.each(['suspended', 'stopped'])('marks a %s wait as an error', async (status) => {
     const real = globalThis.fetch;
+    // `running_ram_mb: 0` is the platform's word for idle, and it is what makes
+    // these two refusals right: the same statuses with a reservation are a
+    // machine on its way up, which the wait now waits for (OPL-4631).
     globalThis.fetch = (async () =>
-      new Response(JSON.stringify({ id: 'vm-1', status }), {
+      new Response(JSON.stringify({ id: 'vm-1', status, running_ram_mb: 0 }), {
         headers: { 'Content-Type': 'application/json' },
       })) as typeof fetch;
     try {
@@ -2787,7 +2790,7 @@ describe('a guest that will not shut down', () => {
     };
     const vnc = { url: 'wss://app.test/vnc?token=SECRET-CONTROL' };
     try {
-      answer({ id: 'vm-1', name: 'desk', status: 'suspended', vnc });
+      answer({ id: 'vm-1', name: 'desk', status: 'suspended', running_ram_mb: 0, vnc });
       const record = await call('suspend_computer', {});
       expect(said(record)).toContain('suspend: desk · vm-1 · suspended');
       expect(JSON.stringify(record)).not.toContain('SECRET-CONTROL');
@@ -3572,8 +3575,13 @@ describe('a refusal the platform put a word on', () => {
       expect(res.isError).toBe(true);
       const text = said(res);
       expect(text).toContain('this computer is not running, so it has no clipboard');
-      expect(text).toMatch(/does NOT clear by waiting/);
+      // The classification still reaches the model as prose. What it no longer
+      // claims is that the state cannot clear: a start that has been admitted
+      // raises this same `unavailable` from the platform's bare pid check, and
+      // "does NOT clear by waiting" was false of exactly that case (OPL-4631).
+      expect(text).toMatch(/will not clear on its own/);
       expect(text).toContain('start_computer');
+      expect(text).toContain('wait_for_computer');
       await close();
     } finally {
       globalThis.fetch = real;
@@ -4519,9 +4527,12 @@ describe('an event stream that stopped with events still in it', () => {
       globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
         const url = new URL(String(input));
         if (url.pathname.endsWith('/computers/vm-1')) {
-          return new Response(JSON.stringify({ id: 'vm-1', status: 'suspended' }), {
-            headers: { 'Content-Type': 'application/json' },
-          });
+          return new Response(
+            JSON.stringify({ id: 'vm-1', status: 'suspended', running_ram_mb: 0 }),
+            {
+              headers: { 'Content-Type': 'application/json' },
+            },
+          );
         }
         return real(input as never, init);
       }) as typeof fetch;
@@ -4565,9 +4576,12 @@ describe('a stopped stream holding more than one batch', () => {
       globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
         const url = new URL(String(input));
         if (url.pathname.endsWith('/computers/vm-1')) {
-          return new Response(JSON.stringify({ id: 'vm-1', status: 'suspended' }), {
-            headers: { 'Content-Type': 'application/json' },
-          });
+          return new Response(
+            JSON.stringify({ id: 'vm-1', status: 'suspended', running_ram_mb: 0 }),
+            {
+              headers: { 'Content-Type': 'application/json' },
+            },
+          );
         }
         return real(input as never, init);
       }) as typeof fetch;
@@ -5652,4 +5666,207 @@ describe('a computer described by the record rather than by its host', () => {
     expect(res.isError).toBe(true);
     expect(seen).toHaveLength(0);
   });
+});
+
+describe('a start the platform has already admitted', () => {
+  // OPL-4631. `status` is read from the guest process, so a start that has been
+  // admitted reads `stopped` while it boots and `suspended` while it resumes.
+  // Both used to be answered as "nobody is starting this" — one refusing the
+  // wait, one ending an event subscription for good.
+  it.each(['suspended', 'stopped'])(
+    'waits through a %s computer that is coming up',
+    async (status) => {
+      const real = globalThis.fetch;
+      let reads = 0;
+      globalThis.fetch = (async () => {
+        reads += 1;
+        const body =
+          reads < 3
+            ? { id: 'vm-1', status, running_ram_mb: 2048 }
+            : { id: 'vm-1', status: 'running', running_ram_mb: 2048 };
+        return new Response(JSON.stringify(body), {
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }) as typeof fetch;
+      try {
+        const { call, close } = await connect();
+        const res = await call('wait_for_computer', { until: 'running', timeout_s: 30 });
+        expect(res.isError).toBeFalsy();
+        expect(said(res)).toMatch(/Running/);
+        await close();
+      } finally {
+        globalThis.fetch = real;
+      }
+    },
+  );
+
+  it('still refuses when the platform says it is holding nothing', async () => {
+    const real = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify({ id: 'vm-1', status: 'stopped', running_ram_mb: 0 }), {
+        headers: { 'Content-Type': 'application/json' },
+      })) as typeof fetch;
+    try {
+      const { call, close } = await connect();
+      const res = await call('wait_for_computer', { until: 'running', timeout_s: 30 });
+      expect(res.isError).toBe(true);
+      expect(said(res)).toMatch(/start_computer boots it/);
+      await close();
+    } finally {
+      globalThis.fetch = real;
+    }
+  });
+
+  // A host that could not be reached, or one too old to report the field, has
+  // not said nothing is coming — so the wait goes on rather than refusing on a
+  // sentence nobody uttered. It costs the timeout, which is the cheaper of the
+  // two wrong answers.
+  //
+  // `timeout_s: 5` is the schema's minimum and is load-bearing: the first cut
+  // of this test passed 2, which the input schema rejects, so it asserted on a
+  // validation error and made ZERO platform reads while appearing to prove the
+  // wait's behaviour (Codex review).
+  it.each(['stopped', 'suspended'])(
+    'waits through a %s computer when the platform did not say',
+    async (status) => {
+      const real = globalThis.fetch;
+      let reads = 0;
+      globalThis.fetch = (async () => {
+        reads += 1;
+        return new Response(JSON.stringify({ id: 'vm-1', status }), {
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }) as typeof fetch;
+      try {
+        const { call, close } = await connect();
+        const res = await call('wait_for_computer', { until: 'running', timeout_s: 5 });
+        expect(res.isError).toBe(true);
+        // The wait ran, rather than the schema refusing the arguments.
+        expect(reads).toBeGreaterThan(1);
+        expect(said(res)).toMatch(/still|last/i);
+        expect(said(res)).not.toMatch(/start_computer boots it|does not clear by itself/);
+        await close();
+      } finally {
+        globalThis.fetch = real;
+      }
+    },
+    // The wait really does spend its five seconds here — that is the assertion —
+    // so the per-test budget has to be longer than the thing under test.
+    20_000,
+  );
+});
+
+describe('what use_computer tells a model about a machine that is not running', () => {
+  // The same inference as the two waits, in the place a model acts on soonest:
+  // "start_computer before driving it" said to a computer whose start is
+  // already admitted is an instruction to start it twice (Codex review).
+  const serve = (body: Record<string, unknown>) => {
+    const real = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify({ id: 'vm-1', name: 'desk', os: 'linux', ...body }), {
+        headers: { 'Content-Type': 'application/json' },
+      })) as typeof fetch;
+    return () => {
+      globalThis.fetch = real;
+    };
+  };
+
+  it.each([
+    ['stopped', 0, /start_computer before driving it/],
+    ['suspended', 0, /start_computer before driving it/],
+    ['stopped', 2048, /wait_for_computer, not start_computer/],
+    ['suspended', 2048, /wait_for_computer, not start_computer/],
+  ])('a %s computer with a pool of %s', async (status, pool, says) => {
+    const restore = serve({ status, running_ram_mb: pool });
+    try {
+      const { call, close } = await connect();
+      const res = await call('use_computer', { computer_id: 'vm-1' });
+      expect(said(res)).toMatch(says);
+      await close();
+    } finally {
+      restore();
+    }
+  });
+
+  it('says the question is open when the platform did not answer it', async () => {
+    // Not a prescription dressed as neutrality, which is what the first cut
+    // was: it recommended the wait without saying why (Codex review). The
+    // honest sentence names the gap, and names the call that closes it without
+    // starting anything.
+    const restore = serve({ status: 'stopped' });
+    try {
+      const { call, close } = await connect();
+      const res = await call('use_computer', { computer_id: 'vm-1' });
+      expect(said(res)).toMatch(/did not say whether a start is under way/);
+      expect(said(res)).toMatch(/which starts nothing/);
+      expect(said(res)).not.toMatch(/start_computer before driving it/);
+      await close();
+    } finally {
+      restore();
+    }
+  });
+
+  it.each([
+    ['build-failed', /delete_computer and build it again/],
+    ['half-removed', /cannot be started or used again/],
+    ['building', /wait_for_computer, then start_computer/],
+  ])('a %s computer is never told to start', async (status, says) => {
+    // The platform refuses to start all three, so
+    // "start_computer before driving it" sends a model at a call that will
+    // refuse it. The zero pool is what the first cut keyed on, and is exactly
+    // what these three report.
+    const restore = serve({ status, running_ram_mb: 0 });
+    try {
+      const { call, close } = await connect();
+      const res = await call('use_computer', { computer_id: 'vm-1' });
+      expect(said(res)).toMatch(says);
+      expect(said(res)).not.toMatch(/start_computer before driving it/);
+      await close();
+    } finally {
+      restore();
+    }
+  });
+
+  it('says a building memory fork will come up by itself', async () => {
+    // It reserves its RAM at the start of the copy and resumes at the end of
+    // one, so there is nothing for the caller to do but wait.
+    const restore = serve({ status: 'building', running_ram_mb: 2048 });
+    try {
+      const { call, close } = await connect();
+      const res = await call('use_computer', { computer_id: 'vm-1' });
+      expect(said(res)).toMatch(/come up on its own when the copy finishes/);
+      await close();
+    } finally {
+      restore();
+    }
+  });
+});
+
+describe('the wait and the states nothing can start', () => {
+  // wait_for_computer refused build-failed but not half-removed, so a computer
+  // whose disk is gone spent the whole budget and was then reported as "last
+  // seen half-removed" — the state the caller passed in (Codex review).
+  it('refuses a half-removed computer at once rather than waiting on it', async () => {
+    const real = globalThis.fetch;
+    let reads = 0;
+    globalThis.fetch = (async () => {
+      reads += 1;
+      return new Response(
+        JSON.stringify({ id: 'vm-1', status: 'half-removed', running_ram_mb: 0 }),
+        { headers: { 'Content-Type': 'application/json' } },
+      );
+    }) as typeof fetch;
+    try {
+      const { call, close } = await connect();
+      const started = Date.now();
+      const res = await call('wait_for_computer', { until: 'running', timeout_s: 30 });
+      expect(res.isError).toBe(true);
+      expect(said(res)).toMatch(/delete_computer is what clears it/);
+      expect(Date.now() - started).toBeLessThan(3_000);
+      expect(reads).toBeLessThan(4);
+      await close();
+    } finally {
+      globalThis.fetch = real;
+    }
+  }, 40_000);
 });

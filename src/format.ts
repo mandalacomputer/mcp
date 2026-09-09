@@ -157,8 +157,47 @@ export type Computer = {
   deleted_at?: string;
   lost_at?: string;
   start_error?: string;
+  /**
+   * Guest RAM the platform is holding for this computer against the account's
+   * running pool (platform OPL-4630).
+   *
+   * The field that says whether a start is on its way, which `status` cannot:
+   * `status` is read from the guest process, and a start that has been ADMITTED
+   * has no process yet. Through the whole of that window the machine reports
+   * what it WAS — `stopped` for a cold boot, `suspended` for a resume, whose
+   * session record is spent only on the way out of a start that worked.
+   *
+   * Charged from admission rather than from boot, so a zero is the platform
+   * saying it is holding nothing. Absent is a host that did not say: one too
+   * old to report it, one that could not be reached, or a response the platform
+   * wrote before reading the computer back. See `nothingAdmitted`.
+   */
+  running_ram_mb?: number;
   vnc?: Record<string, unknown>;
 };
+
+/**
+ * Whether the platform has said, in as many words, that nothing is coming up.
+ *
+ * Two waits in this server used to read `stopped` and `suspended` as "nobody is
+ * starting this" and answer accordingly — one refusing the wait, one ending an
+ * event subscription for good. Both are right about an idle computer and wrong
+ * about one that is mid-start, and the difference was not visible until the
+ * platform published `running_ram_mb`.
+ *
+ * Three states, not two, and the third is why this is a function rather than
+ * `!c.running_ram_mb`: ABSENT is a host that did not answer the question.
+ * Reading that as a zero would refuse on a sentence nobody uttered, and the
+ * cost of waiting instead is a timeout rather than a machine. The two SDKs make
+ * the same distinction the same way (OPL-4628, OPL-4629).
+ */
+export function nothingAdmitted(c: Computer): boolean {
+  return (
+    typeof c.running_ram_mb === 'number' &&
+    Number.isFinite(c.running_ram_mb) &&
+    c.running_ram_mb === 0
+  );
+}
 
 /**
  * A create or a clone can answer `{computer, start_error}` rather than a bare

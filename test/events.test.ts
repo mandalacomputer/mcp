@@ -511,9 +511,12 @@ describe('the socket underneath', () => {
     globalThis.fetch = (async (input: string | URL | Request) => {
       const url = new URL(typeof input === 'string' ? input : input.toString());
       if (url.host !== new URL(BASE).host) return real(input as never);
-      return new Response(JSON.stringify({ id: 'vm-1', status: 'suspended', os: 'linux' }), {
-        headers: { 'Content-Type': 'application/json' },
-      });
+      return new Response(
+        JSON.stringify({ id: 'vm-1', status: 'suspended', running_ram_mb: 0, os: 'linux' }),
+        {
+          headers: { 'Content-Type': 'application/json' },
+        },
+      );
     }) as typeof fetch;
     try {
       const ev = fakeEvents();
@@ -539,7 +542,12 @@ describe('the socket underneath', () => {
     // meets `starting`, which is the ordinary weather of a machine coming up
     // and is precisely what the caller is waiting through — not a refusal.
     const real = globalThis.fetch;
-    let status = 'starting';
+    // `stopped`, not `starting`: the platform reports no such status — its set
+    // is running, stopped, suspended, building, build-failed, half-removed — so
+    // this test exercised neither guard it was written for. A cold boot that has
+    // been admitted IS `stopped` with a reservation, which is the real shape of
+    // "the ordinary weather of a machine coming up" (Codex review).
+    let status = 'stopped';
     globalThis.fetch = (async (input: string | URL | Request) => {
       const url = new URL(typeof input === 'string' ? input : input.toString());
       if (url.host !== new URL(BASE).host) return real(input as never);
@@ -547,6 +555,9 @@ describe('the socket underneath', () => {
         JSON.stringify({
           id: 'vm-1',
           status,
+          // Mid-start: the reservation is held from admission, before the guest
+          // process this status is read from exists (OPL-4631).
+          running_ram_mb: 2048,
           os: 'linux',
           vnc: { events_url: 'wss://app.test/api/v1/computers/vm-1/events?token=t' },
         }),
@@ -561,6 +572,10 @@ describe('the socket underneath', () => {
         // It backs off rather than stopping, and connects once it is running.
         await new Promise((r) => setTimeout(r, 100));
         expect(sub.state.status).not.toBe('stopped');
+        // And has NOT connected yet — without this, a subscription that
+        // ignored the guard and opened a socket immediately would satisfy the
+        // wait below just as well (Codex review).
+        expect(ev.sockets).toHaveLength(0);
         status = 'running';
         await until('a connection once it is running', () => ev.sockets.length === 1, 5_000);
       } finally {
@@ -640,6 +655,9 @@ describe('the socket underneath', () => {
         JSON.stringify({
           id: 'vm-1',
           status,
+          // Idle, not mid-start: the waits key on this, and a suspended
+          // computer whose resume has been admitted is waited for (OPL-4631).
+          running_ram_mb: status === 'running' ? 2048 : 0,
           os: 'linux',
           vnc: { events_url: 'wss://app.test/api/v1/computers/vm-1/events?token=t' },
         }),
@@ -1020,5 +1038,114 @@ describe('a hello that carried no events list', () => {
     expect(res.isError).toBeFalsy();
     expect(eventsOf(res).map((e) => e.type)).toContain('window.opened');
     await close();
+  });
+});
+
+describe('an event stream and a start already admitted', () => {
+  // OPL-4631 where it costs most: SettledError ends a subscription for GOOD, so
+  // a stream opened against a computer mid-resume used to die permanently and
+  // name the resume as the reason.
+  //
+  // Driven through EventHub rather than poll_events, which is what the "still
+  // starting" test above does and for the same reason: a subscription that is
+  // backing off correctly never returns from a poll, so a tool call could only
+  // prove it by timing out.
+  const serve = (body: Record<string, unknown>) => {
+    const real = globalThis.fetch;
+    globalThis.fetch = (async (input: string | URL | Request) => {
+      const url = new URL(typeof input === 'string' ? input : input.toString());
+      if (url.host !== new URL(BASE).host) return real(input as never);
+      return new Response(
+        JSON.stringify({
+          id: 'vm-1',
+          os: 'linux',
+          vnc: { events_url: 'wss://app.test/api/v1/computers/vm-1/events?token=t' },
+          ...body,
+        }),
+        { headers: { 'Content-Type': 'application/json' } },
+      );
+    }) as typeof fetch;
+    return () => {
+      globalThis.fetch = real;
+    };
+  };
+
+  const settledReason = (sub: { state: { status: string; reason?: string } }) =>
+    sub.state.status === 'stopped' ? String(sub.state.reason ?? '') : '';
+
+  it.each([
+    ['stopped', 2048, false],
+    ['suspended', 2048, false],
+    ['stopped', undefined, false],
+    ['suspended', undefined, false],
+    ['stopped', 0, true],
+    ['suspended', 0, true],
+  ])('%s with a pool of %s settles: %s', async (status, pool, settles) => {
+    const restore = serve(pool === undefined ? { status } : { status, running_ram_mb: pool });
+    try {
+      const ev = fakeEvents({ ready: true });
+      const hub = new EventHub(new Api('com_test', BASE), ev.factory);
+      try {
+        const sub = hub.open('vm-1');
+        await new Promise((r) => setTimeout(r, 100));
+        expect(sub.state.status === 'stopped').toBe(settles);
+        if (settles) expect(settledReason(sub)).toContain('start_computer');
+        // The fake socket opens whenever it is asked, without consulting the
+        // computer — so "not settled" alone would also be satisfied by a
+        // subscription that skipped the guard and connected to a machine that
+        // is not running (Codex review). NOTHING may connect here either way:
+        // the settled rows never reach a socket, and the waiting rows are
+        // waiting precisely because they must not.
+        expect(ev.sockets).toHaveLength(0);
+      } finally {
+        hub.closeAll();
+      }
+    } finally {
+      restore();
+    }
+  });
+
+  it('tells a build-failed stream to delete and rebuild, not to start', async () => {
+    // The platform's own remedy for a disk that was never finished, and the
+    // one thing start_computer cannot do for it (Codex review).
+    const restore = serve({ status: 'build-failed', running_ram_mb: 0 });
+    try {
+      const ev = fakeEvents({ ready: true });
+      const hub = new EventHub(new Api('com_test', BASE), ev.factory);
+      try {
+        const sub = hub.open('vm-1');
+        await new Promise((r) => setTimeout(r, 100));
+        expect(sub.state.status).toBe('stopped');
+        expect(settledReason(sub)).toMatch(/[Dd]elete it and build it again/);
+        expect(settledReason(sub)).not.toContain('start_computer');
+        expect(ev.sockets).toHaveLength(0);
+      } finally {
+        hub.closeAll();
+      }
+    } finally {
+      restore();
+    }
+  });
+
+  it('is terminal about a half-removed computer, which will never start again', async () => {
+    // Not a state anybody can admit a start for: its disk is gone, and the
+    // reference says only deleting it again clears it. Backing off on that
+    // would re-read the record every fifteen seconds for the whole session.
+    const restore = serve({ status: 'half-removed' });
+    try {
+      const ev = fakeEvents({ ready: true });
+      const hub = new EventHub(new Api('com_test', BASE), ev.factory);
+      try {
+        const sub = hub.open('vm-1');
+        await new Promise((r) => setTimeout(r, 100));
+        expect(sub.state.status).toBe('stopped');
+        expect(settledReason(sub)).toContain('half-removed');
+        expect(ev.sockets).toHaveLength(0);
+      } finally {
+        hub.closeAll();
+      }
+    } finally {
+      restore();
+    }
   });
 });
