@@ -185,7 +185,7 @@ export const PARAMETERS: ReadonlyMap<string, readonly string[]> = new Map([
     ['body:name', 'body:cpu', 'body:ram_mb', 'body:disk_gb', 'body:idle_suspend_min'],
   ],
   ['DELETE computers/:id', ['query:snapshots', 'query:expect']],
-  ['POST computers/:id/start', []],
+  ['POST computers/:id/start', ['query:resume_only']],
   ['POST computers/:id/stop', ['query:force']],
   ['POST computers/:id/suspend', []],
   ['POST computers/:id/restart', []],
@@ -320,6 +320,11 @@ export const PARAMETERS: ReadonlyMap<string, readonly string[]> = new Map([
  * would say nothing that route's own line does not.
  */
 export const UNIMPLEMENTED_PARAMETERS: ReadonlySet<string> = new Set([
+  // DECISION. start_computer requests a boot or resume. With resume_only=true,
+  // a stopped computer without a saved session returns 200 without starting.
+  // Keep that successful no-op out of the tool so a model cannot mistake the
+  // acknowledgement for a start; exposing it needs explicit result semantics.
+  'POST computers/:id/start  query:resume_only',
   // DECISION. `keys: ['ctrl', 'c']` is sent instead. The chord-as-one-string
   // form cannot express a key whose own name contains the separator.
   'POST computers/:id/input  body:key',
