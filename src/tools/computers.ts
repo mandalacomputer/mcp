@@ -541,7 +541,7 @@ export const registerComputers: Registrar = (server, session, opts) => {
             return `\n\nIt is ${status}, and this host did not say whether a start is under way — wait_for_computer, which starts nothing, says which it is.`;
           };
           return said(
-            `Selected ${describe(c)}. Later calls need no computer_id.` + advice(),
+            `Selected ${describe(c)}. Later calls need no computer_id.${advice()}`,
             withoutCredentials(c),
           );
         } finally {
