@@ -511,9 +511,12 @@ describe('the socket underneath', () => {
     globalThis.fetch = (async (input: string | URL | Request) => {
       const url = new URL(typeof input === 'string' ? input : input.toString());
       if (url.host !== new URL(BASE).host) return real(input as never);
-      return new Response(JSON.stringify({ id: 'vm-1', status: 'suspended', os: 'linux' }), {
-        headers: { 'Content-Type': 'application/json' },
-      });
+      return new Response(
+        JSON.stringify({ id: 'vm-1', status: 'suspended', running_ram_mb: 0, os: 'linux' }),
+        {
+          headers: { 'Content-Type': 'application/json' },
+        },
+      );
     }) as typeof fetch;
     try {
       const ev = fakeEvents();
@@ -547,6 +550,9 @@ describe('the socket underneath', () => {
         JSON.stringify({
           id: 'vm-1',
           status,
+          // Idle, not mid-start: the waits key on this, and a suspended
+          // computer whose resume has been admitted is waited for (OPL-4631).
+          running_ram_mb: status === 'running' ? 2048 : 0,
           os: 'linux',
           vnc: { events_url: 'wss://app.test/api/v1/computers/vm-1/events?token=t' },
         }),
@@ -640,6 +646,9 @@ describe('the socket underneath', () => {
         JSON.stringify({
           id: 'vm-1',
           status,
+          // Idle, not mid-start: the waits key on this, and a suspended
+          // computer whose resume has been admitted is waited for (OPL-4631).
+          running_ram_mb: status === 'running' ? 2048 : 0,
           os: 'linux',
           vnc: { events_url: 'wss://app.test/api/v1/computers/vm-1/events?token=t' },
         }),

@@ -304,6 +304,20 @@ const BUILD_STREAM =
 /** Exec output, encoded the way the platform encodes it. */
 export const b64 = (s: string) => Buffer.from(s, 'utf8').toString('base64');
 
+/**
+ * What the platform reports as held against the running pool for a given status
+ * (platform OPL-4630), so a fixture that says `suspended` says the whole of what
+ * a suspended computer looks like.
+ *
+ * The real rule is a reservation OR a live process, and a reservation is taken
+ * before the process exists — so a computer mid-start reads `stopped` or
+ * `suspended` with a NON-zero value here. That case is not the default because
+ * it is not the common one; a test that wants it overrides the field, and
+ * `running_ram_mb: 0` on a stopped fixture is the fixture saying "and nobody is
+ * starting it", which is what the waits key on.
+ */
+const runningRamFor = (status: string): number => (status === 'running' ? COMPUTER.ram_mb : 0);
+
 function respond(
   method: string,
   path: string,
@@ -449,7 +463,11 @@ function respond(
     return method === 'GET' ? json(HOLDINGS) : json(CAPTURING_SNAPSHOT, 202);
   }
   if (path.endsWith('/computers'))
-    return json(method === 'GET' ? [{ ...COMPUTER, status }] : COMPUTER);
+    return json(
+      method === 'GET'
+        ? [{ ...COMPUTER, status, running_ram_mb: runningRamFor(status) }]
+        : { ...COMPUTER, running_ram_mb: runningRamFor(COMPUTER.status) },
+    );
   // The four power actions answer the platform's Ack and not a computer record
   // (apidoc: `response: ref('Ack')` on each). The catch-all below answered a
   // record for them, so the server's formatting of the real answer — a
@@ -457,7 +475,7 @@ function respond(
   if (/\/computers\/[^/]+\/(start|stop|suspend|restart)$/.test(path)) return json({ ok: true });
   // Before the catch-all, which answers COMPUTER for every id there is.
   if (path === '/computers/vm-bridged') return json(BRIDGED_COMPUTER);
-  return json({ ...COMPUTER, status });
+  return json({ ...COMPUTER, status, running_ram_mb: runningRamFor(status) });
 }
 
 /**

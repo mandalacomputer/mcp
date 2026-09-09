@@ -33,7 +33,7 @@ import { posix } from 'node:path';
 import { WebSocket as UndiciWebSocket } from 'undici';
 import type { Api } from './api.js';
 import { isTransientForPoll, MandalaError } from './errors.js';
-import { type Computer, unwrapComputer } from './format.js';
+import { type Computer, nothingAdmitted, unwrapComputer } from './format.js';
 import * as P from './paths.js';
 
 /**
@@ -1184,26 +1184,38 @@ export class Subscription {
       throw err;
     }
     const status = c.status ?? 'unknown';
-    if (status === 'suspended') {
+    // SETTLING IS FOREVER, so each of these has to be a state nobody is already
+    // moving out of. `status` cannot say that on its own: it is read from the
+    // guest process, and a start that has been ADMITTED has no process yet, so
+    // it reads `stopped` through a cold boot and `suspended` through a resume —
+    // whose session record is spent only on the way out of a start that worked.
+    // A stream opened against a computer mid-resume used to die permanently and
+    // name the resume as the reason (OPL-4631). nothingAdmitted is the
+    // platform's own word for idle, and absence of the field is not that word.
+    if (status === 'suspended' && nothingAdmitted(c)) {
       throw new SettledError(
         `${this.computerId} suspended, and the event stream is the one part of this API that does ` +
           'not resume a computer for you. Listening is not using, so a computer nobody touches ' +
           'suspends underneath its own stream. start_computer, then ask again.',
       );
     }
-    if (status === 'stopped' || status === 'build-failed') {
+    if (status === 'build-failed' || (status === 'stopped' && nothingAdmitted(c))) {
       throw new SettledError(
         `${this.computerId} is ${status}, and only a running computer has an event stream. ` +
           'start_computer, then ask again.',
       );
     }
     if (status !== 'running') {
-      // `starting`, `moving`, `creating` — states that clear on their own, so
-      // they get the backoff rather than the refusal. Settling on everything
-      // that was not `running` broke the flow the README advertises: a
-      // create_computer followed at once by wait_for_event("computer.ready")
-      // meets `starting`, which is the ordinary weather of a machine coming up
-      // and is precisely what the caller is waiting through.
+      // Everything left is a state that clears on its own, so it gets the
+      // backoff rather than the refusal — `building`, and now a `stopped` or
+      // `suspended` computer whose start has been admitted and is loading.
+      //
+      // That last pair is what this branch was FOR, and it could not reach it.
+      // The comment here used to name `starting`, `moving` and `creating`; the
+      // platform reports none of them — its statuses are `running`, `stopped`,
+      // `suspended`, `building`, `build-failed` and `half-removed` — so the
+      // flow it described, a create_computer followed at once by
+      // wait_for_event("computer.ready"), met `stopped` and settled above.
       throw new MandalaError(`${this.computerId} is ${status}; waiting for it to be running`);
     }
     const vnc = c.vnc as Record<string, unknown> | undefined;

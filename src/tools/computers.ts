@@ -12,6 +12,7 @@ import {
   guarded,
   incompleteWarning,
   json,
+  nothingAdmitted,
   refused,
   said,
   unwrapComputer,
@@ -1035,13 +1036,24 @@ export const registerComputers: Registrar = (server, session, opts) => {
           }
           // Neither of the next two resolves on its own, so spinning on either
           // burns the whole timeout waiting for something nobody is going to do.
-          if (last === 'suspended') {
+          //
+          // Unless somebody is. `status` is read from the guest process, so a
+          // start that has been ADMITTED reads as `stopped` while it boots and
+          // as `suspended` while it resumes — the session record is spent only
+          // on the way out of a start that worked. Refusing there tells a model
+          // to call start_computer on a computer that is already starting, and
+          // the obvious next thing it does is start it a second time.
+          //
+          // nothingAdmitted is the platform's own word for idle, and it is
+          // absent-aware: a host that did not answer has not said nothing is
+          // coming, so the wait goes on rather than refusing (OPL-4631).
+          if (last === 'suspended' && nothingAdmitted(c)) {
             return refused(
               `${id} is suspended, and that state does not clear by itself. start_computer resumes the saved session in about a second.`,
               withoutCredentials(c),
             );
           }
-          if (last === 'stopped') {
+          if (last === 'stopped' && nothingAdmitted(c)) {
             return refused(`${id} is stopped. start_computer boots it.`, withoutCredentials(c));
           }
           if (last === 'running') {
