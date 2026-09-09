@@ -572,6 +572,10 @@ describe('the socket underneath', () => {
         // It backs off rather than stopping, and connects once it is running.
         await new Promise((r) => setTimeout(r, 100));
         expect(sub.state.status).not.toBe('stopped');
+        // And has NOT connected yet — without this, a subscription that
+        // ignored the guard and opened a socket immediately would satisfy the
+        // wait below just as well (Codex review).
+        expect(ev.sockets).toHaveLength(0);
         status = 'running';
         await until('a connection once it is running', () => ev.sockets.length === 1, 5_000);
       } finally {
@@ -1086,6 +1090,35 @@ describe('an event stream and a start already admitted', () => {
         await new Promise((r) => setTimeout(r, 100));
         expect(sub.state.status === 'stopped').toBe(settles);
         if (settles) expect(settledReason(sub)).toContain('start_computer');
+        // The fake socket opens whenever it is asked, without consulting the
+        // computer — so "not settled" alone would also be satisfied by a
+        // subscription that skipped the guard and connected to a machine that
+        // is not running (Codex review). NOTHING may connect here either way:
+        // the settled rows never reach a socket, and the waiting rows are
+        // waiting precisely because they must not.
+        expect(ev.sockets).toHaveLength(0);
+      } finally {
+        hub.closeAll();
+      }
+    } finally {
+      restore();
+    }
+  });
+
+  it('tells a build-failed stream to delete and rebuild, not to start', async () => {
+    // The platform's own remedy for a disk that was never finished, and the
+    // one thing start_computer cannot do for it (Codex review).
+    const restore = serve({ status: 'build-failed', running_ram_mb: 0 });
+    try {
+      const ev = fakeEvents({ ready: true });
+      const hub = new EventHub(new Api('com_test', BASE), ev.factory);
+      try {
+        const sub = hub.open('vm-1');
+        await new Promise((r) => setTimeout(r, 100));
+        expect(sub.state.status).toBe('stopped');
+        expect(settledReason(sub)).toMatch(/[Dd]elete it and build it again/);
+        expect(settledReason(sub)).not.toContain('start_computer');
+        expect(ev.sockets).toHaveLength(0);
       } finally {
         hub.closeAll();
       }
@@ -1107,6 +1140,7 @@ describe('an event stream and a start already admitted', () => {
         await new Promise((r) => setTimeout(r, 100));
         expect(sub.state.status).toBe('stopped');
         expect(settledReason(sub)).toContain('half-removed');
+        expect(ev.sockets).toHaveLength(0);
       } finally {
         hub.closeAll();
       }

@@ -1199,9 +1199,19 @@ export class Subscription {
           'suspends underneath its own stream. start_computer, then ask again.',
       );
     }
-    if (status === 'build-failed' || (status === 'stopped' && nothingAdmitted(c))) {
+    // Two terminal answers, and they are not the same answer. A disk that was
+    // never finished is not started by anybody — the platform's own remedy is
+    // "delete it and build it again" — so telling that caller to start_computer
+    // sends them at a call that refuses them (Codex review).
+    if (status === 'build-failed') {
       throw new SettledError(
-        `${this.computerId} is ${status}, and only a running computer has an event stream. ` +
+        `${this.computerId}'s disk was never finished, so there is nothing to stream and nothing ` +
+          'to start. Delete it and build it again.',
+      );
+    }
+    if (status === 'stopped' && nothingAdmitted(c)) {
+      throw new SettledError(
+        `${this.computerId} is stopped, and only a running computer has an event stream. ` +
           'start_computer, then ask again.',
       );
     }

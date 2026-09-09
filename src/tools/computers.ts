@@ -499,22 +499,45 @@ export const registerComputers: Registrar = (server, session, opts) => {
               `${c.id ?? computer_id} was deleted while it was being selected. The session selection was not changed.`,
             );
           }
-          // The advice has to know the difference the two waits know, or it
-          // sends a model to start a computer that is already starting — which
-          // is the whole of OPL-4631, in the one place a model is most likely
-          // to act on the sentence immediately. A machine whose start the
-          // platform has admitted is one to WAIT for; only one it is holding
-          // nothing for wants start_computer. An unknown pool says neither, so
-          // it names the state and stops there.
+          // The advice has to know what the two waits know, or it sends a model
+          // to start a computer that is already starting — the whole of
+          // OPL-4631, in the one place a model acts on the sentence soonest.
+          //
+          // STATUS FIRST, THEN THE POOL, and that order is the correction: the
+          // first cut asked only about the pool, so it told a caller to start a
+          // build-failed computer, a half-removed one and a build still running
+          // — three machines the platform refuses to start at all (buildErr in
+          // server/vm.go). A reservation is only ever the difference between
+          // "start it" and "wait for it" on a machine that COULD be started.
           const advice = () => {
-            if (c.status === 'running') return '';
-            const idle = nothingAdmitted(c);
-            if (idle)
-              return `\n\nIt is ${c.status ?? 'not running'} — start_computer before driving it.`;
-            if (c.running_ram_mb !== undefined) {
-              return `\n\nIt is ${c.status ?? 'not running'}, and its start has already been admitted — wait_for_computer, not start_computer.`;
+            const status = c.status ?? 'not running';
+            if (status === 'running') return '';
+            // Terminal, and each with the remedy that actually applies.
+            if (status === 'build-failed') {
+              return `\n\nIts disk was never finished — delete_computer and build it again. Nothing else clears this.`;
             }
-            return `\n\nIt is ${c.status ?? 'not running'} — wait_for_computer says when it is usable.`;
+            if (status === 'half-removed') {
+              return `\n\nIts files were partly removed: it cannot be started or used again. delete_computer is what clears it.`;
+            }
+            // A disk copy in progress cannot be started either, and a memory
+            // fork resumes itself at the end of one — so both wait, and only
+            // the reason differs.
+            if (status === 'building') {
+              return c.running_ram_mb
+                ? `\n\nIt is still building, and its RAM is already reserved — it will come up on its own when the copy finishes. wait_for_computer.`
+                : `\n\nIt is still building — wait_for_computer, then start_computer once the copy has finished.`;
+            }
+            // Stopped or suspended: the one place a start is the right advice,
+            // and only when the platform says it is holding nothing.
+            if (nothingAdmitted(c)) {
+              return `\n\nIt is ${status} — start_computer before driving it.`;
+            }
+            if (c.running_ram_mb !== undefined) {
+              return `\n\nIt is ${status}, and its start has already been admitted — wait_for_computer, not start_computer.`;
+            }
+            // The pool was not reported, so neither answer is established. Say
+            // that, rather than prescribing one of them as though it were.
+            return `\n\nIt is ${status}, and this host did not say whether a start is under way — wait_for_computer, which starts nothing, says which it is.`;
           };
           return said(
             `Selected ${describe(c)}. Later calls need no computer_id.` + advice(),
@@ -1045,6 +1068,18 @@ export const registerComputers: Registrar = (server, session, opts) => {
                 : ' — the platform gave no reason';
             return refused(
               `Build failed${why}. This does not resolve on its own.`,
+              withoutCredentials(c),
+            );
+          }
+          // Its files were partly removed and its disk is gone: the platform
+          // refuses to start or use it, and only deleting it again clears it.
+          // Waiting spent the whole budget and then reported "last seen
+          // half-removed", which is the state the caller passed in (Codex
+          // review). Not qualified by the pool: nothing can be admitted for a
+          // machine with no disk.
+          if (last === 'half-removed') {
+            return refused(
+              `${id} is half-removed: its files were partly removed, it cannot be started or used again, and delete_computer is what clears it.`,
               withoutCredentials(c),
             );
           }

@@ -3575,8 +3575,13 @@ describe('a refusal the platform put a word on', () => {
       expect(res.isError).toBe(true);
       const text = said(res);
       expect(text).toContain('this computer is not running, so it has no clipboard');
-      expect(text).toMatch(/does NOT clear by waiting/);
+      // The classification still reaches the model as prose. What it no longer
+      // claims is that the state cannot clear: a start that has been admitted
+      // raises this same `unavailable` from the platform's bare pid check, and
+      // "does NOT clear by waiting" was false of exactly that case (OPL-4631).
+      expect(text).toMatch(/will not clear on its own/);
       expect(text).toContain('start_computer');
+      expect(text).toContain('wait_for_computer');
       await close();
     } finally {
       globalThis.fetch = real;
@@ -5784,16 +5789,85 @@ describe('what use_computer tells a model about a machine that is not running', 
     }
   });
 
-  it('names the state and points at the wait when the platform did not say', async () => {
+  it('says the question is open when the platform did not answer it', async () => {
+    // Not a prescription dressed as neutrality, which is what the first cut
+    // was: it recommended the wait without saying why (Codex review). The
+    // honest sentence names the gap, and names the call that closes it without
+    // starting anything.
     const restore = serve({ status: 'stopped' });
     try {
       const { call, close } = await connect();
       const res = await call('use_computer', { computer_id: 'vm-1' });
-      expect(said(res)).toMatch(/wait_for_computer says when it is usable/);
+      expect(said(res)).toMatch(/did not say whether a start is under way/);
+      expect(said(res)).toMatch(/which starts nothing/);
       expect(said(res)).not.toMatch(/start_computer before driving it/);
       await close();
     } finally {
       restore();
     }
   });
+
+  it.each([
+    ['build-failed', /delete_computer and build it again/],
+    ['half-removed', /cannot be started or used again/],
+    ['building', /wait_for_computer, then start_computer/],
+  ])('a %s computer is never told to start', async (status, says) => {
+    // The platform refuses to start all three (buildErr in server/vm.go), so
+    // "start_computer before driving it" sends a model at a call that will
+    // refuse it. The zero pool is what the first cut keyed on, and is exactly
+    // what these three report.
+    const restore = serve({ status, running_ram_mb: 0 });
+    try {
+      const { call, close } = await connect();
+      const res = await call('use_computer', { computer_id: 'vm-1' });
+      expect(said(res)).toMatch(says);
+      expect(said(res)).not.toMatch(/start_computer before driving it/);
+      await close();
+    } finally {
+      restore();
+    }
+  });
+
+  it('says a building memory fork will come up by itself', async () => {
+    // It reserves its RAM at the start of the copy and resumes at the end of
+    // one, so there is nothing for the caller to do but wait.
+    const restore = serve({ status: 'building', running_ram_mb: 2048 });
+    try {
+      const { call, close } = await connect();
+      const res = await call('use_computer', { computer_id: 'vm-1' });
+      expect(said(res)).toMatch(/come up on its own when the copy finishes/);
+      await close();
+    } finally {
+      restore();
+    }
+  });
+});
+
+describe('the wait and the states nothing can start', () => {
+  // wait_for_computer refused build-failed but not half-removed, so a computer
+  // whose disk is gone spent the whole budget and was then reported as "last
+  // seen half-removed" — the state the caller passed in (Codex review).
+  it('refuses a half-removed computer at once rather than waiting on it', async () => {
+    const real = globalThis.fetch;
+    let reads = 0;
+    globalThis.fetch = (async () => {
+      reads += 1;
+      return new Response(
+        JSON.stringify({ id: 'vm-1', status: 'half-removed', running_ram_mb: 0 }),
+        { headers: { 'Content-Type': 'application/json' } },
+      );
+    }) as typeof fetch;
+    try {
+      const { call, close } = await connect();
+      const started = Date.now();
+      const res = await call('wait_for_computer', { until: 'running', timeout_s: 30 });
+      expect(res.isError).toBe(true);
+      expect(said(res)).toMatch(/delete_computer is what clears it/);
+      expect(Date.now() - started).toBeLessThan(3_000);
+      expect(reads).toBeLessThan(4);
+      await close();
+    } finally {
+      globalThis.fetch = real;
+    }
+  }, 40_000);
 });
