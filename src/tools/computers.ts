@@ -173,8 +173,9 @@ type Usage = {
  * model reads before it acts on cost, and a dimension the account is billed on
  * that appears only in the JSON underneath is a figure nobody weighs. Two were
  * missing: `ram_gb_hours`, although the tool's own description promises hours
- * "weighted by cores and memory", and `snapshot_gb_months`, which apidoc.ts
- * calls "the unit snapshots are priced in" — the figure that explains the bill
+ * "weighted by cores and memory", and `snapshot_gb_months`, which the API
+ * reference calls the unit snapshots are priced in — the figure that explains
+ * the bill
  * of an account holding many durable snapshots and running almost nothing.
  *
  * The `_hours` twins of the two `_months` figures are deliberately NOT here.
@@ -1435,7 +1436,7 @@ export const registerComputers: Registrar = (server, session, opts) => {
         // Not fetched on the caller's behalf, which was the tempting shortcut
         // and is the wrong one. A fingerprint read a millisecond before the
         // delete binds the purge to whatever the set is now, not to what anyone
-        // agreed to — and the race checkExpectation exists for is exactly that:
+        // agreed to — and the race the expectation exists for is exactly that:
         // a capture that finishes between the decision and the click, then gets
         // destroyed by a confirmation that predates it.
         const fingerprint = expect?.trim() || undefined;

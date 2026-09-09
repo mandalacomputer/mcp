@@ -59,8 +59,8 @@ describe('get_usage', () => {
 
   it('puts every priced dimension in the sentence, memory and snapshots included', async () => {
     // Two were missing. The description promises hours "weighted by cores and
-    // memory" and the line carried the cores half only; and apidoc.ts calls
-    // snapshot_gb_months "the unit snapshots are priced in", which is the
+    // memory" and the line carried the cores half only; and the API reference
+    // calls snapshot_gb_months the unit snapshots are priced in, which is the
     // figure that explains the bill of an account holding many durable
     // snapshots and running almost nothing. Both were in the JSON underneath
     // and nowhere in the sentence a model reads first.

@@ -35,6 +35,12 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run lint
+      # This repo is public and the platform it speaks to is not. The references
+      # this catches reach a MODEL here — tool descriptions are what an agent
+      # reads before it acts — and they ship in the published server. OPL-4617
+      # scrubbed two by hand and left nothing behind to catch the next
+      # (OPL-4637).
+      - run: npm run check:internals
       - run: npm run typecheck
       - run: npx vitest run
       - run: npm run build
