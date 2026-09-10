@@ -360,6 +360,10 @@ export class Subscription {
    * changed.
    */
   #armGen = new Map<string, number>();
+  /** Trees that have armed at least once in this subscription. */
+  #everArmed = new Set<string>();
+  /** Re-arms a file-wait response has not explained yet. */
+  #undisclosedRearm = new Set<string>();
   /**
    * The STANDING loss on each tree, cleared when it arms.
    *
@@ -570,6 +574,16 @@ export class Subscription {
     return this.#armGen.get(path) ?? 0;
   }
 
+  /** Whether a completed re-arm still needs to be explained to this tree's caller. */
+  hasUndisclosedRearm(path: string): boolean {
+    return this.#undisclosedRearm.has(path);
+  }
+
+  /** Claim a re-arm for the response that is about to explain it. */
+  takeUndisclosedRearm(path: string): boolean {
+    return this.#undisclosedRearm.delete(path);
+  }
+
   /** The last thing this tree said it had lost, if it has said one since arming. */
   lostFor(path: string): string | undefined {
     return this.#watchLost.get(path);
@@ -714,6 +728,8 @@ export class Subscription {
         this.#watchLost.delete(evicted);
         this.#hostName.delete(evicted);
         this.#interrupted.delete(evicted);
+        this.#everArmed.delete(evicted);
+        this.#undisclosedRearm.delete(evicted);
         this.#watchRefused.delete(evicted);
         // An experiment about a tree nobody nominates any more has nothing left
         // to prove, and letting it finish would file a refusal against a path
@@ -1542,7 +1558,7 @@ export class Subscription {
       // would drop a permanent condition that nothing puts back. `hello.watching`
       // has no field for it, so the flag is the only record there is.
       if (w.armed && !this.isArmed(nominated)) {
-        this.#bumpArm(nominated);
+        this.#armedTransition(nominated);
         this.#watchLost.delete(nominated);
       } else if (this.#watchLost.get(nominated) === 'unwatchable') {
         // Cleared on any new connection, unlike `budget`, because a tree that
@@ -1618,6 +1634,13 @@ export class Subscription {
     this.#armGen.set(path, (this.#armGen.get(path) ?? 0) + 1);
   }
 
+  /** Record an arm, retaining later arms until a file wait explains their gap. */
+  #armedTransition(path: string): void {
+    if (this.#everArmed.has(path)) this.#undisclosedRearm.add(path);
+    else this.#everArmed.add(path);
+    this.#bumpArm(path);
+  }
+
   /**
    * What a `file.changed` says about the TREE, as opposed to about a file.
    *
@@ -1658,7 +1681,7 @@ export class Subscription {
       // clears the flag when the link goes down — and the wait that should have
       // said "re-read the tree" would have gone on waiting on a tree whose
       // history had a hole in it.
-      this.#bumpArm(watch);
+      this.#armedTransition(watch);
       this.#armed.set(watch, true);
       return;
     }

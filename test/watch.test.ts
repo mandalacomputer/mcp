@@ -379,6 +379,209 @@ describe('a tree the model nominates', () => {
     await close();
   });
 
+  it('retains a re-arm that arrives between calls until the next wait reports it', async () => {
+    const { call, close, ev } = await attach({ ready: false });
+    await call('wait_for_file_change', { path: '/a', timeout_s: 1 });
+    const socket = await nominated(ev);
+    socket.send(frame({ watch: '/a', armed: true }, 'cur-1'));
+
+    const res = await call('wait_for_file_change', { path: '/a', timeout_s: 1 });
+    expect(res.isError).toBeFalsy();
+    expect(textOf(res)).toContain('re-armed after an interruption');
+    expect(textOf(res)).toContain('Re-read the directory');
+    expect(textOf(res)).not.toContain('nothing is missed between calls');
+
+    const again = await call('wait_for_file_change', { path: '/a', timeout_s: 1 });
+    expect(textOf(again)).not.toContain('re-armed after an interruption');
+    await close();
+  });
+
+  it('does not mistake the guest finishing its initial arm for an interruption', async () => {
+    const { call, close, ev } = await attach({}, false);
+    const answer = call('wait_for_file_change', { path: '/a', timeout_s: 2 });
+    const socket = await nominated(ev);
+    socket.send(frame({ watch: '/a', armed: true }, 'cur-1'));
+
+    const res = await answer;
+    expect(res.isError).toBeFalsy();
+    expect(textOf(res)).toContain('Nothing changed under /a');
+    expect(textOf(res)).not.toContain('re-armed after an interruption');
+    await close();
+  });
+
+  it('keeps a pending re-arm through a competing read and a wait on another tree', async () => {
+    const { call, close, ev } = await attach();
+    await call('wait_for_file_change', { path: '/a', timeout_s: 1 });
+    const socket = await nominated(ev);
+    socket.send(frame({ watch: '/a', armed: true }, 'cur-1'));
+
+    const polled = await call('poll_events');
+    expect(dataOf(polled).events).toHaveLength(1);
+    const other = await call('wait_for_file_change', { path: '/b', timeout_s: 1 });
+    expect(textOf(other)).not.toContain('re-armed after an interruption');
+
+    const res = await call('wait_for_file_change', { path: '/a', timeout_s: 1 });
+    expect(textOf(res)).toContain('re-armed after an interruption');
+    expect(dataOf(res).events).toEqual([]);
+    await close();
+  });
+
+  it('keeps a pending re-arm when its reconciliation is cancelled', async () => {
+    const { call, client, close, ev } = await attach();
+    const normal = globalThis.fetch;
+    let reconciling: AbortSignal | null | undefined;
+    try {
+      await call('wait_for_file_change', { path: '/a', timeout_s: 1 });
+      const socket = await nominated(ev);
+      socket.send({ type: 'gap', cursor: 'cur-gap', data: {} });
+      socket.send(frame({ watch: '/a', armed: true }, 'cur-1'));
+
+      globalThis.fetch = (async (input, init) => {
+        if (!String(input).endsWith('/windows')) return normal(input, init);
+        reconciling = init?.signal;
+        return new Promise<Response>((_resolve, reject) => {
+          reconciling?.addEventListener('abort', () => reject(reconciling?.reason), { once: true });
+        });
+      }) as typeof fetch;
+      const controller = new AbortController();
+      const cancelled = client.callTool(
+        { name: 'wait_for_file_change', arguments: { path: '/a', timeout_s: 5 } },
+        undefined,
+        { signal: controller.signal },
+      );
+      await until('reconciliation to start', () => reconciling !== undefined);
+      controller.abort();
+      await expect(cancelled).rejects.toThrow();
+      await until('reconciliation cancellation', () => reconciling?.aborted === true);
+      globalThis.fetch = normal;
+
+      const res = await call('wait_for_file_change', { path: '/a', timeout_s: 1 });
+      expect(textOf(res)).toContain('re-armed after an interruption');
+    } finally {
+      globalThis.fetch = normal;
+      await close();
+    }
+  });
+
+  it('keeps a during-wait re-arm when its reconciliation is cancelled', async () => {
+    const { call, client, close, ev } = await attach();
+    const normal = globalThis.fetch;
+    let reconciling: AbortSignal | null | undefined;
+    try {
+      await call('wait_for_file_change', { path: '/a', timeout_s: 1 });
+      const socket = await nominated(ev);
+      socket.send({ type: 'gap', cursor: 'cur-gap', data: {} });
+      globalThis.fetch = (async (input, init) => {
+        if (!String(input).endsWith('/windows')) return normal(input, init);
+        reconciling = init?.signal;
+        return new Promise<Response>((_resolve, reject) => {
+          reconciling?.addEventListener('abort', () => reject(reconciling?.reason), { once: true });
+        });
+      }) as typeof fetch;
+
+      const controller = new AbortController();
+      const cancelled = client.callTool(
+        { name: 'wait_for_file_change', arguments: { path: '/a', timeout_s: 5 } },
+        undefined,
+        { signal: controller.signal },
+      );
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      socket.send(frame({ watch: '/a', armed: true }, 'cur-1'));
+      await until('reconciliation to start', () => reconciling !== undefined);
+      controller.abort();
+      await expect(cancelled).rejects.toThrow();
+      await until('reconciliation cancellation', () => reconciling?.aborted === true);
+      globalThis.fetch = normal;
+
+      const res = await call('wait_for_file_change', { path: '/a', timeout_s: 1 });
+      expect(textOf(res)).toContain('re-armed after an interruption');
+    } finally {
+      globalThis.fetch = normal;
+      await close();
+    }
+  });
+
+  it('does not drop a delivery when a competing wait reports the pending re-arm', async () => {
+    const { call, close, ev } = await attach();
+    const normal = globalThis.fetch;
+    let release: (() => void) | undefined;
+    try {
+      await call('wait_for_file_change', { path: '/a', timeout_s: 1 });
+      const socket = await nominated(ev);
+      socket.send({ type: 'gap', cursor: 'cur-gap', data: {} });
+      socket.send(frame({ watch: '/a', armed: true }, 'cur-1'));
+      globalThis.fetch = (async (input, init) => {
+        if (!String(input).endsWith('/windows')) return normal(input, init);
+        return new Promise<Response>((resolve) => {
+          release = () => resolve(new Response('{"windows":[]}'));
+        });
+      }) as typeof fetch;
+
+      const reconciling = call('wait_for_file_change', { path: '/a', timeout_s: 5 });
+      await until('reconciliation to start', () => release !== undefined);
+      const competing = await call('wait_for_file_change', { path: '/a', timeout_s: 1 });
+      expect(textOf(competing)).toContain('re-armed after an interruption');
+      release?.();
+
+      const res = await reconciling;
+      expect(textOf(res)).toContain('Another call on vm-1 reported the watch interruption');
+      expect(textOf(res)).not.toContain('Nothing changed under');
+      expect(dataOf(res).events).toEqual(
+        expect.arrayContaining([expect.objectContaining({ cursor: 'cur-1' })]),
+      );
+    } finally {
+      globalThis.fetch = normal;
+      await close();
+    }
+  });
+
+  it('reports a pending re-arm before enforcing a standing watch budget', async () => {
+    const { call, close, ev } = await attach();
+    await call('wait_for_file_change', { path: '/a', timeout_s: 1 });
+    const socket = await nominated(ev);
+    socket.send(frame({ watch: '/a', armed: true }, 'cur-1'));
+    socket.send(frame({ watch: '/a', lost: 'budget' }, 'cur-2'));
+
+    const interrupted = await call('wait_for_file_change', { path: '/a', timeout_s: 1 });
+    expect(textOf(interrupted)).toContain('re-armed after an interruption');
+    const budget = await call('wait_for_file_change', { path: '/a', timeout_s: 1 });
+    expect(budget.isError).toBe(true);
+    expect(textOf(budget)).toContain('bigger than the directory budget');
+    expect(textOf(budget)).not.toContain('re-armed after an interruption');
+    await close();
+  });
+
+  it('forgets pending re-arm state when the watch itself is evicted', {
+    timeout: 20_000,
+  }, async () => {
+    const { call, close, ev } = await attach();
+    await call('wait_for_file_change', { path: '/a', timeout_s: 1 });
+    (await nominated(ev)).send(frame({ watch: '/a', armed: true }, 'cur-1'));
+    for (const path of ['/b', '/c', '/d', '/e']) {
+      await call('wait_for_file_change', { path, timeout_s: 1 });
+    }
+
+    const nominatedAgain = await call('wait_for_file_change', { path: '/a', timeout_s: 1 });
+    expect(textOf(nominatedAgain)).toContain('Nothing changed under /a');
+    expect(textOf(nominatedAgain)).not.toContain('re-armed after an interruption');
+    await close();
+  });
+
+  it('turns a pending re-arm into the retained stopped-stream gap', async () => {
+    const { call, close, ev } = await attach();
+    await call('wait_for_file_change', { path: '/a', timeout_s: 1 });
+    (await nominated(ev)).send(frame({ watch: '/a', armed: true }, 'cur-1'));
+    platform.state.status = 'suspended';
+    ev.last().close();
+    const stopped = await call('wait_for_file_change', { path: '/a', timeout_s: 1 });
+    expect(stopped.isError).toBe(true);
+
+    platform.state.status = 'running';
+    const resumed = await call('wait_for_file_change', { path: '/a', timeout_s: 2 });
+    expect(textOf(resumed)).toContain('was NOT being watched between an earlier call and this one');
+    await close();
+  });
+
   it('keeps four trees and says which one a fifth pushed out', { timeout: 20_000 }, async () => {
     const { call, close, ev } = await attach();
     for (const path of ['/a', '/b', '/c', '/d']) {

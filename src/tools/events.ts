@@ -1117,6 +1117,44 @@ export const registerEvents: Registrar = (server, session) => {
               `a watch lives on the connection. Anything that changed in that window was never ` +
               `reported and cannot be. Re-read the directory with exec if it matters.`
             : '';
+        // Kept by the subscription rather than inferred from this call's
+        // generation snapshot. A re-arm can arrive while no tool call exists,
+        // and snapshotting after it would otherwise erase the only evidence of
+        // the unreported window. Delete the marker here, where its explanation
+        // is rendered, so unrelated reads and cancelled waits cannot consume it.
+        const rearmNotice = () =>
+          `The watch on ${wire} was re-armed after an interruption — a stop and a start, a ` +
+          `guest reboot, a broker replaced. Reporting starts again HERE, and nothing that ` +
+          `happened to the tree while it was down was reported or ever will be. Re-read the ` +
+          `directory with exec if that window matters, then call again to keep waiting.`;
+        const cancelledWait = () =>
+          refused(
+            `Cancelled while waiting on ${wire}. Nothing was missed by the cancellation — this ` +
+              `server holds the stream and its buffer between calls — but nothing was checked ` +
+              `about the watch either, so call again for an answer about the tree.` +
+              interrupted(),
+          );
+        if (sub.hasUndisclosedRearm(root)) {
+          const d = sub.read({ since, limit });
+          const extras = d.loss ? await reconcile(session, id, extra.signal, deadline) : {};
+          if (extra.signal?.aborted) return cancelledWait();
+          const answer = { ...body(id, d, sub, sub.watching), watch: wire, ...extras };
+          const why = settled(sub, id, root, wire, () => interrupted() + evicted, answer);
+          if (why) return why;
+          // A competing same-tree wait may have explained it while reconcile
+          // was in flight. Only the call that claims the marker repeats it.
+          if (sub.takeUndisclosedRearm(root)) {
+            return said(rearmNotice() + interrupted() + renamed + evicted, answer);
+          }
+          return said(
+            `Another call on ${id} reported the watch interruption while this call was ` +
+              `reconciling it. The events this call read are below; nothing was dropped.` +
+              interrupted() +
+              renamed +
+              evicted,
+            answer,
+          );
+        }
         // When the waiting actually started, which is not when the call did.
         // `timeout_s` bounds the whole call — it has to, because a client
         // cancels a request that outlives its own timeout — so a call that
@@ -1174,18 +1212,14 @@ export const registerEvents: Registrar = (server, session) => {
             // call did not check and which a cancel racing an eviction or a
             // shed makes false. What IS true is the part that matters: the
             // buffer is on this side and nothing in it went anywhere.
-            return refused(
-              `Cancelled while waiting on ${wire}. Nothing was missed by the cancellation — this ` +
-                `server holds the stream and its buffer between calls — but nothing was checked ` +
-                `about the watch either, so call again for an answer about the tree.` +
-                interrupted(),
-            );
+            return cancelledWait();
           }
           const now = sub.state;
           if (now.status === 'stopped')
             return stopped(session, id, now.reason, sub, { since, limit });
           const d = sub.read({ since, limit });
           const extras = d.loss ? await reconcile(session, id, extra.signal, deadline) : {};
+          if (extra.signal?.aborted) return cancelledWait();
           const answer = { ...body(id, d, sub, sub.watching), watch: wire, ...extras };
           // THESE FIRST, and in this order, because each would otherwise be
           // described as something else. Evicting a tree does not reset its arm
@@ -1201,15 +1235,8 @@ export const registerEvents: Registrar = (server, session) => {
           });
           if (why) return why;
           if (sub.armGeneration(root) !== generation) {
-            return said(
-              `The watch on ${wire} was re-armed after an interruption — a stop and a start, a ` +
-                `guest reboot, a broker replaced. Reporting starts again HERE, and nothing that ` +
-                `happened to the tree while it was down was reported or ever will be. Re-read the ` +
-                `directory with exec if that window matters, then call again to keep waiting.` +
-                interrupted() +
-                evicted,
-              answer,
-            );
+            sub.takeUndisclosedRearm(root);
+            return said(rearmNotice() + interrupted() + evicted, answer);
           }
           if (!sub.isArmed(root)) {
             return refused(
@@ -1291,6 +1318,7 @@ export const registerEvents: Registrar = (server, session) => {
         const d = sub.read({ since, limit, through: hit });
         const last = d.events[d.events.length - 1];
         const extras = d.loss ? await reconcile(session, id, extra.signal, deadline) : {};
+        if (extra.signal?.aborted) return cancelledWait();
         const earlier = d.events.length - 1;
         // The one `lost` that is not a re-read: it says the tree is not being
         // watched, so it is the request failing rather than the watch reporting.
