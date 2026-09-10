@@ -398,7 +398,7 @@ export const registerWebhooks: Registrar = (server, session) => {
         const w = asRecord(body) as Webhook;
         if (!carriesSecret(w)) {
           return refused(
-            `The rotate on ${webhook_id} answered with ${shapeOf(body)} and no \`secret\`, so the new signing secret is NOT in this answer and cannot be read back. THE ROTATE MAY HAVE HAPPENED — and if it did, the old secret is already on its 24-hour clock and deliveries will start failing signature checks when it runs out. Read the subscription with get_webhook, then rotate again: rotating inside the window replaces the pending secret rather than keeping three, so a second rotate is safe and is the only way to get one you can store.`,
+            `The rotate on ${webhook_id} answered with ${shapeOf(body)} and no \`secret\`, so the new signing secret is NOT in this answer and cannot be read back. THE ROTATE MAY HAVE HAPPENED — and if it did, the old secret is already on its 24-hour clock and deliveries will start failing signature checks when it runs out. Do not retry blindly: a second rotation may immediately remove the original secret still deployed at the receiver from the signing pair, ending the rest of its 24-hour grace period. Coordinate recovery with whoever updates the receiver so the next secret can be stored and deployed as soon as it is returned. Consider temporarily stopping deliveries first by calling update_webhook with enabled: false, then rotate once, deploy the returned secret, and re-enable deliveries.`,
             body,
           );
         }
