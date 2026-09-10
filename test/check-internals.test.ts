@@ -13,28 +13,42 @@
 
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { copyFileSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { describe, expect, it } from 'vitest';
 
 import { scanText } from '../scripts/check-internals.mjs';
 
-const SCRIPT = join(process.cwd(), 'scripts', 'check-internals.mjs');
+const SCRIPT = fileURLToPath(new URL('../scripts/check-internals.mjs', import.meta.url));
+const DIGESTS = fileURLToPath(new URL('../scripts/internal-names.sha256', import.meta.url));
 
 const digestsFor = (...names: string[]) =>
   new Set(names.map((n) => createHash('sha256').update(n).digest('hex').slice(0, 12)));
 
-const run = (...args: string[]) => {
+const runScript = (script: string, ...args: string[]) => {
   try {
     return {
       status: 0,
-      out: execFileSync('node', [SCRIPT, ...args], { encoding: 'utf8', stdio: 'pipe' }),
+      out: execFileSync('node', [script, ...args], { encoding: 'utf8', stdio: 'pipe' }),
     };
   } catch (err) {
     const e = err as { status: number; stdout: string; stderr: string };
     return { status: e.status, out: `${e.stdout}${e.stderr}` };
   }
+};
+
+const run = (...args: string[]) => runScript(SCRIPT, ...args);
+
+const makeCliFixture = (checkoutName: string, source: string) => {
+  const root = join(mkdtempSync(join(tmpdir(), 'check-internals-')), checkoutName);
+  mkdirSync(join(root, 'scripts'), { recursive: true });
+  mkdirSync(join(root, 'src'));
+  copyFileSync(SCRIPT, join(root, 'scripts', 'check-internals.mjs'));
+  copyFileSync(DIGESTS, join(root, 'scripts', 'internal-names.sha256'));
+  writeFileSync(join(root, 'src', 'fixture.ts'), source);
+  return join(root, 'scripts', 'check-internals.mjs');
 };
 
 describe('check-internals', () => {
@@ -104,6 +118,50 @@ describe('check-internals', () => {
       const { status, out } = run(flag);
       expect(status).toBe(2);
       expect(out).toContain('revision range');
+    },
+  );
+
+  describe.each(['space checkout', 'reserved # % ? checkout'])(
+    'when the checkout path contains encoded characters: %s',
+    (checkoutName) => {
+      it('runs the real scanner and rejects prohibited content', () => {
+        const script = makeCliFixture(checkoutName, '// see the rules in engine.go\n');
+        const { status, out } = runScript(script);
+        expect(status).toBe(1);
+        expect(out).toContain('src/fixture.ts:1: names a platform source file: engine.go');
+      });
+
+      it('runs the real scanner and prints success for clean content', () => {
+        const script = makeCliFixture(checkoutName, 'export const answer = 42;\n');
+        const { status, out } = runScript(script);
+        expect(status).toBe(0);
+        expect(out).toContain('nothing of the platform');
+      });
+
+      it('still reports malformed CLI arguments', () => {
+        const script = makeCliFixture(checkoutName, 'export const answer = 42;\n');
+        const { status, out } = runScript(script, '--messages');
+        expect(status).toBe(2);
+        expect(out).toContain('revision range');
+      });
+    },
+  );
+
+  it.each(['absent', 'missing'] as const)(
+    'is side-effect free when imported with an %s argv entry path',
+    (entryPath) => {
+      const script = makeCliFixture('import # % ? checkout', '// see the rules in engine.go\n');
+      const href = pathToFileURL(script).href;
+      const setEntryPath =
+        entryPath === 'absent'
+          ? 'process.argv.splice(1);'
+          : `process.argv[1] = ${JSON.stringify(`${script}.missing`)};`;
+      const out = execFileSync(
+        'node',
+        ['--input-type=module', '--eval', `${setEntryPath} await import(${JSON.stringify(href)});`],
+        { encoding: 'utf8', stdio: 'pipe' },
+      );
+      expect(out).toBe('');
     },
   );
 
