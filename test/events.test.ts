@@ -418,6 +418,122 @@ describe('a hole in the history', () => {
     await close();
   });
 
+  it.each([false, true])(
+    'discloses opening-cursor eviction after prior delivery: %s',
+    async (reconnect) => {
+      const { call, close, ev, first } = await attach({ ready: false });
+      try {
+        const opening = dataOf(first).cursor;
+        expect(opening).toBe('cur-0');
+        for (let i = 1; i <= 1100; i++) {
+          ev.last().send(frame('window.opened', { id: `0x${i}` }, `cur-${i}`));
+          if (i % 100 === 0) expect(dataOf(await call('poll_events')).lost).toBeUndefined();
+        }
+        if (reconnect) {
+          ev.last().close();
+          await until('a reconnect greeting', () => ev.sockets.length === 2 && ev.last().greeted);
+        }
+        const rewind = await call('poll_events', { since: opening, limit: 500 });
+        expect(eventsOf(rewind)[0].cursor).toBe('cur-77');
+        expect(dataOf(rewind).lost).toMatchObject({ events: 76 });
+        expect(dataOf(rewind).windows_now).toBeTruthy();
+        expect(dataOf(rewind).computer_now).toBeTruthy();
+        const next = await call('poll_events');
+        expect(eventsOf(next)).toHaveLength(0);
+        expect(dataOf(next).cursor).toBe('cur-1100');
+        expect(dataOf(next).lost).toBeUndefined();
+      } finally {
+        await close();
+      }
+    },
+  );
+
+  it('does not count unread opening-cursor eviction twice', async () => {
+    const { call, close, ev, first } = await attach({ ready: false });
+    try {
+      for (let i = 1; i <= 1100; i++) {
+        ev.last().send(frame('window.opened', { id: `0x${i}` }, `cur-${i}`));
+      }
+      const res = await call('poll_events', { since: dataOf(first).cursor, limit: 500 });
+      expect(eventsOf(res)[0].cursor).toBe('cur-77');
+      expect(dataOf(res).lost).toMatchObject({ events: 76 });
+    } finally {
+      await close();
+    }
+  });
+
+  it.each([false, true])(
+    'places replayed opening-cursor history before the greeting: %s',
+    async (beforeHello) => {
+      const ev = fakeEvents(null);
+      const { call, close } = await connect({ webSocket: ev.factory });
+      try {
+        const first = call('poll_events', { since: 'cur-0' });
+        await until('the first socket', () => ev.sockets.length === 1);
+        ev.last().open();
+        const greet = () => ev.last().send({ ...HELLO, ready: false, cursor: 'cur-100' });
+        if (!beforeHello) greet();
+        for (let i = 1; i <= 100; i++) {
+          ev.last().send(frame('window.opened', { id: `0x${i}` }, `cur-${i}`));
+        }
+        if (beforeHello) greet();
+        await first;
+        for (let i = 101; i <= 1124; i++) {
+          ev.last().send(frame('window.opened', { id: `0x${i}` }, `cur-${i}`));
+          if (i % 100 === 0) await call('poll_events');
+        }
+        await call('poll_events');
+        const retained = await call('poll_events', { since: 'cur-100', limit: 500 });
+        expect(eventsOf(retained)[0].cursor).toBe('cur-101');
+        expect(dataOf(retained).lost).toBeUndefined();
+        ev.last().send(frame('window.opened', { id: '0x1125' }, 'cur-1125'));
+        const evicted = await call('poll_events', { since: 'cur-100', limit: 500 });
+        expect(eventsOf(evicted)[0].cursor).toBe('cur-102');
+        expect(dataOf(evicted).lost).toMatchObject({ events: 1 });
+      } finally {
+        await close();
+      }
+    },
+  );
+
+  it('places a replacement opening cursor after the previous connection’s buffer', async () => {
+    const hello = { ready: false, cursor: 'cur-0' };
+    const { call, close, ev } = await attach(hello);
+    try {
+      for (let i = 1; i <= 1100; i++) {
+        ev.last().send(frame('window.opened', { id: `0x${i}` }, `cur-${i}`));
+        if (i % 100 === 0) await call('poll_events');
+      }
+      hello.cursor = 'cur-new';
+      ev.last().close();
+      await until('a replacement greeting', () => ev.sockets.length === 2 && ev.last().greeted);
+      const empty = await call('poll_events', { since: 'cur-new' });
+      expect(eventsOf(empty)).toHaveLength(0);
+      expect(dataOf(empty).lost).toBeUndefined();
+      ev.last().send(frame('window.opened', { id: '0x1101' }, 'cur-1101'));
+      const next = await call('poll_events', { since: 'cur-new' });
+      expect(eventsOf(next).map((e) => e.cursor)).toEqual(['cur-1101']);
+      expect(dataOf(next).lost).toBeUndefined();
+    } finally {
+      await close();
+    }
+  });
+
+  it('rewinds an opening cursor without loss while its history is retained', async () => {
+    const { call, close, ev, first } = await attach({ ready: false });
+    try {
+      ev.last().send(frame('window.opened', { id: '0x1' }, 'cur-1'));
+      ev.last().send(frame('window.closed', { id: '0x1' }, 'cur-2'));
+      await call('poll_events');
+      const res = await call('poll_events', { since: dataOf(first).cursor });
+      expect(eventsOf(res).map((e) => e.cursor)).toEqual(['cur-1', 'cur-2']);
+      expect(dataOf(res).lost).toBeUndefined();
+      expect(eventsOf(await call('poll_events'))).toHaveLength(0);
+    } finally {
+      await close();
+    }
+  });
+
   it('does not re-deliver read events for a cursor it cannot place', async () => {
     // A delivered event stays in the ring until the cap evicts it, so resuming
     // an unplaceable cursor at the OLDEST thing buffered re-sent events the

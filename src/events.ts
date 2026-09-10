@@ -316,6 +316,8 @@ export class Subscription {
   /** The cursor after the last event actually handed to the model. */
   #deliveredCursor?: string;
   #hello?: Hello;
+  /** The buffer position after the greeting's cursor, retained across eviction. */
+  #helloFrom = 0;
   #types?: string[];
   /**
    * The trees nominated on this stream, oldest nomination first.
@@ -854,11 +856,22 @@ export class Subscription {
     if (since === undefined) return Math.max(this.#delivered, this.#oldest);
     const at = this.#ring.findIndex((b) => b.event.cursor === since);
     if (at >= 0) return this.#ring[at].index + 1;
-    // The position at the moment this connection attached, which is
-    // legitimately older than anything in the ring on a quiet computer. The one
-    // deliberate rewind: a caller asking for it is asking to be re-sent this
-    // connection's whole buffer, and saying so exactly.
-    if (since === this.#hello?.cursor) return this.#oldest;
+    // An opening cursor can outlive everything that followed it in the ring.
+    // Evicting already delivered events is harmless for implicit reads, but a
+    // deliberate rewind asks for those events again and must hear about the hole.
+    if (since === this.#hello?.cursor) {
+      const missing = Math.max(0, this.#oldest - this.#helloFrom);
+      if (missing && this.#loss?.events !== null) {
+        this.#loss = {
+          // Unread overflow and this rewind describe overlapping evicted
+          // prefixes. Count their union, rather than adding the same loss twice.
+          events: Math.max(missing, this.#loss?.events ?? 0),
+          reason:
+            'events requested from that opening cursor were dropped from this session’s buffer',
+        };
+      }
+      return Math.max(this.#helloFrom, this.#oldest);
+    }
     // Otherwise: the unread frontier, NOT the oldest thing still in the ring.
     // A delivered event stays in the ring until the cap evicts it, so answering
     // an unplaceable cursor with `#oldest` re-sent events the model already
@@ -1046,6 +1059,9 @@ export class Subscription {
 
   #push(event: ComputerEvent): void {
     this.#ring.push({ index: this.#nextIndex++, event });
+    // A resumed stream may replay the greeting's cursor after the greeting.
+    // Once that event arrives, its position is stronger than the initial frontier.
+    if (event.cursor === this.#hello?.cursor) this.#helloFrom = this.#nextIndex;
     if (this.#ring.length > MAX_BUFFERED) {
       const evicted = this.#ring.splice(0, this.#ring.length - MAX_BUFFERED);
       // Only what the model had not been handed is a loss. Dropping events it
@@ -1429,6 +1445,11 @@ export class Subscription {
       windows: Array.isArray(frame.windows) ? frame.windows : undefined,
       watching: watched(frame.watching),
     };
+    const buffered = this.#ring.find((b) => b.event.cursor === hello.cursor);
+    if (buffered) this.#helloFrom = buffered.index + 1;
+    else if (hello.cursor !== this.#hello?.cursor) this.#helloFrom = this.#nextIndex;
+    // The same greeting on a reconnect must retain its original frontier,
+    // including any history that has since been evicted.
     this.#hello = hello;
     this.#types = hello.events;
     this.#greeted = true;
