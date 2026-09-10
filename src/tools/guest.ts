@@ -1160,7 +1160,10 @@ function execSummary(res: Record<string, unknown>): string {
   else if (res.exit_code != null) bits.push(`exit ${res.exit_code}`);
   if (res.timed_out) {
     bits.push(
-      'TIMED OUT — the command is still running inside the guest; nothing killed it. Re-run with background: true if you need its output',
+      'TIMED OUT — the original command is still running inside the guest; the timeout did not kill it. ' +
+        "Do not rerun it to recover this foreground run's output: a new exec starts another command and may repeat its effects. " +
+        'Inspect the existing process and any effects it may already have had before deliberately starting a new execution. ' +
+        'For future long-running commands, use background: true from the start',
     );
   }
   // Named per stream, because the flags are per stream (OPL-4542). Reading only
