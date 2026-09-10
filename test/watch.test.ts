@@ -1,7 +1,7 @@
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { Api } from '../src/api.js';
-import { EventHub } from '../src/events.js';
+import { EventHub, MAX_BUFFERED } from '../src/events.js';
 import { BASE, connect, FakeSocket, fakeEvents, HELLO, installFakePlatform } from './harness.js';
 
 /**
@@ -457,6 +457,10 @@ describe('a tree the model nominates', () => {
 
       const res = await call('wait_for_file_change', { path: '/a', timeout_s: 1 });
       expect(textOf(res)).toContain('re-armed after an interruption');
+      expect(dataOf(res).events).toEqual(
+        expect.arrayContaining([expect.objectContaining({ cursor: 'cur-1' })]),
+      );
+      expect(dataOf(res).lost).toBeDefined();
     } finally {
       globalThis.fetch = normal;
       await close();
@@ -495,6 +499,133 @@ describe('a tree the model nominates', () => {
 
       const res = await call('wait_for_file_change', { path: '/a', timeout_s: 1 });
       expect(textOf(res)).toContain('re-armed after an interruption');
+      expect(dataOf(res).events).toEqual(
+        expect.arrayContaining([expect.objectContaining({ cursor: 'cur-1' })]),
+      );
+      expect(dataOf(res).lost).toBeDefined();
+    } finally {
+      globalThis.fetch = normal;
+      await close();
+    }
+  });
+
+  it('leaves a matched delivery and its loss unread when reconciliation is cancelled', async () => {
+    const { call, client, close, ev } = await attach();
+    const normal = globalThis.fetch;
+    let reconciling: AbortSignal | null | undefined;
+    try {
+      await call('wait_for_file_change', { path: '/a', timeout_s: 1 });
+      const socket = await nominated(ev);
+      socket.send({ type: 'gap', cursor: 'cur-gap', data: {} });
+      socket.send(frame({ watch: '/a', path: '/a/new-file', kind: 'created' }, 'cur-11'));
+      globalThis.fetch = (async (input, init) => {
+        if (!String(input).endsWith('/windows')) return normal(input, init);
+        reconciling = init?.signal;
+        return new Promise<Response>((_resolve, reject) => {
+          reconciling?.addEventListener('abort', () => reject(reconciling?.reason), { once: true });
+        });
+      }) as typeof fetch;
+
+      const controller = new AbortController();
+      const cancelled = client.callTool(
+        { name: 'wait_for_file_change', arguments: { path: '/a', timeout_s: 5 } },
+        undefined,
+        { signal: controller.signal },
+      );
+      await until('reconciliation to start', () => reconciling !== undefined);
+      controller.abort();
+      await expect(cancelled).rejects.toThrow();
+      await until('reconciliation cancellation', () => reconciling?.aborted === true);
+      globalThis.fetch = normal;
+
+      const polled = await call('poll_events');
+      expect(dataOf(polled).events).toEqual(
+        expect.arrayContaining([expect.objectContaining({ cursor: 'cur-11' })]),
+      );
+      expect(dataOf(polled).lost).toBeDefined();
+      expect(dataOf(polled).cursor).toBe('cur-11');
+    } finally {
+      globalThis.fetch = normal;
+      await close();
+    }
+  });
+
+  it('leaves an abandoned delivery and its loss unread when reconciliation is cancelled', async () => {
+    const { call, client, close, ev } = await attach();
+    const normal = globalThis.fetch;
+    let reconciling: AbortSignal | null | undefined;
+    try {
+      await call('wait_for_file_change', { path: '/a', timeout_s: 1 });
+      const socket = await nominated(ev);
+      globalThis.fetch = (async (input, init) => {
+        if (!String(input).endsWith('/windows')) return normal(input, init);
+        reconciling = init?.signal;
+        return new Promise<Response>((_resolve, reject) => {
+          reconciling?.addEventListener('abort', () => reject(reconciling?.reason), { once: true });
+        });
+      }) as typeof fetch;
+
+      const controller = new AbortController();
+      const cancelled = client.callTool(
+        { name: 'wait_for_file_change', arguments: { path: '/a', timeout_s: 5 } },
+        undefined,
+        { signal: controller.signal },
+      );
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      socket.send({ type: 'gap', cursor: 'cur-gap', data: {} });
+      socket.send(frame({ title: 'other event' }, 'cur-12', 'window.opened'));
+      socket.send({
+        type: 'capabilities',
+        events: ['window.opened', 'process.exited'],
+        detail: 'watcher unavailable',
+      });
+      await until('reconciliation to start', () => reconciling !== undefined);
+      controller.abort();
+      await expect(cancelled).rejects.toThrow();
+      await until('reconciliation cancellation', () => reconciling?.aborted === true);
+      globalThis.fetch = normal;
+
+      const polled = await call('poll_events');
+      expect(dataOf(polled).events).toEqual(
+        expect.arrayContaining([expect.objectContaining({ cursor: 'cur-12' })]),
+      );
+      expect(dataOf(polled).lost).toBeDefined();
+      expect(dataOf(polled).cursor).toBe('cur-12');
+    } finally {
+      globalThis.fetch = normal;
+      await close();
+    }
+  });
+
+  it('reports loss when reconciliation lets the matched event leave the bounded buffer', async () => {
+    const { call, close, ev } = await attach();
+    const normal = globalThis.fetch;
+    let release: (() => void) | undefined;
+    try {
+      await call('wait_for_file_change', { path: '/a', timeout_s: 1 });
+      const socket = await nominated(ev);
+      socket.send({ type: 'gap', cursor: 'cur-gap', data: {} });
+      globalThis.fetch = (async (input, init) => {
+        if (!String(input).endsWith('/windows')) return normal(input, init);
+        return new Promise<Response>((resolve) => {
+          release = () => resolve(new Response('{"windows":[]}'));
+        });
+      }) as typeof fetch;
+
+      const waiting = call('wait_for_file_change', { path: '/a', timeout_s: 5 });
+      socket.send(frame({ watch: '/a', path: '/a/matched', kind: 'created' }, 'cur-11'));
+      await until('reconciliation to start', () => release !== undefined);
+      for (let i = 0; i < MAX_BUFFERED + 10; i++) {
+        socket.send(frame({ title: `later ${i}` }, `cur-overflow-${i}`, 'window.opened'));
+      }
+      release?.();
+
+      const res = await waiting;
+      expect(textOf(res)).toContain('matching event is no longer in this call');
+      expect(textOf(res)).toContain('Some buffered history was lost');
+      expect(textOf(res)).not.toContain('Nothing is lost');
+      expect(textOf(res)).not.toContain('another call on this computer was handed it');
+      expect(dataOf(res).lost).toBeDefined();
     } finally {
       globalThis.fetch = normal;
       await close();
@@ -505,6 +636,7 @@ describe('a tree the model nominates', () => {
     const { call, close, ev } = await attach();
     const normal = globalThis.fetch;
     let release: (() => void) | undefined;
+    let reconciliationReads = 0;
     try {
       await call('wait_for_file_change', { path: '/a', timeout_s: 1 });
       const socket = await nominated(ev);
@@ -512,6 +644,7 @@ describe('a tree the model nominates', () => {
       socket.send(frame({ watch: '/a', armed: true }, 'cur-1'));
       globalThis.fetch = (async (input, init) => {
         if (!String(input).endsWith('/windows')) return normal(input, init);
+        if (++reconciliationReads > 1) return new Response('{"windows":[]}');
         return new Promise<Response>((resolve) => {
           release = () => resolve(new Response('{"windows":[]}'));
         });
@@ -521,14 +654,15 @@ describe('a tree the model nominates', () => {
       await until('reconciliation to start', () => release !== undefined);
       const competing = await call('wait_for_file_change', { path: '/a', timeout_s: 1 });
       expect(textOf(competing)).toContain('re-armed after an interruption');
+      expect(dataOf(competing).events).toEqual(
+        expect.arrayContaining([expect.objectContaining({ cursor: 'cur-1' })]),
+      );
       release?.();
 
       const res = await reconciling;
       expect(textOf(res)).toContain('Another call on vm-1 reported the watch interruption');
       expect(textOf(res)).not.toContain('Nothing changed under');
-      expect(dataOf(res).events).toEqual(
-        expect.arrayContaining([expect.objectContaining({ cursor: 'cur-1' })]),
-      );
+      expect(dataOf(res).events).toEqual([]);
     } finally {
       globalThis.fetch = normal;
       await close();

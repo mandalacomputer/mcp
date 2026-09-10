@@ -856,6 +856,26 @@ export class Subscription {
   }
 
   /**
+   * Whether this read needs the current computer state attached to its loss.
+   *
+   * Asked before {@link read}, because reconciliation awaits network reads and
+   * a caller can cancel during them. Consuming first would advance the shared
+   * cursor and clear the loss into a response that caller never receives. This
+   * preview may establish a loss for an unknown `since`, but consumes nothing.
+   */
+  needsReconciliation(opts: { since?: string; limit: number; through?: number }): boolean {
+    const from = this.resolveFrom(opts.since);
+    if (this.#loss) return true;
+    if (opts.through === undefined) return false;
+    const end = opts.through + 1;
+    let count = 0;
+    for (const buffered of this.#ring) {
+      if (buffered.index >= from && buffered.index < end) count++;
+    }
+    return count > opts.limit;
+  }
+
+  /**
    * Where a read or a wait starts: the model's own place, or the cursor it named.
    *
    * A cursor this buffer cannot place is not an error and not silence. It may

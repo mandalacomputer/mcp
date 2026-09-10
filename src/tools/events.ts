@@ -1135,9 +1135,16 @@ export const registerEvents: Registrar = (server, session) => {
               interrupted(),
           );
         if (sub.hasUndisclosedRearm(root)) {
-          const d = sub.read({ since, limit });
-          const extras = d.loss ? await reconcile(session, id, extra.signal, deadline) : {};
+          const needsReconciliation = sub.needsReconciliation({ since, limit });
+          const recovered = needsReconciliation
+            ? await reconcile(session, id, extra.signal, deadline)
+            : {};
           if (extra.signal?.aborted) return cancelledWait();
+          const after = sub.state;
+          if (after.status === 'stopped')
+            return stopped(session, id, after.reason, sub, { since, limit });
+          const d = sub.read({ since, limit });
+          const extras = d.loss ? recovered : {};
           const answer = { ...body(id, d, sub, sub.watching), watch: wire, ...extras };
           const why = settled(sub, id, root, wire, () => interrupted() + evicted, answer);
           if (why) return why;
@@ -1148,7 +1155,7 @@ export const registerEvents: Registrar = (server, session) => {
           }
           return said(
             `Another call on ${id} reported the watch interruption while this call was ` +
-              `reconciling it. The events this call read are below; nothing was dropped.` +
+              `reconciling it. This call's delivery is below; no buffered event was dropped.` +
               interrupted() +
               renamed +
               evicted,
@@ -1217,9 +1224,16 @@ export const registerEvents: Registrar = (server, session) => {
           const now = sub.state;
           if (now.status === 'stopped')
             return stopped(session, id, now.reason, sub, { since, limit });
-          const d = sub.read({ since, limit });
-          const extras = d.loss ? await reconcile(session, id, extra.signal, deadline) : {};
+          const needsReconciliation = sub.needsReconciliation({ since, limit });
+          const recovered = needsReconciliation
+            ? await reconcile(session, id, extra.signal, deadline)
+            : {};
           if (extra.signal?.aborted) return cancelledWait();
+          const after = sub.state;
+          if (after.status === 'stopped')
+            return stopped(session, id, after.reason, sub, { since, limit });
+          const d = sub.read({ since, limit });
+          const extras = d.loss ? recovered : {};
           const answer = { ...body(id, d, sub, sub.watching), watch: wire, ...extras };
           // THESE FIRST, and in this order, because each would otherwise be
           // described as something else. Evicting a tree does not reset its arm
@@ -1315,10 +1329,14 @@ export const registerEvents: Registrar = (server, session) => {
           );
         }
 
+        const needsReconciliation = sub.needsReconciliation({ since, limit, through: hit });
+        const recovered = needsReconciliation
+          ? await reconcile(session, id, extra.signal, deadline)
+          : {};
+        if (extra.signal?.aborted) return cancelledWait();
         const d = sub.read({ since, limit, through: hit });
         const last = d.events[d.events.length - 1];
-        const extras = d.loss ? await reconcile(session, id, extra.signal, deadline) : {};
-        if (extra.signal?.aborted) return cancelledWait();
+        const extras = d.loss ? recovered : {};
         const earlier = d.events.length - 1;
         // The one `lost` that is not a re-read: it says the tree is not being
         // watched, so it is the request failing rather than the watch reporting.
@@ -1367,6 +1385,19 @@ export const registerEvents: Registrar = (server, session) => {
         // before either reads. Announcing "a change" over an empty list would be
         // a change the caller is never shown.
         if (!last) {
+          if (d.loss) {
+            return said(
+              `A file change under ${wire} on ${id} matched this wait, but the matching event is ` +
+                `no longer in this call's delivery. Some buffered history was lost before it ` +
+                `could be read, so do not assume another reader safely received the match.` +
+                reconciled(extras) +
+                ` Re-read the directory with exec, then call again for whatever comes next.` +
+                interrupted() +
+                renamed +
+                evicted,
+              { ...body(id, d, sub, sub.watching), watch: wire, ...extras },
+            );
+          }
           return said(
             `Something changed under ${wire} on ${id}, and another call on this computer was ` +
               `handed it before this one could read it — the events are in that call's answer, ` +
