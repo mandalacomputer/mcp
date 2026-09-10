@@ -1155,7 +1155,10 @@ export const registerEvents: Registrar = (server, session) => {
           }
           return said(
             `Another call on ${id} reported the watch interruption while this call was ` +
-              `reconciling it. This call's delivery is below; no buffered event was dropped.` +
+              `reconciling it. This call's delivery is below.` +
+              (d.loss
+                ? ` Some buffered history was lost before it could be read.${reconciled(extras)}`
+                : ` No buffered event was dropped.`) +
               interrupted() +
               renamed +
               evicted,

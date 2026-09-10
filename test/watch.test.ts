@@ -669,6 +669,44 @@ describe('a tree the model nominates', () => {
     }
   });
 
+  it('reports overflow after a competing wait claims the pending re-arm', async () => {
+    const { call, close, ev } = await attach();
+    const normal = globalThis.fetch;
+    let release: (() => void) | undefined;
+    let reconciliationReads = 0;
+    try {
+      await call('wait_for_file_change', { path: '/a', timeout_s: 1 });
+      const socket = await nominated(ev);
+      socket.send({ type: 'gap', cursor: 'cur-gap', data: {} });
+      socket.send(frame({ watch: '/a', armed: true }, 'cur-1'));
+      globalThis.fetch = (async (input, init) => {
+        if (!String(input).endsWith('/windows')) return normal(input, init);
+        if (++reconciliationReads > 1) return new Response('{"windows":[]}');
+        return new Promise<Response>((resolve) => {
+          release = () => resolve(new Response('{"windows":[]}'));
+        });
+      }) as typeof fetch;
+
+      const reconciling = call('wait_for_file_change', { path: '/a', timeout_s: 5 });
+      await until('reconciliation to start', () => release !== undefined);
+      const competing = await call('wait_for_file_change', { path: '/a', timeout_s: 1 });
+      expect(textOf(competing)).toContain('re-armed after an interruption');
+      for (let i = 0; i < MAX_BUFFERED + 10; i++) {
+        socket.send(frame({ title: `later ${i}` }, `cur-overflow-${i}`, 'window.opened'));
+      }
+      release?.();
+
+      const res = await reconciling;
+      expect(textOf(res)).toContain('Another call on vm-1 reported the watch interruption');
+      expect(textOf(res)).toContain('Some buffered history was lost');
+      expect(textOf(res)).not.toContain('No buffered event was dropped');
+      expect(dataOf(res).lost).toBeDefined();
+    } finally {
+      globalThis.fetch = normal;
+      await close();
+    }
+  });
+
   it('reports a pending re-arm before enforcing a standing watch budget', async () => {
     const { call, close, ev } = await attach();
     await call('wait_for_file_change', { path: '/a', timeout_s: 1 });
