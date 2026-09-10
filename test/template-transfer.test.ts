@@ -55,6 +55,7 @@ describe('template image preparation continuation', () => {
   afterEach(() => {
     globalThis.fetch = real;
     vi.restoreAllMocks();
+    vi.unstubAllEnvs();
   });
 
   it.each(['preparing', 'copying', 'ready'])(
@@ -84,6 +85,35 @@ describe('template image preparation continuation', () => {
       }
     },
   );
+
+  it.each([
+    {},
+    { size: 'small' },
+    { template: '' },
+    { template: '  ' },
+    { template: original.template, size: 'small' },
+  ])('does not advise an invalid continuation of original arguments %j', async (args) => {
+    globalThis.fetch = vi.fn(async () => refusal('preparing', '5'));
+    const { call, close } = await connect();
+    try {
+      const result = await call('create_computer', args);
+      expect(result.isError).toBe(true);
+      expect(metadata(result)).toEqual({
+        code: 'template_image_preparing',
+        template_transfer: token,
+        preparation: { state: 'preparing' },
+        retry_after_ms: 5000,
+      });
+      expect(said(result)).toContain(
+        'The original create must include a nonblank template and omit size',
+      );
+      expect(said(result)).toContain('do not automatically wait or retry');
+      expect(said(result)).not.toMatch(/Wait \d+|then repeat/);
+      expect(globalThis.fetch).toHaveBeenCalledTimes(1);
+    } finally {
+      await close();
+    }
+  });
 
   it('preserves failure details without treating failure as pending', async () => {
     globalThis.fetch = vi.fn(async () => refusal('failed', '5'));
@@ -137,10 +167,15 @@ describe('template image preparation continuation', () => {
     },
   );
 
-  it('converts an HTTP date to milliseconds on APIError and in the tool result', async () => {
+  it.each([
+    'Thu, 01 Jan 2026 00:00:17 GMT',
+    'Thursday, 01-Jan-26 00:00:17 GMT',
+    'Thu Jan  1 00:00:17 2026',
+  ])('converts HTTP date %s to milliseconds in UTC', async (header) => {
+    vi.stubEnv('TZ', 'America/Chicago');
     const now = Date.UTC(2026, 0, 1);
     vi.spyOn(Date, 'now').mockReturnValue(now);
-    globalThis.fetch = vi.fn(async () => refusal('copying', new Date(now + 17000).toUTCString()));
+    globalThis.fetch = vi.fn(async () => refusal('copying', header));
     const error = await new Api('com_test', BASE)
       .json('POST', 'computers', { body: original })
       .catch((error) => error);

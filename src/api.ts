@@ -997,7 +997,8 @@ function retryAfterMs(header: string | null): number | undefined {
   const httpDate =
     /^(?:[A-Za-z]{3}, \d{2} [A-Za-z]{3} \d{4} \d{2}:\d{2}:\d{2} GMT|[A-Za-z]+, \d{2}-[A-Za-z]{3}-\d{2} \d{2}:\d{2}:\d{2} GMT|[A-Za-z]{3} [A-Za-z]{3} {1,2}\d{1,2} \d{2}:\d{2}:\d{2} \d{4})$/;
   if (!httpDate.test(value)) return undefined;
-  const at = Date.parse(value);
+  // HTTP dates are always UTC, including asctime's timezone-free spelling.
+  const at = Date.parse(value.endsWith('GMT') ? value : `${value} GMT`);
   if (!Number.isFinite(at)) return undefined;
   return Math.min(Math.max(at - Date.now(), 0), MAX_TIMER_MS);
 }

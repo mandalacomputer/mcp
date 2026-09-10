@@ -1360,7 +1360,7 @@ export const registerComputers: Registrar = (server, session, opts) => {
     {
       title: 'Create a computer',
       description:
-        'Build a new cloud desktop and select it for this session. Creating and running a computer costs money on this account. Continue an image preparation refusal only as its result instructs, retaining all original create arguments, including template, and adding template_transfer. This token is not a create idempotency key. Stop after success; never automatically replay after a lost or ambiguous response.',
+        'Build a new cloud desktop and select it for this session. Creating and running a computer costs money on this account. Continue an image preparation refusal only as its result instructs, retaining all original create arguments, including template, and adding the returned preparation token as an argument. This token is not a create idempotency key. Stop after success; never automatically replay after a lost or ambiguous response.',
       inputSchema: {
         name: z.string().optional().describe('A label. The platform picks one if you do not.'),
         size: z
@@ -1430,7 +1430,12 @@ export const registerComputers: Registrar = (server, session, opts) => {
             const tokenPresent =
               typeof body.template_transfer === 'string' &&
               body.template_transfer.trim().length > 0;
+            const originalSupportsContinuation =
+              typeof args.template === 'string' &&
+              args.template.trim().length > 0 &&
+              args.size === undefined;
             const canContinue =
+              originalSupportsContinuation &&
               tokenPresent &&
               typeof state === 'string' &&
               ['preparing', 'copying', 'ready'].includes(state) &&
@@ -1440,7 +1445,9 @@ export const registerComputers: Registrar = (server, session, opts) => {
                 ? 'Image preparation failed. Inspect preparation.error before deciding what to do next; do not automatically wait or retry.'
                 : canContinue
                   ? `Wait ${error.retryAfterMs} milliseconds, then repeat create_computer with all original identical arguments, including template, and this template_transfer token. Stop after success.`
-                  : 'The response does not supply a known continuation state, usable token, and valid delay. Inspect the preparation details; do not automatically wait or retry.';
+                  : !originalSupportsContinuation
+                    ? 'The original create must include a nonblank template and omit size to continue with this token. Inspect the original request and preparation details; do not automatically wait or retry.'
+                    : 'The response does not supply a known continuation state, usable token, and valid delay. Inspect the preparation details; do not automatically wait or retry.';
             return refused(
               `${typeof body.error === 'string' ? body.error : 'The template image is not available for this create.'} No computer has been created. ${advice} The token is not a create idempotency key. Never automatically replay after a lost or ambiguous response.`,
               {
