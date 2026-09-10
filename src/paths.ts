@@ -233,6 +233,7 @@ export function createBody(args: {
   name?: string;
   size?: string;
   template?: string;
+  template_transfer?: string;
   cpu?: number;
   ram_mb?: number;
   disk_gb?: number;

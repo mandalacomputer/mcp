@@ -1375,6 +1375,12 @@ export const registerComputers: Registrar = (server, session, opts) => {
           .describe(
             'From list_templates, e.g. "base" for Linux/Xfce. Defaults to the platform default.',
           ),
+        template_transfer: z
+          .string()
+          .optional()
+          .describe(
+            'Token from an image preparation refusal. Retry the same create with this token after the requested delay to preserve the exact selected build. Stop retrying after success.',
+          ),
         cpu: z.number().int().min(1).optional(),
         ram_mb: z.number().int().min(512).optional(),
         disk_gb: z
@@ -1397,11 +1403,30 @@ export const registerComputers: Registrar = (server, session, opts) => {
     },
     (args, extra) =>
       guarded(async () => {
-        const c = unwrapComputer(
-          await session.api
+        let data: unknown;
+        try {
+          data = await session.api
             .with(extra.signal)
-            .json('POST', P.COMPUTERS, { body: P.createBody(args) }),
-        );
+            .json('POST', P.COMPUTERS, { body: P.createBody(args) });
+        } catch (error) {
+          const body =
+            error instanceof ConflictError
+              ? (error.body as
+                  | { code?: unknown; template_transfer?: unknown; error?: unknown }
+                  | undefined)
+              : undefined;
+          if (
+            body?.code === 'template_image_preparing' &&
+            typeof body.template_transfer === 'string'
+          ) {
+            return refused(
+              `${typeof body.error === 'string' ? body.error : 'The template image is being prepared.'} No computer has been created. Wait five seconds, then retry create_computer with the same arguments and this template_transfer token. Stop retrying after success.`,
+              { template_transfer: body.template_transfer },
+            );
+          }
+          throw error;
+        }
+        const c = unwrapComputer(data);
         // Selection and the sentence claiming it are the same decision. Bound
         // conditionally and reported unconditionally, a create that came back
         // without an id left this session pointing at whatever it held before
