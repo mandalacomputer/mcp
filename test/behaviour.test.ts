@@ -297,7 +297,7 @@ describe('failures', () => {
     expect(textOf(res)).toContain('409');
   });
 
-  it('says plainly when a command timed out but is still running', async () => {
+  it('does not suggest replaying a command that timed out but is still running', async () => {
     globalThis.fetch = (async () =>
       new Response(JSON.stringify({ exit_code: -1, timed_out: true, stdout: '' }), {
         headers: { 'Content-Type': 'application/json' },
@@ -307,8 +307,14 @@ describe('failures', () => {
     const res = await call('exec', { command: 'sleep 600' });
     await close();
 
-    expect(textOf(res)).toContain('TIMED OUT');
-    expect(textOf(res)).toContain('background');
+    const answer = textOf(res);
+    expect(answer).toContain('TIMED OUT');
+    expect(answer).toContain('still running');
+    expect(answer).not.toMatch(/re-?run with background/i);
+    expect(answer).toMatch(/rerun.+recover.+output/i);
+    expect(answer).toMatch(/repeat.+effects|effects.+repeat/i);
+    expect(answer).toMatch(/inspect.+process.+effects/i);
+    expect(answer).toMatch(/future.+background/i);
   });
 });
 
