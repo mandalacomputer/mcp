@@ -509,12 +509,31 @@ thing to fix. An `error` event is the *stream* failing and says nothing about th
 build, and the tool says so rather than letting a model rewrite a document that
 is fine.
 
-What you build is **not launchable yet**: the fleet does not advertise a family
-it built rather than shipped, so a create naming such a ref is still refused.
-`publish_template` says the same thing where it matters — publishing and being
-launchable are different questions, and its result no longer ends on a flat
-"launch it with `create_computer`" that a document declaring `spec.build` would
-have led straight into a refusal on.
+A completed template build can launch with `create_computer` when eligible
+capacity and its image are available. Publishing a template and completing its
+build are separate steps; publication alone does not guarantee launch capacity.
+
+When the API supports image preparation continuation, a `create_computer`
+refusal with code `template_image_preparing` preserves `template_transfer` and
+`preparation` (including `state` and `error`) in the JSON appended to the tool's
+error text. `retry_after_ms`, when present, is the parsed `Retry-After` delay in
+**milliseconds**, also available to embedders as `APIError.retryAfterMs`. Both
+integer seconds and HTTP dates are accepted; missing or invalid delays are
+omitted. Delays are capped at 2,147,483,647 milliseconds to fit a timer.
+
+For `preparing`, `copying`, or `ready` with a usable token and delay, wait for
+that delay, then repeat the original identical create arguments, including
+`template`, adding the token exactly as returned. The token must be a nonblank
+string, requires the original `template`, and cannot be combined with `size`.
+A `failed` preparation reports its error for inspection before deciding what to
+do next. Missing or unknown states and missing or invalid delays do not supply
+automatic retry advice. The server never replays a create automatically, and
+`isTransient` returns false for this refusal code because unchanged replay is
+not the continuation protocol.
+
+The token selects the image build; it is **not a create idempotency key**. Stop
+after success. After a lost or ambiguous response, inspect `list_computers`
+before deciding what to do; never automatically replay the create.
 
 ## Running it as a service
 

@@ -240,6 +240,19 @@ export function createBody(args: {
   resolution?: string;
   start?: boolean;
 }): Json {
+  if (args.template_transfer !== undefined) {
+    if (typeof args.template_transfer !== 'string' || !args.template_transfer.trim()) {
+      throw new Error('template_transfer must be a nonblank string.');
+    }
+    if (typeof args.template !== 'string' || !args.template.trim()) {
+      throw new Error('template_transfer requires the original template argument.');
+    }
+    if (args.size !== undefined) {
+      throw new Error(
+        'template_transfer cannot be combined with size. Use the original template and explicit create arguments.',
+      );
+    }
+  }
   const { start = true, ...rest } = args;
   return { ...omitUndefined(rest as Json), start };
 }

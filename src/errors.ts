@@ -36,6 +36,8 @@ export class APIError extends MandalaError {
     message: string,
     readonly status: number,
     readonly body?: unknown,
+    /** Parsed Retry-After delay in milliseconds; absent when missing or invalid. */
+    readonly retryAfterMs?: number,
   ) {
     super(message);
     this.reason = refusalReason(body);
@@ -226,8 +228,9 @@ export class MoveRequiredError extends ConflictError {
     body: unknown,
     /** Whether a host in this region could run the size that was asked for. */
     readonly movePossible: boolean,
+    retryAfterMs?: number,
   ) {
-    super(message, status, body);
+    super(message, status, body, retryAfterMs);
   }
 }
 
@@ -269,8 +272,9 @@ export class RangeNotSatisfiableError extends APIError {
     body?: unknown,
     /** The file's real length, off `Content-Range`, when the response sent one. */
     readonly size?: number,
+    retryAfterMs?: number,
   ) {
-    super(message, status, body);
+    super(message, status, body, retryAfterMs);
   }
 }
 
@@ -289,14 +293,15 @@ export class RangeNotSatisfiableError extends APIError {
  */
 export class RateLimitError extends APIError {
   override name = 'RateLimitError';
+  // biome-ignore lint/complexity/noUselessConstructor: Preserve the documented public constructor.
   constructor(
     message: string,
     status: number,
     body?: unknown,
     /** From `Retry-After`, in milliseconds from now, when the response sent one. */
-    readonly retryAfterMs?: number,
+    retryAfterMs?: number,
   ) {
-    super(message, status, body);
+    super(message, status, body, retryAfterMs);
   }
 }
 
@@ -544,11 +549,8 @@ const BY_STATUS: Record<number, typeof APIError> = {
   // arriving from anywhere else is still the right class with the platform's
   // own message on it.
   416: RangeNotSatisfiableError,
-  // Reached through errorForStatus only when the response headers were not in
-  // hand — Api.#error builds this one itself, for RangeNotSatisfiableError's
-  // reason: `Retry-After` is on the headers and the number is worth keeping.
-  // The entry is here so a 429 arriving from anywhere else is still the right
-  // class, which is what {@link isTransient} now asks about.
+  // Retry-After is parsed by Api and passed through errorForStatus.
+  // A 429 built without headers still has the same public error class.
   429: RateLimitError,
   // The other status a proxy writes on its own, and it was the one gap left in
   // this range: with no entry it fell through to a bare APIError, so a model
@@ -726,7 +728,12 @@ export function platformSaid(body: unknown): string | undefined {
 }
 
 /** Build the error for a status, with the platform's own message when it sent one. */
-export function errorForStatus(status: number, message: string, body?: unknown): APIError {
+export function errorForStatus(
+  status: number,
+  message: string,
+  body?: unknown,
+  retryAfterMs?: number,
+): APIError {
   const Cls = BY_STATUS[status] ?? APIError;
   // The 409 that is an offer, told apart by its body. Before the substitutions
   // below because it never wants one: the platform's sentence here is the whole
@@ -734,7 +741,10 @@ export function errorForStatus(status: number, message: string, body?: unknown):
   // read by whoever has to agree to it.
   if (Cls === ConflictError) {
     const offer = moveOffer(body);
-    if (offer) return new MoveRequiredError(message, status, body, offer.possible);
+    if (offer) return new MoveRequiredError(message, status, body, offer.possible, retryAfterMs);
+  }
+  if (Cls === RangeNotSatisfiableError) {
+    return new RangeNotSatisfiableError(message, status, body, undefined, retryAfterMs);
   }
   // Substituted for an empty body, which says nothing, and for a proxy's HTML
   // page, which says 500 characters of nothing. NOT for a structured message:
@@ -751,21 +761,21 @@ export function errorForStatus(status: number, message: string, body?: unknown):
   // that deployment than the generic outage prose here does, and discarding it
   // was the very thing the 504 and 520 guards exist to prevent.
   if (Cls === GatewayTimeoutError && !platformNamed(body)) {
-    return new GatewayTimeoutError(gatewayTimeoutMessage(status), status, body);
+    return new GatewayTimeoutError(gatewayTimeoutMessage(status), status, body, retryAfterMs);
   }
   if (Cls === OriginResponseError && !platformNamed(body)) {
     // 502 and 520 share a class and not a message: one knows the request
     // arrived, the other cannot tell. See BAD_GATEWAY_MESSAGE.
     const said = status === 502 ? BAD_GATEWAY_MESSAGE : ORIGIN_RESPONSE_MESSAGE;
-    return new OriginResponseError(said, status, body);
+    return new OriginResponseError(said, status, body, retryAfterMs);
   }
   if (Cls === OriginTLSError && !platformNamed(body)) {
-    return new OriginTLSError(ORIGIN_TLS_MESSAGE, status, body);
+    return new OriginTLSError(ORIGIN_TLS_MESSAGE, status, body, retryAfterMs);
   }
   if (Cls === OriginUnreachableError && !platformNamed(body)) {
-    return new OriginUnreachableError(ORIGIN_UNREACHABLE_MESSAGE, status, body);
+    return new OriginUnreachableError(ORIGIN_UNREACHABLE_MESSAGE, status, body, retryAfterMs);
   }
-  return new Cls(message, status, body);
+  return new Cls(message, status, body, retryAfterMs);
 }
 
 /**
@@ -841,6 +851,16 @@ export function errorForStatus(status: number, message: string, body?: unknown):
  * what it can and cannot tell apart.
  */
 export function isTransient(err: unknown): boolean {
+  // Preparation requires the original template and a token, and may have failed.
+  // A generic retry of the unchanged create is not the continuation protocol.
+  if (
+    err instanceof APIError &&
+    err.body !== null &&
+    typeof err.body === 'object' &&
+    (err.body as { code?: unknown }).code === 'template_image_preparing'
+  ) {
+    return false;
+  }
   // A move offer is a 409 and is NOT transient — it is a decision about the
   // size that was asked for, and the same request answers the same way forever.
   // First, because it is a subclass of the very branch below that would say yes
