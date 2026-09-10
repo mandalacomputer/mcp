@@ -1,4 +1,4 @@
-import { Agent, type Dispatcher, fetch as undiciFetch } from 'undici';
+import { Agent, type Dispatcher, Headers as UndiciHeaders, fetch as undiciFetch } from 'undici';
 import {
   type APIError,
   CancelledError,
@@ -193,7 +193,7 @@ export class Api {
       parsed = new URL(baseUrl);
     } catch {
       throw new MandalaError(
-        `not a valid base URL: ${baseUrl}. Set MANDALA_BASE_URL to an absolute http(s) URL, e.g. ${DEFAULT_BASE_URL}`,
+        `not a valid base URL. Set MANDALA_BASE_URL to an absolute http(s) URL, e.g. ${DEFAULT_BASE_URL}`,
       );
     }
     // The scheme the message already promised. `new URL` alone accepts
@@ -203,7 +203,7 @@ export class Api {
     // to be about the setting.
     if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
       throw new MandalaError(
-        `not an http(s) base URL: ${baseUrl}. Set MANDALA_BASE_URL to an absolute http(s) URL, e.g. ${DEFAULT_BASE_URL}`,
+        `not an http(s) base URL. Set MANDALA_BASE_URL to an absolute http(s) URL, e.g. ${DEFAULT_BASE_URL}`,
       );
     }
     // Normalised as a URL rather than as a string. `${base}/${path}` looked
@@ -217,9 +217,8 @@ export class Api {
     parsed.pathname = parsed.pathname.replace(/\/+$/, '');
     this.#base = parsed;
     // Still the string that was given, minus the trailing slashes it was always
-    // stripped of — this is what error messages name and what `with` re-parses,
-    // and changing its spelling would change what a reader is told they
-    // configured.
+    // stripped of — this is what `with` re-parses, and changing its spelling
+    // would change the configured destination.
     this.baseUrl = baseUrl.replace(/\/+$/, '');
     this.#apiKey = apiKey;
     this.#signal = signal;
@@ -286,9 +285,10 @@ export class Api {
     }
 
     const signal = opts.signal ?? this.#signal;
+    const requested = this.#url(path, opts.query);
+    const fetchRequest = platformFetch();
+
     let resp: Response;
-    /** Kept so a relative `Location` can be resolved against what was asked. */
-    let requested: URL | string = this.#base;
     try {
       // `dispatcher` is Node/undici's extension to RequestInit. It is kept on
       // a typed variable so the standard fetch signature can still be used.
@@ -306,8 +306,7 @@ export class Api {
         redirect: 'manual',
         dispatcher: PLATFORM_DISPATCHER,
       };
-      requested = this.#url(path, opts.query);
-      resp = await platformFetch()(requested, init);
+      resp = await fetchRequest(requested, init);
     } catch (cause) {
       // Cancellation first, because it is not a connectivity failure and the
       // wrap below cannot tell the difference. An aborted fetch rejects with a
@@ -320,6 +319,15 @@ export class Api {
       if (isCancellation(cause, signal)) {
         throw cancellationError(method, path, 'before the platform answered');
       }
+      if (
+        fetchRequest === (undiciFetch as unknown as typeof globalThis.fetch) &&
+        undiciRejectsLocally(requested, headers)
+      ) {
+        throw new MandalaError(
+          `${method} /${path.replace(/^\/+/, '')} was rejected locally before it could be sent. ` +
+            'Check the configured URL and request headers.',
+        );
+      }
       // Rewritten, because the raw one names the host and the failure a model
       // can act on is "the platform is not reachable", not a DNS error string.
       //
@@ -329,13 +337,12 @@ export class Api {
       // wire means the platform may have acted and the answer was lost. The
       // second says so, and the wording follows the class rather than the other
       // way round (OPL-3855).
-      const detail = cause instanceof Error ? cause.message : String(cause);
       if (neverDispatched(cause)) {
-        throw new ConnectivityError(`could not reach ${this.#base.origin}: ${detail}`);
+        throw new ConnectivityError(`could not reach ${this.#base.origin}`);
       }
       throw new ConnectivityInterruptedError(
         `${method} /${path.replace(/^\/+/, '')} to ${this.#base.origin} failed after the request ` +
-          `was sent: ${detail}. It may have been received, so treat anything it would have ` +
+          `was sent. It may have been received, so treat anything it would have ` +
           'changed as unknown rather than undone.',
       );
     }
@@ -698,6 +705,30 @@ export class Api {
 }
 
 /**
+ * Does undici refuse this request shape before it can put anything on a wire?
+ *
+ * Its own validation errors quote the rejected header value or full URL. Those
+ * values can contain the credentials this client is responsible for keeping
+ * out of errors, so inspect the inputs instead of the exception text. The
+ * caller checks that undici itself was selected before using this result; a
+ * replacement fetch may support URL userinfo or validate headers differently.
+ *
+ * Kept deliberately narrow. An arbitrary TypeError from fetch does not prove a
+ * request stayed local, and treating one as safe to replay could duplicate a
+ * mutating operation.
+ */
+function undiciRejectsLocally(requested: string, headers: Record<string, string>): boolean {
+  const url = new URL(requested);
+  if (url.username || url.password) return true;
+  try {
+    new UndiciHeaders(headers);
+    return false;
+  } catch {
+    return true;
+  }
+}
+
+/**
  * Was this rejection the caller hanging up, rather than the network?
  *
  * The watched signal is the only reliable answer. `AbortSignal.abort(reason)`
@@ -886,9 +917,8 @@ async function readBody<T>(
     // to and the poll predicate must ride out (OPL-3855).
     if (isTransportFailure(cause)) {
       throw new ConnectivityInterruptedError(
-        `could not finish reading ${method} /${path.replace(/^\/+/, '')}: ${
-          cause instanceof Error ? cause.message : String(cause)
-        }. The request was received, so treat anything it would have changed as ` +
+        `could not finish reading ${method} /${path.replace(/^\/+/, '')}. ` +
+          `The request was received, so treat anything it would have changed as ` +
           'unknown rather than undone.',
       );
     }

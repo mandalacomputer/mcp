@@ -54,9 +54,9 @@
 
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { join, relative, sep } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const HERE = join(fileURLToPath(new URL('.', import.meta.url)));
 const ROOT = join(HERE, '..');
@@ -207,7 +207,17 @@ function fail(message) {
   process.exit(2);
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+function isEntrypoint() {
+  if (!process.argv[1]) return false;
+  if (import.meta.url === pathToFileURL(process.argv[1]).href) return true;
+  try {
+    return import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href;
+  } catch {
+    return false;
+  }
+}
+
+if (isEntrypoint()) {
   const range = parseRange(process.argv.slice(2));
   const digests = loadDigests();
   const problems = [...scanFiles(digests), ...(range ? scanMessages(range, digests) : [])];
