@@ -73,7 +73,7 @@ const ALLOWED = new Set([
 ]);
 
 /** Everything a reader of this project can see. */
-const SCANNED_DIRS = ['src', 'test', 'scripts', '.github'];
+const SCANNED_DIRS = ['src', 'test', 'scripts', '.github', 'plugin', '.claude-plugin'];
 const SCANNED_FILES = ['README.md', 'SECURITY.md', 'package.json'];
 const SUFFIXES = new Set(['.ts', '.tsx', '.mjs', '.js', '.md', '.json', '.yml', '.yaml']);
 

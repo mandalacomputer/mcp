@@ -15,7 +15,7 @@ import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { copyFileSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { describe, expect, it } from 'vitest';
 
@@ -41,13 +41,22 @@ const runScript = (script: string, ...args: string[]) => {
 
 const run = (...args: string[]) => runScript(SCRIPT, ...args);
 
-const makeCliFixture = (checkoutName: string, source: string) => {
+const makeCliFixture = (
+  checkoutName: string,
+  source: string,
+  files: Record<string, string> = {},
+) => {
   const root = join(mkdtempSync(join(tmpdir(), 'check-internals-')), checkoutName);
   mkdirSync(join(root, 'scripts'), { recursive: true });
   mkdirSync(join(root, 'src'));
   copyFileSync(SCRIPT, join(root, 'scripts', 'check-internals.mjs'));
   copyFileSync(DIGESTS, join(root, 'scripts', 'internal-names.sha256'));
   writeFileSync(join(root, 'src', 'fixture.ts'), source);
+  for (const [path, contents] of Object.entries(files)) {
+    const full = join(root, path);
+    mkdirSync(dirname(full), { recursive: true });
+    writeFileSync(full, contents);
+  }
   return join(root, 'scripts', 'check-internals.mjs');
 };
 
@@ -164,6 +173,45 @@ describe('check-internals', () => {
       expect(out).toBe('');
     },
   );
+
+  it.each([
+    {
+      label: 'plugin skill',
+      path: 'plugin/skills/example/SKILL.md',
+      contents: '# Example\n\nSee engine.go.\n',
+      line: 3,
+    },
+    {
+      label: 'plugin manifest',
+      path: 'plugin/.claude-plugin/plugin.json',
+      contents: '{"name":"example","description":"See engine.go"}\n',
+      line: 1,
+    },
+    {
+      label: 'root marketplace manifest',
+      path: '.claude-plugin/marketplace.json',
+      contents: '{"name":"example","description":"See engine.go"}\n',
+      line: 1,
+    },
+  ])('scans a shipped $label', ({ path, contents, line }) => {
+    const script = makeCliFixture('plugin checkout', 'export const answer = 42;\n', {
+      [path]: contents,
+    });
+    const { status, out } = runScript(script);
+    expect(status).toBe(1);
+    expect(out).toContain(`${path}:${line}: names a platform source file: engine.go`);
+  });
+
+  it('passes clean plugin and marketplace content', () => {
+    const script = makeCliFixture('clean plugin checkout', 'export const answer = 42;\n', {
+      'plugin/skills/example/SKILL.md': '# Example\n\nDescribes stable public behavior.\n',
+      'plugin/.claude-plugin/plugin.json': '{"name":"example"}\n',
+      '.claude-plugin/marketplace.json': '{"plugins":[]}\n',
+    });
+    const { status, out } = runScript(script);
+    expect(status).toBe(0);
+    expect(out).toContain('nothing of the platform');
+  });
 
   it('reads every commit in a range, not just one end of it', () => {
     const repo = mkdtempSync(join(tmpdir(), 'ci-'));
