@@ -705,6 +705,28 @@ describe('bodies the platform is not supposed to send', () => {
     await close();
   });
 
+  it('returns the image preparation token without replaying a create', async () => {
+    let requests = 0;
+    globalThis.fetch = (async () => {
+      requests++;
+      return new Response(
+        JSON.stringify({
+          error: 'preparing',
+          code: 'template_image_preparing',
+          template_transfer: 'prepare-token',
+        }),
+        { status: 409, headers: { 'Content-Type': 'application/json' } },
+      );
+    }) as typeof fetch;
+    const { call, close } = await connect();
+    const res = await call('create_computer', { template: 'acc-1/tool@1.0.0' });
+    expect(res.isError).toBe(true);
+    expect(said(res)).toContain('prepare-token');
+    expect(said(res)).toContain('No computer has been created');
+    expect(requests).toBe(1);
+    await close();
+  });
+
   it('does not report a create with no id as selected', async () => {
     // The bind was conditional on `c.id` and the sentence was not, so a
     // response without one left the session pointing at whatever it held

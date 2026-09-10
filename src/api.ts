@@ -7,7 +7,6 @@ import {
   errorForStatus,
   MandalaError,
   RangeNotSatisfiableError,
-  RateLimitError,
   RedirectError,
 } from './errors.js';
 
@@ -432,29 +431,13 @@ export class Api {
         body = text;
       }
     }
-    // The one status whose headers say more than its body does. `Content-Range:
-    // bytes *\/<size>` carries the file's real length, and errorForStatus takes
-    // no headers — deliberately, since every other status it maps is decided by
-    // the number alone. So this one is built here, where the response is still
-    // in hand, and the length rides on the error to whoever asked for the range.
+    const delay = retryAfterMs(resp.headers.get('retry-after'));
+    // Content-Range describes the file length, independently of Retry-After.
     if (resp.status === 416) {
       const total = parseContentRange(resp.headers.get('content-range'))?.total;
-      return new RangeNotSatisfiableError(message, resp.status, body, total);
+      return new RangeNotSatisfiableError(message, resp.status, body, total, delay);
     }
-    // The other one, for the same reason: `Retry-After` is a header, and it is
-    // the platform saying how long to wait rather than leaving the wait tools
-    // to guess. Built here while the response is still in hand; the BY_STATUS
-    // entry covers a 429 reaching errorForStatus from anywhere else, without
-    // the number.
-    if (resp.status === 429) {
-      return new RateLimitError(
-        message,
-        resp.status,
-        body,
-        retryAfterMs(resp.headers.get('retry-after')),
-      );
-    }
-    return errorForStatus(resp.status, message, body);
+    return errorForStatus(resp.status, message, body, delay);
   }
 
   /**
@@ -1010,7 +993,12 @@ function retryAfterMs(header: string | null): number | undefined {
   if (!header) return undefined;
   const seconds = /^\d+$/.test(header.trim()) ? Number(header) : Number.NaN;
   if (Number.isFinite(seconds) && seconds >= 0) return Math.min(seconds * 1_000, MAX_TIMER_MS);
-  const at = Date.parse(header);
+  const value = header.trim();
+  const httpDate =
+    /^(?:[A-Za-z]{3}, \d{2} [A-Za-z]{3} \d{4} \d{2}:\d{2}:\d{2} GMT|[A-Za-z]+, \d{2}-[A-Za-z]{3}-\d{2} \d{2}:\d{2}:\d{2} GMT|[A-Za-z]{3} [A-Za-z]{3} {1,2}\d{1,2} \d{2}:\d{2}:\d{2} \d{4})$/;
+  if (!httpDate.test(value)) return undefined;
+  // HTTP dates are always UTC, including asctime's timezone-free spelling.
+  const at = Date.parse(value.endsWith('GMT') ? value : `${value} GMT`);
   if (!Number.isFinite(at)) return undefined;
   return Math.min(Math.max(at - Date.now(), 0), MAX_TIMER_MS);
 }

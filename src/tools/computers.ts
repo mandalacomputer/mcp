@@ -1360,7 +1360,7 @@ export const registerComputers: Registrar = (server, session, opts) => {
     {
       title: 'Create a computer',
       description:
-        'Build a new cloud desktop and select it for this session. Creating and running a computer costs money on this account.',
+        'Build a new cloud desktop and select it for this session. Creating and running a computer costs money on this account. Continue an image preparation refusal only as its result instructs, retaining all original create arguments, including template, and adding the returned preparation token as an argument. This token is not a create idempotency key. Stop after success; never automatically replay after a lost or ambiguous response.',
       inputSchema: {
         name: z.string().optional().describe('A label. The platform picks one if you do not.'),
         size: z
@@ -1374,6 +1374,13 @@ export const registerComputers: Registrar = (server, session, opts) => {
           .optional()
           .describe(
             'From list_templates, e.g. "base" for Linux/Xfce. Defaults to the platform default.',
+          ),
+        template_transfer: z
+          .string()
+          .refine((value) => value.trim().length > 0, 'template_transfer must not be blank')
+          .optional()
+          .describe(
+            'Nonblank opaque token from an image preparation refusal; preserve it exactly. When the result permits continuation, keep all original create arguments including template, add this token, and wait for the supplied delay. Requires template and cannot be combined with size. Not a create idempotency key: stop after success and never automatically replay after a lost or ambiguous response.',
           ),
         cpu: z.number().int().min(1).optional(),
         ram_mb: z.number().int().min(512).optional(),
@@ -1397,11 +1404,63 @@ export const registerComputers: Registrar = (server, session, opts) => {
     },
     (args, extra) =>
       guarded(async () => {
-        const c = unwrapComputer(
-          await session.api
+        let data: unknown;
+        try {
+          data = await session.api
             .with(extra.signal)
-            .json('POST', P.COMPUTERS, { body: P.createBody(args) }),
-        );
+            .json('POST', P.COMPUTERS, { body: P.createBody(args) });
+        } catch (error) {
+          const body =
+            error instanceof ConflictError
+              ? (error.body as
+                  | {
+                      code?: unknown;
+                      template_transfer?: unknown;
+                      error?: unknown;
+                      preparation?: unknown;
+                    }
+                  | undefined)
+              : undefined;
+          if (body?.code === 'template_image_preparing' && error instanceof ConflictError) {
+            const preparation = body.preparation;
+            const state =
+              preparation && typeof preparation === 'object'
+                ? (preparation as { state?: unknown }).state
+                : undefined;
+            const tokenPresent =
+              typeof body.template_transfer === 'string' &&
+              body.template_transfer.trim().length > 0;
+            const originalSupportsContinuation =
+              typeof args.template === 'string' &&
+              args.template.trim().length > 0 &&
+              args.size === undefined;
+            const canContinue =
+              originalSupportsContinuation &&
+              tokenPresent &&
+              typeof state === 'string' &&
+              ['preparing', 'copying', 'ready'].includes(state) &&
+              error.retryAfterMs !== undefined;
+            const advice =
+              state === 'failed'
+                ? 'Image preparation failed. Inspect preparation.error before deciding what to do next; do not automatically wait or retry.'
+                : canContinue
+                  ? `Wait ${error.retryAfterMs} milliseconds, then repeat create_computer with all original identical arguments, including template, and this template_transfer token. Stop after success.`
+                  : !originalSupportsContinuation
+                    ? 'The original create must include a nonblank template and omit size to continue with this token. Inspect the original request and preparation details; do not automatically wait or retry.'
+                    : 'The response does not supply a known continuation state, usable token, and valid delay. Inspect the preparation details; do not automatically wait or retry.';
+            return refused(
+              `${typeof body.error === 'string' ? body.error : 'The template image is not available for this create.'} No computer has been created. ${advice} The token is not a create idempotency key. Never automatically replay after a lost or ambiguous response.`,
+              {
+                code: body.code,
+                template_transfer: body.template_transfer,
+                preparation,
+                retry_after_ms: error.retryAfterMs,
+              },
+            );
+          }
+          throw error;
+        }
+        const c = unwrapComputer(data);
         // Selection and the sentence claiming it are the same decision. Bound
         // conditionally and reported unconditionally, a create that came back
         // without an id left this session pointing at whatever it held before
@@ -1421,7 +1480,12 @@ export const registerComputers: Registrar = (server, session, opts) => {
         const note = c.start_error
           ? `Created ${describe(c)}, but it did not start: ${c.start_error}\nThe computer exists and is selected. start_computer often works on a second attempt.`
           : `Created and selected ${describe(c)}.`;
-        return said(note, withoutCredentials(c));
+        return said(
+          args.template_transfer === undefined
+            ? note
+            : `${note} Stop retrying this create; the template_transfer token is not a create idempotency key.`,
+          withoutCredentials(c),
+        );
       }),
   );
 

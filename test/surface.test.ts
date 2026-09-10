@@ -110,7 +110,15 @@ const EXERCISE: Record<string, Record<string, unknown>[]> = {
   get_desktop_url: [{}],
   // A named size and an explicit shape are alternatives, never both.
   create_computer: [
-    { template: 'base', name: 'made', cpu: 2, ram_mb: 2048, disk_gb: 20, resolution: '1280x800' },
+    {
+      template: 'base',
+      template_transfer: 'prepare-token',
+      name: 'made',
+      cpu: 2,
+      ram_mb: 2048,
+      disk_gb: 20,
+      resolution: '1280x800',
+    },
     { size: 'small' },
   ],
   clone_computer: [{ name: 'copy' }],

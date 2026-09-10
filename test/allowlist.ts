@@ -172,6 +172,7 @@ export const PARAMETERS: ReadonlyMap<string, readonly string[]> = new Map([
       'body:name',
       'body:size',
       'body:template',
+      'body:template_transfer',
       'body:cpu',
       'body:ram_mb',
       'body:disk_gb',
