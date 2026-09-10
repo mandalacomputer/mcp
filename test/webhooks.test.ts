@@ -276,16 +276,23 @@ describe('the webhooks CRUD', () => {
     expect(textOf(res)).toContain('list_webhooks');
   });
 
-  it('says a rotate may have happened, and names the 24-hour clock, when no secret came back', async () => {
-    // The old secret is already on its clock when this answer is written, so a
-    // caller told to save a secret that is not in the payload finds out a day
-    // later, as deliveries start failing signature checks.
+  it('warns that retrying an unreadable rotation can immediately strand the receiver', async () => {
+    // The receiver still has the original key. If this rotate minted a new one
+    // that the answer lost, another rotate replaces that unreadable key and
+    // immediately removes the original from the signing pair.
     const res = await over([], 200, 'rotate_webhook_secret', { webhook_id: WEBHOOK.id });
     expect(res.isError).toBe(true);
-    expect(textOf(res)).not.toMatch(/SHOWN ONCE/);
-    expect(textOf(res)).toContain('MAY HAVE HAPPENED');
-    expect(textOf(res)).toContain('24-hour clock');
-    expect(textOf(res)).toContain('get_webhook');
+    const text = textOf(res);
+    expect(text).not.toMatch(/SHOWN ONCE/);
+    expect(text).toContain('MAY HAVE HAPPENED');
+    expect(text).toContain('24-hour');
+    expect(text).toMatch(/second rotat(?:e|ion).*immediately/is);
+    expect(text).toMatch(/original secret.*receiver/is);
+    expect(text).toMatch(/coordinat.*receiver/is);
+    expect(text).toContain('update_webhook');
+    expect(text).toContain('enabled: false');
+    expect(text).not.toMatch(/second rotate is safe/i);
+    expect(text).not.toContain('get_webhook');
   });
 
   it('reaches every route without a computer selected', async () => {
