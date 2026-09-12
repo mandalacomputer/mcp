@@ -130,6 +130,25 @@ describe('check-internals', () => {
     },
   );
 
+  it('rejects an inline Git option instead of silently skipping commit messages', () => {
+    const script = makeCliFixture('message option checkout', 'export const answer = 42;\n');
+    const repo = join(dirname(script), '..');
+    const git = (...args: string[]) => execFileSync('git', args, { cwd: repo, stdio: 'ignore' });
+    git('init', '-q');
+    git('config', 'user.email', 't@t');
+    git('config', 'user.name', 't');
+    git('add', '.');
+    git('commit', '-qm', 'synthetic: see engine.go');
+
+    const scan = runScript(script, '--messages=HEAD');
+    expect(scan.status).toBe(1);
+    expect(scan.out).toContain('names a platform source file: engine.go');
+
+    const malformed = runScript(script, '--messages=--max-count=0');
+    expect(malformed.status).toBe(2);
+    expect(malformed.out).toContain('revision range');
+  });
+
   describe.each(['space checkout', 'reserved # % ? checkout'])(
     'when the checkout path contains encoded characters: %s',
     (checkoutName) => {

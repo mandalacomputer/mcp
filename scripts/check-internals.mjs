@@ -190,7 +190,9 @@ function parseRange(argv) {
   const inline = argv.find((a) => a.startsWith('--messages='));
   if (inline) {
     const value = inline.slice('--messages='.length);
-    if (!value) fail('--messages needs a revision range, e.g. --messages origin/main..HEAD');
+    if (!value || value.startsWith('-')) {
+      fail('--messages needs a revision range, e.g. --messages origin/main..HEAD');
+    }
     return value;
   }
   if (flag === -1) return undefined;
