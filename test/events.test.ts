@@ -1,7 +1,7 @@
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { Api } from '../src/api.js';
-import { EventHub } from '../src/events.js';
+import { EventHub, MAX_BUFFERED } from '../src/events.js';
 import { BASE, connect, FakeSocket, fakeEvents, HELLO, installFakePlatform } from './harness.js';
 
 /**
@@ -274,6 +274,31 @@ describe('waiting for one event', () => {
     const res = await call('wait_for_event', { types: ['window.opened'], timeout_s: 1 });
     expect(res.isError).toBeFalsy();
     await close();
+  });
+
+  it('returns a cursor that can recover survivors when the matched event is evicted', async () => {
+    const { call, close, ev } = await attach({ ready: false });
+    try {
+      const waiting = call('wait_for_event', { types: ['process.exited'], timeout_s: 5 });
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      ev.last().send(frame('process.exited', { pid: 7, exit_code: 0 }, 'cur-match'));
+      queueMicrotask(() => {
+        for (let i = 0; i < MAX_BUFFERED + 1; i++) {
+          ev.last().send(frame('window.opened', { id: `0x${i}` }, `cur-later-${i}`));
+        }
+      });
+
+      const result = await waiting;
+      expect(eventsOf(result)).toEqual([]);
+      expect(dataOf(result).more_waiting).toBe(MAX_BUFFERED);
+      expect(dataOf(result).lost).toMatchObject({ events: 2 });
+
+      const recovered = await call('poll_events', { since: dataOf(result).cursor, limit: 500 });
+      expect(eventsOf(recovered)[0]).toMatchObject({ cursor: 'cur-later-1' });
+      expect(dataOf(recovered).more_waiting).toBe(MAX_BUFFERED - 500);
+    } finally {
+      await close();
+    }
   });
 });
 

@@ -254,4 +254,46 @@ describe('event recovery answers', () => {
       await session.close();
     }
   });
+
+  for (const tool of ['poll_events', 'wait_for_event'] as const) {
+    it(`leaves ${tool} delivery and loss unread when reconciliation is cancelled`, async () => {
+      const events = fakeEvents({ ready: false });
+      const session = await connect({ webSocket: events.factory });
+      const normal = globalThis.fetch;
+      let reconciling: AbortSignal | null | undefined;
+      try {
+        await session.call('poll_events');
+        events.last().send({ type: 'gap', cursor: 'cur-gap', data: {} });
+        events.last().send({ type: 'window.opened', cursor: 'cur-event', data: { id: '0x1' } });
+        globalThis.fetch = (async (input, init) => {
+          if (!String(input).endsWith('/windows')) return normal(input, init);
+          reconciling = init?.signal;
+          return new Promise<Response>((_resolve, reject) => {
+            reconciling?.addEventListener('abort', () => reject(reconciling?.reason), {
+              once: true,
+            });
+          });
+        }) as typeof fetch;
+
+        const controller = new AbortController();
+        const cancelled = session.client.callTool(
+          { name: tool, arguments: { timeout_s: 5 } },
+          undefined,
+          { signal: controller.signal },
+        );
+        await until(() => reconciling !== undefined);
+        controller.abort();
+        await expect(cancelled).rejects.toThrow();
+        await until(() => reconciling?.aborted === true);
+        globalThis.fetch = normal;
+
+        const next = textOf(await session.call('poll_events'));
+        expect(next).toContain('cur-event');
+        expect(next).toContain('"lost"');
+      } finally {
+        globalThis.fetch = normal;
+        await session.close();
+      }
+    });
+  }
 });

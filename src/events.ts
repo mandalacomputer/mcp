@@ -1083,10 +1083,11 @@ export class Subscription {
     if (typeof at === 'string' && at) return at;
     // Nothing in the ring to place it by: either nothing has been delivered on
     // this stream at all, or the event the position sits after has been evicted.
-    // The last cursor DELIVERED before `#resume`, for the reason
-    // {@link resumeCursor} gives — a position behind the truth is re-read, a
-    // position ahead of it is a hole nothing reports.
-    return this.#deliveredCursor ?? this.#resume ?? this.#hello?.cursor ?? '';
+    // The last cursor DELIVERED, or the frontier where this subscription
+    // started before anything has been handed over. Both follow the same rule
+    // as {@link resumeCursor}: a position behind the receive head may replay,
+    // while a position ahead of unread records silently skips them.
+    return this.#deliveredCursor ?? this.#start ?? this.#hello?.cursor ?? '';
   }
 
   #wakeAll(): void {
