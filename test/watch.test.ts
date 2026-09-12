@@ -122,6 +122,41 @@ function drivenEvents() {
   return { factory, sockets, state, last: () => sockets[sockets.length - 1] };
 }
 
+/** A host that rejects selected nominations while continuing to carry the rest. */
+function selectiveEvents() {
+  const sockets: FakeSocket[] = [];
+  const state = { rejected: new Set<string>(), failAll: false };
+  const factory = (url: string) => {
+    const socket = new FakeSocket(url);
+    sockets.push(socket);
+    setTimeout(() => {
+      if (socket.closed) return;
+      if (state.failAll || socket.watches.some((watch) => state.rejected.has(watch))) {
+        socket.fail();
+        return;
+      }
+      socket.open();
+      const watches = socket.watches;
+      socket.send({
+        ...HELLO,
+        ...(watches.length ? { watching: watches.map((path) => ({ path, armed: true })) } : {}),
+      });
+      socket.greeted = true;
+    }, 0);
+    return socket;
+  };
+  return { factory, sockets, state, last: () => sockets[sockets.length - 1] };
+}
+
+/** A socket whose peer can still finish its close after nominations have changed. */
+class DelayedCloseSocket extends FakeSocket {
+  override close(): void {}
+
+  finish(): void {
+    super.close();
+  }
+}
+
 /** A factory that greets only when the test says so, so a nomination can beat a hello. */
 function greetsOnDemand() {
   const sockets: FakeSocket[] = [];
@@ -976,6 +1011,110 @@ describe('a tree the model nominates', () => {
     await close();
   });
 
+  it('keeps a healthy stream when simultaneous nominations include one refusal', {
+    timeout: 30_000,
+  }, async () => {
+    const ev = selectiveEvents();
+    const { call, close } = await connect({ webSocket: ev.factory });
+    try {
+      await call('poll_events');
+      await call('wait_for_file_change', { path: '/base', timeout_s: 1 });
+      ev.state.rejected.add('/bad');
+
+      const [good, bad] = await Promise.all([
+        call('wait_for_file_change', { path: '/good', timeout_s: 12 }),
+        call('wait_for_file_change', { path: '/bad', timeout_s: 12 }),
+      ]);
+
+      expect(good.isError).toBeFalsy();
+      expect(textOf(good)).toContain('Nothing changed under /good');
+      expect(bad.isError).toBe(true);
+      expect(textOf(bad)).toContain('would not open an event stream carrying /bad');
+      await until('the healthy watch set to reconnect', () => {
+        const socket = ev.last();
+        return socket.greeted && socket.watches.join(',') === '/base,/good';
+      });
+      const stream = await call('poll_events');
+      expect(stream.isError).toBeFalsy();
+      expect(dataOf(stream).watching).toEqual([
+        { path: '/base', armed: true },
+        { path: '/good', armed: true },
+        { path: '/bad', armed: false },
+      ]);
+    } finally {
+      await close();
+    }
+  });
+
+  it('isolates multiple refused nominations while preserving every healthy one', {
+    timeout: 30_000,
+  }, async () => {
+    const ev = selectiveEvents();
+    ev.state.rejected = new Set(['/bad-1', '/bad-2']);
+    const hub = new EventHub(new Api('com_test', BASE), ev.factory);
+    try {
+      const sub = hub.open('vm-1');
+      sub.nominate('/base');
+      await until('the base watch', () => {
+        const socket = ev.sockets.at(-1);
+        return socket?.greeted === true && socket.watches[0] === '/base';
+      });
+      sub.nominate('/good-1');
+      sub.nominate('/bad-1');
+      sub.nominate('/bad-2');
+
+      await until(
+        'both refusals to be isolated',
+        () => sub.watchWasRefused('/bad-1') && sub.watchWasRefused('/bad-2'),
+        25_000,
+      );
+      await until('all healthy watches to reconnect', () => {
+        const socket = ev.last();
+        return socket.greeted && socket.watches.join(',') === '/base,/good-1';
+      });
+      expect(sub.watchWasRefused('/good-1')).toBe(false);
+      expect(sub.nominationLive('/base')).toBe(true);
+      expect(sub.nominationLive('/good-1')).toBe(true);
+    } finally {
+      hub.closeAll();
+    }
+  });
+
+  it('does not accuse mixed nominations when the whole host is unreachable', {
+    timeout: 30_000,
+  }, async () => {
+    const ev = selectiveEvents();
+    const hub = new EventHub(new Api('com_test', BASE), ev.factory);
+    try {
+      const sub = hub.open('vm-1');
+      sub.nominate('/base');
+      await until('the base watch', () => {
+        const socket = ev.sockets.at(-1);
+        return socket?.greeted === true && socket.watches[0] === '/base';
+      });
+      ev.state.failAll = true;
+      sub.nominate('/good');
+      sub.nominate('/bad');
+      await until('a bounded recovery attempt', () => ev.sockets.length >= 5, 20_000);
+      expect(sub.watchWasRefused('/good')).toBe(false);
+      expect(sub.watchWasRefused('/bad')).toBe(false);
+      expect(sub.nominations).toEqual(['/base', '/good', '/bad']);
+      ev.state.failAll = false;
+      await until(
+        'all nominations to recover with the host',
+        () => {
+          const socket = ev.last();
+          return socket.greeted && socket.watches.join(',') === '/base,/good,/bad';
+        },
+        20_000,
+      );
+      expect(sub.watchWasRefused('/good')).toBe(false);
+      expect(sub.watchWasRefused('/bad')).toBe(false);
+    } finally {
+      hub.closeAll();
+    }
+  });
+
   it('does not count a socket it closed itself as a refused upgrade', async () => {
     // `nominate` closes the socket to put a new watch set on the URL, and if it
     // does so before the opening frame lands the connection reads as one that
@@ -1234,6 +1373,131 @@ describe('a tree the model nominates', () => {
     expect(textOf(res)).toContain('pushed out');
     expect(textOf(res)).not.toContain('re-armed');
     await close();
+  });
+
+  it('bounds arm generations to active nominations under sustained churn', {
+    timeout: 40_000,
+  }, async () => {
+    const ev = fakeEvents();
+    const hub = new EventHub(new Api('com_test', BASE), ev.factory);
+    try {
+      const sub = hub.open('vm-1');
+      for (let i = 0; i < 300; i++) {
+        const path = `/tree-${i}`;
+        sub.nominate(path);
+        await until(`generation ${i} to arm`, () => sub.isArmed(path));
+      }
+      expect(sub.nominations).toEqual(['/tree-296', '/tree-297', '/tree-298', '/tree-299']);
+      expect(sub.armGeneration('/tree-0')).toBe(0);
+      expect(sub.armGeneration('/tree-295')).toBe(0);
+      for (const path of sub.nominations) expect(sub.armGeneration(path), path).toBeGreaterThan(0);
+    } finally {
+      hub.closeAll();
+    }
+  });
+
+  it('gives a re-nomination a generation distinct from an older waiter snapshot', async () => {
+    const ev = fakeEvents();
+    const hub = new EventHub(new Api('com_test', BASE), ev.factory);
+    try {
+      const sub = hub.open('vm-1');
+      sub.nominate('/a');
+      await until('/a to arm', () => sub.isArmed('/a'));
+      const olderWait = sub.armGeneration('/a');
+
+      for (const path of ['/b', '/c', '/d', '/e']) {
+        sub.nominate(path);
+        await until(`${path} to arm`, () => sub.isArmed(path));
+      }
+      expect(sub.nominates('/a')).toBe(false);
+      expect(sub.armGeneration('/a')).toBe(0);
+
+      sub.nominate('/a');
+      await until('/a to re-arm', () => sub.isArmed('/a'));
+      expect(sub.armGeneration('/a')).not.toBe(olderWait);
+    } finally {
+      hub.closeAll();
+    }
+  });
+
+  it('keeps a surviving alias aligned when a pending-close greeting includes an eviction', async () => {
+    const sockets: DelayedCloseSocket[] = [];
+    const hub = new EventHub(new Api('com_test', BASE), (url) => {
+      const socket = new DelayedCloseSocket(url);
+      sockets.push(socket);
+      return socket;
+    });
+    try {
+      const sub = hub.open('vm-1');
+      sub.nominate('/old');
+      sub.nominate('/kept');
+      await until('the original connection', () => sockets.length === 1);
+      const old = sockets[0];
+      expect(old.watches).toEqual(['/old', '/kept']);
+
+      for (const path of ['/a', '/b', '/c']) sub.nominate(path);
+      expect(sub.nominates('/old')).toBe(false);
+      old.open();
+      old.send({
+        ...HELLO,
+        watching: [
+          { path: '/host/old', armed: true },
+          { path: '/host/kept', armed: true },
+        ],
+      });
+
+      expect(sub.armGeneration('/old')).toBe(0);
+      expect(sub.isArmed('/old')).toBe(false);
+      expect(sub.hostPath('/kept')).toBe('/host/kept');
+      expect(sub.isArmed('/kept')).toBe(true);
+    } finally {
+      hub.closeAll();
+      sockets.at(-1)?.finish();
+    }
+  });
+
+  it('does not recreate historical arm metadata across repeated pending closes', {
+    timeout: 20_000,
+  }, async () => {
+    const sockets: DelayedCloseSocket[] = [];
+    const hub = new EventHub(new Api('com_test', BASE), (url) => {
+      const socket = new DelayedCloseSocket(url);
+      sockets.push(socket);
+      return socket;
+    });
+    try {
+      const sub = hub.open('vm-1');
+      sub.nominate('/old');
+      await until('the first delayed connection', () => sockets.length === 1);
+      const historical: string[] = [];
+
+      for (let i = 0; i < 20; i++) {
+        const stale = sockets.at(-1)!;
+        historical.push(...stale.watches);
+        for (let j = 0; j < 4; j++) sub.nominate(`/tree-${i}-${j}`);
+        stale.open();
+        stale.send({
+          ...HELLO,
+          watching: stale.watches.map((path) => ({ path: `/host${path}`, armed: true })),
+        });
+        stale.finish();
+        await until(`connection ${i + 1}`, () => sockets.at(-1) !== stale);
+      }
+
+      const active = sockets.at(-1)!;
+      active.open();
+      active.send({
+        ...HELLO,
+        watching: active.watches.map((path) => ({ path: `/host${path}`, armed: true })),
+      });
+      expect(
+        historical.filter((path) => !sub.nominates(path) && sub.armGeneration(path) > 0),
+      ).toEqual([]);
+      expect(sub.nominations).toHaveLength(4);
+    } finally {
+      hub.closeAll();
+      sockets.at(-1)?.finish();
+    }
   });
 
   it('reports the time it spent watching, not the timeout it was given', async () => {
