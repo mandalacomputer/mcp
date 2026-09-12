@@ -142,6 +142,63 @@ describe('screenshots', () => {
     // reading it concludes the click missed and clicks again.
     expect(shot?.query.get('fresh')).toBe('1');
   });
+
+  it('offers the saved frame when a new capture is refused', async () => {
+    // The default asks for a capture, and a capture needs a computer that is
+    // awake — so on a suspended one the default is refused. A bare 409 leaves a
+    // model with nothing to try but the same call again, and this tool has an
+    // argument that asks a question the platform CAN answer: the last frame it
+    // saved. The refusal is where a model meets the problem, so it is where the
+    // option has to be named.
+    const real = globalThis.fetch;
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      if (String(input).includes('/screenshot')) {
+        return Response.json(
+          { error: 'computer is suspended; resume it to capture the screen' },
+          {
+            status: 409,
+          },
+        );
+      }
+      return real(input as never, init);
+    }) as typeof fetch;
+    try {
+      const { call, close } = await connect();
+      const res = await call('screenshot', { width: 1280 });
+      await close();
+      expect(res.isError).toBe(true);
+      // The platform's own sentence survives — it is the half that says which
+      // computer and what state it is in.
+      expect(textOf(res)).toContain('resume it to capture the screen');
+      expect(textOf(res)).toContain('fresh: false');
+      // And it does not pass that saved frame off as the present.
+      expect(textOf(res)).toContain('not as the screen now');
+    } finally {
+      globalThis.fetch = real;
+    }
+  });
+
+  it('leaves a refusal alone when the caller already asked for the saved frame', async () => {
+    // Nothing left to offer: the option has been taken, so naming it again is
+    // advice to do what the caller just did.
+    const real = globalThis.fetch;
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      if (String(input).includes('/screenshot')) {
+        return Response.json({ error: 'no saved frame for this computer' }, { status: 409 });
+      }
+      return real(input as never, init);
+    }) as typeof fetch;
+    try {
+      const { call, close } = await connect();
+      const res = await call('screenshot', { fresh: false });
+      await close();
+      expect(res.isError).toBe(true);
+      expect(textOf(res)).toContain('no saved frame for this computer');
+      expect(textOf(res)).not.toContain('fresh: false');
+    } finally {
+      globalThis.fetch = real;
+    }
+  });
 });
 
 describe('input bodies', () => {

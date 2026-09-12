@@ -1,5 +1,8 @@
+import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
+import { ConflictError } from '../errors.js';
 import {
+  failed,
   guarded,
   INLINE_IMAGE_TYPES,
   image,
@@ -43,6 +46,35 @@ const point = {
   y: z.number().int().optional(),
 };
 
+/**
+ * A refused capture, turned into the one option that still answers.
+ *
+ * The platform's own sentence first and whole — it is the half that says which
+ * computer and what state it is in — and the platform's classification with it,
+ * since `failed` is what composes both. What this adds is the thing neither can
+ * know: that this tool has an argument which asks a different question, one the
+ * platform can answer while it cannot take a new capture.
+ *
+ * It does not claim to know WHY the capture was refused. A computer that is
+ * asleep has nothing to capture from; a computer whose agent is busy for an
+ * instant has, and will answer the same call moments later. The cached frame is
+ * a working answer in both cases and a misleading one in both if it is read as
+ * the present, so the sentence says what that frame is rather than promising the
+ * caller their screenshot.
+ */
+const cachedFrameOffered = (err: ConflictError): CallToolResult => {
+  const sentence = failed(err)
+    .content.map((c) => ('text' in c ? c.text : ''))
+    .join('\n');
+  return refused(
+    `${sentence}\n\nThat was a request for a NEW capture. fresh: false asks instead for the last frame the ` +
+      `platform saved, which it can answer without the computer taking one — so it is the way to see what ` +
+      `was on the screen. Read it as the screen when that frame was taken and not as the screen now: it ` +
+      `cannot show the result of anything sent since, and on a suspended computer it is the moment it went ` +
+      `to sleep. If what you need is the present, the computer has to be awake first.`,
+  );
+};
+
 export const registerInput: Registrar = (server, session) => {
   const post = (
     computerId: string | undefined,
@@ -74,7 +106,7 @@ export const registerInput: Registrar = (server, session) => {
           .boolean()
           .default(true)
           .describe(
-            "Skip the platform's frame cache, which serves any capture under 1.5s old. True by default: after a click, a cached frame can predate the action entirely, and a model reading it concludes the click missed and clicks again.",
+            'Skip the platform\'s frame cache, which serves any capture under 1.5s old. True by default: after a click, a cached frame can predate the action entirely, and a model reading it concludes the click missed and clicks again. A fresh capture needs a computer that is awake, so on a suspended one it is refused rather than answered — pass false to ask for the last frame the platform saved. That frame is the screen as it was when the computer was last awake, which is the right answer for "what was on screen" and the wrong one for "did my click land".',
           ),
       },
       annotations: { readOnlyHint: true },
@@ -82,14 +114,29 @@ export const registerInput: Registrar = (server, session) => {
     ({ computer_id, width, fresh }, extra) =>
       guarded(async () => {
         const id = session.resolve(computer_id);
-        const shot = await session.api.with(extra.signal).bytes(
-          'GET',
-          P.computerAction(id, 'screenshot'),
-          {
-            query: { w: width, fresh: fresh ? 1 : undefined },
-          },
-          MAX_INLINE_IMAGE_BYTES,
-        );
+        let shot: Awaited<ReturnType<typeof session.api.bytes>>;
+        try {
+          shot = await session.api.with(extra.signal).bytes(
+            'GET',
+            P.computerAction(id, 'screenshot'),
+            {
+              query: { w: width, fresh: fresh ? 1 : undefined },
+            },
+            MAX_INLINE_IMAGE_BYTES,
+          );
+        } catch (err) {
+          // The refusal whose next step is a PARAMETER, caught here for the
+          // reason `backgroundFull` is caught in exec: the answer names one of
+          // this tool's own arguments, and the error classes are shared with
+          // every embedder and with two other clients.
+          //
+          // Only when this call asked for a capture, which is the only way the
+          // refusal can be about asking for one. A model that meets a bare 409
+          // here has nothing to try, and the thing it does instead is ask again
+          // — a loop over a computer that cannot answer it.
+          if (fresh && err instanceof ConflictError) return cachedFrameOffered(err);
+          throw err;
+        }
         // The bound `read_file` observes, observed here too. A 3840x2160 capture
         // of a dense screen is the case it exists for: refused with its size and
         // the parameter that fixes it, rather than turned into ~85 MB of base64

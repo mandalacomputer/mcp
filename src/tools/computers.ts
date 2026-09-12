@@ -51,7 +51,16 @@ type Move = {
   computer_id: string;
   state: string;
   detail?: string;
-  live: boolean;
+  /**
+   * Whether the move is still running — `undefined` for a row that did not say.
+   *
+   * Optional because the rows are not validated field by field: `movesOf` keeps
+   * any row with an id, so `live` is whatever arrived. Declared `boolean` it read
+   * as a guarantee, and both readers were written against that guarantee — one of
+   * them is a listing that painted a row with no flag as a move that had
+   * finished.
+   */
+  live?: boolean;
   cpu?: number;
   ram_mb?: number;
   disk_gb?: number;
@@ -140,9 +149,27 @@ const moveShape = (m: Move) =>
     .filter(Boolean)
     .join(' · ') || 'no change';
 
-/** One row of list_moves. */
-const moveLine = (m: Move) =>
-  `${m.computer_id}: ${m.state}${m.live ? ' (running)' : ''} — ${moveShape(m)}${m.detail ? ` — ${m.detail}` : ''}`;
+/**
+ * One row of list_moves, and the three things `live` can say rather than two.
+ *
+ * `live` is the flag this tool's own description tells a model to poll on, so
+ * the one answer it must never give is a confident "not running" about a row
+ * that did not say. A truthy test gave exactly that: a row whose flag was absent
+ * or was not a boolean read as finished, and a caller polling for the move to end
+ * stops there — while a disk is still being copied between two hosts, and while
+ * the platform goes on refusing the next move on this account because this one
+ * has not finished. The watch loop already treats an unreadable flag as a poll it
+ * could not get an answer to; this is the same fact, said in a listing.
+ */
+const moveLine = (m: Move) => {
+  const liveness =
+    m.live === true
+      ? ' (running)'
+      : m.live === false
+        ? ''
+        : ' (LIVENESS UNKNOWN — this row did not say whether the move is still running, so do not read it as finished)';
+  return `${m.computer_id}: ${m.state}${liveness} — ${moveShape(m)}${m.detail ? ` — ${m.detail}` : ''}`;
+};
 
 type Usage = {
   from?: string;
