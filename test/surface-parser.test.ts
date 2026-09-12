@@ -6,6 +6,8 @@ import { describe, expect, it } from 'vitest';
 import {
   balanced,
   entries,
+  listItems,
+  objectFields,
   stripComments,
   topLevelField,
   topLevelKeys,
@@ -164,6 +166,56 @@ describe('the surface source scanner', () => {
     expect(() => entries(' {a:1}, buildEntry(x), {b:2} ')).toThrow(/not an object literal/);
     expect(() => entries(" {a:1}, 'GET x', {b:2} ")).toThrow(/not an object literal/);
     expect(entries(' {a:1}, {b:2}, ')).toEqual(['a:1', 'b:2']);
+  });
+
+  it('reads a regex that follows a keyword the openers list forgot', () => {
+    // Enumerating the words a regex can follow is how this reader reached
+    // `else` and stopped. `export default /…/` and `class C extends /…/` are
+    // both legal, and read as division the walk goes INTO the regex: the Python
+    // port of this reader was found accepting a whole fake route table out of
+    // one. Every reserved word is a non-value now, so the regex is skipped and
+    // the table below is the only one there is.
+    for (const keyword of ['default', 'extends']) {
+      const source = `export ${keyword} /'a' } b/; // gone`;
+      const clean = stripComments(source);
+      // The regex survives whole, so neither the `'` nor the `}` inside it is
+      // read as syntax; the comment after it still goes.
+      expect(clean).toHaveLength(source.length);
+      expect(clean).toContain("/'a' } b/");
+      expect(clean).not.toContain('gone');
+    }
+    // And a division is still a division, whatever it divides.
+    expect(stripComments('const half = total / count; // gone')).toContain('total / count');
+  });
+
+  it('splits list elements without splitting inside their literals', () => {
+    expect(listItems(`{ name: 'a, b' }, SHARED, [1, 2]`)).toEqual([
+      `{ name: 'a, b' }`,
+      'SHARED',
+      '[1, 2]',
+    ]);
+    expect(listItems(`{ a: 1 }, `)).toEqual(['{ a: 1 }']);
+  });
+
+  it('refuses a hole between list separators rather than reading one fewer', () => {
+    expect(() => listItems('{a:1}, , {b:2}')).toThrow(/empty list element/);
+    expect(() => listItems('{a:1}, {b:2}}')).toThrow(/unbalanced/);
+  });
+
+  it('reads every object field, in whichever way its key is spelled', () => {
+    const fields = objectFields(`'GET a': { x: 1 }, "PUT b": { y: 2 }, plain: 3`);
+    expect([...fields.keys()]).toEqual(['GET a', 'PUT b', 'plain']);
+    expect(fields.get('PUT b')).toBe('{ y: 2 }');
+  });
+
+  it('refuses an object entry it cannot account for', () => {
+    // Every entry, not every entry a regex recognises: an unread key is a route
+    // compared against no parameters at all, and the scan's own "found nothing"
+    // guard stays quiet because the others counted.
+    expect(() => objectFields('...SHARED, a: 1')).toThrow(/unsupported object entry/);
+    expect(() => objectFields('[key]: 1')).toThrow(/unsupported object entry/);
+    expect(() => objectFields('a: 1, a: 2')).toThrow(/duplicate key/);
+    expect(() => objectFields('a:')).toThrow(/no value/);
   });
 
   it('reads a quoted key as the key it names', () => {
@@ -399,6 +451,86 @@ describe('the route table reader', () => {
     ).toEqual(['header:X-Model-Key']);
   });
 
+  it('resolves a shared constant whose identifier is not capitalised', async () => {
+    // The pattern asked for capitals, so a lower-case declaration was never
+    // seen — and the citation scan asked for capitals too, so the reference was
+    // not seen either. Both halves silent, and the route read as taking none.
+    expect(
+      await scanParams(`
+        const allowPartial: Query = { name: 'allow_partial', description: 'x' };
+        export const DOCS: Record<string, Doc> = {
+          'GET sizes': { query: [allowPartial] },
+        };
+      `),
+    ).toEqual(['query:allow_partial']);
+  });
+
+  it('reads a parameter name in whichever quote style it is written in', async () => {
+    expect(
+      await scanParams(`
+        export const DOCS: Record<string, Doc> = {
+          'GET sizes': { query: [{ name: "fresh", description: 'x' }] },
+        };
+      `),
+    ).toEqual(['query:fresh']);
+  });
+
+  it('reads a route key spelled with double quotes', async () => {
+    // Skipped by the single-quote key pattern this replaced, the entry was
+    // absent from the parameter table and the route was compared against
+    // nothing — while the "found no routes" guard stayed quiet, because the
+    // other entries counted.
+    expect(
+      await scanParams(`
+        export const DOCS: Record<string, Doc> = {
+          "GET sizes": { query: [{ name: 'fresh', description: 'x' }] },
+        };
+      `),
+    ).toEqual(['query:fresh']);
+  });
+
+  it('does not read a name nested in a schema as a parameter of the route', async () => {
+    // The flat `name:\s*'…'` this replaced read every name in the list at any
+    // depth, so a schema property called `name` became a query parameter the
+    // platform never documented — reported as one the mirror is missing.
+    expect(
+      await scanParams(`
+        export const DOCS: Record<string, Doc> = {
+          'GET sizes': {
+            query: [{ name: 'fresh', schema: { properties: { name: { type: 'string' } } } }],
+          },
+        };
+      `),
+    ).toEqual(['query:fresh']);
+  });
+
+  it('refuses a query entry whose name it cannot read', async () => {
+    const { said, code } = await refuseParams(
+      `export const DOCS: Record<string, Doc> = { 'GET sizes': { query: [{ schema: S }] } };\n`,
+    );
+    expect(code).toBe(1);
+    expect(said).toContain('no name this reader can read');
+  });
+
+  it('refuses a shared constant it could not resolve rather than ignoring it', async () => {
+    // Forgiving was the old reader's only option: it scanned the list flat, so
+    // the capitalised words of each description — RFC, UTC — looked exactly
+    // like a constant. Reading the elements is what makes this answerable.
+    const { said, code } = await refuseParams(
+      `export const DOCS: Record<string, Doc> = { 'GET sizes': { query: [MYSTERY] } };\n`,
+    );
+    expect(code).toBe(1);
+    expect(said).toContain('not a shared parameter this reader resolved');
+  });
+
+  it('refuses a spread where the documentation lists its parameters', async () => {
+    const { said, code } = await refuseParams(
+      `export const DOCS: Record<string, Doc> = { 'GET sizes': { query: [...SHARED] } };\n`,
+    );
+    expect(code).toBe(1);
+    expect(said).toContain('cannot read');
+  });
+
   it('reads a body whose object call is spelled with different whitespace', async () => {
     // The exact `body: object(` this replaced is a spelling, not a shape: a
     // formatter that puts the call on the next line yields no body fields at
@@ -605,10 +737,76 @@ describe('the route table reader', () => {
     ).toEqual(['GET gamma']);
   });
 
-  it('ignores an entry that carries only half of the pair', async () => {
-    expect(await scanTable(`{ pattern: 'orphan' }, { method: 'PUT', pattern: 'delta' },`)).toEqual([
-      'PUT delta',
-    ]);
+  it('does not read a route table hidden inside a regex', async () => {
+    // `export default /…/` read as division walks into the regex, and what it
+    // finds there is a declaration: the table below is the real one, and the
+    // one in the regex must not be read at all — nor stop the real one being
+    // read.
+    const dir = fixture(
+      `export default /a; export const V1_ROUTES: Route[] = [{method:'GET',pattern:'fake'}]; z/;
+export const V1_ROUTES: Route[] = [{ method: 'GET', pattern: 'real' }];
+`,
+    );
+    try {
+      const { said } = await runCheck(dir);
+      const read = [...said.matchAll(/^ {2}\+ ([A-Z]+ \S+)$/gm)].map((m) => m[1]);
+      expect(read).toEqual(['GET real']);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('does not read a table declared inside a nested scope', async () => {
+    // A declaration of the same name inside a function is not the module's
+    // table, and reading it instead compares the mirror against something
+    // nothing serves.
+    const dir = fixture(
+      `function build() {
+  const V1_ROUTES: Route[] = [{ method: 'GET', pattern: 'fake' }];
+  return V1_ROUTES;
+}
+export const V1_ROUTES: Route[] = [{ method: 'GET', pattern: 'real' }];
+`,
+    );
+    try {
+      const { said } = await runCheck(dir);
+      expect([...said.matchAll(/^ {2}\+ ([A-Z]+ \S+)$/gm)].map((m) => m[1])).toEqual(['GET real']);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses a table declared twice where it can read both', async () => {
+    const dir = fixture(
+      `export const V1_ROUTES: Route[] = [{ method: 'GET', pattern: 'one' }];
+export const V1_ROUTES: Route[] = [{ method: 'GET', pattern: 'two' }];
+`,
+    );
+    try {
+      const { said, code } = await runCheck(dir);
+      expect(said).toContain('declared more than once');
+      expect(code).not.toBe(0);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses an entry that carries only half of the pair', async () => {
+    // Skipped, this reads as a table the platform is short by one route, and
+    // the entry it could not read is reported as a route the mirror invented —
+    // which sends whoever reads it to delete a line that is correct. What a
+    // half-read entry actually means is that the walk above was wrong about the
+    // spelling, or that the value came from somewhere it cannot see.
+    const dir = fixture(
+      `export const V1_ROUTES: Route[] = [{ pattern: 'orphan' }, { method: 'PUT', pattern: 'delta' }];\n`,
+    );
+    try {
+      const { said, code } = await runCheck(dir);
+      expect(said).toContain('no literal method and pattern');
+      expect(code).not.toBe(0);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it('keeps reading entries past a brace quoted inside one of them', async () => {
