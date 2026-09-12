@@ -51,6 +51,7 @@ import {
   reasonKind,
   UnavailableError,
 } from '../src/errors.js';
+import { EventHub, MAX_BUFFERED } from '../src/events.js';
 import { failed, MAX_INLINE_IMAGE_BYTES, unwrapComputer } from '../src/format.js';
 import { hostSpellings, isLoopbackHost } from '../src/http.js';
 import {
@@ -5917,4 +5918,136 @@ describe('the wait and the states nothing can start', () => {
       globalThis.fetch = real;
     }
   }, 40_000);
+});
+
+describe('a gap one call previewed and another call reads', () => {
+  async function until(what: string, cond: () => boolean, ms = 3_000): Promise<void> {
+    const stop = Date.now() + ms;
+    while (!cond()) {
+      if (Date.now() > stop) throw new Error(`timed out waiting for ${what}`);
+      await new Promise((r) => setTimeout(r, 5));
+    }
+  }
+
+  /** The JSON half of a `said` result. */
+  const bodyOf = (res: CallToolResult): Record<string, unknown> => {
+    const at = said(res).indexOf('\n\n');
+    if (at < 0) throw new Error(`no data in result: ${said(res)}`);
+    return JSON.parse(said(res).slice(at + 2));
+  };
+
+  it('does not report it against a later read that asked from somewhere else', async () => {
+    // One subscription serves every call on a computer, so the preview that asks
+    // whether a read needs reconciliation must not record what it sees. It did:
+    // placing an unplaceable `since` stamped the standing loss, and the caller
+    // that asked was gone — cancelled during the reconciliation the preview had
+    // just triggered — so the next call on that computer was handed the hole.
+    // That call named no cursor at all and had lost nothing; it was told a gap
+    // it could not have caused and could not act on, and the caller whose cursor
+    // the gap really belonged to was never told anything.
+    const platform = installFakePlatform();
+    const events = fakeEvents();
+    const real = globalThis.fetch;
+    let reconciling: AbortSignal | null | undefined;
+    const { call, client, close } = await connect({ webSocket: events.factory });
+    try {
+      await call('poll_events', {});
+      // Reconciliation is what the preview's answer buys, and it hangs here so
+      // the caller can be cancelled inside it.
+      globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+        if (!String(input).endsWith('/windows')) return real(input as never, init);
+        reconciling = init?.signal;
+        return new Promise<Response>((_resolve, reject) => {
+          reconciling?.addEventListener('abort', () => reject(reconciling?.reason), { once: true });
+        });
+      }) as typeof fetch;
+
+      const controller = new AbortController();
+      const cancelled = client.callTool(
+        // A cursor this session cannot place: from before a reap, or from another
+        // stream. The gap is real and belongs to THIS call.
+        { name: 'wait_for_event', arguments: { since: 'cur-elsewhere', timeout_s: 5 } },
+        undefined,
+        { signal: controller.signal },
+      );
+      await new Promise((r) => setTimeout(r, 50));
+      events.last().send({ type: 'window.opened', cursor: 'cur-1', data: { id: '0x1' } });
+      await until('reconciliation to start', () => reconciling !== undefined);
+      controller.abort();
+      await expect(cancelled).rejects.toThrow();
+      globalThis.fetch = real;
+
+      const next = await call('poll_events', {});
+      expect(next.isError).toBeFalsy();
+      expect(bodyOf(next).lost).toBeUndefined();
+      // And the gap is still there for whoever asks from that cursor, rather
+      // than having been consumed by a call that never saw it.
+      const asked = await call('poll_events', { since: 'cur-elsewhere' });
+      expect(bodyOf(asked).lost).toBeDefined();
+    } finally {
+      globalThis.fetch = real;
+      await close();
+      platform.restore();
+    }
+  }, 20_000);
+
+  it('keeps the predicate itself free of side effects', async () => {
+    // The same rule stated where it is cheap to check, because the tool path
+    // above can only ever exercise one of the callers. A predicate that reports
+    // a hole must leave the subscription as it found it.
+    const platform = installFakePlatform();
+    const events = fakeEvents();
+    const hub = new EventHub(new Api('com_test', BASE), events.factory);
+    try {
+      const sub = hub.open('vm-1');
+      await until('the greeting', () => events.sockets.at(-1)?.greeted === true);
+      events.last().send({ type: 'window.opened', cursor: 'cur-1', data: { id: '0x1' } });
+
+      expect(sub.needsReconciliation({ since: 'cur-elsewhere', limit: 100 })).toBe(true);
+      // Asked twice on purpose: a predicate that recorded its answer would be
+      // reporting its own earlier call from here on.
+      expect(sub.needsReconciliation({ since: 'cur-elsewhere', limit: 100 })).toBe(true);
+      const implicit = sub.read({ limit: 100 });
+      expect(implicit.events.map((e) => e.cursor)).toContain('cur-1');
+      expect(implicit.loss).toBeUndefined();
+      // And the read that does name that cursor reports it, which is the half
+      // this must not cost.
+      expect(sub.read({ since: 'cur-elsewhere', limit: 100 }).loss).toMatchObject({ events: null });
+    } finally {
+      hub.closeAll();
+      platform.restore();
+    }
+  }, 20_000);
+
+  it('does not put a count on a hole that starts at a cursor it cannot place', async () => {
+    // The gap discipline the rest of this class keeps: an unknown quantity plus
+    // a known one is unknown. A cursor this session cannot place may be any
+    // distance back, so the buffer's own overflow count must not be handed over
+    // as the size of that hole — which is what happens if the standing loss is
+    // simply preferred to the one the cursor implies (Codex review).
+    const platform = installFakePlatform();
+    const events = fakeEvents();
+    const hub = new EventHub(new Api('com_test', BASE), events.factory);
+    try {
+      const sub = hub.open('vm-1');
+      await until('the greeting', () => events.sockets.at(-1)?.greeted === true);
+      // Unread and over the cap, so the ring establishes a numeric loss of its
+      // own before anybody reads.
+      for (let i = 1; i <= MAX_BUFFERED + 1; i++) {
+        events.last().send({ type: 'window.opened', cursor: `cur-${i}`, data: { id: `0x${i}` } });
+      }
+
+      const plain = sub.read({ since: 'cur-elsewhere', limit: 100 });
+      expect(plain.loss?.events).toBeNull();
+      expect(plain.loss?.reason).toMatch(/not a place this session can find/);
+      // And the same through a `through` read that also had to step over events
+      // to reach its match, which is where the two counts would be added.
+      const matched = sub.read({ since: 'cur-elsewhere', limit: 1, through: MAX_BUFFERED });
+      expect(matched.loss?.events).toBeNull();
+      expect(matched.loss?.reason).toMatch(/not a place this session can find/);
+    } finally {
+      hub.closeAll();
+      platform.restore();
+    }
+  }, 20_000);
 });
