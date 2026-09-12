@@ -562,11 +562,12 @@ export const registerEvents: Registrar = (server, session) => {
         // point in this call, and a `state` captured before the wait is a
         // statement about a moment that has passed.
         const opening = sub.state;
+        // A cancelled call must not drain a stopped subscription's final
+        // buffered delivery into an answer its caller can no longer receive.
+        if (extra.signal?.aborted) return cancelledDuringAttach(id);
         if (opening.status === 'stopped') {
           return stopped(session, id, opening.reason, sub, { since, limit });
         }
-        // A caller who hung up is not a stream that failed to open.
-        if (extra.signal?.aborted) return cancelledDuringAttach(id);
         if (!sub.eventTypes) return unattached(id, Date.now() - started);
         const connection = sub.connected ? sub.connectionVersion : undefined;
 
@@ -704,9 +705,10 @@ export const registerEvents: Registrar = (server, session) => {
                 (connectionNote(sub, connection) || 'The stream is still open and buffering.'),
             );
           }
-          const now = sub.state;
-          if (now.status === 'stopped')
-            return stopped(session, id, now.reason, sub, { since, limit });
+          const stoppedWhileWaiting = sub.state;
+          if (stoppedWhileWaiting.status === 'stopped') {
+            return stopped(session, id, stoppedWhileWaiting.reason, sub, { since, limit });
+          }
           // Asked again, because the wait that just ended is long enough for a
           // `capabilities` frame to have arrived inside it. A withdrawal that
           // happened while parked is still the reason nothing came, and saying
@@ -721,8 +723,21 @@ export const registerEvents: Registrar = (server, session) => {
           // which is an answer, and it comes with the cursor that makes asking
           // again cost nothing. Reporting it as a failure would teach a model to
           // stop asking — back to the screenshot loop this tool exists to end.
+          const needsReconciliation = sub.needsReconciliation({ since, limit });
+          const recovered = needsReconciliation
+            ? await reconcile(session, id, extra.signal, deadline)
+            : {};
+          if (extra.signal?.aborted) {
+            return refused(
+              `Cancelled while waiting on ${id}. Buffered events remain available on the next call. ` +
+                (connectionNote(sub, connection) || 'The stream is still open and buffering.'),
+            );
+          }
+          const now = sub.state;
+          if (now.status === 'stopped')
+            return stopped(session, id, now.reason, sub, { since, limit });
           const d = sub.read({ since, limit });
-          const extras = d.loss ? await reconcile(session, id, extra.signal, deadline) : {};
+          const extras = d.loss ? recovered : {};
           // What did NOT match still happened, and this read has just handed it
           // over — so the sentence has to name it. Saying "nothing happened"
           // over a payload holding three events is the one thing a model must
@@ -755,15 +770,35 @@ export const registerEvents: Registrar = (server, session) => {
           );
         }
 
+        const needsReconciliation = sub.needsReconciliation({ since, limit, through: hit });
+        const recovered = needsReconciliation
+          ? await reconcile(session, id, extra.signal, deadline)
+          : {};
+        if (extra.signal?.aborted) {
+          return refused(
+            `Cancelled while waiting on ${id}. Buffered events remain available on the next call. ` +
+              (connectionNote(sub, connection) || 'The stream is still open and buffering.'),
+          );
+        }
         const d = sub.read({ since, limit, through: hit });
         const last = d.events[d.events.length - 1];
-        const extras = d.loss ? await reconcile(session, id, extra.signal, deadline) : {};
+        const extras = d.loss ? recovered : {};
         const before = d.events.length - 1;
         // Empty when another call on this computer consumed the matched event
         // first: the ring is one buffer with one delivered cursor, and two
         // overlapping waits can both match before either reads. Naming an event
         // over an empty list would be an event the caller is never shown.
         if (!last) {
+          if (d.loss) {
+            return said(
+              `An event on ${id} matched this wait, but the matching event is no longer in this ` +
+                `call's delivery. Some buffered history was lost before it could be read, so do ` +
+                `not assume another reader safely received the match.` +
+                reconciled(extras) +
+                ` Call again for the events that remain buffered.`,
+              { ...body(id, d, sub, sub.watching), ...extras },
+            );
+          }
           return said(
             `Something happened on ${id} and another call on this computer was handed it before ` +
               `this one could read it — the events are in that call's answer, not below. Nothing ` +
@@ -985,10 +1020,10 @@ export const registerEvents: Registrar = (server, session) => {
         const started = Date.now();
         await attached(sub, extra.signal, deadline);
         const opening = sub.state;
+        if (extra.signal?.aborted) return cancelledDuringAttach(id);
         if (opening.status === 'stopped') {
           return stopped(session, id, opening.reason, sub, { since, limit });
         }
-        if (extra.signal?.aborted) return cancelledDuringAttach(id);
         if (!sub.eventTypes) return unattached(id, Date.now() - started);
 
         // Asked before the tree is nominated, because a computer that cannot
@@ -1020,10 +1055,10 @@ export const registerEvents: Registrar = (server, session) => {
         if (!sub.nominationLive(root)) {
           await sub.nominated(root, deadline, extra.signal);
           const after = sub.state;
+          if (extra.signal?.aborted) return cancelledWhileArming(id, root);
           if (after.status === 'stopped') {
             return stopped(session, id, after.reason, sub, { since, limit });
           }
-          if (extra.signal?.aborted) return cancelledWhileArming(id, root);
           // ASKED FIRST, all four of them, because each is an answer and the
           // timeout below is only the absence of one. A tree the host would not
           // carry, one another call evicted, or a computer that has stopped
@@ -1060,9 +1095,9 @@ export const registerEvents: Registrar = (server, session) => {
         if (!sub.isArmed(root)) await sub.armedWait(root, deadline, extra.signal);
         if (!sub.isArmed(root)) {
           const now = sub.state;
+          if (extra.signal?.aborted) return cancelledWhileArming(id, wire);
           if (now.status === 'stopped')
             return stopped(session, id, now.reason, sub, { since, limit });
-          if (extra.signal?.aborted) return cancelledWhileArming(id, wire);
           // Asked before the sentence below, all four of them, because that
           // sentence says the nomination stands and this tree is still coming
           // up — and every word of it is false when the tree has been evicted
@@ -1482,15 +1517,28 @@ export const registerEvents: Registrar = (server, session) => {
         const started = Date.now();
         await attached(sub, extra.signal);
         const state = sub.state;
+        if (extra.signal?.aborted) return cancelledDuringAttach(id);
         if (state.status === 'stopped') {
           return stopped(session, id, state.reason, sub, { since, limit });
         }
-        if (extra.signal?.aborted) return cancelledDuringAttach(id);
         if (!sub.eventTypes) return unattached(id, Date.now() - started);
 
         const connection = sub.connected ? sub.connectionVersion : undefined;
+        const needsReconciliation = sub.needsReconciliation({ since, limit });
+        const recovered = needsReconciliation ? await reconcile(session, id, extra.signal) : {};
+        if (extra.signal?.aborted) {
+          return refused(
+            `Cancelled while reading events on ${id}. Buffered events remain available on the next ` +
+              `call. ` +
+              (connectionNote(sub, connection) || 'The stream is still open and buffering.'),
+          );
+        }
+        const after = sub.state;
+        if (after.status === 'stopped') {
+          return stopped(session, id, after.reason, sub, { since, limit });
+        }
         const d = sub.read({ since, limit });
-        const extras = d.loss ? await reconcile(session, id, extra.signal) : {};
+        const extras = d.loss ? recovered : {};
         const interruption = connectionNote(sub, connection);
         if (interruption) {
           return said(interruption + (d.loss ? reconciled(extras) : ''), {

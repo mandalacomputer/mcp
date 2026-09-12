@@ -1,7 +1,9 @@
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { Api } from '../src/api.js';
-import { EventHub } from '../src/events.js';
+import { EventHub, MAX_BUFFERED } from '../src/events.js';
+import { Session } from '../src/session.js';
+import { registerEvents } from '../src/tools/events.js';
 import { BASE, connect, FakeSocket, fakeEvents, HELLO, installFakePlatform } from './harness.js';
 
 /**
@@ -275,6 +277,31 @@ describe('waiting for one event', () => {
     expect(res.isError).toBeFalsy();
     await close();
   });
+
+  it('returns a cursor that can recover survivors when the matched event is evicted', async () => {
+    const { call, close, ev } = await attach({ ready: false });
+    try {
+      const waiting = call('wait_for_event', { types: ['process.exited'], timeout_s: 5 });
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      ev.last().send(frame('process.exited', { pid: 7, exit_code: 0 }, 'cur-match'));
+      queueMicrotask(() => {
+        for (let i = 0; i < MAX_BUFFERED + 1; i++) {
+          ev.last().send(frame('window.opened', { id: `0x${i}` }, `cur-later-${i}`));
+        }
+      });
+
+      const result = await waiting;
+      expect(eventsOf(result)).toEqual([]);
+      expect(dataOf(result).more_waiting).toBe(MAX_BUFFERED);
+      expect(dataOf(result).lost).toMatchObject({ events: 2 });
+
+      const recovered = await call('poll_events', { since: dataOf(result).cursor, limit: 500 });
+      expect(eventsOf(recovered)[0]).toMatchObject({ cursor: 'cur-later-1' });
+      expect(dataOf(recovered).more_waiting).toBe(MAX_BUFFERED - 500);
+    } finally {
+      await close();
+    }
+  });
 });
 
 describe('a desktop that came up before anybody was listening', () => {
@@ -516,6 +543,43 @@ describe('a hole in the history', () => {
       expect(dataOf(next).lost).toBeUndefined();
     } finally {
       await close();
+    }
+  });
+
+  it('keeps a replacement opening cursor at the retained eviction frontier', async () => {
+    const hello = { ready: false, cursor: 'cur-initial' };
+    const ev = fakeEvents(hello);
+    const hub = new EventHub(new Api('com_test', BASE), ev.factory);
+    try {
+      const sub = hub.open('vm-1');
+      await until('the first greeting', () => ev.last()?.greeted === true);
+      sub.read();
+      for (let i = 0; i < MAX_BUFFERED + 1; i++) {
+        ev.last().send(frame('window.opened', { id: `0x${i}` }, `cur-item-${i}`));
+      }
+
+      hello.cursor = 'cur-item-0';
+      ev.last().close();
+      await until('the replacement greeting', () => ev.sockets.length === 2 && ev.last().greeted);
+
+      const empty = sub.read({ through: 0, limit: 100 });
+      expect(empty.events).toEqual([]);
+      expect(empty.cursor).toBe('cur-item-0');
+      expect(empty.more).toBe(MAX_BUFFERED);
+      const first = sub.read({ since: empty.cursor, limit: 500 });
+      expect(first.events[0]).toMatchObject({ cursor: 'cur-item-1' });
+      expect(first.loss).toBeUndefined();
+
+      const rewind = sub.read({ since: empty.cursor, limit: 10 });
+      expect(rewind.events[0]).toMatchObject({ cursor: 'cur-item-1' });
+      expect(rewind.loss).toBeUndefined();
+
+      ev.last().send(frame('window.opened', { id: '0x-next' }, 'cur-item-1025'));
+      const afterEviction = sub.read({ since: empty.cursor, limit: 10 });
+      expect(afterEviction.events[0]).toMatchObject({ cursor: 'cur-item-2' });
+      expect(afterEviction.loss).toMatchObject({ events: 1 });
+    } finally {
+      hub.closeAll();
     }
   });
 
@@ -1132,6 +1196,48 @@ describe('a capability withdrawn while somebody is already waiting', () => {
     expect(res.isError).toBeFalsy();
     expect(eventsOf(res).map((e) => e.type)).toContain('window.opened');
     await close();
+  });
+
+  it('reports a stopped stream and its final buffer before withdrawn capabilities', async () => {
+    type Handler = (
+      args: Record<string, unknown>,
+      extra: { signal?: AbortSignal },
+    ) => Promise<CallToolResult>;
+    const handlers: Record<string, Handler> = {};
+    const ev = fakeEvents({ ready: false });
+    const session = new Session({
+      apiKey: 'com_test',
+      baseUrl: BASE,
+      computerId: 'vm-1',
+      webSocket: ev.factory,
+    });
+    registerEvents(
+      {
+        registerTool: (name: string, _definition: unknown, handler: Handler) => {
+          handlers[name] = handler;
+        },
+      } as never,
+      session,
+      { lifecycle: true },
+    );
+    const signal = new AbortController().signal;
+    try {
+      await handlers.poll_events({ limit: 100 }, { signal });
+      const waiting = handlers.wait_for_event(
+        { types: ['process.exited'], timeout_s: 5, limit: 100 },
+        { signal },
+      );
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      ev.last().send(frame('window.opened', { id: '0x1' }, 'cur-buffered'));
+      ev.last().send({ type: 'capabilities', events: ['window.opened'] });
+      session.events.open('vm-1').close('the stream stopped during the wait');
+
+      const result = await waiting;
+      expect(textOf(result)).toContain('the stream stopped during the wait');
+      expect(eventsOf(result)).toEqual([expect.objectContaining({ cursor: 'cur-buffered' })]);
+    } finally {
+      session.events.closeAll();
+    }
   });
 });
 

@@ -632,6 +632,37 @@ describe('a tree the model nominates', () => {
     }
   });
 
+  it('returns a cursor that can recover survivors when a matched change is evicted', {
+    timeout: 10_000,
+  }, async () => {
+    const { call, close, ev } = await attach();
+    try {
+      await call('wait_for_file_change', { path: '/a', timeout_s: 1 });
+      const socket = await nominated(ev);
+      const waiting = call('wait_for_file_change', { path: '/a', timeout_s: 5 });
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      socket.send(frame({ watch: '/a', path: '/a/matched', kind: 'created' }, 'cur-match'));
+      queueMicrotask(() => {
+        for (let i = 0; i < MAX_BUFFERED + 1; i++) {
+          socket.send(frame({ title: `later ${i}` }, `cur-later-${i}`, 'window.opened'));
+        }
+      });
+
+      const result = await waiting;
+      expect(dataOf(result).events).toEqual([]);
+      expect(dataOf(result).more_waiting).toBe(MAX_BUFFERED);
+      expect(dataOf(result).lost).toMatchObject({ events: 2 });
+
+      const recovered = await call('poll_events', { since: dataOf(result).cursor, limit: 500 });
+      expect(dataOf(recovered).events).toEqual(
+        expect.arrayContaining([expect.objectContaining({ cursor: 'cur-later-1' })]),
+      );
+      expect(dataOf(recovered).more_waiting).toBe(MAX_BUFFERED - 500);
+    } finally {
+      await close();
+    }
+  });
+
   it('does not drop a delivery when a competing wait reports the pending re-arm', async () => {
     const { call, close, ev } = await attach();
     const normal = globalThis.fetch;
