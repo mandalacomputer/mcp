@@ -85,6 +85,74 @@ describe('the SSE reader', () => {
       { event: 'done', data: { stop: 'end_turn' } },
     ]);
   });
+
+  it.each([
+    [
+      'LF followed by CR',
+      'event: step\ndata: {"n":1}\n\revent: done\ndata: {"stop":"end_turn"}\n\r',
+    ],
+    [
+      'CRLF followed by CR',
+      'event: step\r\ndata: {"n":1}\r\n\revent: done\r\ndata: {"stop":"end_turn"}\r\n\r',
+    ],
+  ])('frames mixed %s blank lines at every chunk boundary', async (_name, body) => {
+    for (let split = 1; split < body.length; split++) {
+      streamingChunks([body.slice(0, split), body.slice(split)]);
+      expect(await collect(), `split at ${split}`).toEqual([
+        { event: 'step', data: { n: 1 } },
+        { event: 'done', data: { stop: 'end_turn' } },
+      ]);
+    }
+  });
+
+  it('delivers a CR-terminated frame while the stream stays open', async () => {
+    const enc = new TextEncoder();
+    let controller!: ReadableStreamDefaultController<Uint8Array>;
+    let cancelled = false;
+    globalThis.fetch = (async () =>
+      new Response(
+        new ReadableStream({
+          start(c) {
+            controller = c;
+            c.enqueue(enc.encode('event: step\ndata: {"n":1}\r\r'));
+          },
+          cancel() {
+            cancelled = true;
+          },
+        }),
+        { headers: { 'Content-Type': 'text/event-stream' } },
+      )) as typeof fetch;
+
+    const stream = new Api('com_test', BASE).sse('POST', 'computers/vm-1/agent');
+    const pending = stream.next();
+    const timeout = Symbol('timeout');
+    try {
+      let timer!: ReturnType<typeof setTimeout>;
+      const first = await Promise.race([
+        pending,
+        new Promise<typeof timeout>((resolve) => {
+          timer = setTimeout(() => resolve(timeout), 1_000);
+        }),
+      ]);
+      clearTimeout(timer);
+      if (first === timeout) {
+        controller.close();
+        await pending;
+      }
+      expect(first).not.toBe(timeout);
+      expect(first).toMatchObject({ value: { event: 'step', data: { n: 1 } } });
+
+      // The last CR may acquire its optional LF in a later network chunk. It
+      // belongs to the boundary already dispatched, not to the next frame.
+      controller.enqueue(enc.encode('\nevent: done\ndata: {"stop":"end_turn"}\n\n'));
+      expect(await stream.next()).toMatchObject({
+        value: { event: 'done', data: { stop: 'end_turn' } },
+      });
+    } finally {
+      await stream.return(undefined);
+    }
+    expect(cancelled).toBe(true);
+  });
 });
 
 describe('the filename off a download', () => {

@@ -190,6 +190,26 @@ describe('agent stream media types and payloads', () => {
       globalThis.fetch = real;
     }
   });
+
+  it('keeps step and done frames separated by mixed legal line endings', async () => {
+    const real = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      new Response(
+        'event: step\ndata: {"n":1,"detail":"clicked"}\n\r' +
+          'event: done\r\ndata: {"stop":"end_turn","text":"Done"}\r\n\r',
+        { headers: { 'Content-Type': 'text/event-stream' } },
+      )) as typeof fetch;
+    try {
+      const { call, close } = await connect({ modelKey: 'sk-test' });
+      const res = await call('run_agent', { prompt: 'finish' });
+      expect(res.isError).toBeFalsy();
+      expect(said(res)).toMatch(/finished/);
+      expect(said(res)).toMatch(/clicked/);
+      await close();
+    } finally {
+      globalThis.fetch = real;
+    }
+  });
 });
 
 describe('explicit lifecycle flags', () => {
@@ -2996,7 +3016,7 @@ describe('read_file raster images and text', () => {
     expect(said(res)).not.toMatch(/Base64:/);
   });
 
-  it('does not render an empty window as bytes N--1', async () => {
+  it('refuses an empty body for a non-empty 206 window', async () => {
     globalThis.fetch = (async () =>
       new Response(new Uint8Array(), {
         status: 206,
@@ -3010,7 +3030,8 @@ describe('read_file raster images and text', () => {
     const { call, close } = await connect();
     const res = await call('read_file', { path: '/tmp/log.txt', offset: 5 });
     await close();
-    expect(said(res)).toContain('empty window at offset 5 of 100');
+    expect(res.isError).toBe(true);
+    expect(said(res)).toMatch(/206.*Content-Range/i);
     expect(said(res)).not.toMatch(/bytes 5--1/);
   });
 
@@ -4066,14 +4087,15 @@ describe('run_agent under a client that is counting the seconds', () => {
   it('stops at a well-formed done rather than waiting for a close that may not come', async () => {
     const real = globalThis.fetch;
     let cancelled = false;
-    // A stream that sends `done` and then never ends — the shape a proxy that
-    // holds the connection open produces. Before the break, the tool sat here
-    // with the answer already in hand until the client gave up on it.
+    // A stream that sends `done` with a lone-CR blank line and then never ends —
+    // the shape a proxy that holds the connection open produces. The second CR
+    // completes the frame before it can acquire an optional LF from a later
+    // network chunk, so the tool must act on the answer already in hand.
     globalThis.fetch = (async () =>
       new Response(
         new ReadableStream({
           start(controller) {
-            controller.enqueue(new TextEncoder().encode(stream));
+            controller.enqueue(new TextEncoder().encode(`${stream.slice(0, -2)}\r\r`));
           },
           cancel() {
             cancelled = true;
@@ -5155,7 +5177,7 @@ describe('a stdio server whose client closed the pipe', () => {
 });
 
 describe('a platform address that answers with a redirect', () => {
-  it('reports it instead of following it, and names what to set instead', async () => {
+  it('reports a redirect instead of following it', async () => {
     // The default `redirect: 'follow'` made isTransientForPoll's docstring
     // false: it argues its `>= 500` bound from "Api does not follow redirects",
     // and under 'follow' a 3xx never reached the predicate at all. Following one
@@ -5182,7 +5204,7 @@ describe('a platform address that answers with a redirect', () => {
     }
   });
 
-  it('names the Location, because that is the value the operator has to set', async () => {
+  it('names a resource Location but tells the operator to verify the API root', async () => {
     const real = globalThis.fetch;
     globalThis.fetch = (async () =>
       new Response(null, {
@@ -5196,6 +5218,8 @@ describe('a platform address that answers with a redirect', () => {
       const said = (err as Error).message;
       expect(said).toContain('https://elsewhere.example/api/v1/');
       expect(said).toContain('MANDALA_BASE_URL');
+      expect(said).toMatch(/API root/i);
+      expect(said).toMatch(/resource URL in Location is not itself a base URL/i);
       // A bare `HTTP 308` is what the general mapping would have produced, and
       // it names nothing the operator can act on.
       expect(said).not.toMatch(/^HTTP 308$/);
@@ -5242,6 +5266,8 @@ describe('a platform address that answers with a redirect', () => {
       const said = (err as Error).message;
       expect(said).toContain(`${new URL(BASE).origin}/moved/api/v1`);
       expect(said).not.toMatch(/to \/moved\/api\/v1\b/);
+      expect(said).toMatch(/API root/i);
+      expect(said).not.toMatch(/set MANDALA_BASE_URL to that URL/i);
     } finally {
       globalThis.fetch = real;
     }
