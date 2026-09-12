@@ -375,6 +375,50 @@ describe('list_moves', () => {
     }
   });
 
+  it('does not paint a row with no liveness flag as a move that has finished', async () => {
+    // `live` is the flag this tool's description tells a model to poll on, and a
+    // truthy test answers "not running" for a row that said nothing. The rows are
+    // not validated field by field — any row with an id is kept — so a missing
+    // or non-boolean flag is a real shape, and reading it as finished stops a
+    // caller polling while a disk is still being copied between two hosts, and
+    // while the platform goes on refusing the next move on this account.
+    const restore = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      Response.json({
+        moves: [
+          { computer_id: 'vm-1', state: 'moving' },
+          { computer_id: 'vm-2', state: 'moving', live: 'yes' },
+          { computer_id: 'vm-3', state: 'moving', live: true },
+          { computer_id: 'vm-4', state: 'done', live: false },
+        ],
+      })) as typeof fetch;
+    try {
+      const { call, close } = await connect();
+      const res = await call('list_moves', {});
+      await close();
+
+      expect(res.isError).toBeFalsy();
+      const lines = textOf(res).split('\n');
+      const line = (id: string) => lines.find((l) => l.startsWith(`${id}:`)) ?? '';
+      // Neither claimed finished nor claimed running: said to be unknown, which
+      // is what the row actually established.
+      for (const id of ['vm-1', 'vm-2']) {
+        expect(line(id), id).toContain('LIVENESS UNKNOWN');
+        expect(line(id), id).not.toContain('(running)');
+      }
+      // And the two rows that DID say are unchanged, which is the half a fix
+      // here could quietly cost: a finished move must not grow a warning.
+      expect(line('vm-3')).toContain('(running)');
+      expect(line('vm-4')).not.toContain('LIVENESS UNKNOWN');
+      expect(line('vm-4')).not.toContain('(running)');
+      // Not dropped, either. A row with an id and a state is readable; it is one
+      // field that is not, and the row is how a blocked move gets its name.
+      expect(textOf(res)).not.toContain('malformed move');
+    } finally {
+      globalThis.fetch = restore;
+    }
+  });
+
   it('still reports a valid empty moves table as a quiet account', async () => {
     const restore = globalThis.fetch;
     globalThis.fetch = (async () => Response.json({ moves: [] })) as typeof fetch;
