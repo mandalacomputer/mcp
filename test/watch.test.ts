@@ -148,6 +148,15 @@ function selectiveEvents() {
   return { factory, sockets, state, last: () => sockets[sockets.length - 1] };
 }
 
+/** A socket whose peer can still finish its close after nominations have changed. */
+class DelayedCloseSocket extends FakeSocket {
+  override close(): void {}
+
+  finish(): void {
+    super.close();
+  }
+}
+
 /** A factory that greets only when the test says so, so a nomination can beat a hello. */
 function greetsOnDemand() {
   const sockets: FakeSocket[] = [];
@@ -1408,6 +1417,86 @@ describe('a tree the model nominates', () => {
       expect(sub.armGeneration('/a')).not.toBe(olderWait);
     } finally {
       hub.closeAll();
+    }
+  });
+
+  it('keeps a surviving alias aligned when a pending-close greeting includes an eviction', async () => {
+    const sockets: DelayedCloseSocket[] = [];
+    const hub = new EventHub(new Api('com_test', BASE), (url) => {
+      const socket = new DelayedCloseSocket(url);
+      sockets.push(socket);
+      return socket;
+    });
+    try {
+      const sub = hub.open('vm-1');
+      sub.nominate('/old');
+      sub.nominate('/kept');
+      await until('the original connection', () => sockets.length === 1);
+      const old = sockets[0];
+      expect(old.watches).toEqual(['/old', '/kept']);
+
+      for (const path of ['/a', '/b', '/c']) sub.nominate(path);
+      expect(sub.nominates('/old')).toBe(false);
+      old.open();
+      old.send({
+        ...HELLO,
+        watching: [
+          { path: '/host/old', armed: true },
+          { path: '/host/kept', armed: true },
+        ],
+      });
+
+      expect(sub.armGeneration('/old')).toBe(0);
+      expect(sub.isArmed('/old')).toBe(false);
+      expect(sub.hostPath('/kept')).toBe('/host/kept');
+      expect(sub.isArmed('/kept')).toBe(true);
+    } finally {
+      hub.closeAll();
+      sockets.at(-1)?.finish();
+    }
+  });
+
+  it('does not recreate historical arm metadata across repeated pending closes', {
+    timeout: 20_000,
+  }, async () => {
+    const sockets: DelayedCloseSocket[] = [];
+    const hub = new EventHub(new Api('com_test', BASE), (url) => {
+      const socket = new DelayedCloseSocket(url);
+      sockets.push(socket);
+      return socket;
+    });
+    try {
+      const sub = hub.open('vm-1');
+      sub.nominate('/old');
+      await until('the first delayed connection', () => sockets.length === 1);
+      const historical: string[] = [];
+
+      for (let i = 0; i < 20; i++) {
+        const stale = sockets.at(-1)!;
+        historical.push(...stale.watches);
+        for (let j = 0; j < 4; j++) sub.nominate(`/tree-${i}-${j}`);
+        stale.open();
+        stale.send({
+          ...HELLO,
+          watching: stale.watches.map((path) => ({ path: `/host${path}`, armed: true })),
+        });
+        stale.finish();
+        await until(`connection ${i + 1}`, () => sockets.at(-1) !== stale);
+      }
+
+      const active = sockets.at(-1)!;
+      active.open();
+      active.send({
+        ...HELLO,
+        watching: active.watches.map((path) => ({ path: `/host${path}`, armed: true })),
+      });
+      expect(
+        historical.filter((path) => !sub.nominates(path) && sub.armGeneration(path) > 0),
+      ).toEqual([]);
+      expect(sub.nominations).toHaveLength(4);
+    } finally {
+      hub.closeAll();
+      sockets.at(-1)?.finish();
     }
   });
 

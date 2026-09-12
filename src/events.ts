@@ -1584,6 +1584,10 @@ export class Subscription {
     }
     sent.forEach((nominated, i) => {
       const w = watching[i];
+      // Keep the original index: `watching[i]` answers `sent[i]`, even when an
+      // earlier nomination was evicted while this connection was closing.
+      // The evicted entry itself must write nothing back into active metadata.
+      if (!this.#watches.includes(nominated)) return;
       if (w.path !== nominated) this.#hostName.set(nominated, w.path);
       armed.set(nominated, w.armed);
       // A tree that comes up armed on a connection that found it unarmed is a
@@ -1723,11 +1727,13 @@ export class Subscription {
   }
 
   #bumpArm(path: string): void {
+    if (!this.#watches.includes(path)) return;
     this.#armGen.set(path, ++this.#nextArmGen);
   }
 
   /** Record an arm, retaining later arms until a file wait explains their gap. */
   #armedTransition(path: string): void {
+    if (!this.#watches.includes(path)) return;
     if (this.#everArmed.has(path)) this.#undisclosedRearm.add(path);
     else this.#everArmed.add(path);
     this.#bumpArm(path);
