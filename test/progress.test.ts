@@ -126,6 +126,57 @@ describe('the keepalive itself', () => {
     await beat('still copying');
     expect(r.logs).toHaveLength(2);
   });
+
+  it('serializes changed lines with timer-driven notifications', async () => {
+    const delivered: number[] = [];
+    let releasePeriodic: (() => void) | undefined;
+    let active = 0;
+    let mostActive = 0;
+    const beat = heartbeat(
+      {
+        _meta: { progressToken: 'tok' },
+        sendNotification: async (n) => {
+          active += 1;
+          mostActive = Math.max(mostActive, active);
+          delivered.push(n.params.progress);
+          if (n.params.progress === 2) {
+            await new Promise<void>((resolve) => {
+              releasePeriodic = resolve;
+            });
+          }
+          active -= 1;
+        },
+      },
+      undefined,
+      100,
+    );
+
+    await beat('first state');
+    const timer = vi.advanceTimersByTimeAsync(100);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(delivered).toEqual([1, 2]);
+    const changed = beat('second state');
+    expect(mostActive).toBe(1);
+    releasePeriodic?.();
+    await timer;
+    await changed;
+    expect(delivered).toEqual([1, 2, 3]);
+    expect(mostActive).toBe(1);
+    await beat.stop();
+  });
+
+  it('stops periodic notifications and clears its timer', async () => {
+    const r = recorder('tok');
+    const beat = heartbeat(r.extra, r.log);
+    await beat('working');
+    await vi.advanceTimersByTimeAsync(HEARTBEAT_MS * 3);
+    expect(r.beats).toHaveLength(4);
+
+    await beat.stop();
+    expect(vi.getTimerCount()).toBe(0);
+    await vi.advanceTimersByTimeAsync(HEARTBEAT_MS * 2);
+    expect(r.beats).toHaveLength(4);
+  });
 });
 
 describe('the waits that send it', () => {
@@ -222,6 +273,169 @@ describe('a capture that takes more than one poll', () => {
     expect(seen.some((b) => (b.message ?? '').includes('still copying'))).toBe(true);
     expect(seen.map((b) => b.progress)).toEqual([...seen.map((_, i) => i + 1)]);
   }, 20_000);
+});
+
+describe('progress during a slow poll', () => {
+  let real: typeof globalThis.fetch;
+  beforeEach(() => {
+    real = globalThis.fetch;
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+    globalThis.fetch = real;
+  });
+
+  it('keeps an MCP request alive through Retry-After without retrying early', async () => {
+    const placeholder = {
+      id: 'snap-slow',
+      computer_id: 'vm-1',
+      name: 'slow',
+      state: 'capturing',
+    };
+    const calls: string[] = [];
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const method = (init?.method ?? 'GET').toUpperCase();
+      calls.push(`${method} ${String(input)}`);
+      if (method === 'POST') return Response.json(placeholder, { status: 202 });
+      if (calls.length === 2) {
+        return Response.json(
+          { error: 'please wait' },
+          { status: 429, headers: { 'Retry-After': '120' } },
+        );
+      }
+      return Response.json([{ ...placeholder, state: 'pending' }]);
+    }) as typeof globalThis.fetch;
+
+    const { client, close } = await connect();
+    vi.useFakeTimers();
+    const seen: Beat[] = [];
+    const request = client.callTool(
+      { name: 'create_snapshot', arguments: { computer_id: 'vm-1', name: 'slow', timeout_s: 300 } },
+      undefined,
+      {
+        onprogress: (p) => seen.push(p as Beat),
+        timeout: 60_000,
+        resetTimeoutOnProgress: true,
+      },
+    );
+
+    await vi.advanceTimersByTimeAsync(1);
+    expect(calls).toHaveLength(2);
+    await vi.advanceTimersByTimeAsync(60_001);
+    expect(calls).toHaveLength(2);
+    await vi.advanceTimersByTimeAsync(60_000);
+    const result = await request;
+    expect(result.isError).toBeFalsy();
+    expect(calls).toHaveLength(3);
+    expect(seen.map((b) => b.progress)).toEqual(seen.map((_, i) => i + 1));
+    const completedBeats = seen.length;
+    await vi.advanceTimersByTimeAsync(HEARTBEAT_MS * 2);
+    expect(seen).toHaveLength(completedBeats);
+    expect(vi.getTimerCount()).toBe(0);
+    await close();
+  });
+
+  it('reports periodically while a fetch is still in flight', async () => {
+    const placeholder = {
+      id: 'snap-fetch',
+      computer_id: 'vm-1',
+      name: 'slow fetch',
+      state: 'capturing',
+    };
+    let calls = 0;
+    globalThis.fetch = (async (_input: string | URL | Request, init?: RequestInit) => {
+      calls += 1;
+      if ((init?.method ?? 'GET').toUpperCase() === 'POST') {
+        return Response.json(placeholder, { status: 202 });
+      }
+      return new Promise<Response>((resolve) => {
+        setTimeout(() => resolve(Response.json([{ ...placeholder, state: 'pending' }])), 35_000);
+      });
+    }) as typeof globalThis.fetch;
+
+    const { client, close } = await connect();
+    vi.useFakeTimers();
+    const seen: Beat[] = [];
+    const request = client.callTool(
+      {
+        name: 'create_snapshot',
+        arguments: { computer_id: 'vm-1', name: 'slow fetch', timeout_s: 300 },
+      },
+      undefined,
+      {
+        onprogress: (p) => seen.push(p as Beat),
+        timeout: 60_000,
+        resetTimeoutOnProgress: true,
+      },
+    );
+
+    await vi.advanceTimersByTimeAsync(30_001);
+    expect(calls).toBe(2);
+    expect(seen.length).toBeGreaterThanOrEqual(4);
+    await vi.advanceTimersByTimeAsync(5_000);
+    const result = await request;
+    expect(result.isError).toBeFalsy();
+    expect(seen.map((b) => b.progress)).toEqual(seen.map((_, i) => i + 1));
+    const completedBeats = seen.length;
+    await vi.advanceTimersByTimeAsync(HEARTBEAT_MS * 2);
+    expect(seen).toHaveLength(completedBeats);
+    expect(vi.getTimerCount()).toBe(0);
+    await close();
+  });
+
+  it('stops reporting after the caller cancels a slow fetch', async () => {
+    const placeholder = {
+      id: 'snap-cancel',
+      computer_id: 'vm-1',
+      name: 'cancel',
+      state: 'capturing',
+    };
+    globalThis.fetch = (async (_input: string | URL | Request, init?: RequestInit) => {
+      if ((init?.method ?? 'GET').toUpperCase() === 'POST') {
+        return Response.json(placeholder, { status: 202 });
+      }
+      return new Promise<Response>((_resolve, reject) => {
+        const cancelled = () => {
+          const error = new Error('cancelled');
+          error.name = 'AbortError';
+          reject(error);
+        };
+        if (init?.signal?.aborted) cancelled();
+        else init?.signal?.addEventListener('abort', cancelled, { once: true });
+      });
+    }) as typeof globalThis.fetch;
+
+    const { client, close } = await connect();
+    vi.useFakeTimers();
+    const controller = new AbortController();
+    const seen: Beat[] = [];
+    const request = client
+      .callTool(
+        { name: 'create_snapshot', arguments: { computer_id: 'vm-1', name: 'cancel' } },
+        undefined,
+        {
+          signal: controller.signal,
+          onprogress: (p) => seen.push(p as Beat),
+          timeout: 60_000,
+          resetTimeoutOnProgress: true,
+        },
+      )
+      .then(
+        () => 'resolved',
+        () => 'cancelled',
+      );
+
+    await vi.advanceTimersByTimeAsync(HEARTBEAT_MS + 1);
+    expect(seen.length).toBeGreaterThan(1);
+    controller.abort();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(await request).toBe('cancelled');
+    const cancelledBeats = seen.length;
+    await vi.advanceTimersByTimeAsync(HEARTBEAT_MS * 2);
+    expect(seen).toHaveLength(cancelledBeats);
+    expect(vi.getTimerCount()).toBe(0);
+    await close();
+  });
 });
 
 describe('a guest that has not come up yet', () => {

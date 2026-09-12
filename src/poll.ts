@@ -85,6 +85,9 @@ export type ProgressExtra = {
 /** Somewhere to log a line for a person watching, without importing McpServer. */
 export type Logger = { sendLoggingMessage: (m: { level: 'info'; data: string }) => Promise<void> };
 
+/** A keepalive sender whose timer must be stopped when its wait ends. */
+export type Heartbeat = ((line: string) => Promise<void>) & { stop: () => Promise<void> };
+
 /**
  * The keepalive a wait longer than a minute owes the client it is keeping.
  *
@@ -118,13 +121,33 @@ export function heartbeat(
   extra: ProgressExtra,
   log: Logger | undefined,
   everyMs: number = HEARTBEAT_MS,
-): (line: string) => Promise<void> {
+): Heartbeat {
   const progressToken = extra._meta?.progressToken;
   let sent = 0;
   let spoken = false;
   let last = '';
   let at = 0;
-  return async (line: string) => {
+  let current: string | undefined;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let stopped = false;
+  let queue = Promise.resolve();
+
+  const schedule = () => {
+    if (timer !== undefined) clearTimeout(timer);
+    timer = undefined;
+    if (stopped || !spoken) return;
+    timer = setTimeout(
+      () => {
+        timer = undefined;
+        if (current !== undefined) void enqueue(current);
+      },
+      Math.max(0, everyMs - (Date.now() - at)),
+    );
+    timer.unref?.();
+  };
+
+  const send = async (line: string) => {
+    if (stopped) return;
     const now = Date.now();
     // A changed line is news and goes out at once; an unchanged one is a
     // keepalive and goes out on the interval. `spoken` covers the first turn,
@@ -158,4 +181,28 @@ export function heartbeat(
     }
     await log?.sendLoggingMessage({ level: 'info', data: line }).catch(() => {});
   };
+
+  // A timer can fire while a changed state is being reported. Put both paths
+  // through one queue so progress values arrive in order and notification
+  // promises never overlap. Scheduling after the queued turn also prevents a
+  // slow receiver from building an unbounded backlog of periodic sends.
+  const enqueue = (line: string): Promise<void> => {
+    queue = queue
+      .then(() => send(line))
+      .catch(() => {})
+      .then(schedule);
+    return queue;
+  };
+
+  const beat = ((line: string) => {
+    current = line;
+    return enqueue(line);
+  }) as Heartbeat;
+  beat.stop = async () => {
+    stopped = true;
+    if (timer !== undefined) clearTimeout(timer);
+    timer = undefined;
+    await queue;
+  };
+  return beat;
 }
