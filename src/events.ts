@@ -1497,6 +1497,7 @@ export class Subscription {
     };
     const buffered = this.#ring.find((b) => b.event.cursor === hello.cursor);
     if (buffered) this.#helloFrom = buffered.index + 1;
+    else if (hello.cursor === this.#beforeOldestCursor) this.#helloFrom = this.#oldest;
     else if (hello.cursor !== this.#hello?.cursor) this.#helloFrom = this.#nextIndex;
     // The same greeting on a reconnect must retain its original frontier,
     // including any history that has since been evicted.

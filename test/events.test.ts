@@ -546,6 +546,43 @@ describe('a hole in the history', () => {
     }
   });
 
+  it('keeps a replacement opening cursor at the retained eviction frontier', async () => {
+    const hello = { ready: false, cursor: 'cur-initial' };
+    const ev = fakeEvents(hello);
+    const hub = new EventHub(new Api('com_test', BASE), ev.factory);
+    try {
+      const sub = hub.open('vm-1');
+      await until('the first greeting', () => ev.last()?.greeted === true);
+      sub.read();
+      for (let i = 0; i < MAX_BUFFERED + 1; i++) {
+        ev.last().send(frame('window.opened', { id: `0x${i}` }, `cur-item-${i}`));
+      }
+
+      hello.cursor = 'cur-item-0';
+      ev.last().close();
+      await until('the replacement greeting', () => ev.sockets.length === 2 && ev.last().greeted);
+
+      const empty = sub.read({ through: 0, limit: 100 });
+      expect(empty.events).toEqual([]);
+      expect(empty.cursor).toBe('cur-item-0');
+      expect(empty.more).toBe(MAX_BUFFERED);
+      const first = sub.read({ since: empty.cursor, limit: 500 });
+      expect(first.events[0]).toMatchObject({ cursor: 'cur-item-1' });
+      expect(first.loss).toBeUndefined();
+
+      const rewind = sub.read({ since: empty.cursor, limit: 10 });
+      expect(rewind.events[0]).toMatchObject({ cursor: 'cur-item-1' });
+      expect(rewind.loss).toBeUndefined();
+
+      ev.last().send(frame('window.opened', { id: '0x-next' }, 'cur-item-1025'));
+      const afterEviction = sub.read({ since: empty.cursor, limit: 10 });
+      expect(afterEviction.events[0]).toMatchObject({ cursor: 'cur-item-2' });
+      expect(afterEviction.loss).toMatchObject({ events: 1 });
+    } finally {
+      hub.closeAll();
+    }
+  });
+
   it('rewinds an opening cursor without loss while its history is retained', async () => {
     const { call, close, ev, first } = await attach({ ready: false });
     try {
