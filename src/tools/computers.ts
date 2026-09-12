@@ -763,98 +763,102 @@ export const registerComputers: Registrar = (server, session, opts) => {
         // tool that says nothing for minutes is one a client cancels — see
         // heartbeat, and OPL-4579 for the wait that proved it.
         const beat = heartbeat(extra, server.server);
-        await beat(`Moving ${id} — the platform has accepted it.`);
+        try {
+          await beat(`Moving ${id} — the platform has accepted it.`);
 
-        let last: Move = started;
-        let blocked: string | undefined;
-        while (!untilDeadline.aborted) {
-          if (extra.signal?.aborted) {
-            return refused(
-              `Cancelled while waiting for ${id} to move. THE MOVE IS STILL RUNNING — nothing was stopped, ` +
-                `because a disk crossing between two hosts cannot be called back. list_moves says where it ` +
-                `got to.`,
-              last,
-            );
-          }
-          let table: { moves: Move[]; dropped: number } | undefined;
-          let raw: unknown;
-          try {
-            raw = await api.json('GET', P.MOVES);
-            table = movesOf(raw);
-          } catch (err) {
-            if (extra.signal?.aborted) continue;
-            if (err instanceof CancelledError) {
-              if (untilDeadline.aborted) break;
-              blocked = err.message;
+          let last: Move = started;
+          let blocked: string | undefined;
+          while (!untilDeadline.aborted) {
+            if (extra.signal?.aborted) {
+              return refused(
+                `Cancelled while waiting for ${id} to move. THE MOVE IS STILL RUNNING — nothing was stopped, ` +
+                  `because a disk crossing between two hosts cannot be called back. list_moves says where it ` +
+                  `got to.`,
+                last,
+              );
+            }
+            let table: { moves: Move[]; dropped: number } | undefined;
+            let raw: unknown;
+            try {
+              raw = await api.json('GET', P.MOVES);
+              table = movesOf(raw);
+            } catch (err) {
+              if (extra.signal?.aborted) continue;
+              if (err instanceof CancelledError) {
+                if (untilDeadline.aborted) break;
+                blocked = err.message;
+                await beat(`Moving ${id} — the platform could not be asked: ${blocked}`);
+                await sleep(POLL_MS, signal);
+                continue;
+              }
+              // The poll reads the control plane's own table, so the statuses
+              // worth riding out are the ones that mean "ask again" — exactly
+              // wait_for_computer's list. Anything else is a real failure, and
+              // the move is still running behind it, which a thrown error's
+              // handler has no way to say. So it is said here.
+              if (!isTransientForPoll(err)) {
+                return refused(
+                  `${err instanceof Error ? err.message : String(err)}\n\nTHE MOVE IS STILL RUNNING — this ` +
+                    `was the poll failing, not the move. list_moves says where it got to.`,
+                  last,
+                );
+              }
+              blocked = err instanceof Error ? err.message : String(err);
+              await beat(`Moving ${id} — the platform could not be asked: ${blocked}`);
+              await sleep(pollDelay(err), signal);
+              continue;
+            }
+            // A table that is not a list is the platform failing to answer, not
+            // an answer that the move is gone. It rides out the same way a poll
+            // that threw does, so the deadline's sentence says the platform could
+            // not be asked rather than claiming a deletion nothing established.
+            if (!table) {
+              blocked = `GET /moves answered with ${shapeOf((raw as { moves?: unknown } | null)?.moves)}, not a list of moves`;
               await beat(`Moving ${id} — the platform could not be asked: ${blocked}`);
               await sleep(POLL_MS, signal);
               continue;
             }
-            // The poll reads the control plane's own table, so the statuses
-            // worth riding out are the ones that mean "ask again" — exactly
-            // wait_for_computer's list. Anything else is a real failure, and
-            // the move is still running behind it, which a thrown error's
-            // handler has no way to say. So it is said here.
-            if (!isTransientForPoll(err)) {
+            blocked = undefined;
+            const mine = table.moves.find((m) => m.computer_id === id);
+            // A move that is no longer listed is one the platform reaped, and it
+            // reaps for one reason: the computer was deleted. Not a state to keep
+            // polling for.
+            //
+            // Unless a row could not be READ, in which case absence is not
+            // established: the move may be sitting in the row this poll had to
+            // drop. That is a poll that could not be answered rather than an
+            // answer, so it rides out exactly as a transient failure does, and
+            // the deadline's sentence says the platform could not be asked
+            // instead of claiming a deletion nothing showed.
+            if (!mine && table.dropped) {
+              blocked = `GET /moves answered with ${table.dropped} unreadable row(s), so this move may be among them`;
+              await beat(`Moving ${id} — the platform could not be asked: ${blocked}`);
+              await sleep(POLL_MS, signal);
+              continue;
+            }
+            if (!mine) {
               return refused(
-                `${err instanceof Error ? err.message : String(err)}\n\nTHE MOVE IS STILL RUNNING — this ` +
-                  `was the poll failing, not the move. list_moves says where it got to.`,
+                `The move of ${id} is no longer listed. That happens when the computer is deleted — check ` +
+                  `list_computers.`,
                 last,
               );
             }
-            blocked = err instanceof Error ? err.message : String(err);
-            await beat(`Moving ${id} — the platform could not be asked: ${blocked}`);
-            await sleep(pollDelay(err), signal);
-            continue;
-          }
-          // A table that is not a list is the platform failing to answer, not
-          // an answer that the move is gone. It rides out the same way a poll
-          // that threw does, so the deadline's sentence says the platform could
-          // not be asked rather than claiming a deletion nothing established.
-          if (!table) {
-            blocked = `GET /moves answered with ${shapeOf((raw as { moves?: unknown } | null)?.moves)}, not a list of moves`;
-            await beat(`Moving ${id} — the platform could not be asked: ${blocked}`);
+            last = mine;
+            if (!mine.live) return finishedMove(id, mine);
+            await beat(`Moving ${id} — ${mine.state}${mine.detail ? `: ${mine.detail}` : ''}`);
             await sleep(POLL_MS, signal);
-            continue;
           }
-          blocked = undefined;
-          const mine = table.moves.find((m) => m.computer_id === id);
-          // A move that is no longer listed is one the platform reaped, and it
-          // reaps for one reason: the computer was deleted. Not a state to keep
-          // polling for.
-          //
-          // Unless a row could not be READ, in which case absence is not
-          // established: the move may be sitting in the row this poll had to
-          // drop. That is a poll that could not be answered rather than an
-          // answer, so it rides out exactly as a transient failure does, and
-          // the deadline's sentence says the platform could not be asked
-          // instead of claiming a deletion nothing showed.
-          if (!mine && table.dropped) {
-            blocked = `GET /moves answered with ${table.dropped} unreadable row(s), so this move may be among them`;
-            await beat(`Moving ${id} — the platform could not be asked: ${blocked}`);
-            await sleep(POLL_MS, signal);
-            continue;
-          }
-          if (!mine) {
-            return refused(
-              `The move of ${id} is no longer listed. That happens when the computer is deleted — check ` +
-                `list_computers.`,
-              last,
-            );
-          }
-          last = mine;
-          if (!mine.live) return finishedMove(id, mine);
-          await beat(`Moving ${id} — ${mine.state}${mine.detail ? `: ${mine.detail}` : ''}`);
-          await sleep(POLL_MS, signal);
+          return refused(
+            blocked
+              ? `Gave up watching after ${timeout_s}s; the platform could not be asked — the last attempt said: ` +
+                  `${blocked}. THE MOVE IS STILL RUNNING. list_moves says where it got to.`
+              : `Still moving after ${timeout_s}s, which a large disk takes. THE MOVE IS STILL RUNNING and ` +
+                  `nothing was changed by giving up on the wait. list_moves says where it got to.`,
+            last,
+          );
+        } finally {
+          await beat.stop();
         }
-        return refused(
-          blocked
-            ? `Gave up watching after ${timeout_s}s; the platform could not be asked — the last attempt said: ` +
-                `${blocked}. THE MOVE IS STILL RUNNING. list_moves says where it got to.`
-            : `Still moving after ${timeout_s}s, which a large disk takes. THE MOVE IS STILL RUNNING and ` +
-                `nothing was changed by giving up on the wait. list_moves says where it got to.`,
-          last,
-        );
       }),
   );
 
@@ -984,200 +988,209 @@ export const registerComputers: Registrar = (server, session, opts) => {
           : untilDeadline;
         const api = session.api.with(signal);
         const beat = heartbeat(extra, server.server);
-        let last = 'unknown';
-        // Kept so the give-up message can name it. A hypervisor that was
-        // unreachable for the whole window is the single most useful thing to
-        // report, and swallowing every transient would end the wait saying only
-        // that the status was never seen.
-        let blocked: string | undefined;
-        while (!untilDeadline.aborted) {
-          // The caller giving up ends the wait. The signal aborts the request
-          // in flight, but nothing about an aborted request stops the next
-          // iteration from starting one — so a cancelled call would go on
-          // polling the platform for the rest of its timeout_s, up to fifteen
-          // minutes of traffic on behalf of nobody.
-          if (extra.signal?.aborted) return cancelled(id, last);
-          // The status read is exactly as transient-prone as the guest probe
-          // below it — a hypervisor that cannot be reached answers 503, which
-          // is the ordinary weather of a machine still coming up. Letting that
-          // out would abort the one tool whose entire job is to keep asking.
-          let c: Computer;
-          try {
-            c = unwrapComputer(await api.json('GET', P.computer(id)));
-          } catch (err) {
-            // The caller's own signal is checked first, and by identity rather
-            // than by reading the error: the request is now bound to two
-            // deadlines, and only one of them means anybody stopped caring.
+        try {
+          let last = 'unknown';
+          // Open the progress channel before the first status read. That read
+          // has the same network and response deadlines as every later poll,
+          // so it can be the whole wait rather than a quick prelude to it.
+          await beat(`Waiting for ${id} — asking the platform for its status.`);
+          // Kept so the give-up message can name it. A hypervisor that was
+          // unreachable for the whole window is the single most useful thing to
+          // report, and swallowing every transient would end the wait saying only
+          // that the status was never seen.
+          let blocked: string | undefined;
+          while (!untilDeadline.aborted) {
+            // The caller giving up ends the wait. The signal aborts the request
+            // in flight, but nothing about an aborted request stops the next
+            // iteration from starting one — so a cancelled call would go on
+            // polling the platform for the rest of its timeout_s, up to fifteen
+            // minutes of traffic on behalf of nobody.
             if (extra.signal?.aborted) return cancelled(id, last);
-            // A body stream can also fail without either signal firing (an
-            // undici idle timeout is an AbortError). That is a transport
-            // failure, not a cancellation, and is retried below as transient.
-            // Only the deadline signal proves the wait's own timer arrived.
-            if (err instanceof CancelledError) {
-              if (untilDeadline.aborted) {
-                blocked = `the status read was still in flight when the ${timeout_s}s deadline arrived`;
-                break;
-              }
-              blocked = err.message;
-              await beat(`Waiting for ${id} — the platform could not be asked: ${blocked}`);
-              await sleep(POLL_MS, signal);
-              continue;
-            }
-            if (!isTransientForPoll(err)) throw err;
-            blocked = err instanceof Error ? err.message : String(err);
-            await beat(`Waiting for ${id} — the platform could not be asked: ${blocked}`);
-            await sleep(pollDelay(err), signal);
-            continue;
-          }
-          blocked = undefined;
-          session.noteResolution(id, c.resolution);
-          last = c.status ?? 'unknown';
-          // ONE beat per turn, and this is not it when a guest probe is about to
-          // run. Beating here and again in the probe's failure branch sent two
-          // notifications per poll — and because the two lines DIFFER, each read
-          // as news to the throttle and neither was ever held, so the steady
-          // state of the commonest long wait was twice the per-poll rate the
-          // interval exists to avoid (/code-review).
-          //
-          // Fixed by making the two say the SAME thing rather than by silencing
-          // this one, which was the first attempt and dropped the wrong half of
-          // the pair (/code-review again). The probe below is the longest call
-          // in the loop — an undici header timeout or a proxy 524 can hold it
-          // for minutes — so the beat that must survive is the one IN FRONT of
-          // it. The 409 branch repeats this line and the throttle holds it; a
-          // probe that fails some other way says so, which is news and goes out.
-          await beat(
-            until === 'guest' && last === 'running'
-              ? `Waiting for ${id} — running; asking the guest.`
-              : `Waiting for ${id} — ${last}.`,
-          );
-          if (last === 'build-failed') {
-            // `refused`, for the reason `cancelled` is: the wait never reached
-            // what it was told to wait for, and this one never will. A caller
-            // reading `isError` to decide whether to go on would otherwise see
-            // a build that failed and a guest that answered as the same result.
-            //
-            // `build.source` is what the machine was built *from*, not why the
-            // build failed — printed bare after "Build failed:" it reads as the
-            // reason and names an image instead of a cause. `start_error` is
-            // the field that carries a diagnostic, so prefer it and label the
-            // source as the source when that is all there is.
-            const why = c.start_error
-              ? `: ${c.start_error}`
-              : c.build?.source
-                ? ` (built from ${c.build.source}) — the platform gave no reason`
-                : ' — the platform gave no reason';
-            return refused(
-              `Build failed${why}. This does not resolve on its own.`,
-              withoutCredentials(c),
-            );
-          }
-          // Its files were partly removed and its disk is gone: the platform
-          // refuses to start or use it, and only deleting it again clears it.
-          // Waiting spent the whole budget and then reported "last seen
-          // half-removed", which is the state the caller passed in (Codex
-          // review). Not qualified by the pool: nothing can be admitted for a
-          // machine with no disk.
-          if (last === 'half-removed') {
-            return refused(
-              `${id} is half-removed: its files were partly removed, it cannot be started or used again, and delete_computer is what clears it.`,
-              withoutCredentials(c),
-            );
-          }
-          // Neither of the next two resolves on its own, so spinning on either
-          // burns the whole timeout waiting for something nobody is going to do.
-          //
-          // Unless somebody is. `status` is read from the guest process, so a
-          // start that has been ADMITTED reads as `stopped` while it boots and
-          // as `suspended` while it resumes — the session record is spent only
-          // on the way out of a start that worked. Refusing there tells a model
-          // to call start_computer on a computer that is already starting, and
-          // the obvious next thing it does is start it a second time.
-          //
-          // nothingAdmitted is the platform's own word for idle, and it is
-          // absent-aware: a host that did not answer has not said nothing is
-          // coming, so the wait goes on rather than refusing (OPL-4631).
-          if (last === 'suspended' && nothingAdmitted(c)) {
-            return refused(
-              `${id} is suspended, and that state does not clear by itself. start_computer resumes the saved session in about a second.`,
-              withoutCredentials(c),
-            );
-          }
-          if (last === 'stopped' && nothingAdmitted(c)) {
-            return refused(`${id} is stopped. start_computer boots it.`, withoutCredentials(c));
-          }
-          if (last === 'running') {
-            if (until === 'running') return said(`Running: ${describe(c)}`, withoutCredentials(c));
-            // "The guest is up" is not a status the platform reports, so it is
-            // asked rather than waited for: a trivial exec either answers, or
-            // refuses with the 409 that says the agent is not up yet.
+            // The status read is exactly as transient-prone as the guest probe
+            // below it — a hypervisor that cannot be reached answers 503, which
+            // is the ordinary weather of a machine still coming up. Letting that
+            // out would abort the one tool whose entire job is to keep asking.
+            let c: Computer;
             try {
-              await api.send('POST', P.computerAction(id, 'exec'), {
-                body: P.execBody({ command: 'true', timeout_s: 5 }),
-              });
-              return said(`Guest is answering: ${describe(c)}`, withoutCredentials(c));
+              c = unwrapComputer(await api.json('GET', P.computer(id)));
             } catch (err) {
-              // The same two deadlines as the status read above, and for the
-              // same reason: this catch used to judge the error alone, so a
-              // cancellation during the guest probe left the wait throwing what
-              // read as a platform outage instead of saying the caller had
-              // hung up. Half the loop knew to check the signal and half did
-              // not, which is the worse of the two ways to be inconsistent.
+              // The caller's own signal is checked first, and by identity rather
+              // than by reading the error: the request is now bound to two
+              // deadlines, and only one of them means anybody stopped caring.
               if (extra.signal?.aborted) return cancelled(id, last);
+              // A body stream can also fail without either signal firing (an
+              // undici idle timeout is an AbortError). That is a transport
+              // failure, not a cancellation, and is retried below as transient.
+              // Only the deadline signal proves the wait's own timer arrived.
               if (err instanceof CancelledError) {
                 if (untilDeadline.aborted) {
-                  blocked = `the guest probe was still in flight when the ${timeout_s}s deadline arrived`;
+                  blocked = `the status read was still in flight when the ${timeout_s}s deadline arrived`;
                   break;
                 }
                 blocked = err.message;
-                await beat(
-                  `Waiting for ${id} — running; the platform could not be asked: ${blocked}`,
-                );
+                await beat(`Waiting for ${id} — the platform could not be asked: ${blocked}`);
                 await sleep(POLL_MS, signal);
                 continue;
               }
               if (!isTransientForPoll(err)) throw err;
-              // What actually refused, rather than one sentence for every
-              // failure. A 409 IS the guest not being up yet — that is the
-              // probe working, and it repeats the line beat in front of the
-              // probe so the throttle holds it. A 503 is a hypervisor nobody
-              // can reach and a transport abort is neither: saying "the guest
-              // is not answering" over those tells the person watching the log
-              // the one thing this channel exists to get right.
-              //
-              // And it SETS `blocked`, which it never did — not before this
-              // change and not after the first version of it. A wait that spent
-              // its whole window failing the probe on 503s gave up saying "was
-              // last seen running" and named nothing, while the progress
-              // channel had been reporting the hypervisor the entire time: the
-              // same contradiction this comment set out to remove, pointed the
-              // other way (/code-review). Deliberately not for the 409, where
-              // the platform did answer and `blocked` would be a lie about it.
-              if (!(err instanceof ConflictError)) {
-                blocked = err instanceof Error ? err.message : String(err);
-              }
-              await beat(
-                err instanceof ConflictError
-                  ? `Waiting for ${id} — running; asking the guest.`
-                  : `Waiting for ${id} — running; the platform could not be asked: ${blocked}`,
-              );
-              // The guest probe's own failure decides this turn's interval, for
-              // pollDelay's reason. The ordinary path below keeps POLL_MS.
+              blocked = err instanceof Error ? err.message : String(err);
+              await beat(`Waiting for ${id} — the platform could not be asked: ${blocked}`);
               await sleep(pollDelay(err), signal);
               continue;
             }
+            blocked = undefined;
+            session.noteResolution(id, c.resolution);
+            last = c.status ?? 'unknown';
+            // ONE beat per turn, and this is not it when a guest probe is about to
+            // run. Beating here and again in the probe's failure branch sent two
+            // notifications per poll — and because the two lines DIFFER, each read
+            // as news to the throttle and neither was ever held, so the steady
+            // state of the commonest long wait was twice the per-poll rate the
+            // interval exists to avoid (/code-review).
+            //
+            // Fixed by making the two say the SAME thing rather than by silencing
+            // this one, which was the first attempt and dropped the wrong half of
+            // the pair (/code-review again). The probe below is the longest call
+            // in the loop — an undici header timeout or a proxy 524 can hold it
+            // for minutes — so the beat that must survive is the one IN FRONT of
+            // it. The 409 branch repeats this line and the throttle holds it; a
+            // probe that fails some other way says so, which is news and goes out.
+            await beat(
+              until === 'guest' && last === 'running'
+                ? `Waiting for ${id} — running; asking the guest.`
+                : `Waiting for ${id} — ${last}.`,
+            );
+            if (last === 'build-failed') {
+              // `refused`, for the reason `cancelled` is: the wait never reached
+              // what it was told to wait for, and this one never will. A caller
+              // reading `isError` to decide whether to go on would otherwise see
+              // a build that failed and a guest that answered as the same result.
+              //
+              // `build.source` is what the machine was built *from*, not why the
+              // build failed — printed bare after "Build failed:" it reads as the
+              // reason and names an image instead of a cause. `start_error` is
+              // the field that carries a diagnostic, so prefer it and label the
+              // source as the source when that is all there is.
+              const why = c.start_error
+                ? `: ${c.start_error}`
+                : c.build?.source
+                  ? ` (built from ${c.build.source}) — the platform gave no reason`
+                  : ' — the platform gave no reason';
+              return refused(
+                `Build failed${why}. This does not resolve on its own.`,
+                withoutCredentials(c),
+              );
+            }
+            // Its files were partly removed and its disk is gone: the platform
+            // refuses to start or use it, and only deleting it again clears it.
+            // Waiting spent the whole budget and then reported "last seen
+            // half-removed", which is the state the caller passed in (Codex
+            // review). Not qualified by the pool: nothing can be admitted for a
+            // machine with no disk.
+            if (last === 'half-removed') {
+              return refused(
+                `${id} is half-removed: its files were partly removed, it cannot be started or used again, and delete_computer is what clears it.`,
+                withoutCredentials(c),
+              );
+            }
+            // Neither of the next two resolves on its own, so spinning on either
+            // burns the whole timeout waiting for something nobody is going to do.
+            //
+            // Unless somebody is. `status` is read from the guest process, so a
+            // start that has been ADMITTED reads as `stopped` while it boots and
+            // as `suspended` while it resumes — the session record is spent only
+            // on the way out of a start that worked. Refusing there tells a model
+            // to call start_computer on a computer that is already starting, and
+            // the obvious next thing it does is start it a second time.
+            //
+            // nothingAdmitted is the platform's own word for idle, and it is
+            // absent-aware: a host that did not answer has not said nothing is
+            // coming, so the wait goes on rather than refusing (OPL-4631).
+            if (last === 'suspended' && nothingAdmitted(c)) {
+              return refused(
+                `${id} is suspended, and that state does not clear by itself. start_computer resumes the saved session in about a second.`,
+                withoutCredentials(c),
+              );
+            }
+            if (last === 'stopped' && nothingAdmitted(c)) {
+              return refused(`${id} is stopped. start_computer boots it.`, withoutCredentials(c));
+            }
+            if (last === 'running') {
+              if (until === 'running')
+                return said(`Running: ${describe(c)}`, withoutCredentials(c));
+              // "The guest is up" is not a status the platform reports, so it is
+              // asked rather than waited for: a trivial exec either answers, or
+              // refuses with the 409 that says the agent is not up yet.
+              try {
+                await api.send('POST', P.computerAction(id, 'exec'), {
+                  body: P.execBody({ command: 'true', timeout_s: 5 }),
+                });
+                return said(`Guest is answering: ${describe(c)}`, withoutCredentials(c));
+              } catch (err) {
+                // The same two deadlines as the status read above, and for the
+                // same reason: this catch used to judge the error alone, so a
+                // cancellation during the guest probe left the wait throwing what
+                // read as a platform outage instead of saying the caller had
+                // hung up. Half the loop knew to check the signal and half did
+                // not, which is the worse of the two ways to be inconsistent.
+                if (extra.signal?.aborted) return cancelled(id, last);
+                if (err instanceof CancelledError) {
+                  if (untilDeadline.aborted) {
+                    blocked = `the guest probe was still in flight when the ${timeout_s}s deadline arrived`;
+                    break;
+                  }
+                  blocked = err.message;
+                  await beat(
+                    `Waiting for ${id} — running; the platform could not be asked: ${blocked}`,
+                  );
+                  await sleep(POLL_MS, signal);
+                  continue;
+                }
+                if (!isTransientForPoll(err)) throw err;
+                // What actually refused, rather than one sentence for every
+                // failure. A 409 IS the guest not being up yet — that is the
+                // probe working, and it repeats the line beat in front of the
+                // probe so the throttle holds it. A 503 is a hypervisor nobody
+                // can reach and a transport abort is neither: saying "the guest
+                // is not answering" over those tells the person watching the log
+                // the one thing this channel exists to get right.
+                //
+                // And it SETS `blocked`, which it never did — not before this
+                // change and not after the first version of it. A wait that spent
+                // its whole window failing the probe on 503s gave up saying "was
+                // last seen running" and named nothing, while the progress
+                // channel had been reporting the hypervisor the entire time: the
+                // same contradiction this comment set out to remove, pointed the
+                // other way (/code-review). Deliberately not for the 409, where
+                // the platform did answer and `blocked` would be a lie about it.
+                if (!(err instanceof ConflictError)) {
+                  blocked = err instanceof Error ? err.message : String(err);
+                }
+                await beat(
+                  err instanceof ConflictError
+                    ? `Waiting for ${id} — running; asking the guest.`
+                    : `Waiting for ${id} — running; the platform could not be asked: ${blocked}`,
+                );
+                // The guest probe's own failure decides this turn's interval, for
+                // pollDelay's reason. The ordinary path below keeps POLL_MS.
+                await sleep(pollDelay(err), signal);
+                continue;
+              }
+            }
+            await sleep(POLL_MS, signal);
           }
-          await sleep(POLL_MS, signal);
+          // Also a refusal: the deadline passed without the condition being met,
+          // which is the same shape of answer as a cancellation and not the same
+          // as success. The message still says to call again, because the state
+          // it was waiting on may yet arrive.
+          return refused(
+            blocked
+              ? `Gave up after ${timeout_s}s; the platform could not be asked about ${id} for the whole wait — the last attempt said: ${blocked}. Nothing was changed — call again to keep waiting.`
+              : `Gave up after ${timeout_s}s; ${id} was last seen ${last}. Nothing was changed — call again to keep waiting.`,
+          );
+        } finally {
+          await beat.stop();
         }
-        // Also a refusal: the deadline passed without the condition being met,
-        // which is the same shape of answer as a cancellation and not the same
-        // as success. The message still says to call again, because the state
-        // it was waiting on may yet arrive.
-        return refused(
-          blocked
-            ? `Gave up after ${timeout_s}s; the platform could not be asked about ${id} for the whole wait — the last attempt said: ${blocked}. Nothing was changed — call again to keep waiting.`
-            : `Gave up after ${timeout_s}s; ${id} was last seen ${last}. Nothing was changed — call again to keep waiting.`,
-        );
       }),
   );
 
