@@ -362,6 +362,8 @@ export class Subscription {
    * changed.
    */
   #armGen = new Map<string, number>();
+  /** Next subscription-wide arm identity; active paths alone retain theirs. */
+  #nextArmGen = 0;
   /** Trees that have armed at least once in this subscription. */
   #everArmed = new Set<string>();
   /** Re-arms a file-wait response has not explained yet. */
@@ -394,29 +396,24 @@ export class Subscription {
    * Trees a connection carrying them would not open, PROVEN so.
    *
    * Proven means the experiment came back positive — see {@link #cleared}: the
-   * tree was withheld, the same stream opened without it, and there is nothing
-   * else the difference could be. A tree merely suspected is
-   * {@link #shedCandidate} and is not in here.
+   * tree failed when added to a known working set, then that same set opened
+   * without it. A tree still being tested is not in here.
    */
   #watchRefused = new Set<string>();
   /**
-   * The tree currently withheld from the URL to find out whether it is the
-   * reason nothing will open. `undefined` when no experiment is running.
+   * A bounded search for nominations the host will not carry.
    *
-   * It stays in {@link #watches} throughout, which is what keeps a caller from
-   * being told its tree was evicted to make room for somebody else's — this is
-   * a suspicion, not a decision about what the caller asked for.
+   * The last successful set is tried first. Once that opens, each addition is
+   * added back alone. A failed addition is removed once more for confirmation,
+   * so a host outage during the probe cannot turn an innocent tree into a
+   * refusal. Nominations stay in {@link #watches} throughout the experiment.
    */
-  #shedCandidate?: string;
-  /**
-   * Whether a watch has been ruled out as the reason connections are failing.
-   *
-   * Set when an experiment comes back negative, cleared the moment anything
-   * greets. Without it a host that is simply DOWN would shed its way through
-   * every tree in the set two failures at a time, reporting each in turn as one
-   * the host would not carry.
-   */
-  #shedRuledOut = false;
+  #watchRecovery?: {
+    baseline: string[];
+    pending: string[];
+    candidate?: string;
+    phase: 'fallback' | 'probe' | 'confirm' | 'recover';
+  };
   /** What the last connection that reached an opening frame was carrying. */
   #lastGood: string[] = [];
   /** Consecutive connections that never reached an opening frame while watching. */
@@ -702,10 +699,13 @@ export class Subscription {
     // end on its own deadline, which is what the refused retry beside it does.
     const unwatchable = this.#watchLost.get(path) === 'unwatchable';
     if (unwatchable) this.#watchLost.delete(path);
-    const retrying = this.#watchRefused.delete(path) || this.#shedCandidate === path || unwatchable;
-    if (this.#shedCandidate === path) this.#shedCandidate = undefined;
+    // A fresh request supersedes an in-flight diagnosis. The next connection
+    // carries the newly requested set and, if needed, diagnoses that set from
+    // the beginning rather than applying a conclusion to a set that changed.
+    const recovering = this.#watchRecovery !== undefined;
+    if (recovering) this.#watchRecovery = undefined;
+    const retrying = this.#watchRefused.delete(path) || recovering || unwatchable;
     this.#upgradeFailures = 0;
-    this.#shedRuledOut = false;
     const at = this.#watches.indexOf(path);
     if (at >= 0) {
       // Most recently asked about goes last, so the eviction below always takes
@@ -733,17 +733,10 @@ export class Subscription {
         this.#everArmed.delete(evicted);
         this.#undisclosedRearm.delete(evicted);
         this.#watchRefused.delete(evicted);
-        // An experiment about a tree nobody nominates any more has nothing left
-        // to prove, and letting it finish would file a refusal against a path
-        // this stream is no longer asking for.
-        if (this.#shedCandidate === evicted) this.#shedCandidate = undefined;
-        // The arm generation is deliberately NOT deleted. It has to stay
-        // monotonic per path, because a waiter parked on this tree is holding a
-        // number from before the eviction: reset to zero and re-nominated, the
-        // tree would come back at one and that waiter would read an eviction as
-        // a re-arm — "reporting starts here, re-read the tree" about a tree that
-        // had simply been taken away from it. Eviction is told by membership,
-        // which is what `nominates` is for.
+        // Historical paths retain no metadata. Generation identities come from
+        // a subscription-wide counter, so deleting this entry still cannot let
+        // an older waiter confuse a later re-nomination with its original arm.
+        this.#armGen.delete(evicted);
       }
     }
     this.#reopen();
@@ -1193,6 +1186,10 @@ export class Subscription {
       // tree, under an arming the caller is already waiting on.
       if (this.#renominate) {
         this.#renominate = false;
+        // Recovery often closes a fallback or successful probe immediately
+        // after its greeting. It still proved the host reachable, so discard
+        // the failure backoff accumulated before that greeting.
+        if (reached) backoff = BACKOFF_MS;
         continue;
       }
       // A connection that got as far as its opening frame is not a failure,
@@ -1405,13 +1402,18 @@ export class Subscription {
         // `watching` is measured against, and what says whether a nomination
         // made a moment ago is on this connection or on the next one.
         //
-        // The nominations MINUS whatever is being withheld: a tree proven to be
-        // one this host will not carry, and the one currently under suspicion
-        // for it. Both stay in `#watches`, because they are still what the
-        // caller asked for and the difference belongs on the wire rather than
-        // in this client's record of the request.
+        // Proven refusals stay off the wire. During diagnosis, the last working
+        // set is sent alone or with exactly one candidate; all nominations stay
+        // in `#watches`, because an experiment is not an eviction.
+        const recovery = this.#watchRecovery;
+        const included = recovery
+          ? new Set([
+              ...recovery.baseline,
+              ...(recovery.phase === 'probe' && recovery.candidate ? [recovery.candidate] : []),
+            ])
+          : undefined;
         this.#sent = this.#watches.filter(
-          (w) => !this.#watchRefused.has(w) && w !== this.#shedCandidate,
+          (w) => !this.#watchRefused.has(w) && (!included || included.has(w)),
         );
         for (const w of this.#sent) target.searchParams.append('watch', w);
         socket = this.#socketFor(target.toString());
@@ -1508,7 +1510,7 @@ export class Subscription {
     // could be observed from otherwise — and a connection that WORKS does not
     // end for minutes or hours. An experiment whose positive result was only
     // read on the way out is an experiment with no result.
-    this.#cleared();
+    const continueWatchRecovery = this.#cleared();
     this.#adoptWatching(hello.watching);
     this.#resume ??= hello.cursor || undefined;
     this.#start ??= hello.cursor || undefined;
@@ -1529,6 +1531,11 @@ export class Subscription {
     // because a display manager can be restarted inside a running computer and
     // that is a new session. One extra readiness is the cheaper wrong answer.
     if (hello.ready && !resuming) this.#pushReady(hello.cursor);
+    // Advance only after this greeting has been fully adopted. Closing in
+    // `#cleared` would let its remaining work set `open` and armed state after
+    // the socket had already finished, briefly making an intermediate probe
+    // look like the connection about to replace it.
+    if (continueWatchRecovery) this.#reopen();
     this.#wakeAll();
   }
 
@@ -1620,53 +1627,103 @@ export class Subscription {
    * reconnecting forever with nothing ever saying why.
    *
    * But a host that is down fails in exactly the same way, so two missed
-   * handshakes are not proof of anything. The experiment is: drop the newest
-   * tree and try again WITHOUT it. If that connection greets, the tree was the
-   * problem and this server can say so. If it fails too, the tree was innocent
-   * — it goes back, and nothing is claimed about the host beyond its being
-   * unreachable, which the reconnect loop was already handling.
+   * handshakes are not proof of anything. Recovery first returns to the last
+   * set that opened. If that fallback opens, each new nomination is added back
+   * alone. A candidate that fails is withheld once more and blamed only when
+   * the known-good set opens again. If that set also fails, recovery keeps it
+   * as the reconnect target and retests the candidate after the host returns.
    */
-  #cleared(): void {
-    // Whatever was withheld is now proven guilty: this is the same stream
-    // without it, and it opened.
-    if (this.#shedCandidate !== undefined) {
-      this.#watchRefused.add(this.#shedCandidate);
-      this.#shedCandidate = undefined;
+  #cleared(): boolean {
+    const recovery = this.#watchRecovery;
+    if (!recovery) {
+      this.#lastGood = [...this.#sent];
+      this.#upgradeFailures = 0;
+      return false;
     }
-    this.#lastGood = [...this.#sent];
+
+    if (recovery.phase === 'fallback' && recovery.pending.length === 1) {
+      // Two failures of the full set followed immediately by the last working
+      // set opening isolate its only addition without another round trip.
+      this.#watchRefused.add(recovery.pending.shift()!);
+    } else if (recovery.phase === 'recover') {
+      // A fallback failed too, so the outage made the preceding evidence
+      // ambiguous. Now that the known-good set is back, test that candidate
+      // again instead of filing a refusal from before the outage.
+      recovery.candidate ??= recovery.pending.shift();
+      if (recovery.candidate !== undefined) {
+        recovery.phase = 'probe';
+        this.#lastGood = [...recovery.baseline];
+        this.#upgradeFailures = 0;
+        return true;
+      }
+    } else if (recovery.phase === 'probe' && recovery.candidate !== undefined) {
+      // This candidate opened beside the known-good set, so retain it while the
+      // remaining additions are tested.
+      recovery.baseline.push(recovery.candidate);
+    } else if (recovery.phase === 'confirm' && recovery.candidate !== undefined) {
+      // The candidate failed beside this set and the same set has now reopened
+      // without it. Only here is a refusal proven.
+      this.#watchRefused.add(recovery.candidate);
+    }
+
+    recovery.candidate = undefined;
+    const next = recovery.pending.shift();
+    if (next !== undefined) {
+      recovery.candidate = next;
+      recovery.phase = 'probe';
+      this.#lastGood = [...recovery.baseline];
+      this.#upgradeFailures = 0;
+      return true;
+    }
+
+    this.#lastGood = [...recovery.baseline];
+    this.#watchRecovery = undefined;
     this.#upgradeFailures = 0;
-    this.#shedRuledOut = false;
+    return false;
   }
 
   /** @see {@link #cleared} — the other half, for a connection that never greeted. */
   #blamed(): void {
-    if (this.#shedCandidate !== undefined) {
-      // The experiment came back negative. The tree goes back on the URL and
-      // watches stop being blamed until something connects — otherwise a host
-      // that is simply down would shed its way through every tree in the set,
-      // reporting each in turn as one the host would not carry.
-      this.#shedCandidate = undefined;
-      this.#shedRuledOut = true;
+    const recovery = this.#watchRecovery;
+    if (recovery?.phase === 'probe') {
+      // A failed probe alone is not proof: the host may have gone down after
+      // the fallback opened. Retry the known-good set before blaming the tree.
+      recovery.phase = 'confirm';
       this.#upgradeFailures = 0;
       this.#wakeAll();
       return;
     }
-    if (!this.#sent.length || this.#shedRuledOut) return;
+    if (recovery) {
+      // The known-good set failed too, so this is a host outage rather than
+      // evidence against a watch. Keep reconnecting that set; once it opens,
+      // the ambiguous candidate is probed again from fresh evidence.
+      recovery.phase = 'recover';
+      this.#upgradeFailures = 0;
+      this.#wakeAll();
+      return;
+    }
+    if (!this.#sent.length) return;
     if (++this.#upgradeFailures < WATCH_SHED_AFTER) return;
     this.#upgradeFailures = 0;
-    // Whatever changed since this stream last worked, and only then the newest.
-    // After an LRU refresh "newest" means "most recently asked about", which is
-    // the opposite of a good suspect: the tree a caller keeps asking about is
-    // the one least likely to be new. What the last connection that actually
-    // greeted was carrying is the real before-and-after.
     const carried = this.#sent;
-    this.#shedCandidate =
-      carried.find((w) => !this.#lastGood.includes(w)) ?? carried[carried.length - 1];
+    const baseline = this.#lastGood.filter(
+      (watch) => carried.includes(watch) && !this.#watchRefused.has(watch),
+    );
+    let pending = carried.filter((watch) => !baseline.includes(watch));
+    // If an unchanged set stops opening, retain the old single-watch experiment:
+    // remove one tree and see whether the rest still opens. This can detect a
+    // watch the host stopped accepting without reading an outage as a refusal.
+    if (!pending.length) {
+      const candidate = carried[carried.length - 1];
+      pending = [candidate];
+      baseline.splice(baseline.indexOf(candidate), 1);
+    }
+    this.#watchRecovery = { baseline, pending, phase: 'fallback' };
     this.#wakeAll();
   }
 
   #bumpArm(path: string): void {
-    this.#armGen.set(path, (this.#armGen.get(path) ?? 0) + 1);
+    this.#armGen.set(path, ++this.#nextArmGen);
   }
 
   /** Record an arm, retaining later arms until a file wait explains their gap. */
