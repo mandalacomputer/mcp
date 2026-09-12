@@ -1,5 +1,6 @@
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { MAX_BUFFERED } from '../src/events.js';
 import { connect, FakeSocket, fakeEvents, installFakePlatform } from './harness.js';
 
 const textOf = (result: CallToolResult) =>
@@ -7,6 +8,9 @@ const textOf = (result: CallToolResult) =>
     .filter((part): part is { type: 'text'; text: string } => part.type === 'text')
     .map((part) => part.text)
     .join('\n');
+
+const dataOf = (result: CallToolResult): Record<string, unknown> =>
+  JSON.parse(textOf(result).split('\n\n').slice(1).join('\n\n'));
 
 async function until(ready: () => boolean): Promise<void> {
   const deadline = Date.now() + 2000;
@@ -251,6 +255,99 @@ describe('event recovery answers', () => {
       expect(result).toContain('list_windows');
       expect(result).not.toContain('nothing was missed');
     } finally {
+      await session.close();
+    }
+  });
+
+  for (const tool of ['poll_events', 'wait_for_event'] as const) {
+    it(`leaves ${tool} delivery and loss unread when reconciliation is cancelled`, async () => {
+      const events = fakeEvents({ ready: false });
+      const session = await connect({ webSocket: events.factory });
+      const normal = globalThis.fetch;
+      let reconciling: AbortSignal | null | undefined;
+      try {
+        await session.call('poll_events');
+        events.last().send({ type: 'gap', cursor: 'cur-gap', data: {} });
+        events.last().send({ type: 'window.opened', cursor: 'cur-event', data: { id: '0x1' } });
+        globalThis.fetch = (async (input, init) => {
+          if (!String(input).endsWith('/windows')) return normal(input, init);
+          reconciling = init?.signal;
+          return new Promise<Response>((_resolve, reject) => {
+            reconciling?.addEventListener('abort', () => reject(reconciling?.reason), {
+              once: true,
+            });
+          });
+        }) as typeof fetch;
+
+        const controller = new AbortController();
+        const cancelled = session.client.callTool(
+          { name: tool, arguments: { timeout_s: 5 } },
+          undefined,
+          { signal: controller.signal },
+        );
+        await until(() => reconciling !== undefined);
+        controller.abort();
+        await expect(cancelled).rejects.toThrow();
+        await until(() => reconciling?.aborted === true);
+        globalThis.fetch = normal;
+
+        const next = textOf(await session.call('poll_events'));
+        expect(next).toContain('cur-event');
+        expect(next).toContain('"lost"');
+      } finally {
+        globalThis.fetch = normal;
+        await session.close();
+      }
+    });
+  }
+
+  it('keeps an eviction cursor behind survivors when a reconnect gaps during reconciliation', async () => {
+    const hello = { ready: false };
+    const events = fakeEvents(hello);
+    const session = await connect({ webSocket: events.factory });
+    const normal = globalThis.fetch;
+    let release: (() => void) | undefined;
+    try {
+      await session.call('poll_events');
+      globalThis.fetch = (async (input, init) => {
+        if (!String(input).endsWith('/windows')) return normal(input, init);
+        return new Promise<Response>((resolve) => {
+          release = () => resolve(new Response('{"windows":[]}'));
+        });
+      }) as typeof fetch;
+
+      const waiting = session.call('wait_for_event', {
+        types: ['process.exited'],
+        timeout_s: 5,
+      });
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      events.last().send({ type: 'process.exited', cursor: 'cur-match', data: { pid: 7 } });
+      queueMicrotask(() => {
+        for (let i = 0; i < MAX_BUFFERED + 1; i++) {
+          events.last().send({ type: 'window.opened', cursor: `cur-survivor-${i}`, data: {} });
+        }
+      });
+      await until(() => release !== undefined);
+
+      hello.ready = true;
+      events.last().close();
+      await until(() => events.sockets.length === 2 && events.last().greeted);
+      events.last().send({ type: 'gap', cursor: 'cur-gap', data: {} });
+      release?.();
+
+      const first = dataOf(await waiting);
+      globalThis.fetch = normal;
+      expect(first.events).toEqual([]);
+      expect(first.more_waiting).toBe(MAX_BUFFERED);
+      const next = dataOf(
+        await session.call('poll_events', { since: first.cursor as string, limit: 500 }),
+      );
+      expect((next.events as Record<string, unknown>[])[0]).toMatchObject({
+        cursor: 'cur-survivor-2',
+      });
+      expect(next.more_waiting).toBe(MAX_BUFFERED - 500);
+    } finally {
+      globalThis.fetch = normal;
       await session.close();
     }
   });
