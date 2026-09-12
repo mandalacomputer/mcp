@@ -229,6 +229,44 @@ describe('the surface source scanner', () => {
     expect(topLevelKeys(`name: 'real', other: "fake: value"`)).toEqual(['name', 'other']);
   });
 
+  it('refuses body fields it cannot account for rather than reading none', () => {
+    // The three shapes that used to be nothing. Each carries fields of the route
+    // and none of them can be resolved here, so each was a body read as shorter
+    // than it is — and under-reading has no symptom of its own: the mirror
+    // listing the field is reported as having invented it, and a mirror written
+    // by somebody who missed it too agrees with this reader about nothing at
+    // all. A body read as having NO fields is a route documenting no body, which
+    // is the vacuous all-clear the whole gate exists to refuse (OPL-4812).
+    expect(() => topLevelKeys('...SHARED_FIELDS, name: 1')).toThrow(/spread/);
+    expect(() => topLevelKeys('name: 1, ...SHARED_FIELDS')).toThrow(/spread/);
+    expect(() => topLevelKeys('[FIELD_NAME]: 1')).toThrow(/computed key/);
+    expect(() => topLevelKeys('name: 1, [`${prefix}_id`]: 2')).toThrow(/computed key/);
+    expect(() => topLevelKeys('`${prefix}_id`: 1')).toThrow(/interpolated key/);
+    // And a literal sitting in key position with no colon after it is not a
+    // field of anything this reader understands either.
+    expect(() => topLevelKeys(`'name' , age: 1`)).toThrow(/not a key/);
+    // A template with no hole in it is an ordinary key, and an escaped `${` is
+    // two of the characters a name is spelled with rather than a hole.
+    expect(topLevelKeys('`name`: 1')).toEqual(['name']);
+    expect(topLevelKeys('`\\${name}`: 1')).toEqual(['${name}']);
+  });
+
+  it('reads shorthand as the field it names', () => {
+    // `{ name }` is `{ name: name }`, and the field it names is the whole of what
+    // a body comparison needs from it. It matched neither branch before, so it
+    // was a field walked past in silence.
+    expect(topLevelKeys('name')).toEqual(['name']);
+    expect(topLevelKeys('name, age: 1')).toEqual(['name', 'age']);
+    expect(topLevelKeys('age: 1, name')).toEqual(['age', 'name']);
+  });
+
+  it('still reads an object laid out across lines', () => {
+    // The position after a comma is whitespace before it is anything, and a
+    // reader that classified that would refuse every object a formatter has
+    // touched. Kept alongside the refusals above, because they are one change.
+    expect(topLevelKeys('\n  name: 1,\n  age: 2,\n')).toEqual(['name', 'age']);
+  });
+
   it('refuses a body whose delimiters close more than they opened', () => {
     // Silent truncation is the failure this gate exists to refuse: the depth
     // never climbs back, so every key after the stray closer is dropped and the
@@ -585,6 +623,29 @@ describe('the route table reader', () => {
     expect(code).toBe(1);
     expect(said).toContain("'GET sizes' documents a body in a form this reader does not know");
     expect(said).not.toContain('offset -1');
+  });
+
+  it('names the route when a body field cannot be accounted for', async () => {
+    // The field walk was forgiving of exactly the shapes that hide fields: a
+    // spread's fields live somewhere this cannot see, and a computed or
+    // interpolated key names something it cannot resolve. Each read as no field
+    // at all, so a body of nothing but a spread reported a route documenting no
+    // body — matching a mirror that lists none, which is the vacuous all-clear
+    // the query and header halves of this reader already refuse (OPL-4812).
+    for (const body of [
+      'object({ ...SHARED_FIELDS })',
+      'object({ name: str("x"), ...SHARED_FIELDS })',
+      'object({ [FIELD]: str("x") })',
+      'object({ `${prefix}_id`: str("x") })',
+    ]) {
+      const { said, code } = await refuseParams(
+        `export const DOCS: Record<string, Doc> = { 'GET sizes': { body: ${body} } };\n`,
+      );
+      expect(code, body).toBe(1);
+      // The route, because the walk's own message is an offset into a slice of
+      // a file and there is nowhere to go and look at that.
+      expect(said, body).toContain("'GET sizes' documents a body this reader cannot account for");
+    }
   });
 
   it('reads a query list whose bracket the formatter wrapped', async () => {

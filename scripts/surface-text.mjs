@@ -340,7 +340,26 @@ export function balanced(text, from, open, close) {
   throw new Error(`unbalanced ${open} from offset ${from}`);
 }
 
-/** The keys of an object literal at its own depth only. */
+/**
+ * The keys of an object literal at its own depth only, or a throw for one it
+ * cannot account for.
+ *
+ * EVERY key, which is the whole of what the caller needs: this is what reads a
+ * route's body fields, and a field it cannot see is a field the comparison does
+ * not make. Under-reading has no symptom of its own — the mirror listing the
+ * field is reported as having invented it, and a mirror written by somebody who
+ * missed it too agrees with this reader about nothing at all. A body read as
+ * having no fields is a route documenting no body, and the check then passes on
+ * a shape it did not analyse, which is the one outcome this gate exists to make
+ * impossible.
+ *
+ * So the shapes that carry fields this cannot resolve are refused rather than
+ * walked past: a spread, whose fields are somewhere else entirely; a key
+ * computed from an identifier; a key interpolated into a template. Each was
+ * silently nothing, and a silent nothing here is indistinguishable from a
+ * literal with no fields in it. `entries` and `objectFields` already refuse the
+ * same three for the same reason (OPL-4812).
+ */
 export function topLevelKeys(body) {
   const keys = [];
   // A key sits at the start of the object or just after a comma; nothing else
@@ -354,10 +373,67 @@ export function topLevelKeys(body) {
     const before = body.slice(0, at).trimEnd();
     return before === '' || before.endsWith('{') || before.endsWith(',');
   };
+  const seen = (at) => JSON.stringify(body.slice(at, at + 40));
   let depth = 0;
   let i = 0;
   while (i < body.length) {
     const ch = body[i];
+    // Key position is decided BEFORE anything else, because two of the three
+    // shapes refused here are opened by a character the walk below would rather
+    // count: a computed key's `[` was depth, and its contents were read as a
+    // nested literal with the key never seen at all.
+    //
+    // Whitespace is not a key and not a shape: the position after a comma is
+    // spaces before it is anything, and classifying one of those would refuse
+    // every object with a line break in it.
+    if (depth === 0 && !/\s/.test(ch) && inKeyPosition(i)) {
+      // A quoted key is a key: `'name': str(…)` names the field `name` exactly
+      // as `name:` does. Stepping over the literal without looking for the colon
+      // reads the object as having no field there at all — and an object read as
+      // having no fields is a route documenting no body, which matches a mirror
+      // that lists none. That match is the vacuous all-clear this whole gate is
+      // built to refuse.
+      if (ch === "'" || ch === '"' || ch === '`') {
+        const end = quotedEnd(body, i);
+        const colon = body.slice(end).match(/^\s*:/);
+        if (!colon) {
+          throw new Error(`a literal in key position that is not a key: ${seen(i)}`);
+        }
+        const inner = body.slice(i + 1, end - 1);
+        // A key spelled with a hole in it names nothing this can resolve, and it
+        // is a field of the route either way. Refused, where it used to be
+        // dropped: a guess at the name would be wrong, and silence is a field
+        // nobody compared.
+        if (ch === '`' && hasHole(inner)) {
+          throw new Error(`an interpolated key this reader cannot resolve: ${seen(i)}`);
+        }
+        keys.push(unescaped(inner));
+        i = end + colon[0].length;
+        continue;
+      }
+      if (body.startsWith('...', i)) {
+        throw new Error(`a spread whose fields this reader cannot see: ${seen(i)}`);
+      }
+      if (ch === '[') {
+        throw new Error(`a computed key this reader cannot resolve: ${seen(i)}`);
+      }
+      const named = body.slice(i).match(/^([A-Za-z_$][\w$]*)\s*:/);
+      if (named) {
+        keys.push(named[1]);
+        i += named[0].length;
+        continue;
+      }
+      // `{ name }` is shorthand for `{ name: name }`, and the field it names is
+      // the one thing about it this needs. Read rather than refused, because
+      // reading it costs nothing and loses nothing.
+      const shorthand = body.slice(i).match(/^([A-Za-z_$][\w$]*)\s*(?:,|$)/);
+      if (shorthand) {
+        keys.push(shorthand[1]);
+        i += shorthand[1].length;
+        continue;
+      }
+      throw new Error(`something in key position this reader cannot read: ${seen(i)}`);
+    }
     if (ch === '{' || ch === '[' || ch === '(') depth++;
     else if (ch === '}' || ch === ']' || ch === ')') {
       // Valid source cannot close what it never opened, and the depth never
@@ -366,37 +442,11 @@ export function topLevelKeys(body) {
       // parse. `entries` throws on the same condition for the same reason.
       if (--depth < 0) throw new Error(`unbalanced ${ch} at offset ${i}`);
     } else if (ch === "'" || ch === '"' || ch === '`') {
-      const end = quotedEnd(body, i);
-      // A quoted key is a key: `'name': str(…)` names the field `name` exactly
-      // as `name:` does. Stepping over the literal without looking for the colon
-      // reads the object as having no field there at all — and an object read as
-      // having no fields is a route documenting no body, which matches a mirror
-      // that lists none. That match is the vacuous all-clear this whole gate is
-      // built to refuse.
-      if (depth === 0 && inKeyPosition(i)) {
-        const colon = body.slice(end).match(/^\s*:/);
-        if (colon) {
-          const inner = body.slice(i + 1, end - 1);
-          // A computed key spelled with a hole in it names nothing this can
-          // resolve; guessing at one would be worse than the key going unnamed.
-          if (!(ch === '`' && hasHole(inner))) keys.push(unescaped(inner));
-          i = end + colon[0].length;
-          continue;
-        }
-      }
-      i = end;
+      i = quotedEnd(body, i);
       continue;
     } else if (ch === '/' && regexCanStart(body, i)) {
       i = regexEnd(body, i);
       continue;
-    }
-    if (depth === 0 && inKeyPosition(i)) {
-      const m = body.slice(i).match(/^([A-Za-z_][A-Za-z0-9_]*)\s*:/);
-      if (m) {
-        keys.push(m[1]);
-        i += m[0].length;
-        continue;
-      }
     }
     i++;
   }

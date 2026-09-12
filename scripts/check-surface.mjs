@@ -430,7 +430,21 @@ function main() {
         // neither the route nor the file it is in.
         const brace = args === null ? -1 : args.indexOf('{');
         if (brace !== -1) {
-          for (const k of topLevelKeys(balanced(args, brace, '{', '}'))) params.add(`body:${k}`);
+          // The field walk refuses a spread, a computed key and an interpolated
+          // one: each is a field of THIS route that it cannot resolve, and
+          // reading none of them is how a route with a body passes for a route
+          // with none. Re-thrown with the route named, because on its own the
+          // message gives an offset into a slice of a file — which is not
+          // somewhere anybody can go and look (OPL-4812).
+          let fields;
+          try {
+            fields = topLevelKeys(balanced(args, brace, '{', '}'));
+          } catch (err) {
+            throw new Error(
+              `'${route}' documents a body this reader cannot account for: ${err.message}`,
+            );
+          }
+          for (const k of fields) params.add(`body:${k}`);
         } else if (body[bodyAt] !== '{') {
           throw new Error(
             `'${route}' documents a body in a form this reader does not know — ` +
