@@ -4087,14 +4087,15 @@ describe('run_agent under a client that is counting the seconds', () => {
   it('stops at a well-formed done rather than waiting for a close that may not come', async () => {
     const real = globalThis.fetch;
     let cancelled = false;
-    // A stream that sends `done` and then never ends — the shape a proxy that
-    // holds the connection open produces. Before the break, the tool sat here
-    // with the answer already in hand until the client gave up on it.
+    // A stream that sends `done` with a lone-CR blank line and then never ends —
+    // the shape a proxy that holds the connection open produces. The second CR
+    // completes the frame before it can acquire an optional LF from a later
+    // network chunk, so the tool must act on the answer already in hand.
     globalThis.fetch = (async () =>
       new Response(
         new ReadableStream({
           start(controller) {
-            controller.enqueue(new TextEncoder().encode(stream));
+            controller.enqueue(new TextEncoder().encode(`${stream.slice(0, -2)}\r\r`));
           },
           cancel() {
             cancelled = true;

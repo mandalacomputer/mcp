@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { Api } from '../src/api.js';
 import { MAX_INLINE_IMAGE_BYTES } from '../src/format.js';
-import { connect, download } from './harness.js';
+import { BASE, connect, download } from './harness.js';
 
 /**
  * Paging a guest file, which is the whole of what a `Range` bought.
@@ -20,6 +21,31 @@ import { connect, download } from './harness.js';
  */
 
 const MAX_INLINE_BYTES = 256 * 1024;
+
+describe('partial response totals', () => {
+  const real = globalThis.fetch;
+  afterEach(() => {
+    globalThis.fetch = real;
+  });
+
+  it.each([
+    ['an unknown-total 206', 'bytes 10-15/*', undefined],
+    ['a known-total 206', 'bytes 10-15/20', 20],
+    ['a capped 200', undefined, 6],
+  ])('keeps the file size truthful for %s', async (_case, contentRange, totalBytes) => {
+    globalThis.fetch = (async () =>
+      new Response('abcdef', {
+        status: contentRange ? 206 : 200,
+        headers: {
+          'Content-Length': '6',
+          ...(contentRange ? { 'Content-Range': contentRange } : {}),
+        },
+      })) as typeof fetch;
+    const file = await new Api('com_test', BASE).bytes('GET', 'files', {}, 3);
+    expect(file.truncated).toBe(true);
+    expect(file.totalBytes).toBe(totalBytes);
+  });
+});
 
 /** The last request's headers, so a test can assert what went out. */
 let sent: Headers;

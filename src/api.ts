@@ -629,19 +629,13 @@ export class Api {
       // number here is about the window: Content-Length is how long THIS body
       // is, and `bytes.length` is how much of it was kept. Reading either as
       // the file's size is how a caller decides it has the whole thing.
-      totalBytes:
-        window?.total !== undefined
-          ? window.total
-          : truncated
-            ? declared !== undefined && declared > bytes.length
-              ? declared
-              : undefined
-            : // A 206 whose Content-Range said `*`: the window arrived in full
-              // and the file's length is still unknown, so this must not fall
-              // through to `bytes.length`, which would call the window the file.
-              window
-              ? undefined
-              : bytes.length,
+      totalBytes: window
+        ? window.total
+        : truncated
+          ? declared !== undefined && declared > bytes.length
+            ? declared
+            : undefined
+          : bytes.length,
       unrangeable: (resp.headers.get('accept-ranges') ?? '').trim().toLowerCase() === 'none',
       window,
     };
@@ -672,6 +666,10 @@ export class Api {
     const reader = resp.body.getReader();
     const decoder = new TextDecoder();
     let buffer = '';
+    // A boundary ending in CR is complete immediately. If that CR later gains
+    // an LF in the next network chunk, discard the LF as the optional second
+    // byte of the line ending that was already consumed.
+    let suppressLeadingLf = false;
     try {
       for (;;) {
         const { done, value } = await readBody(method, path, opts.signal ?? this.#signal, () =>
@@ -683,7 +681,12 @@ export class Api {
         // becomes CR-then-LF, each rewritten to its own LF, and the pair reads
         // as the blank line that ends an event — so a frame gets cut in half at
         // a boundary that was never in the stream.
-        buffer += decoder.decode(value, { stream: true });
+        let decoded = decoder.decode(value, { stream: true });
+        if (suppressLeadingLf && decoded) {
+          suppressLeadingLf = false;
+          if (decoded.startsWith('\n')) decoded = decoded.slice(1);
+        }
+        buffer += decoded;
         // Events are separated by a blank line. Each of its two line endings
         // may be CRLF, LF, or lone CR, and a proxy that reframes the stream is
         // entitled to mix them.
@@ -695,6 +698,7 @@ export class Api {
           if (!sep) break;
           const chunk = buffer.slice(0, sep.index);
           buffer = buffer.slice(sep.index + sep.length);
+          suppressLeadingLf = sep.suppressLeadingLf;
           const parsed = parseEvent(chunk);
           if (parsed) yield parsed;
         }
@@ -717,7 +721,7 @@ export class Api {
       // character that says something was lost.
       buffer += decoder.decode();
       for (;;) {
-        const sep = sseBoundary(buffer, true);
+        const sep = sseBoundary(buffer);
         if (!sep) break;
         const chunk = buffer.slice(0, sep.index);
         buffer = buffer.slice(sep.index + sep.length);
@@ -1156,21 +1160,37 @@ async function readTextAtMost(
 }
 
 /** Find the next SSE blank line without confusing a split CRLF for two lines. */
-function sseBoundary(text: string, eof = false): { index: number; length: number } | undefined {
-  const endingAt = (index: number): number | undefined => {
+function sseBoundary(
+  text: string,
+): { index: number; length: number; suppressLeadingLf: boolean } | undefined {
+  const endingAt = (
+    index: number,
+    trailingCrCompletesBoundary = false,
+  ): { length: number; suppressLeadingLf: boolean } | undefined => {
     const char = text[index];
-    if (char === '\n') return 1;
+    if (char === '\n') return { length: 1, suppressLeadingLf: false };
     if (char !== '\r') return undefined;
-    if (index + 1 === text.length) return eof ? 1 : undefined;
-    return text[index + 1] === '\n' ? 2 : 1;
+    if (index + 1 === text.length) {
+      return trailingCrCompletesBoundary ? { length: 1, suppressLeadingLf: true } : undefined;
+    }
+    return {
+      length: text[index + 1] === '\n' ? 2 : 1,
+      suppressLeadingLf: false,
+    };
   };
 
   for (let index = 0; index < text.length; index++) {
     const first = endingAt(index);
     if (first === undefined) continue;
-    const second = endingAt(index + first);
-    if (second !== undefined) return { index, length: first + second };
-    index += first - 1;
+    const second = endingAt(index + first.length, true);
+    if (second !== undefined) {
+      return {
+        index,
+        length: first.length + second.length,
+        suppressLeadingLf: second.suppressLeadingLf,
+      };
+    }
+    index += first.length - 1;
   }
   return undefined;
 }

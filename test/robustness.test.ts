@@ -104,6 +104,55 @@ describe('the SSE reader', () => {
       ]);
     }
   });
+
+  it('delivers a CR-terminated frame while the stream stays open', async () => {
+    const enc = new TextEncoder();
+    let controller!: ReadableStreamDefaultController<Uint8Array>;
+    let cancelled = false;
+    globalThis.fetch = (async () =>
+      new Response(
+        new ReadableStream({
+          start(c) {
+            controller = c;
+            c.enqueue(enc.encode('event: step\ndata: {"n":1}\r\r'));
+          },
+          cancel() {
+            cancelled = true;
+          },
+        }),
+        { headers: { 'Content-Type': 'text/event-stream' } },
+      )) as typeof fetch;
+
+    const stream = new Api('com_test', BASE).sse('POST', 'computers/vm-1/agent');
+    const pending = stream.next();
+    const timeout = Symbol('timeout');
+    try {
+      let timer!: ReturnType<typeof setTimeout>;
+      const first = await Promise.race([
+        pending,
+        new Promise<typeof timeout>((resolve) => {
+          timer = setTimeout(() => resolve(timeout), 1_000);
+        }),
+      ]);
+      clearTimeout(timer);
+      if (first === timeout) {
+        controller.close();
+        await pending;
+      }
+      expect(first).not.toBe(timeout);
+      expect(first).toMatchObject({ value: { event: 'step', data: { n: 1 } } });
+
+      // The last CR may acquire its optional LF in a later network chunk. It
+      // belongs to the boundary already dispatched, not to the next frame.
+      controller.enqueue(enc.encode('\nevent: done\ndata: {"stop":"end_turn"}\n\n'));
+      expect(await stream.next()).toMatchObject({
+        value: { event: 'done', data: { stop: 'end_turn' } },
+      });
+    } finally {
+      await stream.return(undefined);
+    }
+    expect(cancelled).toBe(true);
+  });
 });
 
 describe('the filename off a download', () => {
