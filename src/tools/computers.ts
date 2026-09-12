@@ -88,7 +88,12 @@ const movesOf = (body: unknown): { moves: Move[]; dropped: number } | undefined 
   // An unreadable ENVELOPE is still `undefined`: a different fact, a different
   // answer, and the one the callers already handle.
   const moves = list.filter(
-    (row): row is Move => row !== null && typeof row === 'object' && !Array.isArray(row),
+    (row): row is Move =>
+      row !== null &&
+      typeof row === 'object' &&
+      !Array.isArray(row) &&
+      typeof (row as { computer_id?: unknown }).computer_id === 'string' &&
+      Boolean((row as { computer_id: string }).computer_id.trim()),
   );
   return { moves, dropped: list.length - moves.length };
 };
@@ -842,6 +847,12 @@ export const registerComputers: Registrar = (server, session, opts) => {
                   `list_computers.`,
                 last,
               );
+            }
+            if (typeof mine.live !== 'boolean') {
+              blocked = `GET /moves answered with an unreadable live flag for ${id}`;
+              await beat(`Moving ${id} — the platform could not be asked: ${blocked}`);
+              await sleep(POLL_MS, signal);
+              continue;
             }
             last = mine;
             if (!mine.live) return finishedMove(id, mine);

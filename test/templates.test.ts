@@ -224,9 +224,10 @@ describe('building', () => {
     const res = await call('watch_build', { build_id: 'bld-1' });
     expect(res.isError).toBeFalsy();
     expect(textOf(res)).toMatch(/succeeded/);
-    // The limitation stated where somebody will act on it, rather than found
-    // later as a 503 from a create.
-    expect(textOf(res)).toMatch(/does not yet advertise a family it built/);
+    expect(textOf(res)).toMatch(/published ref/);
+    expect(textOf(res)).toMatch(/create_computer/);
+    expect(textOf(res)).toMatch(/prepar/i);
+    expect(textOf(res)).not.toMatch(/still refused|not launchable/i);
     await close();
   });
 
@@ -967,23 +968,36 @@ describe('what the codex adversarial review found', () => {
     await close();
   });
 
-  /**
-   * The publish result used to end on a flat "Launch it with create_computer",
-   * which contradicted build_template's own description two tools down: a
-   * document declaring `spec.build` names a family the fleet does not
-   * advertise, so following that line led straight into a refusal this server
-   * already knew about.
-   */
-  it('does not promise a launch the build tools say will be refused', async () => {
+  it('guides a custom template from publishing through building to create', async () => {
     const { call, close } = await connect();
     const res = await call('publish_template', { document: 'apiVersion: mandala/v1' });
     const said = textOf(res);
 
     expect(said).toMatch(/acc-1\/devbox@1\.0\.0/);
-    expect(said).not.toMatch(/Launch it with create_computer/);
     expect(said).toMatch(/spec\.build/);
     expect(said).toMatch(/build_template/);
-    expect(said).toMatch(/built rather than shipped/);
+    expect(said).toMatch(/watch_build/);
+    expect(said).toMatch(/create_computer/);
+    expect(said).toMatch(/prepar/i);
+    expect(said).not.toMatch(/still refused|not launchable/i);
+    await close();
+  });
+
+  it('keeps custom-build guidance free of withheld lifecycle tool names', async () => {
+    const { client, call, close } = await connect({ lifecycle: false });
+    const tools = (await client.listTools()).tools;
+    const build = tools.find((tool) => tool.name === 'build_template');
+    const published = textOf(
+      await call('publish_template', { document: 'apiVersion: mandala/v1' }),
+    );
+    const completed = textOf(await call('watch_build', { build_id: 'bld-1' }));
+
+    expect(build?.description).toMatch(/successful build/i);
+    expect(build?.description).not.toContain('create_computer');
+    expect(published).toMatch(/whatever creates computers on this setup/);
+    expect(published).not.toContain('create_computer');
+    expect(completed).toMatch(/whatever creates computers on this setup/);
+    expect(completed).not.toContain('create_computer');
     await close();
   });
 });

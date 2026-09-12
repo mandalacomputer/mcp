@@ -925,7 +925,11 @@ function incompleteUtf8Lead(bytes: Uint8Array): number | undefined {
 function decodeUtf8(bytes: Uint8Array): string | undefined {
   // A NUL is legal UTF-8 and is never in a file anybody meant to read as text.
   if (bytes.includes(0)) return undefined;
-  const fatal = new TextDecoder('utf-8', { fatal: true });
+  // Each file window is decoded independently. Preserve U+FEFF when it happens
+  // to be the first character in this window: at a nonzero offset it cannot be
+  // a transport marker, and at offset zero it is still a valid character the
+  // caller asked us to return byte-for-byte.
+  const fatal = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
   try {
     return fatal.decode(bytes);
   } catch {
@@ -1065,7 +1069,8 @@ function decodeExecStream(
       // consumed and gone, while these are named in hex beside the text and
       // arrive whole on the next read. read_file marks a cut file the same way.
       text:
-        new TextDecoder('utf-8', { fatal: true }).decode(middle) + (tail.length ? '\ufffd' : ''),
+        new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(middle) +
+        (tail.length ? '\ufffd' : ''),
       head: bytes.subarray(0, start),
       tail,
     };
