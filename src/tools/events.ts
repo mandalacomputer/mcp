@@ -705,6 +705,10 @@ export const registerEvents: Registrar = (server, session) => {
                 (connectionNote(sub, connection) || 'The stream is still open and buffering.'),
             );
           }
+          const stoppedWhileWaiting = sub.state;
+          if (stoppedWhileWaiting.status === 'stopped') {
+            return stopped(session, id, stoppedWhileWaiting.reason, sub, { since, limit });
+          }
           // Asked again, because the wait that just ended is long enough for a
           // `capabilities` frame to have arrived inside it. A withdrawal that
           // happened while parked is still the reason nothing came, and saying

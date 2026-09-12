@@ -2,6 +2,8 @@ import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { Api } from '../src/api.js';
 import { EventHub, MAX_BUFFERED } from '../src/events.js';
+import { Session } from '../src/session.js';
+import { registerEvents } from '../src/tools/events.js';
 import { BASE, connect, FakeSocket, fakeEvents, HELLO, installFakePlatform } from './harness.js';
 
 /**
@@ -1157,6 +1159,48 @@ describe('a capability withdrawn while somebody is already waiting', () => {
     expect(res.isError).toBeFalsy();
     expect(eventsOf(res).map((e) => e.type)).toContain('window.opened');
     await close();
+  });
+
+  it('reports a stopped stream and its final buffer before withdrawn capabilities', async () => {
+    type Handler = (
+      args: Record<string, unknown>,
+      extra: { signal?: AbortSignal },
+    ) => Promise<CallToolResult>;
+    const handlers: Record<string, Handler> = {};
+    const ev = fakeEvents({ ready: false });
+    const session = new Session({
+      apiKey: 'com_test',
+      baseUrl: BASE,
+      computerId: 'vm-1',
+      webSocket: ev.factory,
+    });
+    registerEvents(
+      {
+        registerTool: (name: string, _definition: unknown, handler: Handler) => {
+          handlers[name] = handler;
+        },
+      } as never,
+      session,
+      { lifecycle: true },
+    );
+    const signal = new AbortController().signal;
+    try {
+      await handlers.poll_events({ limit: 100 }, { signal });
+      const waiting = handlers.wait_for_event(
+        { types: ['process.exited'], timeout_s: 5, limit: 100 },
+        { signal },
+      );
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      ev.last().send(frame('window.opened', { id: '0x1' }, 'cur-buffered'));
+      ev.last().send({ type: 'capabilities', events: ['window.opened'] });
+      session.events.open('vm-1').close('the stream stopped during the wait');
+
+      const result = await waiting;
+      expect(textOf(result)).toContain('the stream stopped during the wait');
+      expect(eventsOf(result)).toEqual([expect.objectContaining({ cursor: 'cur-buffered' })]);
+    } finally {
+      session.events.closeAll();
+    }
   });
 });
 

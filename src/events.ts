@@ -299,6 +299,8 @@ export class Subscription {
   #nextIndex = 0;
   /** The index after the last event handed to the model. */
   #delivered = 0;
+  /** The cursor immediately before the oldest event still in the ring. */
+  #beforeOldestCursor?: string;
   /** Set once the model has read anything at all, so a first read can say so. */
   #read = false;
   #loss?: Loss;
@@ -908,6 +910,11 @@ export class Subscription {
       }
       return Math.max(this.#helloFrom, this.#oldest);
     }
+    // An empty `through` read can advance the delivery position to the oldest
+    // survivor without handing over an event. Its cursor is the predecessor
+    // retained during eviction, which is no longer in the ring but is still an
+    // exact, lossless place from which to resume those survivors.
+    if (since === this.#beforeOldestCursor) return this.#oldest;
     // Otherwise: the unread frontier, NOT the oldest thing still in the ring.
     // A delivered event stays in the ring until the cap evicts it, so answering
     // an unplaceable cursor with `#oldest` re-sent events the model already
@@ -1081,6 +1088,9 @@ export class Subscription {
     if (typeof cursor === 'string' && cursor) return cursor;
     const at = this.#ring.find((b) => b.index === this.#delivered - 1)?.event.cursor;
     if (typeof at === 'string' && at) return at;
+    if (this.#delivered === this.#oldest && this.#beforeOldestCursor) {
+      return this.#beforeOldestCursor;
+    }
     // Nothing in the ring to place it by: either nothing has been delivered on
     // this stream at all, or the event the position sits after has been evicted.
     // The last cursor DELIVERED, or the frontier where this subscription
@@ -1101,6 +1111,9 @@ export class Subscription {
     if (event.cursor === this.#hello?.cursor) this.#helloFrom = this.#nextIndex;
     if (this.#ring.length > MAX_BUFFERED) {
       const evicted = this.#ring.splice(0, this.#ring.length - MAX_BUFFERED);
+      const beforeOldest = evicted[evicted.length - 1]?.event.cursor;
+      this.#beforeOldestCursor =
+        typeof beforeOldest === 'string' && beforeOldest ? beforeOldest : undefined;
       // Only what the model had not been handed is a loss. Dropping events it
       // already read is the ring doing its job, and counting those would report
       // a hole where there is none.
