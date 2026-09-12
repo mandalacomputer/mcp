@@ -1,5 +1,5 @@
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ConflictError, isTransient, MoveRequiredError } from '../src/errors.js';
 import { connect, installFakePlatform } from './harness.js';
 
@@ -244,6 +244,75 @@ describe('a move that has stopped', () => {
   });
 });
 
+describe('move rows that do not establish an outcome', () => {
+  const real = globalThis.fetch;
+  afterEach(() => {
+    vi.useRealTimers();
+    globalThis.fetch = real;
+  });
+
+  const afterUnreadable = async (unreadable: Record<string, unknown>) => {
+    let reads = 0;
+    globalThis.fetch = (async (_input: string | URL | Request, init?: RequestInit) => {
+      const started = { computer_id: 'vm-1', state: 'moving', live: true, ram_mb: 26000 };
+      if ((init?.method ?? 'GET') === 'POST') return Response.json(started, { status: 202 });
+      reads++;
+      return Response.json({
+        moves:
+          reads === 1
+            ? [unreadable]
+            : [
+                { ...started, state: 'done', live: false },
+                { computer_id: 'vm-other', state: 'moving', live: true },
+              ],
+      });
+    }) as typeof fetch;
+    vi.useFakeTimers();
+    const { call, close } = await connect();
+    const pending = call('move_computer', { computer_id: 'vm-1', ram_mb: 26000, timeout_s: 5 });
+    await vi.advanceTimersByTimeAsync(5_000);
+    const result = await pending;
+    await close();
+    return { result, reads };
+  };
+
+  it('does not infer deletion from a row without a readable identity', async () => {
+    const { result, reads } = await afterUnreadable({});
+    expect(result.isError).toBeFalsy();
+    expect(textOf(result)).toContain('moved and is now');
+    expect(reads).toBe(2);
+  });
+
+  it('does not treat an unreadable live flag as a terminal move', async () => {
+    const { result, reads } = await afterUnreadable({
+      computer_id: 'vm-1',
+      state: 'failed',
+      live: null,
+    });
+    expect(result.isError).toBeFalsy();
+    expect(textOf(result)).toContain('moved and is now');
+    expect(reads).toBe(2);
+  });
+
+  it('uses a valid matching row even when an unrelated row is malformed', async () => {
+    globalThis.fetch = (async (_input: string | URL | Request, init?: RequestInit) => {
+      const started = { computer_id: 'vm-1', state: 'moving', live: true, ram_mb: 26000 };
+      return Response.json(
+        (init?.method ?? 'GET') === 'POST'
+          ? started
+          : { moves: [{}, { ...started, state: 'done', live: false }] },
+        { status: (init?.method ?? 'GET') === 'POST' ? 202 : 200 },
+      );
+    }) as typeof fetch;
+    const { call, close } = await connect();
+    const result = await call('move_computer', { computer_id: 'vm-1', ram_mb: 26000 });
+    await close();
+
+    expect(result.isError).toBeFalsy();
+    expect(textOf(result)).toContain('moved and is now');
+  });
+});
+
 describe('list_moves', () => {
   let platform: ReturnType<typeof installFakePlatform>;
   beforeEach(() => {
@@ -281,6 +350,41 @@ describe('list_moves', () => {
       expect(res.isError).toBe(true);
       expect(textOf(res)).toContain('not a list of moves');
       expect(textOf(res)).not.toContain('No moves on this account');
+    } finally {
+      globalThis.fetch = restore;
+    }
+  });
+
+  it('refuses rows without readable identities rather than reporting a quiet account', async () => {
+    const restore = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      Response.json({
+        moves: [{}, { computer_id: '   ', state: 'moving', live: true }],
+      })) as typeof fetch;
+    try {
+      const { call, close } = await connect();
+      const res = await call('list_moves', {});
+      await close();
+
+      expect(res.isError).toBe(true);
+      expect(textOf(res)).toContain('ignored 2 malformed move entries');
+      expect(textOf(res)).toContain('malformed move');
+      expect(textOf(res)).not.toContain('No moves on this account');
+    } finally {
+      globalThis.fetch = restore;
+    }
+  });
+
+  it('still reports a valid empty moves table as a quiet account', async () => {
+    const restore = globalThis.fetch;
+    globalThis.fetch = (async () => Response.json({ moves: [] })) as typeof fetch;
+    try {
+      const { call, close } = await connect();
+      const res = await call('list_moves', {});
+      await close();
+
+      expect(res.isError).toBeFalsy();
+      expect(textOf(res)).toContain('No moves on this account');
     } finally {
       globalThis.fetch = restore;
     }

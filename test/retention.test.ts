@@ -61,18 +61,20 @@ describe('get_retention', () => {
   // rather than through it, which is how usage.test.ts reads its own variants:
   // installFakePlatform serves one fixture, and these two cases are about the
   // shapes it does not carry.
-  const read = async (window: Record<string, unknown>) => {
+  const readResult = async (window: Record<string, unknown>) => {
     const restore = globalThis.fetch;
     globalThis.fetch = answering(window);
     try {
       const { call, close } = await connect();
-      const text = textOf(await call('get_retention', {}));
+      const result = await call('get_retention', {});
       await close();
-      return text;
+      return result;
     } finally {
       globalThis.fetch = restore;
     }
   };
+
+  const read = async (window: Record<string, unknown>) => textOf(await readResult(window));
 
   it('leaves a tier that is off out of the sentence rather than printing a zero', async () => {
     const text = await read({ daily: 7, weekly: 0, monthly: 0 });
@@ -89,6 +91,19 @@ describe('get_retention', () => {
     // because the same three zeroes mean opposite things as an entitlement and
     // as a daemon policy.
     expect(text).not.toMatch(/kept forever|deleted/);
+  });
+
+  it.each([
+    ['a missing tier', { daily: 7, weekly: 4 }],
+    ['a tier with the wrong type', { daily: '7', weekly: 4, monthly: 12 }],
+    ['a negative tier', { daily: -1, weekly: 4, monthly: 12 }],
+    ['a fractional tier', { daily: 7.5, weekly: 4, monthly: 12 }],
+    ['an unsafe integer tier', { daily: Number.MAX_SAFE_INTEGER + 1, weekly: 4, monthly: 12 }],
+  ])('refuses %s rather than reporting a different policy', async (_case, window) => {
+    const result = await readResult(window);
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toMatch(/retention policy|could not be read/i);
+    expect(textOf(result)).not.toContain('no retained automatic history');
   });
 });
 

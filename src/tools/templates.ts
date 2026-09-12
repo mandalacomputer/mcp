@@ -139,19 +139,15 @@ export const registerTemplates: Registrar = (server, session, opts) => {
             body,
           );
         }
-        // What it takes to LAUNCH the thing, rather than the flat "Launch it
-        // with create_computer" this used to end on. That sentence contradicted
-        // build_template's own description two tools down: a document declaring
-        // `spec.build` names a family the fleet does not advertise, so following
-        // this line led straight into a refusal the server already knew about
-        // (adversarial review, OPL-3835). Publishing and being launchable are
-        // different questions and this says so, without claiming to know which
-        // of the two this document is — the store answers the first, and only
-        // the document says whether it declares build steps.
+        // Publishing stores the document; a custom image then has to finish its
+        // build before creation can use the ref. Creation remains the authority
+        // on preparation and capacity, so this names that next step without
+        // claiming the image is already present everywhere it might be used.
         return said(
           `Published ${body.ref}. A published template is named by its ref and by nothing else, so its short name still means one of ours. ` +
-            `WHETHER IT LAUNCHES depends on the document: pass the ref to ${launcher} as ` +
-            '`template` if it layers onto a family the fleet ships, but one declaring `spec.build` steps names a family that has to be built first — that is build_template — and the fleet does not yet advertise a family it built rather than shipped, so a create naming such a ref is still refused.',
+            `If the document has no \`spec.build\` steps, pass the ref to ${launcher} as \`template\`. ` +
+            `If it declares build steps, call build_template, follow the job with watch_build, and after it succeeds pass this same published ref to ${launcher}. ` +
+            `${launcher} may still return image preparation instructions or a capacity refusal; follow that result rather than assuming the successful build made every destination ready.`,
           body,
         );
       }),
@@ -290,8 +286,7 @@ export const registerTemplates: Registrar = (server, session, opts) => {
     'build_template',
     {
       title: 'Compile a template document into an image',
-      description:
-        'Compile a document that declares `spec.build` steps into a golden image. Returns IMMEDIATELY with a job — a build takes minutes, an agent image roughly fifteen — and watch_build is how you follow it. THE NAMESPACE AND THE FAMILY BOTH HAVE TO BE YOURS: `spec.family` is what the image is called on a hypervisor, in a directory shared with every computer on that machine, so a build may only write into `golden-<your account id>` or that and a `-` and a name of your choosing. A refusal saying a host is busy is not a problem with your document — one build runs per hypervisor — and is worth retrying. What you build is NOT launchable yet: the fleet does not advertise a family it built rather than shipped, so a create naming such a ref is still refused.',
+      description: `Compile a document that declares \`spec.build\` steps into a golden image. Returns IMMEDIATELY with a job — a build takes minutes, an agent image roughly fifteen — and watch_build is how you follow it. THE NAMESPACE AND THE FAMILY BOTH HAVE TO BE YOURS: \`spec.family\` is what the image is called on a hypervisor, in a directory shared with every computer on that machine, so a build may only write into \`golden-<your account id>\` or that and a \`-\` and a name of your choosing. A refusal saying a host is busy is not a problem with your document — one build runs per hypervisor — and is worth retrying. After a successful build, pass the published ref to ${launcher} as \`template\`. ${launcher} may still return image preparation instructions or a capacity refusal; follow that result rather than assuming the successful build made every destination ready.`,
       inputSchema: {
         document: z
           .string()
@@ -643,7 +638,7 @@ export const registerTemplates: Registrar = (server, session, opts) => {
           : undefined;
         return said(
           last.status === 'succeeded'
-            ? `Build ${build_id} succeeded. The image exists, but the fleet does not yet advertise a family it built rather than shipped, so a create naming this ref is still refused.`
+            ? `Build ${build_id} succeeded. Pass the published ref for this build to ${launcher} as \`template\`. ${launcher} may still return image preparation instructions or a capacity refusal; follow that result rather than assuming the successful build made every destination ready.`
             : `Build ${build_id} ${last.status}.` +
                 (failed
                   ? ` Step ${failed.n} (${failed.kind}: ${failed.label}) is the one that failed.`
