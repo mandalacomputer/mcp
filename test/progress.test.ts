@@ -228,6 +228,31 @@ describe('the keepalive itself', () => {
     expect(deliveries).toBe(2);
   });
 
+  it('keeps beating after a timer that fires a millisecond early', async () => {
+    // OPL-4781. The periodic beat is rearmed only by the path that sends one,
+    // so a wake that landed a millisecond short of its own deadline — which
+    // libuv is entitled to deliver — took the throttled branch, returned, and
+    // left nothing scheduled. One early fire ended the keepalive for the rest
+    // of the operation and put the 60s cancellation back.
+    const r = recorder('tok');
+    const beat = heartbeat(r.extra, r.log);
+    await beat('working');
+    expect(r.beats).toHaveLength(1);
+
+    // The clock the throttle reads runs 1ms behind the one the timer fires on.
+    const clock = Date.now;
+    const lag = vi.spyOn(Date, 'now').mockImplementation(() => clock() - 1);
+    await vi.advanceTimersByTimeAsync(HEARTBEAT_MS);
+    lag.mockRestore();
+
+    // Whether that wake sent anything is not the point — that a later one can
+    // is. A heartbeat with no timer left never speaks again.
+    await vi.advanceTimersByTimeAsync(HEARTBEAT_MS * 2);
+    expect(r.beats.length).toBeGreaterThan(1);
+
+    await beat.stop();
+  });
+
   it('stops periodic notifications and clears its timer', async () => {
     const r = recorder('tok');
     const beat = heartbeat(r.extra, r.log);

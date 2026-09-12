@@ -1274,13 +1274,18 @@ export const registerEvents: Registrar = (server, session) => {
           const extras = d.loss ? recovered : {};
           const answer = { ...body(id, d, sub, sub.watching), watch: wire, ...extras };
           // THESE FIRST, and in this order, because each would otherwise be
-          // described as something else. Evicting a tree does not reset its arm
-          // generation — that is kept monotonic on purpose — but it does take
-          // the tree out of the watch set, and the generation branch below would
-          // call that a re-arm and invite the caller to go on waiting on a tree
-          // nothing nominates. A tree the host would not carry is missing from
+          // described as something else. Evicting a tree drops its arm
+          // generation along with the rest of its metadata, so the generation
+          // branch below reads an eviction as a change and would call it a
+          // re-arm — inviting the caller to go on waiting on a tree nothing
+          // nominates. Membership is what that actually is, and `settled` is
+          // where it is asked. A tree the host would not carry is missing from
           // the set for a quite different reason, which is why the refusal is
           // asked about ahead of the membership.
+          //
+          // Generations stay unambiguous across a re-nomination because they
+          // come from a subscription-wide counter: a tree that comes back gets
+          // a number no waiter can be holding, rather than restarting at one.
           const why = settled(sub, id, root, wire, () => interrupted() + evicted, {
             ...body(id, d, sub, sub.watching),
             ...extras,
