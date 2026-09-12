@@ -47,31 +47,36 @@ const point = {
 };
 
 /**
- * A refused capture, turned into the one option that still answers.
+ * A refused capture, and the one other question this tool can ask.
  *
  * The platform's own sentence first and whole — it is the half that says which
  * computer and what state it is in — and the platform's classification with it,
  * since `failed` is what composes both. What this adds is the thing neither can
- * know: that this tool has an argument which asks a different question, one the
- * platform can answer while it cannot take a new capture.
+ * know: that this tool has an argument which asks for something else, and that
+ * the something else may be answerable when a new capture is not.
  *
- * It does not claim to know WHY the capture was refused. A computer that is
- * asleep has nothing to capture from; a computer whose agent is busy for an
- * instant has, and will answer the same call moments later. The cached frame is
- * a working answer in both cases and a misleading one in both if it is read as
- * the present, so the sentence says what that frame is rather than promising the
- * caller their screenshot.
+ * Offered as a FALLBACK and not as a promise, which is the whole of the care
+ * needed here (Codex review). Two different refusals reach this, and it cannot
+ * tell them apart: a computer that is asleep has nothing to capture from, while
+ * a computer whose agent is busy for an instant has and will answer the very
+ * same call moments later. `fresh: false` only permits the cache — it does not
+ * establish that anything is in it — so a sentence guaranteeing a frame sends a
+ * caller from a refusal that clears by itself to one that does not clear at all.
+ * Hence: the platform's sentence is pointed back at, the fallback is conditional,
+ * and what the frame would MEAN is stated, because a saved frame read as the
+ * present is a worse answer than no frame.
  */
 const cachedFrameOffered = (err: ConflictError): CallToolResult => {
   const sentence = failed(err)
     .content.map((c) => ('text' in c ? c.text : ''))
     .join('\n');
   return refused(
-    `${sentence}\n\nThat was a request for a NEW capture. fresh: false asks instead for the last frame the ` +
-      `platform saved, which it can answer without the computer taking one — so it is the way to see what ` +
-      `was on the screen. Read it as the screen when that frame was taken and not as the screen now: it ` +
-      `cannot show the result of anything sent since, and on a suspended computer it is the moment it went ` +
-      `to sleep. If what you need is the present, the computer has to be awake first.`,
+    `${sentence}\n\nThat was a request for a NEW capture. Read the sentence above first: if it says this is ` +
+      `worth sending again, the capture itself will work in a moment and waiting is the answer. Otherwise ` +
+      `fresh: false asks for the last frame the platform saved rather than a new one, which needs nothing ` +
+      `captured — it is refused in the same way when there is no saved frame to serve, so it is a fallback ` +
+      `and not a guarantee. Whatever comes back is the screen as it was when that frame was taken and not ` +
+      `the screen now: it cannot show the result of anything sent since.`,
   );
 };
 
@@ -106,7 +111,7 @@ export const registerInput: Registrar = (server, session) => {
           .boolean()
           .default(true)
           .describe(
-            'Skip the platform\'s frame cache, which serves any capture under 1.5s old. True by default: after a click, a cached frame can predate the action entirely, and a model reading it concludes the click missed and clicks again. A fresh capture needs a computer that is awake, so on a suspended one it is refused rather than answered — pass false to ask for the last frame the platform saved. That frame is the screen as it was when the computer was last awake, which is the right answer for "what was on screen" and the wrong one for "did my click land".',
+            'Skip the platform\'s frame cache, which serves any capture under 1.5s old. True by default: after a click, a cached frame can predate the action entirely, and a model reading it concludes the click missed and clicks again. A capture needs a computer that is awake, so on a suspended one this is refused rather than answered — pass false to ask for the last saved frame instead, which is refused in turn when there is no saved frame to serve. A saved frame answers "what was on the screen" and cannot answer "did my click land".',
           ),
       },
       annotations: { readOnlyHint: true },
