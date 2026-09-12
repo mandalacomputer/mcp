@@ -85,6 +85,9 @@ export type ProgressExtra = {
 /** Somewhere to log a line for a person watching, without importing McpServer. */
 export type Logger = { sendLoggingMessage: (m: { level: 'info'; data: string }) => Promise<void> };
 
+/** A keepalive sender whose timer must be stopped when its wait ends. */
+export type Heartbeat = ((line: string) => Promise<void>) & { stop: () => Promise<void> };
+
 /**
  * The keepalive a wait longer than a minute owes the client it is keeping.
  *
@@ -118,13 +121,100 @@ export function heartbeat(
   extra: ProgressExtra,
   log: Logger | undefined,
   everyMs: number = HEARTBEAT_MS,
-): (line: string) => Promise<void> {
+): Heartbeat {
   const progressToken = extra._meta?.progressToken;
   let sent = 0;
   let spoken = false;
   let last = '';
   let at = 0;
-  return async (line: string) => {
+  let current: string | undefined;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let stopped = false;
+  let notifying = false;
+  let pendingNotification: string | undefined;
+  let logging = false;
+  let pendingLog: string | undefined;
+
+  const schedule = () => {
+    if (timer !== undefined) clearTimeout(timer);
+    timer = undefined;
+    if (stopped || !spoken) return;
+    timer = setTimeout(
+      () => {
+        timer = undefined;
+        if (current !== undefined) emit(current);
+      },
+      Math.max(0, everyMs - (Date.now() - at)),
+    );
+    timer.unref?.();
+  };
+
+  const notify = (line: string) => {
+    if (stopped || progressToken === undefined) return;
+    if (notifying) {
+      // One latest frame is enough to catch up after a slow receiver. Keeping
+      // every timer tick would make the queue grow for as long as it was slow.
+      pendingNotification = line;
+      return;
+    }
+    notifying = true;
+    sent += 1;
+    let delivery: Promise<void>;
+    try {
+      delivery = extra.sendNotification({
+        method: 'notifications/progress',
+        // `progress` is the count of notifications, which the SDK's
+        // ProgressSchema asks to increase every time. No `total`: a wait does
+        // not know how many turns it will take, and a total of 0 renders as a
+        // finished bar.
+        params: { progressToken, progress: sent, message: line },
+      });
+    } catch {
+      delivery = Promise.resolve();
+    }
+    const finished = () => {
+      notifying = false;
+      if (stopped) {
+        pendingNotification = undefined;
+        return;
+      }
+      const pending = pendingNotification;
+      pendingNotification = undefined;
+      if (pending !== undefined) notify(pending);
+    };
+    void delivery.then(finished, finished);
+  };
+
+  const writeLog = (line: string) => {
+    if (stopped || !log) return;
+    if (logging) {
+      // Logging is useful to a person but cannot keep the MCP request alive.
+      // Keep its backlog bounded and, above all, keep it out of progress's way.
+      pendingLog = line;
+      return;
+    }
+    logging = true;
+    let delivery: Promise<void>;
+    try {
+      delivery = log.sendLoggingMessage({ level: 'info', data: line });
+    } catch {
+      delivery = Promise.resolve();
+    }
+    const finished = () => {
+      logging = false;
+      if (stopped) {
+        pendingLog = undefined;
+        return;
+      }
+      const pending = pendingLog;
+      pendingLog = undefined;
+      if (pending !== undefined) writeLog(pending);
+    };
+    void delivery.then(finished, finished);
+  };
+
+  const emit = (line: string) => {
+    if (stopped) return;
     const now = Date.now();
     // A changed line is news and goes out at once; an unchanged one is a
     // keepalive and goes out on the interval. `spoken` covers the first turn,
@@ -143,19 +233,24 @@ export function heartbeat(
     spoken = true;
     last = line;
     at = now;
-    if (progressToken !== undefined) {
-      sent += 1;
-      await extra
-        .sendNotification({
-          method: 'notifications/progress',
-          // `progress` is the count of notifications, which the SDK's
-          // ProgressSchema asks to increase every time. No `total`: a wait does
-          // not know how many turns it will take, and a total of 0 renders as a
-          // finished bar.
-          params: { progressToken, progress: sent, message: line },
-        })
-        .catch(() => {});
-    }
-    await log?.sendLoggingMessage({ level: 'info', data: line }).catch(() => {});
+    notify(line);
+    writeLog(line);
+    schedule();
   };
+
+  const beat = ((line: string) => {
+    if (stopped) return Promise.resolve();
+    current = line;
+    emit(line);
+    return Promise.resolve();
+  }) as Heartbeat;
+  beat.stop = () => {
+    stopped = true;
+    if (timer !== undefined) clearTimeout(timer);
+    timer = undefined;
+    pendingNotification = undefined;
+    pendingLog = undefined;
+    return Promise.resolve();
+  };
+  return beat;
 }
