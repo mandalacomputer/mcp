@@ -128,7 +128,19 @@ export const registerAgent: Registrar = (server, session) => {
             // level from a run that worked — a caller checking whether the step
             // succeeded would read this one as a success that happened to have
             // a discouraging sentence in it.
-            return refused(`The run failed after ${steps.length} step(s).`, ev.data);
+            //
+            // And it has to say WHY in words, because this is the one place a
+            // status cannot be read off the response: the platform answered 200
+            // before the first step, so a run stopped by the credential, the role
+            // or the plan arrives as a frame in a successful stream. A model
+            // handed "the run failed" and a JSON blob does the natural thing,
+            // which is to call this tool again with the same prompt — paying for
+            // every completed step a second time to be refused the same way.
+            return refused(
+              `The run failed after ${steps.length} step(s).${stopReason(ev.data)}` +
+                (steps.length ? `\n\nWhat it did, and is billed for:\n${steps.join('\n')}` : ''),
+              ev.data,
+            );
           }
         }
 
@@ -167,6 +179,45 @@ export const registerAgent: Registrar = (server, session) => {
       }),
   );
 };
+
+/**
+ * What an `error` frame says about whether calling this tool again can work.
+ *
+ * Three of the statuses a run can stop on are about the CALLER rather than the
+ * computer — the credential stopped being accepted, the role or the account
+ * changed, the plan does not cover the work — and every one of them answers a
+ * second run the same way. They are also the three that can arrive with steps
+ * already completed and billed, which is what makes a retry expensive as well as
+ * useless.
+ *
+ * Anything else is left as the platform's own sentence. A run can fail for
+ * reasons that are worth another attempt, and inventing a verdict for a status
+ * this version has not been told about would be the same mistake in the other
+ * direction: the leading space is part of the returned clause so that an
+ * unclassified stop reads as one sentence rather than as a missing one.
+ */
+function stopReason(data: unknown): string {
+  const frame = isRecord(data) ? data : undefined;
+  const status = typeof frame?.status === 'number' ? frame.status : undefined;
+  const said = typeof frame?.error === 'string' && frame.error ? frame.error : undefined;
+  const why = said ? ` ${said}` : '';
+  if (status === 401 || status === 403) {
+    return (
+      ` It was stopped because this server's credential or the role behind it is no longer` +
+      ` accepted (HTTP ${status}) — not by anything wrong with the computer.${why} Do NOT call` +
+      ` run_agent again with the same prompt: it is refused the same way. Re-authenticate, then` +
+      ` look at what the completed steps already did before deciding what is left to do.`
+    );
+  }
+  if (status === 402) {
+    return (
+      ` It was stopped by the plan on this account as it stands now (HTTP ${status}), not by` +
+      ` anything wrong with the computer.${why} Calling run_agent again does not change that;` +
+      ` say what was refused, and note that the steps below were still billed.`
+    );
+  }
+  return why;
+}
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   value !== null && typeof value === 'object' && !Array.isArray(value);

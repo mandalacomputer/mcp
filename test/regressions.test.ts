@@ -5918,3 +5918,175 @@ describe('the wait and the states nothing can start', () => {
     }
   }, 40_000);
 });
+
+describe('a refusal that is about the caller rather than the computer', () => {
+  /** Everything `failed` would put in front of a model for one status. */
+  const shown = (status: number, message: string, body?: unknown) =>
+    said(failed(errorForStatus(status, message, body)));
+
+  it('tells a model to re-authenticate rather than to send the mutation again', () => {
+    // Authentication and role are checked again while a call is in flight, so
+    // one of these can land after part of the work is done. A model reads the
+    // sentence and nothing else, and a bare "unauthorized (HTTP 401)" reads like
+    // a transport failure — which is the one thing it must not be treated as:
+    // the instinct is to send the call again, and for a create, a start, a move
+    // or a write that is how the same work happens twice.
+    const unauthorized = shown(401, 'unauthorized');
+    expect(unauthorized).toMatch(/stopped being accepted/);
+    expect(unauthorized).toMatch(/partway through a call/);
+    expect(unauthorized).toMatch(/check what already took effect/);
+    // Not a word telling it to try again, which is what the 409 vocabulary says
+    // and what this status must never borrow.
+    expect(unauthorized).not.toMatch(/worth sending again/);
+
+    const forbidden = shown(403, 'This requires member access to this account.');
+    // The platform's own sentence survives — it is the half that says WHAT was
+    // refused — and the advice is added to it.
+    expect(forbidden).toMatch(/This requires member access to this account\./);
+    expect(forbidden).toMatch(/role that changed or an account suspended/);
+    expect(forbidden).not.toMatch(/worth sending again/);
+
+    // A plan limit is not a fault on the machine, and it is the same answer
+    // whether it arrives at once or after a wait.
+    expect(shown(402, 'Choose a plan to start a computer.')).toMatch(/as it stands now/);
+  });
+
+  it('leaves a refusal the platform classified with the sentence written for it', () => {
+    // The status clause speaks only where the platform said nothing more
+    // precise. A 409 it classified has advice of its own, and this must not
+    // displace or duplicate it.
+    const contended = shown(409, 'the guest agent is busy', { reason: 'contention' });
+    expect(contended).toMatch(/worth sending again/);
+    expect(contended).not.toMatch(/stopped being accepted/);
+    // And a status with no advice at all reads exactly as it did before.
+    expect(shown(404, 'computer not found')).toBe('computer not found (HTTP 404)');
+  });
+
+  it('keeps the work a mid-call refusal says was already done', () => {
+    // The completed steps and what they billed are in the error body, and the
+    // sentence was all this used to show — so a run that drove the desktop for
+    // two steps and was then stopped looked exactly like one that never started,
+    // and a model reading it starts again and pays for both a second time.
+    const text = shown(401, 'unauthorized', {
+      error: 'unauthorized',
+      steps_taken: ['1. screenshot', '2. click 40,80'],
+      usage: { input_tokens: 1200, output_tokens: 90 },
+    });
+    expect(text).toMatch(/already done/);
+    expect(text).toMatch(/2\. click 40,80/);
+    expect(text).toMatch(/input_tokens/);
+    // Only the fields that record work. The body's own `error` is the sentence
+    // already shown above it, and repeating it would be the same fact twice.
+    expect(text.split('unauthorized').length - 1).toBe(1);
+  });
+
+  it('says nothing extra when the body records no work', () => {
+    expect(shown(401, 'unauthorized', { error: 'unauthorized' })).not.toMatch(/already done/);
+  });
+});
+
+describe('an agent run stopped part way through', () => {
+  const errorFrame = (data: Record<string, unknown>) =>
+    `event: step\ndata: ${JSON.stringify({ n: 1, detail: 'screenshot' })}\n\n` +
+    `event: error\ndata: ${JSON.stringify(data)}\n\n`;
+
+  it('names an auth stop as one, and says not to run the same prompt again', async () => {
+    // The stream is the one place the status cannot be read off the response:
+    // HTTP 200 went out before the first step, so a run stopped by the
+    // credential or the role arrives as a frame. "The run failed" plus a JSON
+    // blob left a model with one obvious move — call run_agent again — which
+    // pays for every completed step a second time and is refused identically.
+    const real = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      new Response(
+        errorFrame({ error: 'unauthorized', status: 401, steps: 1, usage: { input_tokens: 10 } }),
+        { headers: { 'Content-Type': 'text/event-stream' } },
+      )) as typeof fetch;
+    try {
+      const { call, close } = await connect({ modelKey: 'sk-test' });
+      const res = await call('run_agent', { prompt: 'finish the task' });
+      expect(res.isError).toBe(true);
+      expect(said(res)).toMatch(/no longer accepted \(HTTP 401\)/);
+      expect(said(res)).toMatch(/not by anything wrong with the computer/);
+      expect(said(res)).toMatch(/Do NOT call run_agent again with the same prompt/);
+      // And what it did get through, because that is what the next decision is
+      // made from — and it is billed.
+      expect(said(res)).toMatch(/1\. screenshot/);
+      await close();
+    } finally {
+      globalThis.fetch = real;
+    }
+  });
+
+  it('calls a plan stop a plan stop rather than a broken computer', async () => {
+    const real = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      new Response(errorFrame({ error: 'Choose a plan to start a computer.', status: 402 }), {
+        headers: { 'Content-Type': 'text/event-stream' },
+      })) as typeof fetch;
+    try {
+      const { call, close } = await connect({ modelKey: 'sk-test' });
+      const res = await call('run_agent', { prompt: 'finish the task' });
+      expect(res.isError).toBe(true);
+      expect(said(res)).toMatch(/stopped by the plan on this account/);
+      expect(said(res)).toMatch(/Choose a plan to start a computer\./);
+      await close();
+    } finally {
+      globalThis.fetch = real;
+    }
+  });
+
+  it('leaves a stop it has no verdict for as the platform worded it', async () => {
+    // A run can fail for something worth another attempt, and inventing a
+    // verdict for a status this version was not told about would be the same
+    // mistake pointed the other way.
+    const real = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      new Response(errorFrame({ error: 'the guest agent stopped answering' }), {
+        headers: { 'Content-Type': 'text/event-stream' },
+      })) as typeof fetch;
+    try {
+      const { call, close } = await connect({ modelKey: 'sk-test' });
+      const res = await call('run_agent', { prompt: 'finish the task' });
+      expect(res.isError).toBe(true);
+      expect(said(res)).toMatch(/the guest agent stopped answering/);
+      expect(said(res)).not.toMatch(/Do NOT call run_agent again/);
+      await close();
+    } finally {
+      globalThis.fetch = real;
+    }
+  });
+});
+
+describe('what the prose a model reads first says about a mid-call refusal', () => {
+  it('covers the three statuses that are about the caller, in both texts', async () => {
+    // The server's instructions and the Claude Code skill are read before any
+    // tool description, and they carried a retry policy for 400, 402, 404, 409
+    // and 5xx with nothing at all about authentication dying inside a call. This
+    // asserts only that both texts speak about it and that neither invites a
+    // retry; what they actually say is a judgement no test can make.
+    const platform = installFakePlatform();
+    const { client, close } = await connect({ modelKey: 'sk-test' });
+    try {
+      const skill = readFileSync(
+        new URL('../plugin/skills/mandala-computer/SKILL.md', import.meta.url),
+        'utf8',
+      );
+      for (const [where, text] of [
+        ['server instructions', client.getInstructions() ?? ''],
+        ['the skill', skill],
+      ] as const) {
+        expect(text, where).toMatch(/401/);
+        expect(text, where).toMatch(/403/);
+        expect(text, where).toMatch(/402/);
+        // The two facts a model has to be told, since neither is visible from a
+        // status alone: the refusal can arrive mid-call, and resending is wrong.
+        expect(text, where).toMatch(/in flight/);
+        expect(text, where).toMatch(/resen[dt]/i);
+      }
+    } finally {
+      await close();
+      platform.restore();
+    }
+  });
+});

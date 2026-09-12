@@ -134,6 +134,40 @@ export function reasonAdvice(reason: string | undefined): string | undefined {
 }
 
 /**
+ * What to tell a model about a refusal that is about the CALLER, not the computer.
+ *
+ * The companion to {@link reasonAdvice}, for the three statuses the platform can
+ * answer with partway through a call rather than only at the start of one: the
+ * credential, the role and the plan are all checked again before the platform
+ * does anything further, so a long call can be refused after part of its work is
+ * already done.
+ *
+ * Which makes the wording the interesting part. A model reads one sentence and
+ * decides from it whether to send the call again, and the default instinct on
+ * anything that looks like a transport failure is to retry — so the sentence has
+ * to say, in words and not by omission, that a retry is wrong and that some of
+ * the work may already stand. None of the three is a fault on the computer, and
+ * a model told only "unauthorized (HTTP 401)" reads it as one.
+ *
+ * Only these three. A 404 is deliberately not here: it does not separate deleted
+ * from out of this key's reach, so a single clause would have to be wrong about
+ * one of them — that judgement belongs to the tools that know which id they were
+ * given. Silence is the same discipline {@link reasonAdvice} keeps.
+ */
+export function statusAdvice(status: number | undefined): string | undefined {
+  switch (status) {
+    case 401:
+      return 'the credential this server is using stopped being accepted — revoked, or a session that ended. Sending this again unchanged is refused the same way. This can be decided partway through a call, so check what already took effect before repeating anything that creates, starts, moves, writes or deletes';
+    case 403:
+      return 'this account does not permit this — a role that changed or an account suspended, rather than anything wrong with the computer. Retrying does not help, and it can be decided partway through a call, so check what already took effect before repeating anything that writes';
+    case 402:
+      return 'the plan on this account, as it stands now, does not cover what was asked for. Not a fault on the computer and not something waiting fixes — say what was refused';
+    default:
+      return undefined;
+  }
+}
+
+/**
  * The platform's one-word classification off a refusal body, or `undefined`.
  *
  * Shape-checked in the manner of {@link moveOffer} and for its reason: this

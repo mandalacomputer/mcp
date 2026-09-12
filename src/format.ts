@@ -1,5 +1,5 @@
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
-import { APIError, MandalaError, reasonAdvice } from './errors.js';
+import { APIError, MandalaError, reasonAdvice, statusAdvice } from './errors.js';
 
 /** A plain text result. */
 export const text = (s: string): CallToolResult => ({ content: [{ type: 'text', text: s }] });
@@ -105,11 +105,48 @@ export function failed(err: unknown): CallToolResult {
   // Appended rather than substituted: the sentence is what says WHICH computer
   // and which state, and the word says only what kind. An unclassified refusal —
   // most of them, and always will be — reads exactly as it did before.
-  const advice = err instanceof APIError ? reasonAdvice(err.reason) : undefined;
+  //
+  // The platform's word first, the status second. The word is specific to one
+  // refusal and the status is a class of them, so a classified 409 keeps the
+  // sentence written for it; the status clause speaks where the platform said
+  // nothing more precise, which is every mid-call auth and plan refusal.
+  const advice =
+    err instanceof APIError ? (reasonAdvice(err.reason) ?? statusAdvice(err.status)) : undefined;
+  const line = advice ? `${withStatus} — ${advice}` : withStatus;
+  const kept = err instanceof APIError ? keptWork(err.body) : undefined;
   return {
     isError: true,
-    content: [{ type: 'text', text: advice ? `${withStatus} — ${advice}` : withStatus }],
+    content: [{ type: 'text', text: kept ? `${line}\n\n${kept}` : line }],
   };
+}
+
+/**
+ * Work a refusal says was already done, where the refusal reported any.
+ *
+ * A refusal decided partway through a call is not a call that did nothing: the
+ * platform keeps whatever it had already completed and reports it in the error
+ * body, and this read nothing but the message — so a run that drove the desktop
+ * for nine steps and was then stopped surfaced as one bare sentence, with the
+ * completed steps and what they billed nowhere a model could see them. A model
+ * reading that starts again from the beginning and pays for the nine twice.
+ *
+ * Named fields rather than the whole body. An error body is not a size this
+ * server controls, and most of what is in one is the sentence already shown
+ * above; these are the fields the platform documents as the record of work that
+ * stands, and everything else stays out of the model's context.
+ */
+function keptWork(body: unknown): string | undefined {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return undefined;
+  const from = body as Record<string, unknown>;
+  const kept: Record<string, unknown> = {};
+  for (const field of ['steps_taken', 'steps', 'usage']) {
+    if (from[field] !== undefined && from[field] !== null) kept[field] = from[field];
+  }
+  if (!Object.keys(kept).length) return undefined;
+  return (
+    'This refusal came after part of the work was already done, so the call did not leave the ' +
+    `computer untouched. What stands, and what it billed:\n${JSON.stringify(kept, null, 2)}`
+  );
 }
 
 /** Run a tool body, turning anything it throws into a result the model can read. */
