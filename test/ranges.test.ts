@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { Api } from '../src/api.js';
 import { MAX_INLINE_IMAGE_BYTES } from '../src/format.js';
-import { connect, download } from './harness.js';
+import { BASE, connect, download } from './harness.js';
 
 /**
  * Paging a guest file, which is the whole of what a `Range` bought.
@@ -20,6 +21,31 @@ import { connect, download } from './harness.js';
  */
 
 const MAX_INLINE_BYTES = 256 * 1024;
+
+describe('partial response totals', () => {
+  const real = globalThis.fetch;
+  afterEach(() => {
+    globalThis.fetch = real;
+  });
+
+  it.each([
+    ['an unknown-total 206', 'bytes 10-15/*', undefined],
+    ['a known-total 206', 'bytes 10-15/20', 20],
+    ['a capped 200', undefined, 6],
+  ])('keeps the file size truthful for %s', async (_case, contentRange, totalBytes) => {
+    globalThis.fetch = (async () =>
+      new Response('abcdef', {
+        status: contentRange ? 206 : 200,
+        headers: {
+          'Content-Length': '6',
+          ...(contentRange ? { 'Content-Range': contentRange } : {}),
+        },
+      })) as typeof fetch;
+    const file = await new Api('com_test', BASE).bytes('GET', 'files', {}, 3);
+    expect(file.truncated).toBe(true);
+    expect(file.totalBytes).toBe(totalBytes);
+  });
+});
 
 /** The last request's headers, so a test can assert what went out. */
 let sent: Headers;
@@ -210,6 +236,76 @@ describe('read_file when the range cannot be served', () => {
     expect(out).toContain('206 without a readable Content-Range');
     // And it must not have been passed off as the file.
     expect(out).not.toContain('efghij');
+    await close();
+  });
+
+  it.each([
+    ['more body bytes than its window', 'abcdef', 'bytes 0-2/3'],
+    ['fewer body bytes than its window', 'abc', 'bytes 0-5/6'],
+    ['a window beyond the total', 'abcd', 'bytes 0-3/3'],
+    [
+      'an unsafe window offset',
+      'SYNTHETIC_BODY_MARKER',
+      'bytes 9007199254740992-9007199254740992/*',
+    ],
+    ['an unsafe total', 'SYNTHETIC_BODY_MARKER', 'bytes 0-0/9007199254740992'],
+  ])('refuses a 206 with %s', async (_case, body, contentRange) => {
+    globalThis.fetch = (async () =>
+      new Response(body, {
+        status: 206,
+        headers: {
+          'Content-Type': 'text/plain',
+          'Accept-Ranges': 'bytes',
+          'Content-Range': contentRange,
+        },
+      })) as typeof fetch;
+    const { call, close } = await connect();
+    const res = await call('read_file', { path: '/tmp/part.txt' });
+    expect(res.isError).toBe(true);
+    const out = res.content.map((c) => (c.type === 'text' ? c.text : '')).join('');
+    expect(out).toMatch(/206.*Content-Range/i);
+    expect(out).not.toContain(body);
+    await close();
+  });
+
+  it('refuses a 206 whose Content-Length contradicts its window', async () => {
+    globalThis.fetch = (async () =>
+      new Response('abc', {
+        status: 206,
+        headers: {
+          'Content-Type': 'text/plain',
+          'Accept-Ranges': 'bytes',
+          'Content-Range': 'bytes 0-2/3',
+          'Content-Length': '4',
+        },
+      })) as typeof fetch;
+    const { call, close } = await connect();
+    const res = await call('read_file', { path: '/tmp/part.txt' });
+    expect(res.isError).toBe(true);
+    expect(res.content.map((c) => (c.type === 'text' ? c.text : '')).join('')).toMatch(
+      /206.*Content-Range/i,
+    );
+    await close();
+  });
+
+  it('accepts a locally capped prefix that fits inside the declared window', async () => {
+    const body = 'x'.repeat(MAX_INLINE_BYTES + 20);
+    globalThis.fetch = (async () =>
+      new Response(body, {
+        status: 206,
+        headers: {
+          'Content-Type': 'text/plain',
+          'Accept-Ranges': 'bytes',
+          'Content-Range': `bytes 0-${body.length - 1}/${body.length + 100}`,
+          'Content-Length': String(body.length),
+        },
+      })) as typeof fetch;
+    const { call, close } = await connect();
+    const res = await call('read_file', { path: '/tmp/part.txt' });
+    expect(res.isError).toBeFalsy();
+    const out = res.content.map((c) => (c.type === 'text' ? c.text : '')).join('');
+    expect(out).toContain(`bytes 0-${MAX_INLINE_BYTES - 1}`);
+    expect(out).toContain(`read_file again with offset: ${MAX_INLINE_BYTES}`);
     await close();
   });
 
