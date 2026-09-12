@@ -229,7 +229,16 @@ export function heartbeat(
     // half-hour capture, which is the flood the comment above says is avoided.
     // The two are different questions — whether anything has been said, and how
     // many progress frames have gone out — and only the first gates this.
-    if (spoken && line === last && now - at < everyMs) return;
+    // Rearmed rather than returned, because this is also the path a timer that
+    // fired early lands on. The timer callback has already cleared `timer`, and
+    // `schedule` is the only thing that sets another: returning here would end
+    // the keepalive for the rest of the operation on a wake that was a
+    // millisecond short of its own deadline, which libuv is entitled to deliver.
+    // That is the silence OPL-4743 repaired, reintroduced by the repair.
+    if (spoken && line === last && now - at < everyMs) {
+      schedule();
+      return;
+    }
     spoken = true;
     last = line;
     at = now;
