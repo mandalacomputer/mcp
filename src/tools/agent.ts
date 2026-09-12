@@ -188,7 +188,9 @@ export const registerAgent: Registrar = (server, session) => {
  * changed, the plan does not cover the work — and every one of them answers a
  * second run the same way. They are also the three that can arrive with steps
  * already completed and billed, which is what makes a retry expensive as well as
- * useless.
+ * useless. Each gets its own clause rather than one shared "auth" sentence: only
+ * the first is fixed by authenticating again, and telling the other two to try
+ * that is telling them to spend another run finding out it did not help.
  *
  * Anything else is left as the platform's own sentence. A run can fail for
  * reasons that are worth another attempt, and inventing a verdict for a status
@@ -201,12 +203,24 @@ function stopReason(data: unknown): string {
   const status = typeof frame?.status === 'number' ? frame.status : undefined;
   const said = typeof frame?.error === 'string' && frame.error ? frame.error : undefined;
   const why = said ? ` ${said}` : '';
-  if (status === 401 || status === 403) {
+  // 401 and 403 are split, because the recovery is not the same one. A shared
+  // clause told a caller whose ROLE had been taken away to re-authenticate,
+  // which restores nothing and sends it round the same refusal with another
+  // prompt's worth of billed steps behind it (Codex review).
+  if (status === 401) {
     return (
-      ` It was stopped because this server's credential or the role behind it is no longer` +
-      ` accepted (HTTP ${status}) — not by anything wrong with the computer.${why} Do NOT call` +
-      ` run_agent again with the same prompt: it is refused the same way. Re-authenticate, then` +
-      ` look at what the completed steps already did before deciding what is left to do.`
+      ` It was stopped because this server's credential is no longer accepted (HTTP ${status}) —` +
+      ` not by anything wrong with the computer.${why} Do NOT call run_agent again with the same` +
+      ` prompt: it is refused the same way until the credential is fixed. Once it is, read what` +
+      ` the steps below already did before deciding what is left to do.`
+    );
+  }
+  if (status === 403) {
+    return (
+      ` It was stopped because this account does not permit the run (HTTP ${status}) — a role that` +
+      ` changed or an account suspended, not anything wrong with the computer.${why} Nothing you` +
+      ` can send changes that, and a new credential does not either: say what was refused and` +
+      ` stop, rather than calling run_agent again.`
     );
   }
   if (status === 402) {

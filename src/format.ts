@@ -106,12 +106,16 @@ export function failed(err: unknown): CallToolResult {
   // and which state, and the word says only what kind. An unclassified refusal —
   // most of them, and always will be — reads exactly as it did before.
   //
-  // The platform's word first, the status second. The word is specific to one
-  // refusal and the status is a class of them, so a classified 409 keeps the
-  // sentence written for it; the status clause speaks where the platform said
-  // nothing more precise, which is every mid-call auth and plan refusal.
+  // The status FIRST, where it has something to say, and only then the
+  // platform's word. The three statuses `statusAdvice` answers are the three
+  // where a retry is not merely useless but dangerous, and `reason` is a word
+  // about a computer being busy — nothing constrains the two from arriving
+  // together, and a 403 whose body also said `contention` was told "the same
+  // call works once it finishes", which is exactly the replay this is here to
+  // stop (Codex review). Every other status keeps the platform's word ahead of
+  // anything generic, which is where it belongs: it is specific to one refusal.
   const advice =
-    err instanceof APIError ? (reasonAdvice(err.reason) ?? statusAdvice(err.status)) : undefined;
+    err instanceof APIError ? (statusAdvice(err.status) ?? reasonAdvice(err.reason)) : undefined;
   const line = advice ? `${withStatus} — ${advice}` : withStatus;
   const kept = err instanceof APIError ? keptWork(err.body) : undefined;
   return {
@@ -121,31 +125,66 @@ export function failed(err: unknown): CallToolResult {
 }
 
 /**
- * Work a refusal says was already done, where the refusal reported any.
+ * How much of a retained-work record goes into a model's context.
  *
- * A refusal decided partway through a call is not a call that did nothing: the
- * platform keeps whatever it had already completed and reports it in the error
- * body, and this read nothing but the message — so a run that drove the desktop
- * for nine steps and was then stopped surfaced as one bare sentence, with the
- * completed steps and what they billed nowhere a model could see them. A model
- * reading that starts again from the beginning and pays for the nine twice.
+ * Choosing three field names bounds nothing: a step's detail is text the guest
+ * produced, and an error body is allowed a megabyte of it. One 900,000-character
+ * entry became a 900,000-character tool result — which either buries the sentence
+ * that says what to do, or is truncated by the client, and a record cut off by
+ * somebody else is not one anything can be concluded from (Codex review).
+ */
+const MAX_KEPT_WORK_CHARS = 4_000;
+
+/** Whether one retained field says anything — zero, empty and blank say nothing. */
+function recordsSomething(value: unknown): boolean {
+  if (value === undefined || value === null) return false;
+  if (Array.isArray(value)) return value.length > 0;
+  if (typeof value === 'number') return value !== 0;
+  if (typeof value === 'string') return value.trim().length > 0;
+  if (typeof value === 'object') return Object.keys(value).length > 0;
+  return true;
+}
+
+/**
+ * What a refusal reported having already recorded, where it reported anything.
  *
- * Named fields rather than the whole body. An error body is not a size this
- * server controls, and most of what is in one is the sentence already shown
- * above; these are the fields the platform documents as the record of work that
- * stands, and everything else stays out of the model's context.
+ * A refusal decided partway through a call is not necessarily a call that did
+ * nothing: the platform reports whatever it had recorded in the error body, and
+ * this read nothing but the message — so a run that drove the desktop for nine
+ * steps and was then stopped surfaced as one bare sentence, with the steps and
+ * what they billed nowhere a model could see them. A model reading that starts
+ * again from the beginning and pays for the nine a second time.
+ *
+ * What it does NOT say is that the computer changed. These fields are a record
+ * of what ran and what it cost; billed model work need not have touched anything,
+ * and the one thing worse than hiding the record is a sentence asserting a
+ * mutation that a caller then reports to a user as done (Codex review). So the
+ * label is neutral and the check is named as the caller's own.
+ *
+ * Named fields rather than the whole body: most of what is in one is the sentence
+ * already shown above it, and everything else stays out of the model's context.
+ * Empty is not a record — an empty list of steps and a zero count say a call was
+ * stopped before it did anything, which the sentence above already says better.
  */
 function keptWork(body: unknown): string | undefined {
   if (!body || typeof body !== 'object' || Array.isArray(body)) return undefined;
   const from = body as Record<string, unknown>;
   const kept: Record<string, unknown> = {};
   for (const field of ['steps_taken', 'steps', 'usage']) {
-    if (from[field] !== undefined && from[field] !== null) kept[field] = from[field];
+    const value = from[field];
+    if (!recordsSomething(value)) continue;
+    kept[field] = value;
   }
   if (!Object.keys(kept).length) return undefined;
+  const record = JSON.stringify(kept, null, 2);
+  const shown =
+    record.length > MAX_KEPT_WORK_CHARS
+      ? `${record.slice(0, MAX_KEPT_WORK_CHARS)}\n… shortened here; this record is incomplete and is not enough to establish what the call did.`
+      : record;
   return (
-    'This refusal came after part of the work was already done, so the call did not leave the ' +
-    `computer untouched. What stands, and what it billed:\n${JSON.stringify(kept, null, 2)}`
+    'This refusal came after the platform had already recorded work on this call. What it ' +
+    'reported — a record of what ran and what it cost, NOT proof of what changed on the ' +
+    `computer, which is yours to check before repeating anything:\n${shown}`
   );
 }
 

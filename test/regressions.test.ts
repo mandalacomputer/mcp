@@ -5952,14 +5952,28 @@ describe('a refusal that is about the caller rather than the computer', () => {
   });
 
   it('leaves a refusal the platform classified with the sentence written for it', () => {
-    // The status clause speaks only where the platform said nothing more
-    // precise. A 409 it classified has advice of its own, and this must not
-    // displace or duplicate it.
+    // The platform's word is specific to one refusal, and on every status but
+    // the three above it comes first. A 409 it classified has advice of its own,
+    // and this must not displace or duplicate it.
     const contended = shown(409, 'the guest agent is busy', { reason: 'contention' });
     expect(contended).toMatch(/worth sending again/);
     expect(contended).not.toMatch(/stopped being accepted/);
     // And a status with no advice at all reads exactly as it did before.
     expect(shown(404, 'computer not found')).toBe('computer not found (HTTP 404)');
+  });
+
+  it('does not let a busy-sounding reason word invite a replay of an auth refusal', () => {
+    // Nothing constrains the two from arriving together: `reason` is a word
+    // about a computer, and these three statuses are about the caller. Read in
+    // the other order, a 403 carrying `contention` told the model "the same call
+    // works once it finishes" — the exact replay this ticket exists to prevent,
+    // on the one status where replaying a mutation is dangerous (Codex review).
+    for (const reason of ['contention', 'starting', 'unavailable', 'unsupported']) {
+      for (const status of [401, 403, 402]) {
+        const text = shown(status, 'refused', { reason });
+        expect(text, `${status} + ${reason}`).not.toMatch(/worth sending again/);
+      }
+    }
   });
 
   it('keeps the work a mid-call refusal says was already done', () => {
@@ -5972,7 +5986,7 @@ describe('a refusal that is about the caller rather than the computer', () => {
       steps_taken: ['1. screenshot', '2. click 40,80'],
       usage: { input_tokens: 1200, output_tokens: 90 },
     });
-    expect(text).toMatch(/already done/);
+    expect(text).toMatch(/already recorded work/);
     expect(text).toMatch(/2\. click 40,80/);
     expect(text).toMatch(/input_tokens/);
     // Only the fields that record work. The body's own `error` is the sentence
@@ -5980,8 +5994,36 @@ describe('a refusal that is about the caller rather than the computer', () => {
     expect(text.split('unauthorized').length - 1).toBe(1);
   });
 
+  it('does not turn a record of work into a claim about what changed', () => {
+    // The fields say what ran and what it cost. Neither is proof that anything
+    // on the computer was written — billed model work need not have touched it —
+    // and a sentence asserting one is a sentence a caller repeats to a user as a
+    // change that happened (Codex review).
+    const text = shown(401, 'unauthorized', { usage: { input_tokens: 40 } });
+    expect(text).toMatch(/NOT proof of what changed/);
+    expect(text).toMatch(/yours to check/);
+  });
+
   it('says nothing extra when the body records no work', () => {
-    expect(shown(401, 'unauthorized', { error: 'unauthorized' })).not.toMatch(/already done/);
+    expect(shown(401, 'unauthorized', { error: 'unauthorized' })).not.toMatch(/already recorded/);
+    // Nor when the fields are there and empty: a stopped call that did nothing
+    // is what the sentence above already says, and an empty list dressed as a
+    // record of work reads as though something is in it.
+    const nothing = shown(401, 'unauthorized', { steps: 0, steps_taken: [], usage: {} });
+    expect(nothing).not.toMatch(/steps_taken/);
+    expect(nothing).not.toMatch(/already recorded/);
+  });
+
+  it('bounds the record it puts in front of a model', () => {
+    // Three field names bound nothing — a step's detail is text from the guest,
+    // and an error body is allowed a megabyte of it. One enormous entry became
+    // an enormous tool result, which either buries the sentence saying what to
+    // do or is cut off by the client, and a record truncated by somebody else
+    // supports no conclusion at all (Codex review).
+    const text = shown(401, 'unauthorized', { steps_taken: ['x'.repeat(900_000)] });
+    expect(text.length).toBeLessThan(10_000);
+    expect(text).toMatch(/shortened here/);
+    expect(text).toMatch(/not enough to establish what the call did/);
   });
 });
 
@@ -6009,9 +6051,39 @@ describe('an agent run stopped part way through', () => {
       expect(said(res)).toMatch(/no longer accepted \(HTTP 401\)/);
       expect(said(res)).toMatch(/not by anything wrong with the computer/);
       expect(said(res)).toMatch(/Do NOT call run_agent again with the same prompt/);
+      expect(said(res)).toMatch(/until the credential is fixed/);
       // And what it did get through, because that is what the next decision is
       // made from — and it is billed.
       expect(said(res)).toMatch(/1\. screenshot/);
+      await close();
+    } finally {
+      globalThis.fetch = real;
+    }
+  });
+
+  it('does not tell a run refused on role or suspension to authenticate again', async () => {
+    // The recovery is not the same one as a 401's. A shared clause sent a caller
+    // whose role had been taken away off to re-authenticate, which restores
+    // nothing — and then round the same refusal with another prompt's worth of
+    // billed steps behind it (Codex review).
+    const real = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      new Response(
+        errorFrame({
+          error: 'This requires member access to this account; your current role is viewer.',
+          status: 403,
+        }),
+        { headers: { 'Content-Type': 'text/event-stream' } },
+      )) as typeof fetch;
+    try {
+      const { call, close } = await connect({ modelKey: 'sk-test' });
+      const res = await call('run_agent', { prompt: 'finish the task' });
+      expect(res.isError).toBe(true);
+      expect(said(res)).toMatch(/does not permit the run \(HTTP 403\)/);
+      expect(said(res)).toMatch(/your current role is viewer\./);
+      expect(said(res)).toMatch(/say what was refused and stop/);
+      expect(said(res)).not.toMatch(/[Rr]e-authenticate/);
+      expect(said(res)).not.toMatch(/until the credential is fixed/);
       await close();
     } finally {
       globalThis.fetch = real;
