@@ -51,7 +51,7 @@ import {
   reasonKind,
   UnavailableError,
 } from '../src/errors.js';
-import { EventHub } from '../src/events.js';
+import { EventHub, MAX_BUFFERED } from '../src/events.js';
 import { failed, MAX_INLINE_IMAGE_BYTES, unwrapComputer } from '../src/format.js';
 import { hostSpellings, isLoopbackHost } from '../src/http.js';
 import {
@@ -6013,6 +6013,38 @@ describe('a gap one call previewed and another call reads', () => {
       // And the read that does name that cursor reports it, which is the half
       // this must not cost.
       expect(sub.read({ since: 'cur-elsewhere', limit: 100 }).loss).toMatchObject({ events: null });
+    } finally {
+      hub.closeAll();
+      platform.restore();
+    }
+  }, 20_000);
+
+  it('does not put a count on a hole that starts at a cursor it cannot place', async () => {
+    // The gap discipline the rest of this class keeps: an unknown quantity plus
+    // a known one is unknown. A cursor this session cannot place may be any
+    // distance back, so the buffer's own overflow count must not be handed over
+    // as the size of that hole — which is what happens if the standing loss is
+    // simply preferred to the one the cursor implies (Codex review).
+    const platform = installFakePlatform();
+    const events = fakeEvents();
+    const hub = new EventHub(new Api('com_test', BASE), events.factory);
+    try {
+      const sub = hub.open('vm-1');
+      await until('the greeting', () => events.sockets.at(-1)?.greeted === true);
+      // Unread and over the cap, so the ring establishes a numeric loss of its
+      // own before anybody reads.
+      for (let i = 1; i <= MAX_BUFFERED + 1; i++) {
+        events.last().send({ type: 'window.opened', cursor: `cur-${i}`, data: { id: `0x${i}` } });
+      }
+
+      const plain = sub.read({ since: 'cur-elsewhere', limit: 100 });
+      expect(plain.loss?.events).toBeNull();
+      expect(plain.loss?.reason).toMatch(/not a place this session can find/);
+      // And the same through a `through` read that also had to step over events
+      // to reach its match, which is where the two counts would be added.
+      const matched = sub.read({ since: 'cur-elsewhere', limit: 1, through: MAX_BUFFERED });
+      expect(matched.loss?.events).toBeNull();
+      expect(matched.loss?.reason).toMatch(/not a place this session can find/);
     } finally {
       hub.closeAll();
       platform.restore();

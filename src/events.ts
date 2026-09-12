@@ -943,13 +943,21 @@ export class Subscription {
     // an unplaceable cursor with `#oldest` re-sent events the model already
     // had — while attaching a loss note that said they "were not kept", which
     // was false about exactly the events being re-sent.
+    //
+    // `events: null` whatever else is standing, and that is the same rule
+    // {@link read} applies to its own overflow: a cursor this session cannot
+    // place may be any distance back, so a count taken from this buffer offered
+    // as the size of that hole would be a precise answer to a question nobody
+    // can measure. The standing reason is kept alongside, because an eviction
+    // here and an unplaceable cursor are two true things about one gap.
+    const unplaceable =
+      'that cursor is not a place this session can find, so whatever happened between it and ' +
+      'the events below was not kept here';
     return {
       from: Math.max(this.#delivered, this.#oldest),
-      loss: this.#loss ?? {
+      loss: {
         events: null,
-        reason:
-          'that cursor is not a place this session can find, so whatever happened between it and ' +
-          'the events below was not kept here',
+        reason: this.#loss ? `${this.#loss.reason}; and ${unplaceable}` : unplaceable,
       },
     };
   }
