@@ -186,9 +186,21 @@ const snapshotTurn = async (api: Api, sid: string, unfinished: boolean): Promise
  * without claiming anything about what happens to snapshots already taken. The
  * platform's own reference stops in the same place and for the same reason.
  */
-const retentionLine = (r: unknown): string => {
-  const v = (r ?? {}) as Record<string, unknown>;
-  const n = (x: unknown) => (typeof x === 'number' && Number.isFinite(x) && x > 0 ? x : 0);
+type Retention = { daily: number; weekly: number; monthly: number };
+
+const retentionOf = (r: unknown): Retention | undefined => {
+  if (!isRow(r)) return undefined;
+  const fields = [r.daily, r.weekly, r.monthly];
+  if (
+    !fields.every((value) => typeof value === 'number' && Number.isSafeInteger(value) && value >= 0)
+  ) {
+    return undefined;
+  }
+  return { daily: r.daily as number, weekly: r.weekly as number, monthly: r.monthly as number };
+};
+
+const retentionLine = (v: Retention): string => {
+  const n = (x: number) => (x > 0 ? x : 0);
   const parts = [
     n(v.daily) && `${n(v.daily)} daily`,
     n(v.weekly) && `${n(v.weekly)} weekly`,
@@ -745,7 +757,14 @@ export const registerSnapshots: Registrar = (server, session, opts) => {
     (_args, extra) =>
       guarded(async () => {
         const body = await session.api.with(extra.signal).json('GET', P.RETENTION);
-        return said(retentionLine(body), body);
+        const retention = retentionOf(body);
+        if (!retention) {
+          return refused(
+            'The retention policy could not be read: GET /retention must answer with nonnegative whole-number `daily`, `weekly`, and `monthly` fields. No retention window is inferred from this response.',
+            body,
+          );
+        }
+        return said(retentionLine(retention), body);
       }),
   );
 
