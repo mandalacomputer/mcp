@@ -340,7 +340,35 @@ export function balanced(text, from, open, close) {
   throw new Error(`unbalanced ${open} from offset ${from}`);
 }
 
-/** The keys of an object literal at its own depth only. */
+/**
+ * The keys of an object literal at its own depth only, or a throw for one it
+ * cannot account for.
+ *
+ * EVERY key, which is the whole of what the caller needs: this is what reads a
+ * route's body fields, and a field it cannot see is a field the comparison does
+ * not make. Under-reading has no symptom of its own — the mirror listing the
+ * field is reported as having invented it, and a mirror written by somebody who
+ * missed it too agrees with this reader about nothing at all. A body read as
+ * having no fields is a route documenting no body, and the check then passes on
+ * a shape it did not analyse, which is the one outcome this gate exists to make
+ * impossible.
+ *
+ * So the shapes that carry fields this cannot resolve are refused rather than
+ * walked past: a spread, whose fields are somewhere else entirely; a key
+ * computed from an identifier; a key interpolated into a template. Each was
+ * silently nothing, and a silent nothing here is indistinguishable from a
+ * literal with no fields in it. `entries` and `objectFields` already refuse the
+ * same three for the same reason (OPL-4812).
+ *
+ * One shape stays unread rather than refused: shorthand, `{ name }`. It is the
+ * one key form with no colon to confirm it, and the position it sits in is a
+ * position this reader cannot establish is a key — an identifier one character
+ * after a comma at depth 0 is equally a type argument, and reading `B` out of
+ * `make<A, B>()` would report a field the platform does not document. Refusing
+ * it instead would fail the check over a valid value. Neither is worth it for a
+ * spelling nothing on the far side uses; if one appears, this will under-read by
+ * that field and the comparison will say the mirror invented it.
+ */
 export function topLevelKeys(body) {
   const keys = [];
   // A key sits at the start of the object or just after a comma; nothing else
@@ -354,10 +382,105 @@ export function topLevelKeys(body) {
     const before = body.slice(0, at).trimEnd();
     return before === '' || before.endsWith('{') || before.endsWith(',');
   };
+  const seen = (at) => JSON.stringify(body.slice(at, at + 40));
   let depth = 0;
   let i = 0;
   while (i < body.length) {
     const ch = body[i];
+    // Key position is decided BEFORE the walk below, because one of the shapes
+    // refused here is opened by a character that walk would rather count: a
+    // computed key's `[` was depth, so its contents were read as a nested
+    // literal and the key was never seen at key position at all.
+    //
+    // Whitespace is not a key and not a shape: the position after a comma is
+    // spaces before it is anything, and classifying one of those would refuse
+    // every object with a line break in it.
+    //
+    // And EVERY branch here is confirmed by a colon, bar the spread. That is
+    // what makes it safe to act at a position this cannot fully establish is a
+    // key: `inKeyPosition` reads the raw prefix, and the prefix ends in a comma
+    // inside a type argument list too — `size: make<A, B>(), name: 1` puts `B`
+    // one character after a comma at depth 0, because angle brackets are not
+    // depth (Codex review). Nothing there is followed by a colon, so nothing
+    // here fires on it; a version of this that refused whatever it could not
+    // classify turned that valid value into a failed surface check.
+    if (depth === 0 && !/\s/.test(ch) && inKeyPosition(i)) {
+      // A quoted key is a key: `'name': str(…)` names the field `name` exactly
+      // as `name:` does. Stepping over the literal without looking for the colon
+      // reads the object as having no field there at all — and an object read as
+      // having no fields is a route documenting no body, which matches a mirror
+      // that lists none. That match is the vacuous all-clear this whole gate is
+      // built to refuse.
+      if (ch === "'" || ch === '"' || ch === '`') {
+        const end = quotedEnd(body, i);
+        const colon = body.slice(end).match(/^\s*:/);
+        if (colon) {
+          const inner = body.slice(i + 1, end - 1);
+          // A key spelled with a hole in it names nothing this can resolve, and
+          // it is a field of the route either way. Refused, where it used to be
+          // dropped: a guess at the name would be wrong, and silence is a field
+          // nobody compared.
+          if (ch === '`' && hasHole(inner)) {
+            throw new Error(`an interpolated key this reader cannot resolve: ${seen(i)}`);
+          }
+          keys.push(unescaped(inner));
+          i = end + colon[0].length;
+          continue;
+        }
+        i = end;
+        continue;
+      }
+      // A spread needs no colon to be unambiguous: three dots at the top level
+      // of an object literal are a spread and nothing else. What it carries is
+      // somewhere this reader cannot look, and reading it as no fields at all is
+      // how a body passes for a route that documents none.
+      if (body.startsWith('...', i)) {
+        throw new Error(`a spread whose fields this reader cannot see: ${seen(i)}`);
+      }
+      // A computed key, once the `]` that closes it is followed by a colon. The
+      // colon is the whole of the confirmation: `make<[A, B]>()` also puts a `[`
+      // where a key could be, and it names no field.
+      if (ch === '[') {
+        const closed = i + balanced(body, i, '[', ']').length + 2;
+        if (body.slice(closed).match(/^\s*:/)) {
+          throw new Error(`a computed key this reader cannot resolve: ${seen(i)}`);
+        }
+      }
+      // A number is as much a key as an identifier is — `123: str(…)` names the
+      // field `123` — and it is confirmed the same way. A numeral one character
+      // after a comma in a type argument list is not followed by a colon
+      // (Codex review).
+      //
+      // Plain digits only, and every other numeric spelling is refused rather
+      // than read: the property name is the number's VALUE, so `1_000`, `0x10`
+      // and `123n` name the fields `1000`, `16` and `123`, and a reader handing
+      // back the source text reports three fields nobody serves while the three
+      // that are served go unmentioned. Resolving them here would be a numeric
+      // parser this file has no other use for (Codex review).
+      const numeric = body.slice(i).match(/^(\d[\w$.]*)\s*:/);
+      if (numeric && !/^\d+$/.test(numeric[1])) {
+        throw new Error(`a numeric key this reader cannot resolve: ${seen(i)}`);
+      }
+      const named = body.slice(i).match(/^((?:[A-Za-z_$][\w$]*|\d+))\s*:/);
+      if (named) {
+        keys.push(named[1]);
+        i += named[0].length;
+        continue;
+      }
+      // A getter declares a field too, and it has no colon to confirm it — but
+      // `get` followed by a name followed by `(` is not a shape anything else
+      // here produces, so the keyword does the confirming instead. Read rather
+      // than refused, since the name is right there; `set` with it, because it
+      // names a field of the same object by the same rule, and a name read from
+      // both spellings of one field is one key twice — which is one key, to the
+      // set the caller collects these into (Codex review).
+      const accessor = body.slice(i).match(/^(?:get|set)\s+([A-Za-z_$][\w$]*)\s*\(/);
+      if (accessor) {
+        keys.push(accessor[1]);
+        i += accessor[0].length - 1;
+        continue;
+      }
+    }
     if (ch === '{' || ch === '[' || ch === '(') depth++;
     else if (ch === '}' || ch === ']' || ch === ')') {
       // Valid source cannot close what it never opened, and the depth never
@@ -366,37 +489,11 @@ export function topLevelKeys(body) {
       // parse. `entries` throws on the same condition for the same reason.
       if (--depth < 0) throw new Error(`unbalanced ${ch} at offset ${i}`);
     } else if (ch === "'" || ch === '"' || ch === '`') {
-      const end = quotedEnd(body, i);
-      // A quoted key is a key: `'name': str(…)` names the field `name` exactly
-      // as `name:` does. Stepping over the literal without looking for the colon
-      // reads the object as having no field there at all — and an object read as
-      // having no fields is a route documenting no body, which matches a mirror
-      // that lists none. That match is the vacuous all-clear this whole gate is
-      // built to refuse.
-      if (depth === 0 && inKeyPosition(i)) {
-        const colon = body.slice(end).match(/^\s*:/);
-        if (colon) {
-          const inner = body.slice(i + 1, end - 1);
-          // A computed key spelled with a hole in it names nothing this can
-          // resolve; guessing at one would be worse than the key going unnamed.
-          if (!(ch === '`' && hasHole(inner))) keys.push(unescaped(inner));
-          i = end + colon[0].length;
-          continue;
-        }
-      }
-      i = end;
+      i = quotedEnd(body, i);
       continue;
     } else if (ch === '/' && regexCanStart(body, i)) {
       i = regexEnd(body, i);
       continue;
-    }
-    if (depth === 0 && inKeyPosition(i)) {
-      const m = body.slice(i).match(/^([A-Za-z_][A-Za-z0-9_]*)\s*:/);
-      if (m) {
-        keys.push(m[1]);
-        i += m[0].length;
-        continue;
-      }
     }
     i++;
   }
