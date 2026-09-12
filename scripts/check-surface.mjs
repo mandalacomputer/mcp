@@ -428,7 +428,16 @@ function main() {
         // and it belongs in the message that names the route: fed to `balanced`
         // unchecked, its missing `{` came back as an offset assertion naming
         // neither the route nor the file it is in.
-        const brace = args === null ? -1 : args.indexOf('{');
+        // The FIRST argument, and only when it is a literal in its own right.
+        // `indexOf` took the first brace anywhere in the call, so a wrapper or a
+        // conditional around the real fields — `object(Object.assign({}, X))`,
+        // `object(flag ? {} : { name })` — handed over an empty literal nested
+        // inside it, and the route reported no body fields with nothing said
+        // (Codex review). A -1 falls through to the refusal below, which is the
+        // same sentence `object(IDENTIFIER)` already gets: the shape is one this
+        // reader does not know, and the route is named.
+        const leading = args === null ? '' : args.slice(0, args.length - args.trimStart().length);
+        const brace = args !== null && args.trimStart().startsWith('{') ? leading.length : -1;
         if (brace !== -1) {
           // The field walk refuses a spread, a computed key and an interpolated
           // one: each is a field of THIS route that it cannot resolve, and

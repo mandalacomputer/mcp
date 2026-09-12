@@ -242,22 +242,26 @@ describe('the surface source scanner', () => {
     expect(() => topLevelKeys('[FIELD_NAME]: 1')).toThrow(/computed key/);
     expect(() => topLevelKeys('name: 1, [`${prefix}_id`]: 2')).toThrow(/computed key/);
     expect(() => topLevelKeys('`${prefix}_id`: 1')).toThrow(/interpolated key/);
-    // And a literal sitting in key position with no colon after it is not a
-    // field of anything this reader understands either.
-    expect(() => topLevelKeys(`'name' , age: 1`)).toThrow(/not a key/);
     // A template with no hole in it is an ordinary key, and an escaped `${` is
     // two of the characters a name is spelled with rather than a hole.
     expect(topLevelKeys('`name`: 1')).toEqual(['name']);
     expect(topLevelKeys('`\\${name}`: 1')).toEqual(['${name}']);
   });
 
-  it('reads shorthand as the field it names', () => {
-    // `{ name }` is `{ name: name }`, and the field it names is the whole of what
-    // a body comparison needs from it. It matched neither branch before, so it
-    // was a field walked past in silence.
-    expect(topLevelKeys('name')).toEqual(['name']);
-    expect(topLevelKeys('name, age: 1')).toEqual(['name', 'age']);
-    expect(topLevelKeys('age: 1, name')).toEqual(['age', 'name']);
+  it('does not read a type argument as a key, or refuse the value carrying it', () => {
+    // A colon confirms every refusal above, and this is why. `inKeyPosition`
+    // reads the raw prefix, and angle brackets are not depth — so an identifier,
+    // a tuple or a quoted type argument one character after a comma inside
+    // `make<…>` sits exactly where a key sits. None is followed by a colon, so
+    // none of the refusals fires; a version of this that refused whatever it
+    // could not classify failed the surface check over a valid value, and one
+    // that read it as shorthand reported a field the platform does not document
+    // (Codex review).
+    expect(topLevelKeys('name: make<A, B>(), next: 1')).toEqual(['name', 'next']);
+    expect(topLevelKeys('name: make<A, [B, C]>(), next: 1')).toEqual(['name', 'next']);
+    expect(topLevelKeys(`name: make<A, 'b'>(), next: 1`)).toEqual(['name', 'next']);
+    // The computed-key refusal is still a refusal where the colon IS there.
+    expect(() => topLevelKeys('name: make<A, B>(), [K]: 1')).toThrow(/computed key/);
   });
 
   it('still reads an object laid out across lines', () => {
@@ -646,6 +650,35 @@ describe('the route table reader', () => {
       // a file and there is nowhere to go and look at that.
       expect(said, body).toContain("'GET sizes' documents a body this reader cannot account for");
     }
+  });
+
+  it('does not let a literal nested in an object() call stand for its fields', async () => {
+    // The first brace ANYWHERE in the call was taken as the start of the field
+    // literal, so a wrapper or a conditional around the real fields handed over
+    // an empty literal nested inside it: no body fields, nothing said, and a
+    // mirror that lists none agrees (Codex review). Each of these reads as a
+    // shape this reader does not know, which is the answer `object(IDENTIFIER)`
+    // already gets — and it names the route.
+    for (const body of [
+      'object(Object.assign({}, SHARED_FIELDS))',
+      'object(flag ? {} : { name: str("x") })',
+    ]) {
+      const { said, code } = await refuseParams(
+        `export const DOCS: Record<string, Doc> = { 'GET sizes': { body: ${body} } };\n`,
+      );
+      expect(code, body).toBe(1);
+      expect(said, body).toContain(
+        "'GET sizes' documents a body in a form this reader does not know",
+      );
+    }
+    // And the second argument these calls really do take is still read.
+    expect(
+      await scanParams(`
+        export const DOCS: Record<string, Doc> = {
+          'GET sizes': { body: object({ name: str('Name') }, { title: 'Sizes' }) },
+        };
+      `),
+    ).toEqual(['body:name']);
   });
 
   it('reads a query list whose bracket the formatter wrapped', async () => {

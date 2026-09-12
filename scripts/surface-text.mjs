@@ -359,6 +359,15 @@ export function balanced(text, from, open, close) {
  * silently nothing, and a silent nothing here is indistinguishable from a
  * literal with no fields in it. `entries` and `objectFields` already refuse the
  * same three for the same reason (OPL-4812).
+ *
+ * One shape stays unread rather than refused: shorthand, `{ name }`. It is the
+ * one key form with no colon to confirm it, and the position it sits in is a
+ * position this reader cannot establish is a key — an identifier one character
+ * after a comma at depth 0 is equally a type argument, and reading `B` out of
+ * `make<A, B>()` would report a field the platform does not document. Refusing
+ * it instead would fail the check over a valid value. Neither is worth it for a
+ * spelling nothing on the far side uses; if one appears, this will under-read by
+ * that field and the comparison will say the mirror invented it.
  */
 export function topLevelKeys(body) {
   const keys = [];
@@ -378,14 +387,23 @@ export function topLevelKeys(body) {
   let i = 0;
   while (i < body.length) {
     const ch = body[i];
-    // Key position is decided BEFORE anything else, because two of the three
-    // shapes refused here are opened by a character the walk below would rather
-    // count: a computed key's `[` was depth, and its contents were read as a
-    // nested literal with the key never seen at all.
+    // Key position is decided BEFORE the walk below, because one of the shapes
+    // refused here is opened by a character that walk would rather count: a
+    // computed key's `[` was depth, so its contents were read as a nested
+    // literal and the key was never seen at key position at all.
     //
     // Whitespace is not a key and not a shape: the position after a comma is
     // spaces before it is anything, and classifying one of those would refuse
     // every object with a line break in it.
+    //
+    // And EVERY branch here is confirmed by a colon, bar the spread. That is
+    // what makes it safe to act at a position this cannot fully establish is a
+    // key: `inKeyPosition` reads the raw prefix, and the prefix ends in a comma
+    // inside a type argument list too — `size: make<A, B>(), name: 1` puts `B`
+    // one character after a comma at depth 0, because angle brackets are not
+    // depth (Codex review). Nothing there is followed by a colon, so nothing
+    // here fires on it; a version of this that refused whatever it could not
+    // classify turned that valid value into a failed surface check.
     if (depth === 0 && !/\s/.test(ch) && inKeyPosition(i)) {
       // A quoted key is a key: `'name': str(…)` names the field `name` exactly
       // as `name:` does. Stepping over the literal without looking for the colon
@@ -396,26 +414,37 @@ export function topLevelKeys(body) {
       if (ch === "'" || ch === '"' || ch === '`') {
         const end = quotedEnd(body, i);
         const colon = body.slice(end).match(/^\s*:/);
-        if (!colon) {
-          throw new Error(`a literal in key position that is not a key: ${seen(i)}`);
+        if (colon) {
+          const inner = body.slice(i + 1, end - 1);
+          // A key spelled with a hole in it names nothing this can resolve, and
+          // it is a field of the route either way. Refused, where it used to be
+          // dropped: a guess at the name would be wrong, and silence is a field
+          // nobody compared.
+          if (ch === '`' && hasHole(inner)) {
+            throw new Error(`an interpolated key this reader cannot resolve: ${seen(i)}`);
+          }
+          keys.push(unescaped(inner));
+          i = end + colon[0].length;
+          continue;
         }
-        const inner = body.slice(i + 1, end - 1);
-        // A key spelled with a hole in it names nothing this can resolve, and it
-        // is a field of the route either way. Refused, where it used to be
-        // dropped: a guess at the name would be wrong, and silence is a field
-        // nobody compared.
-        if (ch === '`' && hasHole(inner)) {
-          throw new Error(`an interpolated key this reader cannot resolve: ${seen(i)}`);
-        }
-        keys.push(unescaped(inner));
-        i = end + colon[0].length;
+        i = end;
         continue;
       }
+      // A spread needs no colon to be unambiguous: three dots at the top level
+      // of an object literal are a spread and nothing else. What it carries is
+      // somewhere this reader cannot look, and reading it as no fields at all is
+      // how a body passes for a route that documents none.
       if (body.startsWith('...', i)) {
         throw new Error(`a spread whose fields this reader cannot see: ${seen(i)}`);
       }
+      // A computed key, once the `]` that closes it is followed by a colon. The
+      // colon is the whole of the confirmation: `make<[A, B]>()` also puts a `[`
+      // where a key could be, and it names no field.
       if (ch === '[') {
-        throw new Error(`a computed key this reader cannot resolve: ${seen(i)}`);
+        const closed = i + balanced(body, i, '[', ']').length + 2;
+        if (body.slice(closed).match(/^\s*:/)) {
+          throw new Error(`a computed key this reader cannot resolve: ${seen(i)}`);
+        }
       }
       const named = body.slice(i).match(/^([A-Za-z_$][\w$]*)\s*:/);
       if (named) {
@@ -423,16 +452,6 @@ export function topLevelKeys(body) {
         i += named[0].length;
         continue;
       }
-      // `{ name }` is shorthand for `{ name: name }`, and the field it names is
-      // the one thing about it this needs. Read rather than refused, because
-      // reading it costs nothing and loses nothing.
-      const shorthand = body.slice(i).match(/^([A-Za-z_$][\w$]*)\s*(?:,|$)/);
-      if (shorthand) {
-        keys.push(shorthand[1]);
-        i += shorthand[1].length;
-        continue;
-      }
-      throw new Error(`something in key position this reader cannot read: ${seen(i)}`);
     }
     if (ch === '{' || ch === '[' || ch === '(') depth++;
     else if (ch === '}' || ch === ']' || ch === ')') {
