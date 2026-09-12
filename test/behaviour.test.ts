@@ -235,9 +235,15 @@ describe('screenshots', () => {
       // The platform's word still speaks, and it says to wait.
       expect(textOf(res)).toContain('worth sending again');
       // And the fallback is subordinate to it rather than the headline.
-      expect(textOf(res)).toContain('Read the sentence above first');
+      expect(textOf(res)).toContain('Read the sentence above before anything else');
       // Nothing tells an awake computer to wake up.
       expect(textOf(res)).not.toContain('has to be awake');
+      // And the retry is not promised to produce a picture. What the platform's
+      // word establishes is that the thing in the way can finish — a computer
+      // that turns out to be stopped when it does needs starting, and a sentence
+      // saying waiting is the answer sends a caller round a loop instead
+      // (Codex review).
+      expect(textOf(res)).toContain('not a promise that the capture then works');
     } finally {
       globalThis.fetch = real;
     }

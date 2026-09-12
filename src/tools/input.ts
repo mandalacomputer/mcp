@@ -65,18 +65,27 @@ const point = {
  * Hence: the platform's sentence is pointed back at, the fallback is conditional,
  * and what the frame would MEAN is stated, because a saved frame read as the
  * present is a worse answer than no frame.
+ *
+ * And it promises nothing about the OTHER branch either (Codex review). The
+ * platform's classification says the thing in the way can finish; it does not
+ * say the computer will then be in a state that can be photographed — a disk
+ * still being built clears into a computer that is merely stopped, and the next
+ * look is a 400 rather than a picture. So the retry is named as the first thing
+ * to try, and the caller is told what it is not.
  */
 const cachedFrameOffered = (err: ConflictError): CallToolResult => {
   const sentence = failed(err)
     .content.map((c) => ('text' in c ? c.text : ''))
     .join('\n');
   return refused(
-    `${sentence}\n\nThat was a request for a NEW capture. Read the sentence above first: if it says this is ` +
-      `worth sending again, the capture itself will work in a moment and waiting is the answer. Otherwise ` +
-      `fresh: false asks for the last frame the platform saved rather than a new one, which needs nothing ` +
-      `captured — it is refused in the same way when there is no saved frame to serve, so it is a fallback ` +
-      `and not a guarantee. Whatever comes back is the screen as it was when that frame was taken and not ` +
-      `the screen now: it cannot show the result of anything sent since.`,
+    `${sentence}\n\nThat was a request for a NEW capture. Read the sentence above before anything else: where ` +
+      `it says this is worth another attempt, sending the same call again in a moment is the first thing to ` +
+      `try — it is not a promise that the capture then works, since a computer that turns out not to be ` +
+      `running needs starting rather than another look. The other option is fresh: false, which asks for the ` +
+      `last frame the platform saved rather than a new one and so needs nothing captured; it is refused in ` +
+      `the same way when there is no saved frame to serve, so it is a fallback and not a guarantee either. ` +
+      `Whatever comes back is the screen as it was when that frame was taken and not the screen now: it ` +
+      `cannot show the result of anything sent since.`,
   );
 };
 
