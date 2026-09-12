@@ -165,6 +165,69 @@ describe('the keepalive itself', () => {
     await beat.stop();
   });
 
+  it('keeps progress moving when the logging receiver is slow', async () => {
+    const r = recorder('tok');
+    let releaseLog: (() => void) | undefined;
+    let logs = 0;
+    const beat = heartbeat(r.extra, {
+      sendLoggingMessage: async () => {
+        logs += 1;
+        if (logs === 2) {
+          await new Promise<void>((resolve) => {
+            releaseLog = resolve;
+          });
+        }
+      },
+    });
+
+    await beat('working');
+    await vi.advanceTimersByTimeAsync(HEARTBEAT_MS * 7 + 1);
+    expect(r.beats).toHaveLength(8);
+    expect(logs).toBe(2);
+
+    // Cleanup is part of a tool's return path, so it cannot wait for an
+    // external logging receiver that may never settle.
+    await expect(beat.stop()).resolves.toBeUndefined();
+    expect(vi.getTimerCount()).toBe(0);
+    releaseLog?.();
+    await vi.advanceTimersByTimeAsync(0);
+  });
+
+  it('bounds a slow notification receiver to one pending latest frame', async () => {
+    let deliveries = 0;
+    let active = 0;
+    let mostActive = 0;
+    let releaseNotification: (() => void) | undefined;
+    const beat = heartbeat(
+      {
+        _meta: { progressToken: 'tok' },
+        sendNotification: async () => {
+          deliveries += 1;
+          active += 1;
+          mostActive = Math.max(mostActive, active);
+          if (deliveries === 2) {
+            await new Promise<void>((resolve) => {
+              releaseNotification = resolve;
+            });
+          }
+          active -= 1;
+        },
+      },
+      undefined,
+    );
+
+    await beat('working');
+    await vi.advanceTimersByTimeAsync(HEARTBEAT_MS * 7 + 1);
+    expect(deliveries).toBe(2);
+    expect(mostActive).toBe(1);
+    await expect(beat.stop()).resolves.toBeUndefined();
+    expect(vi.getTimerCount()).toBe(0);
+
+    releaseNotification?.();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(deliveries).toBe(2);
+  });
+
   it('stops periodic notifications and clears its timer', async () => {
     const r = recorder('tok');
     const beat = heartbeat(r.extra, r.log);
@@ -211,11 +274,9 @@ describe('the waits that send it', () => {
   }, 20_000);
 
   it('opens the channel from wait_for_computer', async () => {
-    // `until: "running"`, because the default asks the guest as well and this
-    // fixture's guest answers on the first turn — a wait that finishes at once
-    // has nothing to keep alive, and beating anyway would be a notification for
-    // a call that never came close to a timeout. The wait that DOES need the
-    // channel is the one below.
+    // `until: "running"` keeps this assertion about the status-read path. That
+    // path opens progress before its first request because the request itself
+    // may be the slow part of the wait.
     const seen = await beatsOf('wait_for_computer', {
       computer_id: 'vm-1',
       until: 'running',
@@ -335,6 +396,53 @@ describe('progress during a slow poll', () => {
     await close();
   });
 
+  it('opens progress before wait_for_computer makes its first status request', async () => {
+    let releaseStatus: ((response: Response) => void) | undefined;
+    globalThis.fetch = (async () =>
+      new Promise<Response>((resolve) => {
+        releaseStatus = resolve;
+      })) as typeof globalThis.fetch;
+
+    const { client, close } = await connect();
+    vi.useFakeTimers();
+    const seen: Beat[] = [];
+    let outcome = 'pending';
+    const request = client
+      .callTool(
+        {
+          name: 'wait_for_computer',
+          arguments: { computer_id: 'vm-1', until: 'running', timeout_s: 180 },
+        },
+        undefined,
+        {
+          onprogress: (p) => seen.push(p as Beat),
+          timeout: 60_000,
+          resetTimeoutOnProgress: true,
+        },
+      )
+      .then(
+        (result) => {
+          outcome = 'resolved';
+          return result;
+        },
+        (error: unknown) => {
+          outcome = 'rejected';
+          throw error;
+        },
+      );
+
+    await vi.advanceTimersByTimeAsync(60_001);
+    expect(seen.length).toBeGreaterThanOrEqual(7);
+    expect(outcome).toBe('pending');
+    releaseStatus?.(Response.json({ id: 'vm-1', status: 'running' }));
+    await vi.advanceTimersByTimeAsync(1);
+    const result = await request;
+    expect(result.isError).toBeFalsy();
+    expect(outcome).toBe('resolved');
+    expect(vi.getTimerCount()).toBe(0);
+    await close();
+  });
+
   it('reports periodically while a fetch is still in flight', async () => {
     const placeholder = {
       id: 'snap-fetch',
@@ -381,6 +489,76 @@ describe('progress during a slow poll', () => {
     expect(seen).toHaveLength(completedBeats);
     expect(vi.getTimerCount()).toBe(0);
     await close();
+  });
+
+  it('finishes a completed tool while a periodic log is still pending', async () => {
+    const placeholder = {
+      id: 'snap-log',
+      computer_id: 'vm-1',
+      name: 'slow log',
+      state: 'capturing',
+    };
+    let releaseFetch: ((response: Response) => void) | undefined;
+    let releaseLog: (() => void) | undefined;
+    globalThis.fetch = (async (_input: string | URL | Request, init?: RequestInit) => {
+      if ((init?.method ?? 'GET').toUpperCase() === 'POST') {
+        return Response.json(placeholder, { status: 202 });
+      }
+      return new Promise<Response>((resolve) => {
+        releaseFetch = resolve;
+      });
+    }) as typeof globalThis.fetch;
+
+    const { client, server, close } = await connect();
+    let logs = 0;
+    server.server.sendLoggingMessage = async () => {
+      logs += 1;
+      if (logs === 2) {
+        await new Promise<void>((resolve) => {
+          releaseLog = resolve;
+        });
+      }
+    };
+    vi.useFakeTimers();
+    let outcome = 'pending';
+    const request = client
+      .callTool(
+        {
+          name: 'create_snapshot',
+          arguments: { computer_id: 'vm-1', name: 'slow log', timeout_s: 300 },
+        },
+        undefined,
+        {
+          onprogress: () => {},
+          timeout: 60_000,
+          resetTimeoutOnProgress: true,
+        },
+      )
+      .then(
+        (result) => {
+          outcome = 'resolved';
+          return result;
+        },
+        (error: unknown) => {
+          outcome = 'rejected';
+          throw error;
+        },
+      );
+
+    let completedWhileLogPending = false;
+    try {
+      await vi.advanceTimersByTimeAsync(HEARTBEAT_MS + 1);
+      releaseFetch?.(Response.json([{ ...placeholder, state: 'pending' }]));
+      await vi.advanceTimersByTimeAsync(1);
+      completedWhileLogPending = outcome === 'resolved';
+    } finally {
+      releaseLog?.();
+      await vi.advanceTimersByTimeAsync(0);
+      await request;
+      await close();
+    }
+    expect(logs).toBe(2);
+    expect(completedWhileLogPending).toBe(true);
   });
 
   it('stops reporting after the caller cancels a slow fetch', async () => {
@@ -484,11 +662,11 @@ describe('a guest that has not come up yet', () => {
     // turn produced.
     expect(seen.length).toBeGreaterThan(0);
     expect(seen.length).toBeLessThanOrEqual(3);
-    // The line beat in FRONT of the probe, which the 409 branch then repeats so
-    // the throttle holds it. It is the beat that has to survive: the probe is
-    // the longest call in the loop, and a stall there is exactly when the
-    // client needs to have heard something.
-    expect(seen[0].message).toContain('asking the guest');
+    // The guest line beats in FRONT of the probe, which the 409 branch then
+    // repeats so the throttle holds it. It is the beat that has to survive: the
+    // probe is the longest call in the loop, and a stall there is exactly when
+    // the client needs to have heard something.
+    expect(seen.some((b) => (b.message ?? '').includes('asking the guest'))).toBe(true);
     expect(seen.map((b) => b.progress)).toEqual(seen.map((_, i) => i + 1));
   }, 20_000);
 

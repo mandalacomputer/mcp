@@ -990,6 +990,10 @@ export const registerComputers: Registrar = (server, session, opts) => {
         const beat = heartbeat(extra, server.server);
         try {
           let last = 'unknown';
+          // Open the progress channel before the first status read. That read
+          // has the same network and response deadlines as every later poll,
+          // so it can be the whole wait rather than a quick prelude to it.
+          await beat(`Waiting for ${id} — asking the platform for its status.`);
           // Kept so the give-up message can name it. A hypervisor that was
           // unreachable for the whole window is the single most useful thing to
           // report, and swallowing every transient would end the wait saying only

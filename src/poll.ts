@@ -130,7 +130,10 @@ export function heartbeat(
   let current: string | undefined;
   let timer: ReturnType<typeof setTimeout> | undefined;
   let stopped = false;
-  let queue = Promise.resolve();
+  let notifying = false;
+  let pendingNotification: string | undefined;
+  let logging = false;
+  let pendingLog: string | undefined;
 
   const schedule = () => {
     if (timer !== undefined) clearTimeout(timer);
@@ -139,14 +142,78 @@ export function heartbeat(
     timer = setTimeout(
       () => {
         timer = undefined;
-        if (current !== undefined) void enqueue(current);
+        if (current !== undefined) emit(current);
       },
       Math.max(0, everyMs - (Date.now() - at)),
     );
     timer.unref?.();
   };
 
-  const send = async (line: string) => {
+  const notify = (line: string) => {
+    if (stopped || progressToken === undefined) return;
+    if (notifying) {
+      // One latest frame is enough to catch up after a slow receiver. Keeping
+      // every timer tick would make the queue grow for as long as it was slow.
+      pendingNotification = line;
+      return;
+    }
+    notifying = true;
+    sent += 1;
+    let delivery: Promise<void>;
+    try {
+      delivery = extra.sendNotification({
+        method: 'notifications/progress',
+        // `progress` is the count of notifications, which the SDK's
+        // ProgressSchema asks to increase every time. No `total`: a wait does
+        // not know how many turns it will take, and a total of 0 renders as a
+        // finished bar.
+        params: { progressToken, progress: sent, message: line },
+      });
+    } catch {
+      delivery = Promise.resolve();
+    }
+    const finished = () => {
+      notifying = false;
+      if (stopped) {
+        pendingNotification = undefined;
+        return;
+      }
+      const pending = pendingNotification;
+      pendingNotification = undefined;
+      if (pending !== undefined) notify(pending);
+    };
+    void delivery.then(finished, finished);
+  };
+
+  const writeLog = (line: string) => {
+    if (stopped || !log) return;
+    if (logging) {
+      // Logging is useful to a person but cannot keep the MCP request alive.
+      // Keep its backlog bounded and, above all, keep it out of progress's way.
+      pendingLog = line;
+      return;
+    }
+    logging = true;
+    let delivery: Promise<void>;
+    try {
+      delivery = log.sendLoggingMessage({ level: 'info', data: line });
+    } catch {
+      delivery = Promise.resolve();
+    }
+    const finished = () => {
+      logging = false;
+      if (stopped) {
+        pendingLog = undefined;
+        return;
+      }
+      const pending = pendingLog;
+      pendingLog = undefined;
+      if (pending !== undefined) writeLog(pending);
+    };
+    void delivery.then(finished, finished);
+  };
+
+  const emit = (line: string) => {
     if (stopped) return;
     const now = Date.now();
     // A changed line is news and goes out at once; an unchanged one is a
@@ -166,43 +233,24 @@ export function heartbeat(
     spoken = true;
     last = line;
     at = now;
-    if (progressToken !== undefined) {
-      sent += 1;
-      await extra
-        .sendNotification({
-          method: 'notifications/progress',
-          // `progress` is the count of notifications, which the SDK's
-          // ProgressSchema asks to increase every time. No `total`: a wait does
-          // not know how many turns it will take, and a total of 0 renders as a
-          // finished bar.
-          params: { progressToken, progress: sent, message: line },
-        })
-        .catch(() => {});
-    }
-    await log?.sendLoggingMessage({ level: 'info', data: line }).catch(() => {});
-  };
-
-  // A timer can fire while a changed state is being reported. Put both paths
-  // through one queue so progress values arrive in order and notification
-  // promises never overlap. Scheduling after the queued turn also prevents a
-  // slow receiver from building an unbounded backlog of periodic sends.
-  const enqueue = (line: string): Promise<void> => {
-    queue = queue
-      .then(() => send(line))
-      .catch(() => {})
-      .then(schedule);
-    return queue;
+    notify(line);
+    writeLog(line);
+    schedule();
   };
 
   const beat = ((line: string) => {
+    if (stopped) return Promise.resolve();
     current = line;
-    return enqueue(line);
+    emit(line);
+    return Promise.resolve();
   }) as Heartbeat;
-  beat.stop = async () => {
+  beat.stop = () => {
     stopped = true;
     if (timer !== undefined) clearTimeout(timer);
     timer = undefined;
-    await queue;
+    pendingNotification = undefined;
+    pendingLog = undefined;
+    return Promise.resolve();
   };
   return beat;
 }
