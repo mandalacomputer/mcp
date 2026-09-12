@@ -446,10 +446,27 @@ export function topLevelKeys(body) {
           throw new Error(`a computed key this reader cannot resolve: ${seen(i)}`);
         }
       }
-      const named = body.slice(i).match(/^([A-Za-z_$][\w$]*)\s*:/);
+      // A number is as much a key as an identifier is — `123: str(…)` names the
+      // field `123` — and it is confirmed the same way. A numeral one character
+      // after a comma in a type argument list is not followed by a colon
+      // (Codex review).
+      const named = body.slice(i).match(/^((?:[A-Za-z_$][\w$]*|\d[\w$]*))\s*:/);
       if (named) {
         keys.push(named[1]);
         i += named[0].length;
+        continue;
+      }
+      // A getter declares a field too, and it has no colon to confirm it — but
+      // `get` followed by a name followed by `(` is not a shape anything else
+      // here produces, so the keyword does the confirming instead. Read rather
+      // than refused, since the name is right there; `set` with it, because it
+      // names a field of the same object by the same rule, and a name read from
+      // both spellings of one field is one key twice — which is one key, to the
+      // set the caller collects these into (Codex review).
+      const accessor = body.slice(i).match(/^(?:get|set)\s+([A-Za-z_$][\w$]*)\s*\(/);
+      if (accessor) {
+        keys.push(accessor[1]);
+        i += accessor[0].length - 1;
         continue;
       }
     }

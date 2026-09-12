@@ -264,6 +264,19 @@ describe('the surface source scanner', () => {
     expect(() => topLevelKeys('name: make<A, B>(), [K]: 1')).toThrow(/computed key/);
   });
 
+  it('reads the key forms that have no identifier and no colon between them', () => {
+    // Two more fields that were silently nothing. A number IS confirmed by a
+    // colon and only needed the pattern widening; a getter has no colon, but
+    // `get` followed by a name followed by `(` is a shape nothing else here
+    // produces, so the keyword confirms it instead (Codex review).
+    expect(topLevelKeys(`123: str('Name'), name: 1`)).toEqual(['123', 'name']);
+    expect(topLevelKeys(`get name() { return str('Name'); }, age: 1`)).toEqual(['name', 'age']);
+    expect(topLevelKeys('set name(v) { store(v); }')).toEqual(['name']);
+    // And neither reads a type argument: a numeral in one is followed by no
+    // colon, and `get` in one is followed by no call.
+    expect(topLevelKeys('name: make<A, 1>(), next: 1')).toEqual(['name', 'next']);
+  });
+
   it('still reads an object laid out across lines', () => {
     // The position after a comma is whitespace before it is anything, and a
     // reader that classified that would refuse every object a formatter has
@@ -662,6 +675,10 @@ describe('the route table reader', () => {
     for (const body of [
       'object(Object.assign({}, SHARED_FIELDS))',
       'object(flag ? {} : { name: str("x") })',
+      // A literal the call OPENS with is still only a prefix of the argument:
+      // this one hands over a different map, and the outer field name was read
+      // in place of the field the platform documents.
+      'object({ fields: { name: str("x") } }.fields)',
     ]) {
       const { said, code } = await refuseParams(
         `export const DOCS: Record<string, Doc> = { 'GET sizes': { body: ${body} } };\n`,

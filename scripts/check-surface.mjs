@@ -436,8 +436,21 @@ function main() {
         // (Codex review). A -1 falls through to the refusal below, which is the
         // same sentence `object(IDENTIFIER)` already gets: the shape is one this
         // reader does not know, and the route is named.
+        //
+        // And a literal the call OPENS with is still only a prefix of the
+        // argument: `object({ fields: { name } }.fields)` starts with one and
+        // hands over a different map, so the route reported the outer field name
+        // and not the one the platform documents. So what follows the literal is
+        // checked too — another argument or nothing — which is the rule the
+        // parameter entries above are already read by (Codex review).
         const leading = args === null ? '' : args.slice(0, args.length - args.trimStart().length);
-        const brace = args !== null && args.trimStart().startsWith('{') ? leading.length : -1;
+        let brace = args !== null && args.trimStart().startsWith('{') ? leading.length : -1;
+        let literal;
+        if (brace !== -1) {
+          literal = balanced(args, brace, '{', '}');
+          const after = args.slice(brace + literal.length + 2).trimStart();
+          if (after !== '' && !after.startsWith(',')) brace = -1;
+        }
         if (brace !== -1) {
           // The field walk refuses a spread, a computed key and an interpolated
           // one: each is a field of THIS route that it cannot resolve, and
@@ -447,7 +460,7 @@ function main() {
           // somewhere anybody can go and look (OPL-4812).
           let fields;
           try {
-            fields = topLevelKeys(balanced(args, brace, '{', '}'));
+            fields = topLevelKeys(literal);
           } catch (err) {
             throw new Error(
               `'${route}' documents a body this reader cannot account for: ${err.message}`,
