@@ -62,26 +62,79 @@ function openerOf(text, at) {
   return -1;
 }
 
-// A slash after one of these words begins a regex, because each of them is
-// followed by an expression rather than by a value to divide. The four this
-// began with covered `return /re/` and nothing else, so `typeof /re/.source`,
-// `x in /re/`, `else /re/.test(s)` and the rest were read as division — and the
-// first quote inside such a regex then opened a literal that swallowed whatever
-// followed, comments included.
-const REGEX_KEYWORDS = new Set([
-  'return',
+// Words that are not values, so a slash after one begins a regex rather than
+// dividing. Spelled as every reserved and contextual word there is rather than
+// as the ones a regex is known to follow, because the two mistakes do not cost
+// the same: a word wrongly listed here reads a division as a regex and
+// mis-scans to the end of the line, while a word left out reads a regex as a
+// division and walks into its body, where the first quote opens a literal that
+// swallows whatever follows and a `}` closes a scope nobody opened.
+//
+// Enumerating the openers is how this list reached `else` and stopped: the
+// Python SDK's reader, ported from this one, was found treating `export
+// default /…/` and `class C extends /…/` as arithmetic, and the first of those
+// carried a whole route table inside a regex and had it read as the real one.
+// The five reserved words that ARE values — `this`, `super`, `true`, `false`
+// and `null` — are deliberately absent.
+const NOT_A_VALUE = new Set([
+  'abstract',
+  'as',
+  'asserts',
+  'async',
+  'await',
+  'break',
   'case',
-  'throw',
-  'yield',
-  'typeof',
-  'in',
-  'of',
-  'instanceof',
-  'new',
-  'void',
+  'catch',
+  'class',
+  'const',
+  'continue',
+  'debugger',
+  'declare',
+  'default',
   'delete',
   'do',
   'else',
+  'enum',
+  'export',
+  'extends',
+  'finally',
+  'for',
+  'from',
+  'function',
+  'if',
+  'implements',
+  'import',
+  'in',
+  'infer',
+  'instanceof',
+  'interface',
+  'is',
+  'keyof',
+  'let',
+  'namespace',
+  'new',
+  'of',
+  'out',
+  'override',
+  'package',
+  'private',
+  'protected',
+  'public',
+  'readonly',
+  'return',
+  'satisfies',
+  'static',
+  'switch',
+  'throw',
+  'try',
+  'type',
+  'typeof',
+  'unique',
+  'var',
+  'void',
+  'while',
+  'with',
+  'yield',
 ]);
 
 // The heads whose closing `)` is followed by a statement rather than by a value.
@@ -114,7 +167,7 @@ function regexCanStart(text, from) {
   // which is read as division here; neither file this scans is written that way,
   // and there is no local evidence that would tell the two apart.
   if (ch === ']') return false;
-  return REGEX_KEYWORDS.has(identifierBefore(text, i + 1));
+  return NOT_A_VALUE.has(identifierBefore(text, i + 1));
 }
 
 /** Advance past a regex literal, including escaped delimiters and flags. */
@@ -529,4 +582,181 @@ export function entries(body) {
   }
   if (depth !== 0) throw new Error('unbalanced { in list body');
   return out;
+}
+
+/**
+ * Each comma-separated element of one list or object body, at its own depth.
+ *
+ * A sibling of `entries` for the lists whose elements are not all object
+ * literals: `query: [{ name: 'limit' }, ALLOW_PARTIAL]` holds one of each, and
+ * a caller that has to tell them apart needs the elements before it can. The
+ * commas inside a literal or a nested collection belong to their element, which
+ * is what makes this a walk rather than a `split(',')`.
+ *
+ * A trailing comma is allowed, because a formatter writes them. A hole — `[a, ,
+ * b]` — is not: it is either a sparse array this reader has no meaning for or a
+ * delimiter it got wrong, and both are worth hearing about rather than being
+ * handed one element fewer.
+ */
+export function listItems(body) {
+  const items = [];
+  const opener = { '}': '{', ']': '[', ')': '(' };
+  const stack = [];
+  let from = 0;
+  let i = 0;
+  while (i < body.length) {
+    const ch = body[i];
+    if (ch === "'" || ch === '"' || ch === '`') {
+      i = quotedEnd(body, i);
+      continue;
+    }
+    if (ch === '/' && body[i + 1] === '/') {
+      const end = body.indexOf('\n', i + 2);
+      i = end === -1 ? body.length : end;
+      continue;
+    }
+    if (ch === '/' && body[i + 1] === '*') {
+      const end = body.indexOf('*/', i + 2);
+      i = end === -1 ? body.length : end + 2;
+      continue;
+    }
+    if (ch === '/' && regexCanStart(body, i)) {
+      i = regexEnd(body, i);
+      continue;
+    }
+    if (ch === '{' || ch === '[' || ch === '(') stack.push(ch);
+    else if (ch === '}' || ch === ']' || ch === ')') {
+      // Valid source cannot close what it never opened. Recovering from one
+      // would mean reading the rest of the body at a depth that is wrong for
+      // good, and handing back however many elements survived that.
+      if (stack.pop() !== opener[ch]) throw new Error(`unbalanced ${ch} at offset ${i}`);
+    } else if (ch === ',' && stack.length === 0) {
+      const item = body.slice(from, i).trim();
+      if (item === '') throw new Error(`empty list element at offset ${i}`);
+      items.push(item);
+      from = i + 1;
+    }
+    i++;
+  }
+  if (stack.length) throw new Error('unbalanced list body');
+  const tail = body.slice(from).trim();
+  if (tail !== '') items.push(tail);
+  return items;
+}
+
+/**
+ * The fields of an object literal body, by name, or a throw for an entry this
+ * cannot read.
+ *
+ * `topLevelKeys` answers what an object names and `topLevelField` answers one
+ * quoted value; this is for the caller that has to account for EVERY entry —
+ * the platform's `DOCS`, whose keys are the routes being compared. Read with a
+ * regex, a route key spelled with double quotes is not matched, the entry is
+ * skipped, and the route is compared against no parameters at all while the
+ * scan's own "found nothing" guard stays quiet because the other entries
+ * counted. A spread, or a key computed from an identifier, is refused for the
+ * same reason: what it holds cannot be seen, and the caller must not be handed
+ * a table that is short by however much it carried.
+ */
+export function objectFields(body) {
+  const fields = new Map();
+  for (const item of listItems(body)) {
+    const quote = item[0];
+    let key;
+    let value;
+    if (quote === "'" || quote === '"' || quote === '`') {
+      const end = quotedClose(item, 0);
+      if (end === -1) throw new Error(`unterminated key in ${JSON.stringify(item.slice(0, 40))}`);
+      const inner = item.slice(1, end - 1);
+      // A template key with a hole in it names nothing that can be resolved
+      // here, and a guess at one is worse than saying so.
+      if (quote === '`' && hasHole(inner)) {
+        throw new Error(`interpolated key in ${JSON.stringify(item.slice(0, 40))}`);
+      }
+      const rest = item.slice(end).trimStart();
+      if (!rest.startsWith(':')) {
+        throw new Error(`expected a colon after the key in ${JSON.stringify(item.slice(0, 40))}`);
+      }
+      key = unescaped(inner);
+      value = rest.slice(1).trim();
+    } else {
+      const m = /^([A-Za-z_$][\w$]*)\s*:/.exec(item);
+      if (!m) throw new Error(`unsupported object entry ${JSON.stringify(item.slice(0, 40))}`);
+      key = m[1];
+      value = item.slice(m[0].length).trim();
+    }
+    if (value === '') throw new Error(`no value for the key ${JSON.stringify(key)}`);
+    // Two spellings of one key is one of them winning, and which one depends on
+    // the order they are read in. That is a coin toss over a route's parameters.
+    if (fields.has(key)) throw new Error(`duplicate key ${JSON.stringify(key)}`);
+    fields.set(key, value);
+  }
+  return fields;
+}
+
+/**
+ * Each match of `pattern` that is in module code, rather than inside a literal
+ * or a nested scope.
+ *
+ * `indexOf('export const V1_ROUTES: Route[] = [')` finds the first spelling of
+ * that text anywhere in the file, and anywhere includes inside a regex literal:
+ * `export default /a; export const V1_ROUTES … ; z/;` is legal TypeScript, and
+ * the table in it was read as the real one. The scope half matters for the same
+ * reason — a declaration of the same name inside a function is not the module's
+ * table, and reading it instead compares the mirror against something nothing
+ * serves.
+ *
+ * `source` must be comment-blanked, which is also the cheap half of the answer:
+ * a declaration quoted in a comment — which is how apidoc.ts explains itself —
+ * is already spaces by the time this runs.
+ *
+ * The pattern is expected to end at the initializer's opening delimiter, and
+ * that delimiter is then walked over like any other, so what is inside the
+ * declaration counts as nested and a second declaration cannot be found there.
+ */
+export function moduleDeclarations(source, pattern) {
+  const found = [];
+  const opener = { '}': '{', ']': '[', ')': '(' };
+  const stack = [];
+  const at = new RegExp(pattern, 'y');
+  let i = 0;
+  while (i < source.length) {
+    let ch = source[i];
+    if (ch === "'" || ch === '"' || ch === '`') {
+      i = quotedEnd(source, i);
+      continue;
+    }
+    if (ch === '/' && source[i + 1] === '/') {
+      const end = source.indexOf('\n', i + 2);
+      i = end === -1 ? source.length : end;
+      continue;
+    }
+    if (ch === '/' && source[i + 1] === '*') {
+      const end = source.indexOf('*/', i + 2);
+      i = end === -1 ? source.length : end + 2;
+      continue;
+    }
+    if (ch === '/' && regexCanStart(source, i)) {
+      i = regexEnd(source, i);
+      continue;
+    }
+    // Not mid-identifier: a `myexport const` is not an export, and a sticky
+    // match started inside a longer word would read it as one.
+    if (stack.length === 0 && !/[\w$]/.test(source[i - 1] ?? '')) {
+      at.lastIndex = i;
+      const m = at.exec(source);
+      if (m) {
+        found.push({ index: i, length: m[0].length, groups: m.slice(1) });
+        i = at.lastIndex - 1;
+        ch = source[i];
+      }
+    }
+    if (ch === '{' || ch === '[' || ch === '(') stack.push(ch);
+    else if (ch === '}' || ch === ']' || ch === ')') {
+      if (stack.pop() !== opener[ch]) throw new Error(`unbalanced ${ch} at offset ${i}`);
+    }
+    i++;
+  }
+  if (stack.length) throw new Error('unbalanced module scope');
+  return found;
 }

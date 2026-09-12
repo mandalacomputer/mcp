@@ -42,6 +42,9 @@ import { fileURLToPath } from 'node:url';
 import {
   balanced,
   entries,
+  listItems,
+  moduleDeclarations,
+  objectFields,
   stripComments,
   topLevelField,
   topLevelKeys,
@@ -166,13 +169,22 @@ function main() {
    * all, which is exactly what a mispaired parse is not.
    */
   function routeTable(name) {
-    const decl = `export const ${name}: Route[] = [`;
-    const start = surfaceSource.indexOf(decl);
-    if (start === -1) throw new Error(`${name} not found in web/lib/surface.ts`);
+    // In module code, and exactly once. `indexOf` found the first spelling of
+    // the declaration anywhere in the file, and anywhere includes inside a
+    // regex literal — `export default /a; export const V1_ROUTES … ; z/;` is
+    // legal, and the table written in it was read as the real one, ahead of the
+    // real one further down.
+    const declared = moduleDeclarations(surfaceSource, `export const ${name}: Route\\[\\] = \\[`);
+    if (declared.length !== 1) {
+      throw new Error(
+        `${name} in web/lib/surface.ts is ${declared.length ? 'declared more than once' : 'not declared'} ` +
+          'where this reader can read it',
+      );
+    }
     // The opening bracket of the table, not the one in `Route[]` a few
     // characters earlier — which is what an indexOf('[') from the declaration
     // finds, and which closes immediately.
-    const body = balanced(surfaceSource, start + decl.length - 1, '[', ']');
+    const body = balanced(surfaceSource, declared[0].index + declared[0].length - 1, '[', ']');
     const routes = new Set();
     for (const entry of entries(body)) {
       // Both, out of ONE entry and at that entry's own depth. An entry carrying
@@ -180,7 +192,17 @@ function main() {
       // neither from its neighbour nor from a literal nested in it.
       const method = topLevelField(entry, 'method');
       const pattern = topLevelField(entry, 'pattern');
-      if (method && pattern) routes.add(`${method} ${pattern}`);
+      // Refused rather than skipped. An entry this reader cannot read both
+      // halves of is not a half-written route — it is a spelling the walk above
+      // got wrong, or a value built from something it cannot see, and dropping
+      // it reports a route the platform serves as one the mirror invented.
+      if (!method || !pattern) {
+        throw new Error(
+          `an entry of ${name} in web/lib/surface.ts has no literal method and pattern ` +
+            `this reader can read: ${JSON.stringify(entry.trim().slice(0, 60))}`,
+        );
+      }
+      routes.add(`${method} ${pattern}`);
     }
     if (!routes.size)
       throw new Error(`parsed ${name} but found no routes — has its shape changed?`);
@@ -239,18 +261,43 @@ function main() {
    * both naming the name nobody serves.
    */
   const sharedParams = new Map();
-  for (const m of docClean.matchAll(/^\s*(?:export\s+)?const ([A-Z_]+):\s*Query\s*=\s*\{/gm)) {
-    const named = balanced(docClean, m.index + m[0].length - 1, '{', '}').match(
-      /name:\s*'([^']+)'/,
-    );
-    if (named) sharedParams.set(m[1], named[1]);
+  for (const declaration of moduleDeclarations(
+    docClean,
+    '(?:export\\s+)?const ([A-Za-z_$][\\w$]*)\\s*:\\s*Query\\s*=\\s*\\{',
+  )) {
+    const [identifier] = declaration.groups;
+    const body = balanced(docClean, declaration.index + declaration.length - 1, '{', '}');
+    const named = topLevelField(body, 'name');
+    if (named === undefined) {
+      throw new Error(
+        `the shared parameter ${identifier} in web/lib/apidoc.ts has no name this reader can read`,
+      );
+    }
+    // Two declarations of one identifier is one of them winning by read order,
+    // over a name every route citing it is compared against.
+    if (sharedParams.has(identifier)) {
+      throw new Error(`the shared parameter ${identifier} is declared twice in web/lib/apidoc.ts`);
+    }
+    sharedParams.set(identifier, named);
   }
 
   /** Every query, header and body field the platform documents, by route. */
   function platformParameters() {
-    const decl = 'export const DOCS: Record<string, Doc> = {';
-    const start = docClean.indexOf(decl);
-    if (start === -1) throw new Error('DOCS not found in web/lib/apidoc.ts');
+    // In module code and exactly once, for the reason routeTable reads its
+    // table that way: `indexOf` answers with the first spelling of the
+    // declaration anywhere in the file, including inside a regex literal.
+    const declared = moduleDeclarations(docClean, 'export const DOCS: Record<string, Doc> = \\{');
+    if (declared.length !== 1) {
+      throw new Error(
+        `DOCS in web/lib/apidoc.ts is ${declared.length ? 'declared more than once' : 'not declared'} ` +
+          'where this reader can read it',
+      );
+    }
+    // The comments are already gone: the key is captured by a regex over this
+    // text, and a comment quoting a route key — which is how apidoc.ts explains
+    // itself — reads as an entry of its own; `table.set` then puts its empty
+    // parameter set where the real route's belongs, and the route is compared
+    // against nothing.
     // Located AND sliced out of the stripped copy, the way `routeTable` strips
     // before it splits. This file quotes the shapes being matched in its own
     // comments, and everything here is run over text rather than over a parse —
@@ -260,15 +307,28 @@ function main() {
     // `balanced()` walk that began at a brace inside the comment, which can
     // carry it over the genuine entry, and that route reads as taking no
     // parameters at all.
-    const docs = balanced(docClean, start + decl.length - 1, '{', '}');
+    const docs = balanced(docClean, declared[0].index + declared[0].length - 1, '{', '}');
 
     const table = new Map();
-    const entry = /'([A-Z]+) ([^']+)':\s*\{/g;
-    for (let m = entry.exec(docs); m; m = entry.exec(docs)) {
-      const body = balanced(docs, m.index + m[0].length - 1, '{', '}');
-      // Past this entry rather than into it: a nested `'GET x': {` inside a
-      // description would otherwise be read as a route of its own.
-      entry.lastIndex = m.index + m[0].length + body.length;
+    // Every entry accounted for, rather than every entry a regex recognises.
+    // `'([A-Z]+) ([^']+)':` reads the keys written in single quotes and passes
+    // over the rest without a word: a route key spelled with double quotes is
+    // then absent from this table, compared against nothing, and the scan's own
+    // "found no routes" guard stays quiet because the others counted. A spread
+    // or a computed key is refused here for the same reason — what it carries
+    // cannot be seen, and a table short by an unknown amount must not read as
+    // agreement.
+    for (const [route, value] of objectFields(docs)) {
+      if (!/^[A-Z]+ .+/.test(route)) {
+        throw new Error(`web/lib/apidoc.ts DOCS holds a key this reader cannot read: '${route}'`);
+      }
+      if (value[0] !== '{') {
+        throw new Error(
+          `'${route}' in web/lib/apidoc.ts is documented in a shape this reader ` +
+            'does not know — not an object literal.',
+        );
+      }
+      const body = balanced(value, 0, '{', '}');
       const params = new Set();
 
       for (const [key, kind] of [
@@ -290,19 +350,60 @@ function main() {
         // the other routes counted, so the route's real parameters surface as
         // ones the mirror invented — which sends the operator to the wrong file.
         const at = topLevelValueAt(body, key);
-        if (at === -1 || body[at] !== '[') continue;
+        if (at === -1) continue;
+        if (body[at] !== '[') {
+          throw new Error(
+            `'${route}' in web/lib/apidoc.ts documents ${key} in a shape this reader does not ` +
+              'know — not an array literal.',
+          );
+        }
         const list = balanced(body, at, '[', ']');
-        for (const n of list.matchAll(/name:\s*'([^']+)'/g)) params.add(`${kind}:${n[1]}`);
-        // `$` as well as a separator, and it is not decoration: `query:
-        // [ALLOW_PARTIAL]` on one line is the whole list with nothing after the
-        // identifier, so a lookahead demanding a trailing comma or bracket found
-        // nothing and GET computers read as taking no parameters at all.
-        //
-        // An identifier that resolves to nothing cannot be an error here: this
-        // same scan reads the ordinary capitalised words of a description — RFC,
-        // UTC — out of the prose each parameter carries.
-        for (const id of list.matchAll(/(?:^|[[,\s])([A-Z_]{2,})(?=[,\s\]]|$)/g)) {
-          if (sharedParams.has(id[1])) params.add(`${kind}:${sharedParams.get(id[1])}`);
+        // Element by element, and every element accounted for. The two regexes
+        // this replaces each had a hole of its own. `name:\s*'([^']+)'` read
+        // the whole list flat, so a `name` nested in a schema counted as a
+        // parameter of the route and a `name: "x"` counted as nothing; and the
+        // identifier scan, reading the same flat text, could only be forgiving
+        // of what it did not recognise, because the prose in each entry's
+        // description is full of ordinary capitalised words — RFC, UTC — that
+        // look exactly like a shared constant. Reading the elements is what
+        // makes an unresolved identifier a real answer: there is no prose at
+        // this depth to mistake for one.
+        for (const item of listItems(list)) {
+          if (item[0] === '{') {
+            const inner = balanced(item, 0, '{', '}');
+            if (inner.length + 2 !== item.length) {
+              throw new Error(
+                `'${route}' has a ${key} entry with an expression after its literal: ` +
+                  JSON.stringify(item.slice(0, 60)),
+              );
+            }
+            const name = topLevelField(inner, 'name');
+            if (name === undefined) {
+              throw new Error(
+                `'${route}' has a ${key} entry with no name this reader can read: ` +
+                  JSON.stringify(item.slice(0, 60)),
+              );
+            }
+            params.add(`${kind}:${name}`);
+          } else if (/^[A-Za-z_$][\w$]*$/.test(item)) {
+            const shared = sharedParams.get(item);
+            // Unresolved is refused rather than ignored: a constant this reader
+            // cannot resolve is a parameter the route takes and the comparison
+            // cannot see, which is the shape of every drift this script exists
+            // to catch.
+            if (shared === undefined) {
+              throw new Error(
+                `'${route}' cites ${item} in its ${key} list, which is not a shared ` +
+                  'parameter this reader resolved.',
+              );
+            }
+            params.add(`${kind}:${shared}`);
+          } else {
+            throw new Error(
+              `'${route}' has a ${key} entry this reader cannot read: ` +
+                JSON.stringify(item.slice(0, 60)),
+            );
+          }
         }
       }
 
@@ -332,12 +433,12 @@ function main() {
           for (const k of topLevelKeys(balanced(args, brace, '{', '}'))) params.add(`body:${k}`);
         } else if (body[bodyAt] !== '{') {
           throw new Error(
-            `'${m[1]} ${m[2]}' documents a body in a form this reader does not know — ` +
+            `'${route}' documents a body in a form this reader does not know — ` +
               'neither object(...) nor a raw schema literal.',
           );
         }
       }
-      table.set(`${m[1]} ${m[2]}`, params);
+      table.set(route, params);
     }
     return table;
   }
