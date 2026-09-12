@@ -270,6 +270,13 @@ describe('the surface source scanner', () => {
     // `get` followed by a name followed by `(` is a shape nothing else here
     // produces, so the keyword confirms it instead (Codex review).
     expect(topLevelKeys(`123: str('Name'), name: 1`)).toEqual(['123', 'name']);
+    // Plain digits only. A property's name is the number's VALUE, so `1_000`,
+    // `0x10` and `123n` name `1000`, `16` and `123`; handing back the source
+    // text would report three fields nobody serves while the three that are
+    // served go unmentioned, so they are refused instead (Codex review).
+    for (const key of ['1_000', '0x10', '123n', '1e3', '1.5']) {
+      expect(() => topLevelKeys(`${key}: 1`), key).toThrow(/numeric key/);
+    }
     expect(topLevelKeys(`get name() { return str('Name'); }, age: 1`)).toEqual(['name', 'age']);
     expect(topLevelKeys('set name(v) { store(v); }')).toEqual(['name']);
     // And neither reads a type argument: a numeral in one is followed by no

@@ -450,7 +450,18 @@ export function topLevelKeys(body) {
       // field `123` — and it is confirmed the same way. A numeral one character
       // after a comma in a type argument list is not followed by a colon
       // (Codex review).
-      const named = body.slice(i).match(/^((?:[A-Za-z_$][\w$]*|\d[\w$]*))\s*:/);
+      //
+      // Plain digits only, and every other numeric spelling is refused rather
+      // than read: the property name is the number's VALUE, so `1_000`, `0x10`
+      // and `123n` name the fields `1000`, `16` and `123`, and a reader handing
+      // back the source text reports three fields nobody serves while the three
+      // that are served go unmentioned. Resolving them here would be a numeric
+      // parser this file has no other use for (Codex review).
+      const numeric = body.slice(i).match(/^(\d[\w$.]*)\s*:/);
+      if (numeric && !/^\d+$/.test(numeric[1])) {
+        throw new Error(`a numeric key this reader cannot resolve: ${seen(i)}`);
+      }
+      const named = body.slice(i).match(/^((?:[A-Za-z_$][\w$]*|\d+))\s*:/);
       if (named) {
         keys.push(named[1]);
         i += named[0].length;
