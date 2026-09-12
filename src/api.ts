@@ -348,13 +348,12 @@ export class Api {
     }
     // Before the general mapping, because a 3xx carries no error body to read
     // and its one useful field is a HEADER. Left to `#error` it would arrive as
-    // a bare `HTTP 301`, which says nothing about the value that has to change.
+    // a bare `HTTP 301`, which says nothing about the configuration to inspect.
     if (resp.status >= 300 && resp.status < 400) {
       // Resolved against the request, because `Location` is very often relative
-      // and `redirect: 'manual'` hands back the raw header. "set
-      // MANDALA_BASE_URL to /api/v1/computers" names something that is not a URL
-      // and would not work — and naming the value to paste is the entire reason
-      // this branch exists rather than a bare `HTTP 301`.
+      // and `redirect: 'manual'` hands back the raw header. The resolved value
+      // is diagnostic only: it names the resource that redirected, not
+      // necessarily the API root callers should configure.
       const raw = resp.headers.get('location');
       let to = raw ?? undefined;
       if (raw) {
@@ -375,10 +374,12 @@ export class Api {
       throw new RedirectError(
         `${method} /${path.replace(/^\/+/, '')} was redirected (HTTP ${resp.status}${
           to ? ` to ${to}` : ', with no Location header'
-        }). This client does not follow redirects, because a redirect says the ` +
-          `address it was given is not the address in use — set MANDALA_BASE_URL to ` +
-          `${to ? 'that URL' : 'the URL the platform actually serves'} rather than relying on ` +
-          `a hop on every request. Retrying this unchanged gets the same answer.`,
+        }). This client does not follow redirects. Verify that MANDALA_BASE_URL names the API ` +
+          `root that serves this request; ${
+            to
+              ? 'the resource URL in Location is not itself a base URL to copy'
+              : 'the configured API root did not identify the resource directly'
+          }. Retrying this unchanged gets the same answer.`,
         resp.status,
       );
     }
@@ -589,6 +590,14 @@ export class Api {
           'belong in the file is unknown',
       );
     }
+    const span = window ? window.end - window.start + 1 : undefined;
+    if (span !== undefined && declared !== undefined && declared !== span) {
+      await resp.body?.cancel().catch(() => {});
+      throw new MandalaError(
+        `${method} ${path} answered 206 with Content-Range ${resp.headers.get('content-range')} ` +
+          `for ${span} bytes but Content-Length ${declared}; refusing an inconsistent partial response`,
+      );
+    }
     const { bytes, truncated } = await readBody(
       method,
       path,
@@ -598,6 +607,19 @@ export class Api {
           ? { bytes: new Uint8Array(await resp.arrayBuffer()), truncated: false }
           : await readAtMost(resp, limit),
     );
+    if (
+      span !== undefined &&
+      ((!truncated && bytes.length !== span) || (truncated && bytes.length >= span))
+    ) {
+      throw new MandalaError(
+        `${method} ${path} answered 206 with Content-Range ${resp.headers.get('content-range')} ` +
+          `for ${span} bytes but the body ${
+            truncated
+              ? `continued after its ${bytes.length}-byte local prefix`
+              : `ended at ${bytes.length} bytes`
+          }; refusing an inconsistent partial response`,
+      );
+    }
     return {
       bytes,
       contentType,
@@ -662,19 +684,17 @@ export class Api {
         // as the blank line that ends an event — so a frame gets cut in half at
         // a boundary that was never in the stream.
         buffer += decoder.decode(value, { stream: true });
-        // Events are separated by a blank line, in whichever of the three
-        // terminators the sender chose: the spec allows CRLF, LF and lone CR,
-        // and a proxy that reframes the stream is entitled to any of them.
+        // Events are separated by a blank line. Each of its two line endings
+        // may be CRLF, LF, or lone CR, and a proxy that reframes the stream is
+        // entitled to mix them.
         // Matching only "\n\n" found no boundary at all in a CRLF stream, which
         // collapsed a whole run into one unparseable event and lost the result
         // of a run that had in fact succeeded.
         for (;;) {
-          const sep = /\r?\n\r?\n|\r\r/.exec(buffer);
-          // A tail of "\r\n\r" is deliberately not a boundary yet — the LF that
-          // would complete it may be in the next read.
+          const sep = sseBoundary(buffer);
           if (!sep) break;
           const chunk = buffer.slice(0, sep.index);
-          buffer = buffer.slice(sep.index + sep[0].length);
+          buffer = buffer.slice(sep.index + sep.length);
           const parsed = parseEvent(chunk);
           if (parsed) yield parsed;
         }
@@ -696,6 +716,14 @@ export class Api {
       // simply dropped without this, rather than surfacing as the replacement
       // character that says something was lost.
       buffer += decoder.decode();
+      for (;;) {
+        const sep = sseBoundary(buffer, true);
+        if (!sep) break;
+        const chunk = buffer.slice(0, sep.index);
+        buffer = buffer.slice(sep.index + sep.length);
+        const parsed = parseEvent(chunk);
+        if (parsed) yield parsed;
+      }
       const tail = parseEvent(buffer);
       if (tail) yield tail;
     } finally {
@@ -955,9 +983,9 @@ function mediaType(header: string | null): string {
  * cannot disagree about the grammar, and `*` in either position comes back as
  * `undefined` rather than as a number nothing sent.
  *
- * A malformed header is nothing rather than a throw: it is metadata about a
- * body that already arrived, and failing a download over the label on it would
- * be a worse answer than the one this gives.
+ * A malformed header is nothing rather than a throw so each status can decide
+ * what absence means. A 206 is rejected because its byte positions would be
+ * unknown; a 416 remains useful even when it cannot report the optional size.
  */
 function parseContentRange(
   header: string | null,
@@ -972,11 +1000,28 @@ function parseContentRange(
   };
   const start = num(m[1]);
   const end = num(m[2]);
+  const total = num(m[3]);
+  // Numeric fields that do not fit safely cannot be treated as wildcards.
+  // Doing so would turn a precise but unusable claim into an unknown one and
+  // let callers continue with offsets JavaScript cannot represent exactly.
+  if (
+    (m[1] && start === undefined) ||
+    (m[2] && end === undefined) ||
+    (m[3] !== '*' && total === undefined)
+  ) {
+    return undefined;
+  }
   // A window whose end precedes its start describes no bytes. Dropping the pair
   // rather than passing it on keeps `end - start + 1` from being negative in
   // every caller that trusts this.
   if (start !== undefined && end !== undefined && end < start) return undefined;
-  return { start, end, total: num(m[3]) };
+  if (start !== undefined && end !== undefined) {
+    const span = end - start + 1;
+    if (!Number.isSafeInteger(span)) return undefined;
+    // A satisfied range cannot name bytes at or beyond the complete length.
+    if (total !== undefined && end >= total) return undefined;
+  }
+  return { start, end, total };
 }
 
 /**
@@ -1108,6 +1153,26 @@ async function readTextAtMost(
 ): Promise<{ text: string; truncated: boolean }> {
   const { bytes, truncated } = await readAtMost(resp, limit);
   return { text: new TextDecoder().decode(bytes), truncated };
+}
+
+/** Find the next SSE blank line without confusing a split CRLF for two lines. */
+function sseBoundary(text: string, eof = false): { index: number; length: number } | undefined {
+  const endingAt = (index: number): number | undefined => {
+    const char = text[index];
+    if (char === '\n') return 1;
+    if (char !== '\r') return undefined;
+    if (index + 1 === text.length) return eof ? 1 : undefined;
+    return text[index + 1] === '\n' ? 2 : 1;
+  };
+
+  for (let index = 0; index < text.length; index++) {
+    const first = endingAt(index);
+    if (first === undefined) continue;
+    const second = endingAt(index + first);
+    if (second !== undefined) return { index, length: first + second };
+    index += first - 1;
+  }
+  return undefined;
 }
 
 function parseEvent(chunk: string): SSEEvent | undefined {

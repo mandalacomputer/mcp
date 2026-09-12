@@ -214,6 +214,76 @@ describe('read_file when the range cannot be served', () => {
   });
 
   it.each([
+    ['more body bytes than its window', 'abcdef', 'bytes 0-2/3'],
+    ['fewer body bytes than its window', 'abc', 'bytes 0-5/6'],
+    ['a window beyond the total', 'abcd', 'bytes 0-3/3'],
+    [
+      'an unsafe window offset',
+      'SYNTHETIC_BODY_MARKER',
+      'bytes 9007199254740992-9007199254740992/*',
+    ],
+    ['an unsafe total', 'SYNTHETIC_BODY_MARKER', 'bytes 0-0/9007199254740992'],
+  ])('refuses a 206 with %s', async (_case, body, contentRange) => {
+    globalThis.fetch = (async () =>
+      new Response(body, {
+        status: 206,
+        headers: {
+          'Content-Type': 'text/plain',
+          'Accept-Ranges': 'bytes',
+          'Content-Range': contentRange,
+        },
+      })) as typeof fetch;
+    const { call, close } = await connect();
+    const res = await call('read_file', { path: '/tmp/part.txt' });
+    expect(res.isError).toBe(true);
+    const out = res.content.map((c) => (c.type === 'text' ? c.text : '')).join('');
+    expect(out).toMatch(/206.*Content-Range/i);
+    expect(out).not.toContain(body);
+    await close();
+  });
+
+  it('refuses a 206 whose Content-Length contradicts its window', async () => {
+    globalThis.fetch = (async () =>
+      new Response('abc', {
+        status: 206,
+        headers: {
+          'Content-Type': 'text/plain',
+          'Accept-Ranges': 'bytes',
+          'Content-Range': 'bytes 0-2/3',
+          'Content-Length': '4',
+        },
+      })) as typeof fetch;
+    const { call, close } = await connect();
+    const res = await call('read_file', { path: '/tmp/part.txt' });
+    expect(res.isError).toBe(true);
+    expect(res.content.map((c) => (c.type === 'text' ? c.text : '')).join('')).toMatch(
+      /206.*Content-Range/i,
+    );
+    await close();
+  });
+
+  it('accepts a locally capped prefix that fits inside the declared window', async () => {
+    const body = 'x'.repeat(MAX_INLINE_BYTES + 20);
+    globalThis.fetch = (async () =>
+      new Response(body, {
+        status: 206,
+        headers: {
+          'Content-Type': 'text/plain',
+          'Accept-Ranges': 'bytes',
+          'Content-Range': `bytes 0-${body.length - 1}/${body.length + 100}`,
+          'Content-Length': String(body.length),
+        },
+      })) as typeof fetch;
+    const { call, close } = await connect();
+    const res = await call('read_file', { path: '/tmp/part.txt' });
+    expect(res.isError).toBeFalsy();
+    const out = res.content.map((c) => (c.type === 'text' ? c.text : '')).join('');
+    expect(out).toContain(`bytes 0-${MAX_INLINE_BYTES - 1}`);
+    expect(out).toContain(`read_file again with offset: ${MAX_INLINE_BYTES}`);
+    await close();
+  });
+
+  it.each([
     { requested: 0, served: 40, failure: 'skip' },
     { requested: 40, served: 0, failure: 'repeat' },
   ])(

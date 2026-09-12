@@ -85,6 +85,25 @@ describe('the SSE reader', () => {
       { event: 'done', data: { stop: 'end_turn' } },
     ]);
   });
+
+  it.each([
+    [
+      'LF followed by CR',
+      'event: step\ndata: {"n":1}\n\revent: done\ndata: {"stop":"end_turn"}\n\r',
+    ],
+    [
+      'CRLF followed by CR',
+      'event: step\r\ndata: {"n":1}\r\n\revent: done\r\ndata: {"stop":"end_turn"}\r\n\r',
+    ],
+  ])('frames mixed %s blank lines at every chunk boundary', async (_name, body) => {
+    for (let split = 1; split < body.length; split++) {
+      streamingChunks([body.slice(0, split), body.slice(split)]);
+      expect(await collect(), `split at ${split}`).toEqual([
+        { event: 'step', data: { n: 1 } },
+        { event: 'done', data: { stop: 'end_turn' } },
+      ]);
+    }
+  });
 });
 
 describe('the filename off a download', () => {
