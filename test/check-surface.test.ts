@@ -3,6 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, relative, resolve } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
+import { LIMITS } from '../src/limits.js';
 import { ALLOWED, PARAMETERS } from './allowlist.js';
 
 /**
@@ -45,7 +46,7 @@ describe('check:surface', () => {
     version: 1,
     routes: [...ALLOWED].sort(),
     parameters: Object.fromEntries([...PARAMETERS].filter(([, names]) => names.length)),
-    limits: { 'agent.maxSteps': 100 },
+    limits: { 'agent.maxSteps': 100, ...LIMITS } as Record<string, number>,
   });
 
   const made: string[] = [];
@@ -78,7 +79,7 @@ describe('check:surface', () => {
     const { said, code } = await runCheck(fixture(inStep()));
     const counted = [...PARAMETERS.values()].reduce((n, names) => n + names.length, 0);
     expect(said).toContain(
-      `the mirror matches the platform (${ALLOWED.size} routes, ${counted} parameters`,
+      `the mirror matches the platform (${ALLOWED.size} routes, ${counted} parameters, ${Object.keys(LIMITS).length} limits`,
     );
     expect(code).toBe(0);
   });
@@ -89,6 +90,21 @@ describe('check:surface', () => {
     const { said, code } = await runCheck(fixture(manifest));
     expect(said).toContain('+ POST widgets');
     expect(said).toContain('- GET sizes');
+    expect(said).not.toContain('matches');
+    expect(code).toBe(1);
+  });
+
+  it('names a limit that moved, or one the platform stopped publishing', async () => {
+    // Compared here, in the script the platform's own CI runs, rather than in a
+    // test that skips without a checkout — where none of these could drift.
+    const manifest = inStep();
+    manifest.limits['exec.maxEnvEntries'] = 65;
+    delete manifest.limits['webhook.computersMax'];
+    const { said, code } = await runCheck(fixture(manifest));
+    expect(said).toContain("! exec.maxEnvEntries is 64 here, but the platform's is 65");
+    expect(said).toContain(
+      '! webhook.computersMax is 64 here, and the platform does not publish it',
+    );
     expect(said).not.toContain('matches');
     expect(code).toBe(1);
   });
@@ -182,6 +198,20 @@ describe('check:surface', () => {
       expect(said).not.toContain('matches');
       expect(code).toBe(1);
     }
+    // Decoded before comparing: an escaped spelling of a key already present is
+    // the same key to the parser, and was two to a walk over the raw text.
+    const escaped = manifest.replace(
+      '"parameters":{',
+      '"parameters":{"\\u0044ELETE computers/:id":["query:new_required"],',
+    );
+    expect(escaped).not.toBe(manifest);
+    const asEscaped = await runCheck(fixture(escaped));
+    expect(asEscaped.said).toContain('appears twice');
+    expect(asEscaped.code).toBe(1);
+    // The empty string is a legal key, and a repeated one is still a repeat.
+    const empty = manifest.replace('"parameters":{', '"parameters":{"":[],"":[],');
+    const asEmpty = await runCheck(fixture(empty));
+    expect(asEmpty.said).toContain('appears twice');
     // And a value that merely repeats a KEY'S spelling is not a repeated key: two
     // routes with the same parameter name, a string holding a brace.
     const fine = inStep();

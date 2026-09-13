@@ -119,8 +119,10 @@ function readManifest(platform) {
   let manifest;
   try {
     const text = readFileSync(path, 'utf8');
+    // An object, not the key itself: the empty string is a legal key, and a
+    // truthiness check on it abandoned the walk at the first repeated `""`.
     const twice = repeatedKey(text);
-    if (twice) throw new Error(`the key ${JSON.stringify(twice)} appears twice in one object`);
+    if (twice) throw new Error(`the key ${JSON.stringify(twice.key)} appears twice in one object`);
     manifest = JSON.parse(text);
   } catch (error) {
     throw new Error(`${path} cannot be read: ${error.message}`);
@@ -166,13 +168,15 @@ function readManifest(platform) {
 }
 
 /**
- * The first key that appears twice in one JSON object, or undefined.
+ * The first key that appears twice in one JSON object, as `{ key }`, or null.
  *
  * `JSON.parse` keeps the LAST of two equal keys and says nothing, so a manifest
  * carrying a route's parameters twice compared against whichever came second
  * and silently ignored the other. Two answers to one question is a manifest
  * this cannot read, and the parser has no hook for it — so the text is walked
- * once, strings stepped over, keys recorded per object.
+ * once, strings stepped over, keys recorded per object. Each key is DECODED
+ * before comparing: `"DELETE"` and `"DELETE"` are one key to the parser,
+ * and a walk over the raw text called them two (review).
  */
 function repeatedKey(text) {
   const objects = [];
@@ -183,9 +187,9 @@ function repeatedKey(text) {
       const start = ++i;
       while (i < text.length && text[i] !== '"') i += text[i] === '\\' ? 2 : 1;
       if (expectKey && objects.length) {
-        const key = text.slice(start, i);
+        const key = JSON.parse(`"${text.slice(start, i)}"`);
         const keys = objects[objects.length - 1];
-        if (keys.has(key)) return key;
+        if (keys.has(key)) return { key };
         keys.add(key);
         expectKey = false;
       }
@@ -202,7 +206,7 @@ function repeatedKey(text) {
       expectKey = true;
     }
   }
-  return undefined;
+  return null;
 }
 
 // A comma at object level separates members, and one inside an array that sits
@@ -227,15 +231,18 @@ function inArray(text, at, objects) {
   return !objects.length;
 }
 
-/** The mirror, imported as the suite imports it, or a failure that says why not. */
-async function mirror() {
-  const file = join(repo, 'test/allowlist.ts');
+/**
+ * A TypeScript module of this repo, imported as the suite imports it — Node
+ * strips the types itself from 22.18 on — or a failure that says why not.
+ */
+async function imported(relative) {
+  const file = join(repo, relative);
   try {
     return await import(pathToFileURL(file).href);
   } catch (error) {
     throw new Error(
       `${file} could not be imported: ${error.message}\n` +
-        '  This script imports the mirror as TypeScript, which Node strips itself from 22.18 on.',
+        '  This script imports it as TypeScript, which Node strips itself from 22.18 on.',
     );
   }
 }
@@ -248,9 +255,11 @@ async function main() {
 
   let read;
   let tables;
+  let limits;
   try {
     read = readManifest(platform);
-    tables = await mirror();
+    tables = await imported('test/allowlist.ts');
+    ({ LIMITS: limits } = await imported('src/limits.ts'));
   } catch (error) {
     // Named, and a failure: the checkout is the platform and the comparison
     // could not be made, which is the third state between "no checkout" and
@@ -324,6 +333,25 @@ async function main() {
     );
   }
 
+  // The limits, every one this repo mirrors, against the manifest's: a ceiling
+  // that moved upstream turns a courtesy refusal into a refusal of a call the
+  // platform would have taken, with nothing failing anywhere to say so — which is
+  // why they are compared here, where the platform's own CI runs this, rather than
+  // in a test that skips without a checkout (review).
+  const drifted = [];
+  for (const [key, mine] of Object.entries(limits)) {
+    const theirs = manifest.limits?.[key];
+    if (typeof theirs !== 'number')
+      drifted.push(`  ! ${key} is ${mine} here, and the platform does not publish it`);
+    else if (theirs !== mine)
+      drifted.push(`  ! ${key} is ${mine} here, but the platform's is ${theirs}`);
+  }
+  if (drifted.length) {
+    problems.push(
+      `limits that have moved:\n${drifted.join('\n')}\n\n  Update src/limits.ts. A number this SDK refuses at that the platform no\n  longer does is a refusal of a call that would have worked.`,
+    );
+  }
+
   if (problems.length) {
     console.error(
       `check:surface — the mirror has drifted from the platform.\n\n${problems.join('\n\n')}`,
@@ -332,6 +360,6 @@ async function main() {
     return;
   }
   console.log(
-    `check:surface — the mirror matches the platform (${platformRoutes.size} routes, ${counted} parameters, from ${path}).`,
+    `check:surface — the mirror matches the platform (${platformRoutes.size} routes, ${counted} parameters, ${Object.keys(limits).length} limits, from ${path}).`,
   );
 }
