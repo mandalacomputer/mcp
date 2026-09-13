@@ -15,6 +15,19 @@ import { ALLOWED, PARAMETERS } from './allowlist.js';
  * "matches": the recurring defect in the scanner this replaced was a false
  * all-clear, and a manifest diff can print one too if it silently reads nothing.
  */
+/**
+ * Whether this Node strips types itself (22.18 and later), which the script
+ * needs to import the mirror. Below that the script refuses, naming the version
+ * it needs — asserted below — and the cases that need a real comparison are
+ * skipped rather than failed: the repository supports older Node for the
+ * package, and the platform's own CI, where the comparison is enforced, runs a
+ * Node that strips.
+ */
+const strips = (() => {
+  const [major = 0, minor = 0] = process.versions.node.split('.').map(Number);
+  return major > 22 || (major === 22 && minor >= 18);
+})();
+
 describe('check:surface', () => {
   // Spawned, not spawnSync'd: a synchronous child holds this worker's event loop
   // for the length of the run, and a timing assertion in a sibling worker missed
@@ -75,7 +88,7 @@ describe('check:surface', () => {
     return dir;
   };
 
-  it('says the mirror matches, with the counts, when it does', async () => {
+  it.skipIf(!strips)('says the mirror matches, with the counts, when it does', async () => {
     const { said, code } = await runCheck(fixture(inStep()));
     const counted = [...PARAMETERS.values()].reduce((n, names) => n + names.length, 0);
     expect(said).toContain(
@@ -84,7 +97,7 @@ describe('check:surface', () => {
     expect(code).toBe(0);
   });
 
-  it('names a route that moved in either direction', async () => {
+  it.skipIf(!strips)('names a route that moved in either direction', async () => {
     const manifest = inStep();
     manifest.routes = manifest.routes.filter((r) => r !== 'GET sizes').concat('POST widgets');
     const { said, code } = await runCheck(fixture(manifest));
@@ -94,28 +107,31 @@ describe('check:surface', () => {
     expect(code).toBe(1);
   });
 
-  it('names a limit that moved, or one the platform stopped publishing', async () => {
-    // Compared here, in the script the platform's own CI runs, rather than in a
-    // test that skips without a checkout — where none of these could drift.
-    // Whichever limits this repo mirrors: the first moved, the last withdrawn.
-    const keys = Object.keys(LIMITS) as [keyof typeof LIMITS, ...(keyof typeof LIMITS)[]];
-    const moved = keys[0];
-    const gone = keys.at(-1) ?? moved;
-    const manifest = inStep();
-    manifest.limits[moved] = LIMITS[moved] + 1;
-    delete manifest.limits[gone];
-    const { said, code } = await runCheck(fixture(manifest));
-    expect(said).toContain(
-      `! ${moved} is ${LIMITS[moved]} here, but the platform's is ${LIMITS[moved] + 1}`,
-    );
-    expect(said).toContain(
-      `! ${gone} is ${LIMITS[gone]} here, and the platform does not publish it`,
-    );
-    expect(said).not.toContain('matches');
-    expect(code).toBe(1);
-  });
+  it.skipIf(!strips)(
+    'names a limit that moved, or one the platform stopped publishing',
+    async () => {
+      // Compared here, in the script the platform's own CI runs, rather than in a
+      // test that skips without a checkout — where none of these could drift.
+      // Whichever limits this repo mirrors: the first moved, the last withdrawn.
+      const keys = Object.keys(LIMITS) as [keyof typeof LIMITS, ...(keyof typeof LIMITS)[]];
+      const moved = keys[0];
+      const gone = keys.at(-1) ?? moved;
+      const manifest = inStep();
+      manifest.limits[moved] = LIMITS[moved] + 1;
+      delete manifest.limits[gone];
+      const { said, code } = await runCheck(fixture(manifest));
+      expect(said).toContain(
+        `! ${moved} is ${LIMITS[moved]} here, but the platform's is ${LIMITS[moved] + 1}`,
+      );
+      expect(said).toContain(
+        `! ${gone} is ${LIMITS[gone]} here, and the platform does not publish it`,
+      );
+      expect(said).not.toContain('matches');
+      expect(code).toBe(1);
+    },
+  );
 
-  it('names a parameter that moved in either direction', async () => {
+  it.skipIf(!strips)('names a parameter that moved in either direction', async () => {
     const manifest = inStep();
     manifest.parameters['GET sizes'] = ['query:fresh'];
     manifest.parameters['DELETE computers/:id'] = ['query:expect'];
@@ -150,7 +166,7 @@ describe('check:surface', () => {
     },
   );
 
-  it('says so when the routes agreed and no parameter was compared', async () => {
+  it.skipIf(!strips)('says so when the routes agreed and no parameter was compared', async () => {
     // The count in the success line is also the only evidence the parameter half
     // ran. Both sides empty is not a match, it is a comparison that did not happen.
     const { said, code } = await runCheck(
@@ -159,6 +175,19 @@ describe('check:surface', () => {
     expect(said).toContain('compared zero parameters across 1 shared routes');
     expect(code).toBe(1);
   });
+
+  it.runIf(!strips)(
+    'refuses, naming the Node it needs, where the mirror cannot be imported',
+    async () => {
+      // Older than 22.18: no type stripping, so the mirror cannot be imported and
+      // the comparison cannot be made. Loud, and a failure — never a skip.
+      const { said, code } = await runCheck(fixture(inStep()));
+      expect(said).toContain('could not be imported');
+      expect(said).toContain('22.18');
+      expect(said).not.toContain('matches');
+      expect(code).toBe(1);
+    },
+  );
 
   it('skips, and says so, when no platform is checked out', async () => {
     const { said, code } = await runCheck(undefined, fixture(null));
@@ -188,46 +217,49 @@ describe('check:surface', () => {
     expect(said).not.toContain('skipping');
   });
 
-  it('refuses a key that appears twice rather than reading the last one', async () => {
-    // `JSON.parse` keeps the last of two equal keys and says nothing.
-    const manifest = JSON.stringify(inStep());
-    const twiceRoute = manifest.replace(
-      '"parameters":{',
-      '"parameters":{"DELETE computers/:id":["query:new_required"],',
-    );
-    const twiceLimit = manifest.replace('"limits":{', '"limits":{"agent.maxSteps":1,');
-    expect(twiceRoute).not.toBe(manifest);
-    expect(twiceLimit).not.toBe(manifest);
-    for (const text of [twiceRoute, twiceLimit]) {
-      const { said, code } = await runCheck(fixture(text));
-      expect(said).toContain('appears twice');
-      expect(said).not.toContain('matches');
-      expect(code).toBe(1);
-    }
-    // Decoded before comparing: an escaped spelling of a key already present is
-    // the same key to the parser, and was two to a walk over the raw text.
-    const escaped = manifest.replace(
-      '"parameters":{',
-      '"parameters":{"\\u0044ELETE computers/:id":["query:new_required"],',
-    );
-    expect(escaped).not.toBe(manifest);
-    const asEscaped = await runCheck(fixture(escaped));
-    expect(asEscaped.said).toContain('appears twice');
-    expect(asEscaped.code).toBe(1);
-    // The empty string is a legal key, and a repeated one is still a repeat.
-    const empty = manifest.replace('"parameters":{', '"parameters":{"":[],"":[],');
-    const asEmpty = await runCheck(fixture(empty));
-    expect(asEmpty.said).toContain('appears twice');
-    // And a value that merely repeats a KEY'S spelling is not a repeated key: two
-    // routes with the same parameter name, a string holding a brace.
-    const fine = inStep();
-    fine.parameters['GET sizes'] = ['query:expect'];
-    fine.routes.push('GET brace/{x}');
-    const { said } = await runCheck(fixture(fine));
-    expect(said).not.toContain('appears twice');
-  });
+  it.skipIf(!strips)(
+    'refuses a key that appears twice rather than reading the last one',
+    async () => {
+      // `JSON.parse` keeps the last of two equal keys and says nothing.
+      const manifest = JSON.stringify(inStep());
+      const twiceRoute = manifest.replace(
+        '"parameters":{',
+        '"parameters":{"DELETE computers/:id":["query:new_required"],',
+      );
+      const twiceLimit = manifest.replace('"limits":{', '"limits":{"agent.maxSteps":1,');
+      expect(twiceRoute).not.toBe(manifest);
+      expect(twiceLimit).not.toBe(manifest);
+      for (const text of [twiceRoute, twiceLimit]) {
+        const { said, code } = await runCheck(fixture(text));
+        expect(said).toContain('appears twice');
+        expect(said).not.toContain('matches');
+        expect(code).toBe(1);
+      }
+      // Decoded before comparing: an escaped spelling of a key already present is
+      // the same key to the parser, and was two to a walk over the raw text.
+      const escaped = manifest.replace(
+        '"parameters":{',
+        '"parameters":{"\\u0044ELETE computers/:id":["query:new_required"],',
+      );
+      expect(escaped).not.toBe(manifest);
+      const asEscaped = await runCheck(fixture(escaped));
+      expect(asEscaped.said).toContain('appears twice');
+      expect(asEscaped.code).toBe(1);
+      // The empty string is a legal key, and a repeated one is still a repeat.
+      const empty = manifest.replace('"parameters":{', '"parameters":{"":[],"":[],');
+      const asEmpty = await runCheck(fixture(empty));
+      expect(asEmpty.said).toContain('appears twice');
+      // And a value that merely repeats a KEY'S spelling is not a repeated key: two
+      // routes with the same parameter name, a string holding a brace.
+      const fine = inStep();
+      fine.parameters['GET sizes'] = ['query:expect'];
+      fine.routes.push('GET brace/{x}');
+      const { said } = await runCheck(fixture(fine));
+      expect(said).not.toContain('appears twice');
+    },
+  );
 
-  it('resolves a relative MANDALA_PLATFORM_REPO against this repo', async () => {
+  it.skipIf(!strips)('resolves a relative MANDALA_PLATFORM_REPO against this repo', async () => {
     const root = resolve(__dirname, '..');
     const manifest = inStep();
     manifest.routes.push('GET alpha');
