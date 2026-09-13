@@ -372,6 +372,8 @@ describe('the surface source scanner', () => {
     // the regex's `}` counted as syntax and its backtick ended the template early:
     // a route table inside that template read as the real one.
     expect(stripComments('let n = count++ / 2; // remove this\n')).not.toContain('remove this');
+    // `--` was never in the openers list, so this one held before the fix too: a
+    // compatibility check beside the regression, not a second regression.
     expect(stripComments('let n = count-- / 2; // remove this\n')).not.toContain('remove this');
     const afterComment = 'const s = `${ /*c*/ /}`/.source }`; // remove this\n';
     const clean = stripComments(afterComment);
@@ -379,6 +381,92 @@ describe('the surface source scanner', () => {
     // The regex survived whole rather than being walked into, so the backtick inside
     // it never ended the template.
     expect(clean).toContain('/}`/');
+  });
+
+  it('steps back over a comment by what the forward scan recorded, not by a guess', () => {
+    // `lastIndexOf('/*')` guessed where a block comment began, and a `/*` inside the
+    // comment's own text had it stop short: the `+` before the inner marker was
+    // handed back as the preceding token, the division after the comment read as a
+    // regex, and two documented fields vanished with the check still reporting a
+    // match (sixth review). The forward scan has already decided what every earlier
+    // character IS, so the comment it stepped over is the one stepped back over.
+    expect(
+      topLevelKeys(
+        `first: str(\`\${count /* outer + /* inner */ / 2} /\`), omitted: str("required"), last: str(\`} tail\`)`,
+      ),
+    ).toEqual(['first', 'omitted', 'last']);
+    // A LINE comment holding a block-comment closer: crossing the newline used to
+    // inspect that closer and step back to the `+` in front of it.
+    expect(stripComments('let n = count // c + /* t */\n / 2; // remove this\n')).not.toContain(
+      'remove this',
+    );
+  });
+
+  it('stays linear when the line endings are not LF', () => {
+    // The line-comment lookup recognised LF alone, so a table with CR endings had
+    // every slash re-scan the whole accumulated prefix — 134 KB was over the budget
+    // the LF case had already been held to (sixth review). Nothing is scanned now,
+    // whatever the terminator: the comment a step crosses is looked up, not found.
+    for (const nl of ['\r', '\r\n', '\u2028', '\u2029']) {
+      const source = `const x = ${Array.from({ length: 12_000 }, (_, i) => `a${i}${nl} / b${i}`).join(' + ')};${nl}// remove this${nl}`;
+      const started = Date.now();
+      expect(stripComments(source), JSON.stringify(nl)).not.toContain('remove this');
+      expect(Date.now() - started, JSON.stringify(nl)).toBeLessThan(1000);
+    }
+  });
+
+  it('reads a division after a property name, whatever the name is', () => {
+    // After `.` or `?.` the engine reads any word as a name, keyword or not, so the
+    // refusal above had no rename to offer for `obj.of / 2` — the name is the
+    // object's, not the author's (sixth review). Reserved words are names there
+    // too: `obj.return / 2` read the slash as a regex and kept what followed.
+    for (const expr of ['obj.of', 'obj.type', 'obj?.of', 'obj . of', 'obj.return', 'obj.if']) {
+      expect(stripComments(`x = ${expr} / 2; // remove this\n`), expr).not.toContain('remove this');
+    }
+    // Three dots are a spread, where the word is a value again and the ambiguity
+    // is real.
+    expect(() => stripComments('x = [...of /b/];\n')).toThrow(
+      /cannot tell a regex from a division/,
+    );
+  });
+
+  it('refuses every word that is both a keyword and a name, not most of them', () => {
+    // `abstract` and `asserts` were in the keyword list and not in the refusal
+    // list, so a slash after either read as a regex and the same two fields
+    // vanished with no refusal at all (sixth review). The whole list, against that
+    // reproduction, so the next word added to one list and not the other fails here.
+    const both = [
+      'abstract',
+      'as',
+      'asserts',
+      'async',
+      'await',
+      'declare',
+      'from',
+      'infer',
+      'is',
+      'keyof',
+      'let',
+      'namespace',
+      'of',
+      'out',
+      'override',
+      'readonly',
+      'satisfies',
+      'static',
+      'type',
+      'unique',
+      'yield',
+    ];
+    for (const word of both) {
+      expect(
+        () =>
+          topLevelKeys(
+            `first: str(\`\${${word} / 2} /\`), omitted: str("required"), last: str(\`} tail\`)`,
+          ),
+        word,
+      ).toThrow(/cannot tell a regex from a division/);
+    }
   });
 
   it('reads a slash after a subscript as division, which is the residual case', () => {

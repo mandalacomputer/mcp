@@ -42,7 +42,7 @@ function holeEnd(text, from) {
     } else if (ch === '/' && text[i + 1] === '/') {
       i = lineCommentEnd(text, i + 2) - 1;
     } else if (ch === '/' && text[i + 1] === '*') {
-      const end = text.indexOf('*/', i + 2);
+      const end = blockCommentEnd(text, i);
       // An unterminated block comment swallows the rest of the file, so there is no
       // closing brace to find and saying so is the only honest answer.
       if (end === -1) return -1;
@@ -171,8 +171,15 @@ const STATEMENT_HEADS = new Set(['if', 'while', 'for']);
 // still reporting a match; read as a division, a real regex's `}` closes a scope
 // nobody opened. A refusal naming the line is a variable rename for whoever wrote
 // it (review of OPL-4830).
+//
+// Every word in NOT_A_VALUE that the engine also accepts as a name is here — the
+// list was two short once (`abstract`, `asserts`), and a slash after either read
+// as a regex and dropped the same two fields, with no refusal (sixth review).
+// surface-parser.test walks the whole list against that reproduction.
 const AMBIGUOUS_WORD = new Set([
+  'abstract',
   'as',
+  'asserts',
   'async',
   'await',
   'declare',
@@ -194,66 +201,58 @@ const AMBIGUOUS_WORD = new Set([
 ]);
 
 /**
+ * Every comment a forward scan has stepped over, by text: the offset where each
+ * ends, mapped to where it began.
+ *
+ * Recorded so that a scan looking BACKWARDS from a slash can step over a comment
+ * exactly, rather than guess where it began. Guessing was `lastIndexOf('/*')`,
+ * and a `/*` inside the comment's own text — an "outer + inner" comment — had it
+ * stop short and hand the `+` back as the preceding token, which read the
+ * division after the comment as a regex and dropped two documented fields from
+ * the answer while still reporting a match (review of OPL-4830). The line-comment
+ * case was worse: it re-scanned the whole line at every slash, and a table with CR
+ * line endings made that quadratic again after the LF case had been fixed.
+ *
+ * The forward scan is the authority because it has already decided what every
+ * earlier character IS — string, regex, comment or code — and a comment opener
+ * inside a string is not a comment to it. Backwards, nothing can tell. Every
+ * scanner in this file that steps over a comment does so through `lineCommentEnd`
+ * or `blockCommentEnd`, which record here; keyed by the text so a scanner working
+ * on a slice records and reads its own offsets.
+ */
+const COMMENTS = new Map();
+
+function noteComment(text, start, end) {
+  let spans = COMMENTS.get(text);
+  if (!spans) {
+    spans = new Map();
+    COMMENTS.set(text, spans);
+  }
+  spans.set(end, start);
+}
+
+/**
  * The last character before `from` that the engine would read as code.
  *
- * Whitespace AND comments, because a comment is not a token. A regex written after
- * a block comment inside a template interpolation had the comment's own closing
- * slash inspected, which answered "division" — after which the regex's `}` counted
- * as syntax and its backtick ended the template early, and a route table inside that
- * template was read as the real one (review of OPL-4830).
+ * Whitespace AND comments, because a comment is not a token: a regex written
+ * after a block comment inside a template interpolation had the comment's own
+ * closing slash inspected, which answered "division" — after which the regex's
+ * `}` counted as syntax and its backtick ended the template early, and a route
+ * table inside that template was read as the real one (review of OPL-4830).
  *
- * Line comments are found by scanning the line from its start rather than by
- * looking backwards for `//`, because a `//` inside a string is not a comment and
- * walking backwards cannot tell. The scan is bounded by the line.
+ * A comment is stepped over only where the forward scan recorded one ending
+ * exactly here; see COMMENTS. Nothing is scanned, so this is linear in the
+ * whitespace and comments it crosses, whatever the line endings.
  */
 function significantBefore(text, from) {
   let i = from - 1;
   for (;;) {
-    // Whether a NEWLINE was crossed, which is the only way a line comment can be in
-    // front of this position: every caller scans forward and steps over comments as
-    // it goes, so a slash it is asking about is never itself inside one. Checked
-    // rather than assumed because the line scan below is the length of the line, and
-    // running it at every slash made this quadratic on a one-line table — a 190 KB
-    // line of 12,000 divisions took seconds, which the perf regression in
-    // surface-parser.test pins.
-    let crossed = false;
-    while (i >= 0 && /\s/.test(text[i])) {
-      if (text[i] === '\n' || text[i] === '\r' || text[i] === '\u2028' || text[i] === '\u2029')
-        crossed = true;
-      i--;
-    }
-    if (i < 1) return i;
-    // A block comment ends here: step over it and look again.
-    if (text[i] === '/' && text[i - 1] === '*') {
-      const open = text.lastIndexOf('/*', i - 1);
-      if (open === -1) return i;
-      i = open - 1;
-      continue;
-    }
-    if (!crossed) return i;
-    // A line comment ended at the newline just crossed: the last code before it is
-    // whatever precedes the `//` that opened it.
-    const start = text.lastIndexOf('\n', i) + 1;
-    const opened = lineCommentStart(text.slice(start, i + 1));
-    if (opened === -1) return i;
-    i = start + opened - 1;
+    while (i >= 0 && /\s/.test(text[i])) i--;
+    if (i < 0) return i;
+    const start = COMMENTS.get(text)?.get(i + 1);
+    if (start === undefined) return i;
+    i = start - 1;
   }
-}
-
-/** Where an unquoted `//` opens a comment in one line of text, or -1. */
-function lineCommentStart(line) {
-  let quote = '';
-  for (let i = 0; i < line.length; i++) {
-    const ch = line[i];
-    if (quote) {
-      if (ch === '\\') i++;
-      else if (ch === quote) quote = '';
-      continue;
-    }
-    if (ch === "'" || ch === '"' || ch === '`') quote = ch;
-    else if (ch === '/' && line[i + 1] === '/') return i;
-  }
-  return -1;
 }
 
 /** Whether a slash here can begin a regex literal rather than divide values. */
@@ -287,6 +286,15 @@ function regexCanStart(text, from) {
   // and there is no local evidence that would tell the two apart.
   if (ch === ']') return false;
   const word = identifierBefore(text, i + 1);
+  // A PROPERTY NAME is never a keyword: after `.` or `?.` the engine reads any
+  // word as a name, so `obj.of / 2` and `obj.return / 2` both divide, and refusing
+  // the first left a reader with no rename to make — the name belongs to
+  // whatever object it is read from (sixth review). Three dots are a spread
+  // (`[...of /re/]`), where the word is a value again and the ambiguity is real.
+  if (word) {
+    const dot = significantBefore(text, i + 1 - word.length);
+    if (dot >= 0 && text[dot] === '.' && text[dot - 1] !== '.') return false;
+  }
   if (AMBIGUOUS_WORD.has(word)) {
     throw new Error(
       `cannot tell a regex from a division after \`${word}\`, which is both a keyword and a legal name: rename the variable or hoist the expression out of the literal`,
@@ -429,7 +437,7 @@ export function stripComments(text) {
       clean += ' '.repeat(stop - i);
       i = stop - 1;
     } else if (ch === '/' && text[i + 1] === '*') {
-      const end = text.indexOf('*/', i + 2);
+      const end = blockCommentEnd(text, i);
       const stop = end === -1 ? text.length : end + 2;
       clean += text.slice(i, stop).replace(/[^\r\n]/g, ' ');
       i = stop - 1;
@@ -459,11 +467,30 @@ export function stripComments(text) {
  * Returns the length of the text when the comment runs to the end.
  */
 function lineCommentEnd(text, from) {
+  // `from` is the first character AFTER the `//`, at every call site; the span
+  // recorded starts at the `//` itself.
+  let end = text.length;
   for (let i = from; i < text.length; i++) {
     const ch = text[i];
-    if (ch === '\n' || ch === '\r' || ch === '\u2028' || ch === '\u2029') return i;
+    if (ch === '\n' || ch === '\r' || ch === '\u2028' || ch === '\u2029') {
+      end = i;
+      break;
+    }
   }
-  return text.length;
+  noteComment(text, from - 2, end);
+  return end;
+}
+
+/**
+ * The index of the `*` in the closer of the block comment that opens at `from`,
+ * or -1 when it never closes — the same answer `indexOf` gave, because the
+ * callers each do something different with an unterminated one — and recorded
+ * in COMMENTS so a backwards step can find where it began.
+ */
+function blockCommentEnd(text, from) {
+  const end = text.indexOf('*/', from + 2);
+  if (end !== -1) noteComment(text, from, end + 2);
+  return end;
 }
 
 export function balanced(text, from, open, close) {
@@ -483,7 +510,7 @@ export function balanced(text, from, open, close) {
     } else if (ch === '/' && text[i + 1] === '/') {
       i = lineCommentEnd(text, i + 2);
     } else if (ch === '/' && text[i + 1] === '*') {
-      const end = text.indexOf('*/', i + 2);
+      const end = blockCommentEnd(text, i);
       i = end === -1 ? text.length : end + 1;
     } else if (ch === '/' && regexCanStart(text, i)) {
       i = regexEnd(text, i) - 1;
@@ -809,7 +836,7 @@ export function entries(body) {
       continue;
     }
     if (ch === '/' && body[i + 1] === '*') {
-      const end = body.indexOf('*/', i + 2);
+      const end = blockCommentEnd(body, i);
       i = end === -1 ? body.length : end + 2;
       continue;
     }
@@ -864,7 +891,7 @@ export function listItems(body) {
       continue;
     }
     if (ch === '/' && body[i + 1] === '*') {
-      const end = body.indexOf('*/', i + 2);
+      const end = blockCommentEnd(body, i);
       i = end === -1 ? body.length : end + 2;
       continue;
     }
@@ -979,7 +1006,7 @@ export function moduleDeclarations(source, pattern) {
       continue;
     }
     if (ch === '/' && source[i + 1] === '*') {
-      const end = source.indexOf('*/', i + 2);
+      const end = blockCommentEnd(source, i);
       i = end === -1 ? source.length : end + 2;
       continue;
     }
@@ -1123,7 +1150,7 @@ function oneParameter(paramsText) {
         continue;
       }
       if (paramsText[j] === '/' && paramsText[j + 1] === '*') {
-        const end = paramsText.indexOf('*/', j + 2);
+        const end = blockCommentEnd(paramsText, j);
         if (end === -1) return false;
         j = end + 2;
         continue;
@@ -1148,7 +1175,7 @@ function oneParameter(paramsText) {
       continue;
     }
     if (ch === '/' && paramsText[i + 1] === '*') {
-      const end = paramsText.indexOf('*/', i + 2);
+      const end = blockCommentEnd(paramsText, i);
       // An unterminated comment is not something to read past.
       if (end === -1) return false;
       i = end + 2;
@@ -1320,7 +1347,7 @@ function trailingCall(text, name) {
       continue;
     }
     if (ch === '/' && text[i + 1] === '*') {
-      const end = text.indexOf('*/', i + 2);
+      const end = blockCommentEnd(text, i);
       i = end === -1 ? text.length : end + 2;
       continue;
     }
@@ -1388,7 +1415,7 @@ export function declarationAssignment(source, from) {
       continue;
     }
     if (ch === '/' && source[i + 1] === '*') {
-      const end = source.indexOf('*/', i + 2);
+      const end = blockCommentEnd(source, i);
       i = end === -1 ? source.length : end + 2;
       continue;
     }
