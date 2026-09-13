@@ -1019,7 +1019,9 @@ describe('the classification of a refusal, for whoever is embedding this (OPL-45
     // 401 and 403, which both have sentences — so this clause is for a status those do
     // not cover. It exists so that a different status tomorrow still says the one
     // thing a model has to be told: this is about who is calling, not the computer.
-    expect(reasonAdvice('revoked')).toMatch(/authority this server is calling with no longer holds/);
+    expect(reasonAdvice('revoked')).toMatch(
+      /authority this server is calling with no longer holds/,
+    );
     expect(reasonAdvice('revoked')).toMatch(/refused the same way/);
   });
 
