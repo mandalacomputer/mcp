@@ -21,9 +21,10 @@ export class APIError extends MandalaError {
   override name = 'APIError';
   /**
    * The platform's own word for what KIND of refusal this is, where it sent
-   * one: `contention`, `starting`, `unavailable` or `unsupported` (OPL-3898).
-   * `undefined` for most errors, and always will be — the platform is explicit
-   * that an absent value means unclassified rather than "none of the four".
+   * one: `contention`, `starting`, `unavailable` or `unsupported` (OPL-3898),
+   * or `revoked` (OPL-4801) — the one word about the caller rather than the
+   * computer. `undefined` for most errors, and always will be — the platform is
+   * explicit that an absent value means unclassified rather than "none of these".
    *
    * Read on the base class rather than on the one 409 it was filed for, because
    * the platform keys it on the ERROR and not on the route: the same sentinel is
