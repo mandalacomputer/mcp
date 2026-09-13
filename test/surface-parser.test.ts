@@ -1159,6 +1159,15 @@ describe('the table-initializer readers', () => {
         1,
       ),
     ).toThrow(/callback this reader cannot account for/);
+    // BALANCED comments, so the final-depth check cannot be what refuses it and the
+    // skipping is the only thing standing between this and a count of one parameter.
+    expect(() =>
+      tableArrayLiteral(
+        `([['GET', 'sizes']] as Route[]).map(([m, p]: Route /* < */, _i /* > */, { [++(p as any)]: unused }) => \`\${m} \${p}\`)`,
+        'ALLOWED',
+        1,
+      ),
+    ).toThrow(/callback this reader cannot account for/);
   });
 
   it('reads the one projection through a terminal comma', () => {
@@ -1174,41 +1183,55 @@ describe('the table-initializer readers', () => {
     ).toBe(`['GET', 'sizes']`);
   });
 
-  it('refuses a type assertion whose generic is not a type at all', () => {
+  it('refuses any type assertion carrying type arguments, because it may not be a type', () => {
     // `as any<X, Y>[]` matched the `as` pattern and is not a type: TypeScript ends
     // the type at `any` and reads `< X, Y > []` as comparisons and a comma
     // expression, so the value reaching the call is a boolean. It type-checks, and
     // erasing the suffix as a type certified routes the runtime never produces.
-    // Keyword type arguments cannot do that — `string` is not a value — so the
-    // spellings these tables actually use stay readable.
-    expect(() =>
-      tableArrayLiteral(
-        `(([['GET', 'sizes']] as Route[]).map(([m, p]) => \`\${m} \${p}\`) as any<X, Y>[] as any)`,
-        'ALLOWED',
-        1,
-      ),
-    ).toThrow(/is built with 0 projections/);
-    // And the legal generic assertions still reduce.
+    //
+    // Restricting the arguments to keyword types looked like enough — `string` is
+    // not a value — until `const string: any = 1` makes it one, and the keyword
+    // spelling type-checks and returns `true` at runtime. Which reading TypeScript
+    // takes depends on what names are in scope, which this reader cannot see, so no
+    // generic suffix is read through at all. The body reader in this file pays the
+    // same price for the same reason.
+    for (const suffix of ['any<X, Y>[]', 'any<string, string>[]', 'Route<string, string>[]']) {
+      expect(
+        () =>
+          tableArrayLiteral(
+            `(([['GET', 'sizes']] as Route[]).map(([m, p]) => \`\${m} \${p}\`) as ${suffix} as any)`,
+            'ALLOWED',
+            1,
+          ),
+        suffix,
+      ).toThrow();
+    }
+    // The spelling every mirror actually uses still reduces.
     expect(
       tableArrayLiteral(
-        `([['GET', 'sizes']] as Route<string, string>[]).map(([m, p]) => \`\${m} \${p}\`)`,
+        `([['GET', 'sizes']] as Route[]).map(([m, p]) => \`\${m} \${p}\`)`,
         'ALLOWED',
         1,
       ),
     ).toBe(`['GET', 'sizes']`);
   });
 
-  it('still reads the one projection through a generic annotation', () => {
-    // The refusal above counts commas, and a generic's commas are not parameter
-    // separators — `listItems` does not know that, which is why this is counted
-    // with the angle brackets balanced. A formatter produces this shape.
-    expect(
+  it.each([
+    ['a carriage return', '\r'],
+    ['U+2028', '\u2028'],
+  ])('ends a line comment at %s, the way the engine does', (_what, terminator) => {
+    // Every line-comment scanner in this reader looked for LF alone. The engine ends
+    // a comment at CR, LF, U+2028 and U+2029 — so a comment ended by one of the
+    // others left the rest of a physical line looking like comment here while the
+    // engine had gone back to reading code, and the parameters after it were hidden
+    // from the count (review of OPL-4830). Runtime: `GET NaN`.
+    expect(() =>
       tableArrayLiteral(
-        `([['GET', 'sizes']] as Route[]).map(([m, p]: Route<string, string>) => \`\${m} \${p}\`)`,
+        `([['GET', 'sizes']] as Route[]).map(([m, p]: Route, //${terminator} _i, { [++(p as any)]: u }\n) => \`\${m} \${p}\`)`,
         'ALLOWED',
         1,
       ),
-    ).toBe(`['GET', 'sizes']`);
+    ).toThrow(/callback this reader cannot account for/);
   });
 
   it('refuses a table built with no projection where its caller expects one', () => {

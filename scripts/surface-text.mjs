@@ -300,8 +300,7 @@ export function stripComments(text) {
       clean += text.slice(i, end);
       i = end - 1;
     } else if (ch === '/' && text[i + 1] === '/') {
-      const end = text.indexOf('\n', i + 2);
-      const stop = end === -1 ? text.length : end;
+      const stop = lineCommentEnd(text, i + 2);
       clean += ' '.repeat(stop - i);
       i = stop - 1;
     } else if (ch === '/' && text[i + 1] === '*') {
@@ -321,6 +320,27 @@ export function stripComments(text) {
 }
 
 /** The text inside a balanced pair, ignoring delimiters in literals and comments. */
+/**
+ * Where a `//` comment ends: the next LINE TERMINATOR, all four of them.
+ *
+ * JavaScript ends a line comment at CR, LF, U+2028 or U+2029, and every scanner in
+ * this file used to look for LF alone. That is not a nicety: a comment ended by a
+ * CR left the rest of a physical line looking like comment to this reader while the
+ * engine had gone back to reading code — `([m, p]: Route, //<CR> _i, { [++(p as any)]: u }<LF>)`
+ * passed the parameter count and returned `GET NaN` at runtime (review of
+ * OPL-4830). A scanner that agrees with the engine about where a comment stops is
+ * the only way the counting means anything.
+ *
+ * Returns the length of the text when the comment runs to the end.
+ */
+function lineCommentEnd(text, from) {
+  for (let i = from; i < text.length; i++) {
+    const ch = text[i];
+    if (ch === '\n' || ch === '\r' || ch === '\u2028' || ch === '\u2029') return i;
+  }
+  return text.length;
+}
+
 export function balanced(text, from, open, close) {
   // The caller's `indexOf` answers -1 for a delimiter that is not there, and -1
   // is a legal loop start: what came back was the text from offset 0 to whatever
@@ -336,8 +356,7 @@ export function balanced(text, from, open, close) {
     if (ch === "'" || ch === '"' || ch === '`') {
       i = quotedEnd(text, i) - 1;
     } else if (ch === '/' && text[i + 1] === '/') {
-      const end = text.indexOf('\n', i + 2);
-      i = end === -1 ? text.length : end;
+      i = lineCommentEnd(text, i + 2);
     } else if (ch === '/' && text[i + 1] === '*') {
       const end = text.indexOf('*/', i + 2);
       i = end === -1 ? text.length : end + 1;
@@ -661,8 +680,7 @@ export function entries(body) {
       continue;
     }
     if (ch === '/' && body[i + 1] === '/') {
-      const end = body.indexOf('\n', i + 2);
-      i = end === -1 ? body.length : end;
+      i = lineCommentEnd(body, i + 2);
       continue;
     }
     if (ch === '/' && body[i + 1] === '*') {
@@ -717,8 +735,7 @@ export function listItems(body) {
       continue;
     }
     if (ch === '/' && body[i + 1] === '/') {
-      const end = body.indexOf('\n', i + 2);
-      i = end === -1 ? body.length : end;
+      i = lineCommentEnd(body, i + 2);
       continue;
     }
     if (ch === '/' && body[i + 1] === '*') {
@@ -833,8 +850,7 @@ export function moduleDeclarations(source, pattern) {
       continue;
     }
     if (ch === '/' && source[i + 1] === '/') {
-      const end = source.indexOf('\n', i + 2);
-      i = end === -1 ? source.length : end;
+      i = lineCommentEnd(source, i + 2);
       continue;
     }
     if (ch === '/' && source[i + 1] === '*') {
@@ -978,8 +994,7 @@ function oneParameter(paramsText) {
         continue;
       }
       if (paramsText[j] === '/' && paramsText[j + 1] === '/') {
-        const end = paramsText.indexOf('\n', j + 2);
-        j = end === -1 ? paramsText.length : end;
+        j = lineCommentEnd(paramsText, j + 2);
         continue;
       }
       if (paramsText[j] === '/' && paramsText[j + 1] === '*') {
@@ -1004,8 +1019,7 @@ function oneParameter(paramsText) {
     // it, and read as one parameter — the same false all-clear in a new spelling
     // (second review round of OPL-4830).
     if (ch === '/' && paramsText[i + 1] === '/') {
-      const end = paramsText.indexOf('\n', i + 2);
-      i = end === -1 ? paramsText.length : end;
+      i = lineCommentEnd(paramsText, i + 2);
       continue;
     }
     if (ch === '/' && paramsText[i + 1] === '*') {
@@ -1065,19 +1079,6 @@ function joinsThePair(argsText) {
   return body.slice(2).trim() === `\`\${${named[1]}} \${${named[2]}}\``;
 }
 
-/**
- * Whether every argument of a generic in an `as` suffix is a keyword type.
- *
- * The one thing that makes a generic in a type assertion unambiguous. See the
- * `as` rule below for why an identifier argument is not.
- */
-const KEYWORD_TYPE =
-  /^(?:readonly\s+)?(?:any|unknown|never|void|null|undefined|string|number|boolean|object|symbol|bigint)(?:\s*\[\s*\])*$/;
-function keywordTypeArguments(inside) {
-  const args = inside.split(',');
-  return args.length > 0 && args.every((a) => KEYWORD_TYPE.test(a.trim()));
-}
-
 export function tableArrayLiteral(text, what = 'this declaration', projections = null) {
   const refuse = (why, at) => {
     throw new Error(`${what} ${why}: ${JSON.stringify(at.trim().slice(0, 60))}`);
@@ -1122,24 +1123,26 @@ export function tableArrayLiteral(text, what = 'this declaration', projections =
         continue;
       }
     }
-    // `as <type>` — identifiers, dots, `[]`, and generics ONLY over keyword types.
+    // `as <type>` — an identifier, dots and `[]`, and NO type arguments at all.
     //
-    // The last clause is the whole of a finding. `as any<X, Y>[]` matched the
-    // pattern and is not a type at all: TypeScript ends the type at `any`, reads
-    // the rest as `< X, Y > []` — comparisons and a comma expression — and the
-    // value that reaches the call is a boolean. It type-checks, and a reader that
-    // erased the suffix as a type certified routes the runtime never produces
-    // (review of OPL-4841/4830; the body reader beside this refuses every `as`
-    // suffix for the same reason and pays a refusal for it).
+    // Three rounds of narrowing a pattern here each admitted the next spelling, and
+    // the third is the one that settles it. `as any<X, Y>[]` is not a type:
+    // TypeScript ends the type at `any` and reads `< X, Y > []` as comparisons and a
+    // comma expression, so the value reaching the call is a boolean while the reader
+    // erased the suffix and certified the array it could see. Restricting the
+    // arguments to keyword types looked sufficient — `string` is not a value — until
+    // `const string: any = 1` made it one, and `as any<string, string>[]` type-checks
+    // and returns `true` at runtime (review of OPL-4830). Nothing about the SHAPE of
+    // a generic suffix can tell the two apart, because which reading TypeScript
+    // takes depends on what names are in scope, which this reader cannot see.
     //
-    // A type ARGUMENT that is a keyword type cannot make that mistake possible,
-    // because the executable reading needs its operands to be values and `string`
-    // is not one — so `as Route<string, string>[]` and `as Iterable<string>` stay
-    // readable while `Route<X, Y>` does not. `readonly` is allowed in front of an
-    // argument because `ReadonlyMap<string, readonly string[]>` is how these
-    // tables are spelled.
-    const as = /\sas\s+[A-Za-z_$][\w$.]*(?:<([\w$.,\s[\]]*)>)?(?:\s*\[\s*\])*\s*$/.exec(t);
-    if (as && (as[1] === undefined || keywordTypeArguments(as[1]))) {
+    // So no generic suffix is read through. The body reader in this same file
+    // refuses every `as` suffix for exactly this reason and pays a refusal for it;
+    // this is the same answer, kept as narrow as the tables need — `as Route[]` is
+    // how every mirror spells its own, and a generic one is refused by name rather
+    // than guessed at.
+    const as = /\sas\s+[A-Za-z_$][\w$.]*(?:\s*\[\s*\])*\s*$/.exec(t);
+    if (as) {
       t = t.slice(0, as.index).trim();
       continue;
     }
@@ -1180,8 +1183,7 @@ function trailingCall(text, name) {
       continue;
     }
     if (ch === '/' && text[i + 1] === '/') {
-      const end = text.indexOf('\n', i + 2);
-      i = end === -1 ? text.length : end;
+      i = lineCommentEnd(text, i + 2);
       continue;
     }
     if (ch === '/' && text[i + 1] === '*') {
@@ -1249,8 +1251,7 @@ export function declarationAssignment(source, from) {
       continue;
     }
     if (ch === '/' && source[i + 1] === '/') {
-      const end = source.indexOf('\n', i + 2);
-      i = end === -1 ? source.length : end;
+      i = lineCommentEnd(source, i + 2);
       continue;
     }
     if (ch === '/' && source[i + 1] === '*') {
