@@ -19,8 +19,20 @@ function quotedClose(text, from) {
   return -1;
 }
 
-/** The `}` closing a `${` interpolation opened at `from`, or -1 if unclosed. */
+/**
+ * The `}` closing a `${` interpolation opened at `from`, or -1 if unclosed.
+ *
+ * Comments are skipped here as well as literals, which is not symmetry for its own
+ * sake: a brace or a backtick inside a comment is not syntax, and counting one as
+ * syntax mispairs the interpolation — after which the reader's idea of where the
+ * template ends is wrong for the rest of the expression. That was a false
+ * ALL-CLEAR, not merely a confused one: an annotation carrying `` `${string // }` ``
+ * hid the callback's remaining parameters from the count, and the reader went on
+ * certifying a route the runtime never produced (review of OPL-4830). A regex
+ * literal can hold the same characters, so it is skipped too.
+ */
 function holeEnd(text, from) {
+  const spans = new Map();
   let depth = 0;
   for (let i = from; i < text.length; i++) {
     const ch = text[i];
@@ -28,6 +40,16 @@ function holeEnd(text, from) {
       const end = quotedClose(text, i);
       if (end === -1) return -1;
       i = end - 1;
+    } else if (ch === '/' && text[i + 1] === '/') {
+      i = lineCommentEnd(text, i + 2, spans) - 1;
+    } else if (ch === '/' && text[i + 1] === '*') {
+      const end = blockCommentEnd(text, i, spans);
+      // An unterminated block comment swallows the rest of the file, so there is no
+      // closing brace to find and saying so is the only honest answer.
+      if (end === -1) return -1;
+      i = end + 1;
+    } else if (ch === '/' && regexCanStart(text, i, spans)) {
+      i = regexEnd(text, i) - 1;
     } else if (ch === '{') depth++;
     else if (ch === '}' && --depth === 0) return i;
   }
@@ -140,12 +162,103 @@ const NOT_A_VALUE = new Set([
 // The heads whose closing `)` is followed by a statement rather than by a value.
 const STATEMENT_HEADS = new Set(['if', 'while', 'for']);
 
-/** Whether a slash here can begin a regex literal rather than divide values. */
-function regexCanStart(text, from) {
+// The words above that can equally be a variable name, where a slash after one
+// cannot be decided without knowing which of the two this occurrence is — and that
+// takes a parser's token context, not a word list.
+//
+// So this reader REFUSES them rather than guessing, because both guesses are wrong
+// in a way that matters. Read as a regex, `of / 2` inside a template swallowed the
+// rest of the interpolation and dropped two documented fields from the answer while
+// still reporting a match; read as a division, a real regex's `}` closes a scope
+// nobody opened. A refusal naming the line is a variable rename for whoever wrote
+// it (review of OPL-4830).
+//
+// Every word in NOT_A_VALUE that the engine also accepts as a name is here — the
+// list was two short once (`abstract`, `asserts`), and a slash after either read
+// as a regex and dropped the same two fields, with no refusal (sixth review).
+// surface-parser.test walks the whole list against that reproduction.
+const AMBIGUOUS_WORD = new Set([
+  'abstract',
+  'as',
+  'asserts',
+  'async',
+  'await',
+  'declare',
+  'from',
+  'infer',
+  'is',
+  'keyof',
+  'let',
+  'namespace',
+  'of',
+  'out',
+  'override',
+  'readonly',
+  'satisfies',
+  'static',
+  'type',
+  'unique',
+  'yield',
+]);
+
+/**
+ * The last character before `from` that the engine would read as code.
+ *
+ * Whitespace AND comments, because a comment is not a token: a regex written
+ * after a block comment inside a template interpolation had the comment's own
+ * closing slash inspected, which answered "division" — after which the regex's
+ * `}` counted as syntax and its backtick ended the template early, and a route
+ * table inside that template was read as the real one (review of OPL-4830).
+ *
+ * `spans` is every comment the scan asking has stepped over so far, the offset
+ * each ends at mapped to where it began: a comment is stepped back over only
+ * where the FORWARD scan recorded one ending exactly there. Recorded rather than
+ * found, because backwards nothing can tell a comment opener inside a comment or
+ * a string from a real one — `lastIndexOf('/*')` stopped short on an "outer +
+ * inner" comment and handed the `+` back, and the division after it read as a
+ * regex that swallowed two documented fields (sixth review). The forward scan
+ * has already decided what every earlier character IS. Nothing is scanned here,
+ * so this is linear in what it crosses, whatever the line endings.
+ *
+ * The map is the SCAN's, created by each entry point and handed to the helpers
+ * it calls, never a module-wide memory keyed by the text: that kept every input
+ * alive for the life of the process, made the twentieth scan of a distinct 190 KB
+ * input take seconds, and gave a reader that did not record comments a different
+ * answer to the same string depending on what had been scanned before it
+ * (seventh review).
+ */
+function significantBefore(text, from, spans) {
   let i = from - 1;
-  while (i >= 0 && /\s/.test(text[i])) i--;
+  for (;;) {
+    // The map FIRST, before the whitespace step: a line comment ends at its
+    // newline and the spaces before that newline are INSIDE it, so a step that
+    // skipped whitespace first walked into the comment, past the offset the scan
+    // had recorded, and handed back whatever the comment's text ended in
+    // (seventh review).
+    const start = spans.get(i + 1);
+    if (start !== undefined) {
+      i = start - 1;
+      continue;
+    }
+    if (i < 0) return i;
+    if (/\s/.test(text[i])) {
+      i--;
+      continue;
+    }
+    return i;
+  }
+}
+
+/** Whether a slash here can begin a regex literal rather than divide values. */
+function regexCanStart(text, from, spans) {
+  const i = significantBefore(text, from, spans);
   if (i < 0) return true;
   const ch = text[i];
+  // A POSTFIX operator ends an expression, so the slash after it divides. `+` and
+  // `-` are in the list below as prefix/infix operators, and reading `count++ / 2`
+  // as a regex consumed the rest of the template and then the rest of the file —
+  // valid arithmetic in an unrelated template broke the gate (review of OPL-4830).
+  if ((ch === '+' || ch === '-') && text[i - 1] === ch) return false;
   if ('([{=,:;!?&|~+*%^<>'.includes(ch)) return true;
   if (ch === ')') {
     // A `)` alone decides nothing: `(a + b) / c` divides, `if (ok) /re/.test(s)`
@@ -157,8 +270,7 @@ function regexCanStart(text, from) {
     // division read as a regex can carry a phantom literal over code.
     const open = openerOf(text, i);
     if (open === -1) return false;
-    let word = open - 1;
-    while (word >= 0 && /\s/.test(text[word])) word--;
+    const word = significantBefore(text, open, spans);
     return STATEMENT_HEADS.has(identifierBefore(text, word + 1));
   }
   // `]` closes an index or an array literal, both of them values, and no
@@ -167,7 +279,22 @@ function regexCanStart(text, from) {
   // which is read as division here; neither file this scans is written that way,
   // and there is no local evidence that would tell the two apart.
   if (ch === ']') return false;
-  return NOT_A_VALUE.has(identifierBefore(text, i + 1));
+  const word = identifierBefore(text, i + 1);
+  // A PROPERTY NAME is never a keyword: after `.` or `?.` the engine reads any
+  // word as a name, so `obj.of / 2` and `obj.return / 2` both divide, and refusing
+  // the first left a reader with no rename to make — the name belongs to
+  // whatever object it is read from (sixth review). Three dots are a spread
+  // (`[...of /re/]`), where the word is a value again and the ambiguity is real.
+  if (word) {
+    const dot = significantBefore(text, i + 1 - word.length, spans);
+    if (dot >= 0 && text[dot] === '.' && text[dot - 1] !== '.') return false;
+  }
+  if (AMBIGUOUS_WORD.has(word)) {
+    throw new Error(
+      `cannot tell a regex from a division after \`${word}\`, which is both a keyword and a legal name: rename the variable or hoist the expression out of the literal`,
+    );
+  }
+  return NOT_A_VALUE.has(word);
 }
 
 /** Advance past a regex literal, including escaped delimiters and flags. */
@@ -259,6 +386,15 @@ function unescaped(text) {
     } else if (next === 'u') {
       out += String.fromCharCode(hexValue(text.slice(i + 1, i + 5), text));
       i += 4;
+    } else if (next === '\n' || next === '\u2028' || next === '\u2029') {
+      // A line continuation spells NOTHING. `'si\<newline>zes'` is `sizes` to the
+      // engine, and a reader that kept the newline compared a route with a line
+      // break in it — reporting the real one missing and inventing one nobody
+      // serves.
+    } else if (next === '\r') {
+      // CRLF is one terminator. Swallow the LF with it, or the value keeps a
+      // newline the engine never put there.
+      if (text[i + 1] === '\n') i++;
     } else {
       // Anything else stands for itself: `\'`, `\"`, `` \` ``, `\\`, `\$`.
       out += SHORT_ESCAPES[next] ?? next;
@@ -283,6 +419,7 @@ function escapeRegExp(text) {
 
 /** Remove comments without treating comment markers inside strings as syntax. */
 export function stripComments(text) {
+  const spans = new Map();
   let clean = '';
   for (let i = 0; i < text.length; i++) {
     const ch = text[i];
@@ -291,16 +428,15 @@ export function stripComments(text) {
       clean += text.slice(i, end);
       i = end - 1;
     } else if (ch === '/' && text[i + 1] === '/') {
-      const end = text.indexOf('\n', i + 2);
-      const stop = end === -1 ? text.length : end;
+      const stop = lineCommentEnd(text, i + 2, spans);
       clean += ' '.repeat(stop - i);
       i = stop - 1;
     } else if (ch === '/' && text[i + 1] === '*') {
-      const end = text.indexOf('*/', i + 2);
+      const end = blockCommentEnd(text, i, spans);
       const stop = end === -1 ? text.length : end + 2;
       clean += text.slice(i, stop).replace(/[^\r\n]/g, ' ');
       i = stop - 1;
-    } else if (ch === '/' && regexCanStart(text, i)) {
+    } else if (ch === '/' && regexCanStart(text, i, spans)) {
       const end = regexEnd(text, i);
       clean += text.slice(i, end);
       i = end - 1;
@@ -312,7 +448,47 @@ export function stripComments(text) {
 }
 
 /** The text inside a balanced pair, ignoring delimiters in literals and comments. */
-export function balanced(text, from, open, close) {
+/**
+ * Where a `//` comment ends: the next LINE TERMINATOR, all four of them.
+ *
+ * JavaScript ends a line comment at CR, LF, U+2028 or U+2029, and every scanner in
+ * this file used to look for LF alone. That is not a nicety: a comment ended by a
+ * CR left the rest of a physical line looking like comment to this reader while the
+ * engine had gone back to reading code — `([m, p]: Route, //<CR> _i, { [++(p as any)]: u }<LF>)`
+ * passed the parameter count and returned `GET NaN` at runtime (review of
+ * OPL-4830). A scanner that agrees with the engine about where a comment stops is
+ * the only way the counting means anything.
+ *
+ * Returns the length of the text when the comment runs to the end.
+ */
+function lineCommentEnd(text, from, spans) {
+  // `from` is the first character AFTER the `//`, at every call site; the span
+  // recorded starts at the `//` itself.
+  let end = text.length;
+  for (let i = from; i < text.length; i++) {
+    const ch = text[i];
+    if (ch === '\n' || ch === '\r' || ch === '\u2028' || ch === '\u2029') {
+      end = i;
+      break;
+    }
+  }
+  spans.set(end, from - 2);
+  return end;
+}
+
+/**
+ * The index of the `*` in the closer of the block comment that opens at `from`,
+ * or -1 when it never closes — the same answer `indexOf` gave, because the
+ * callers each do something different with an unterminated one — and recorded
+ * in the scan's `spans` so a backwards step can find where it began.
+ */
+function blockCommentEnd(text, from, spans) {
+  const end = text.indexOf('*/', from + 2);
+  if (end !== -1) spans.set(end + 2, from);
+  return end;
+}
+
+export function balanced(text, from, open, close, spans = new Map()) {
   // The caller's `indexOf` answers -1 for a delimiter that is not there, and -1
   // is a legal loop start: what came back was the text from offset 0 to whatever
   // closer turned up first, a slice that looks like an answer and is not one.
@@ -327,12 +503,11 @@ export function balanced(text, from, open, close) {
     if (ch === "'" || ch === '"' || ch === '`') {
       i = quotedEnd(text, i) - 1;
     } else if (ch === '/' && text[i + 1] === '/') {
-      const end = text.indexOf('\n', i + 2);
-      i = end === -1 ? text.length : end;
+      i = lineCommentEnd(text, i + 2, spans);
     } else if (ch === '/' && text[i + 1] === '*') {
-      const end = text.indexOf('*/', i + 2);
+      const end = blockCommentEnd(text, i, spans);
       i = end === -1 ? text.length : end + 1;
-    } else if (ch === '/' && regexCanStart(text, i)) {
+    } else if (ch === '/' && regexCanStart(text, i, spans)) {
       i = regexEnd(text, i) - 1;
     } else if (ch === open) depth++;
     else if (ch === close && --depth === 0) return text.slice(from + 1, i);
@@ -370,6 +545,7 @@ export function balanced(text, from, open, close) {
  * that field and the comparison will say the mirror invented it.
  */
 export function topLevelKeys(body) {
+  const spans = new Map();
   const keys = [];
   // A key sits at the start of the object or just after a comma; nothing else
   // in an object literal is a key, whatever follows it. `tag: flag ? 'a' : 'b'`
@@ -441,7 +617,7 @@ export function topLevelKeys(body) {
       // colon is the whole of the confirmation: `make<[A, B]>()` also puts a `[`
       // where a key could be, and it names no field.
       if (ch === '[') {
-        const closed = i + balanced(body, i, '[', ']').length + 2;
+        const closed = i + balanced(body, i, '[', ']', spans).length + 2;
         if (body.slice(closed).match(/^\s*:/)) {
           throw new Error(`a computed key this reader cannot resolve: ${seen(i)}`);
         }
@@ -491,7 +667,19 @@ export function topLevelKeys(body) {
     } else if (ch === "'" || ch === '"' || ch === '`') {
       i = quotedEnd(body, i);
       continue;
-    } else if (ch === '/' && regexCanStart(body, i)) {
+    } else if (ch === '/' && body[i + 1] === '/') {
+      // Stepped over AND recorded, like every other scanner: this one read a
+      // comment's text as code, which was wrong on its own, and once the step
+      // back over a comment relied on what the scan had recorded it also gave a
+      // different answer to the same string depending on what had been scanned
+      // before (seventh review).
+      i = lineCommentEnd(body, i + 2, spans);
+      continue;
+    } else if (ch === '/' && body[i + 1] === '*') {
+      const end = blockCommentEnd(body, i, spans);
+      i = end === -1 ? body.length : end + 2;
+      continue;
+    } else if (ch === '/' && regexCanStart(body, i, spans)) {
       i = regexEnd(body, i);
       continue;
     }
@@ -521,6 +709,7 @@ export function topLevelKeys(body) {
  * about which quote closes the literal and hands back a truncated value.
  */
 export function topLevelField(body, name) {
+  const spans = new Map();
   const at = new RegExp(`${escapeRegExp(name)}\\s*:\\s*`, 'y');
   let depth = 0;
   let i = 0;
@@ -535,7 +724,19 @@ export function topLevelField(body, name) {
     } else if (ch === "'" || ch === '"' || ch === '`') {
       i = quotedEnd(body, i);
       continue;
-    } else if (ch === '/' && regexCanStart(body, i)) {
+    } else if (ch === '/' && body[i + 1] === '/') {
+      // Stepped over AND recorded, like every other scanner: this one read a
+      // comment's text as code, which was wrong on its own, and once the step
+      // back over a comment relied on what the scan had recorded it also gave a
+      // different answer to the same string depending on what had been scanned
+      // before (seventh review).
+      i = lineCommentEnd(body, i + 2, spans);
+      continue;
+    } else if (ch === '/' && body[i + 1] === '*') {
+      const end = blockCommentEnd(body, i, spans);
+      i = end === -1 ? body.length : end + 2;
+      continue;
+    } else if (ch === '/' && regexCanStart(body, i, spans)) {
       i = regexEnd(body, i);
       continue;
     }
@@ -585,6 +786,7 @@ export function topLevelField(body, name) {
  * one of them reports the other as absent.
  */
 export function topLevelValueAt(body, name) {
+  const spans = new Map();
   const lit = escapeRegExp(name);
   const key = new RegExp(`(?:'${lit}'|"${lit}"|${lit})\\s*:\\s*`, 'y');
   let depth = 0;
@@ -606,7 +808,19 @@ export function topLevelValueAt(body, name) {
     } else if (ch === "'" || ch === '"' || ch === '`') {
       i = quotedEnd(body, i);
       continue;
-    } else if (ch === '/' && regexCanStart(body, i)) {
+    } else if (ch === '/' && body[i + 1] === '/') {
+      // Stepped over AND recorded, like every other scanner: this one read a
+      // comment's text as code, which was wrong on its own, and once the step
+      // back over a comment relied on what the scan had recorded it also gave a
+      // different answer to the same string depending on what had been scanned
+      // before (seventh review).
+      i = lineCommentEnd(body, i + 2, spans);
+      continue;
+    } else if (ch === '/' && body[i + 1] === '*') {
+      const end = blockCommentEnd(body, i, spans);
+      i = end === -1 ? body.length : end + 2;
+      continue;
+    } else if (ch === '/' && regexCanStart(body, i, spans)) {
       i = regexEnd(body, i);
       continue;
     }
@@ -636,6 +850,7 @@ export function topLevelValueAt(body, name) {
  * the mirror invented rather than as a list nobody read whole.
  */
 export function entries(body) {
+  const spans = new Map();
   const out = [];
   let depth = 0;
   let from = 0;
@@ -652,16 +867,15 @@ export function entries(body) {
       continue;
     }
     if (ch === '/' && body[i + 1] === '/') {
-      const end = body.indexOf('\n', i + 2);
-      i = end === -1 ? body.length : end;
+      i = lineCommentEnd(body, i + 2, spans);
       continue;
     }
     if (ch === '/' && body[i + 1] === '*') {
-      const end = body.indexOf('*/', i + 2);
+      const end = blockCommentEnd(body, i, spans);
       i = end === -1 ? body.length : end + 2;
       continue;
     }
-    if (ch === '/' && regexCanStart(body, i)) {
+    if (ch === '/' && regexCanStart(body, i, spans)) {
       if (depth === 0) throw stray(i);
       i = regexEnd(body, i);
       continue;
@@ -696,6 +910,7 @@ export function entries(body) {
  * handed one element fewer.
  */
 export function listItems(body) {
+  const spans = new Map();
   const items = [];
   const opener = { '}': '{', ']': '[', ')': '(' };
   const stack = [];
@@ -708,16 +923,15 @@ export function listItems(body) {
       continue;
     }
     if (ch === '/' && body[i + 1] === '/') {
-      const end = body.indexOf('\n', i + 2);
-      i = end === -1 ? body.length : end;
+      i = lineCommentEnd(body, i + 2, spans);
       continue;
     }
     if (ch === '/' && body[i + 1] === '*') {
-      const end = body.indexOf('*/', i + 2);
+      const end = blockCommentEnd(body, i, spans);
       i = end === -1 ? body.length : end + 2;
       continue;
     }
-    if (ch === '/' && regexCanStart(body, i)) {
+    if (ch === '/' && regexCanStart(body, i, spans)) {
       i = regexEnd(body, i);
       continue;
     }
@@ -812,6 +1026,7 @@ export function objectFields(body) {
  * declaration counts as nested and a second declaration cannot be found there.
  */
 export function moduleDeclarations(source, pattern) {
+  const spans = new Map();
   const found = [];
   const opener = { '}': '{', ']': '[', ')': '(' };
   const stack = [];
@@ -824,16 +1039,15 @@ export function moduleDeclarations(source, pattern) {
       continue;
     }
     if (ch === '/' && source[i + 1] === '/') {
-      const end = source.indexOf('\n', i + 2);
-      i = end === -1 ? source.length : end;
+      i = lineCommentEnd(source, i + 2, spans);
       continue;
     }
     if (ch === '/' && source[i + 1] === '*') {
-      const end = source.indexOf('*/', i + 2);
+      const end = blockCommentEnd(source, i, spans);
       i = end === -1 ? source.length : end + 2;
       continue;
     }
-    if (ch === '/' && regexCanStart(source, i)) {
+    if (ch === '/' && regexCanStart(source, i, spans)) {
       i = regexEnd(source, i);
       continue;
     }
@@ -856,4 +1070,422 @@ export function moduleDeclarations(source, pattern) {
   }
   if (stack.length) throw new Error('unbalanced module scope');
   return found;
+}
+
+/**
+ * The value of `text` when it is exactly one plain quoted literal, else
+ * `undefined`.
+ *
+ * Any of the three quote styles, which is the point of it. The mirror tables
+ * were read with `/'([^']+)'/g`, so an entry a formatter or an author wrote with
+ * double quotes matched nothing and was skipped — and a skipped entry is not a
+ * complaint, it is a table that is short by however much it held. The caller
+ * decides what to do about an unreadable element; this only answers whether the
+ * element IS a plain string.
+ *
+ * Escapes are RESOLVED rather than refused, through the same `unescaped` the rest
+ * of this file reads literals with: `"a\x2Fb"` is the four characters `a/b` and a
+ * reader that answered `a\x2Fb` would compare a route nobody serves. A template
+ * that interpolates is the one thing refused, because what it spells depends on
+ * values this reader cannot see.
+ */
+export function stringLiteral(text) {
+  const t = text.trim();
+  const quote = t[0];
+  if (quote !== "'" && quote !== '"' && quote !== '`') return undefined;
+  // The literal has to be the WHOLE of the element. `'a' + b` and `'a'.repeat(2)`
+  // both start with a readable literal and mean something else.
+  if (quotedEnd(t, 0) !== t.length) return undefined;
+  const inner = t.slice(1, -1);
+  if (quote === '`' && hasHole(inner)) return undefined;
+  return unescaped(inner);
+}
+
+/**
+ * The body of the array literal a table's initializer IS, and a throw for an
+ * initializer that is anything more than one.
+ *
+ * The tables read here are arrays, but not always the initializer itself: one is
+ * `new Set((<array> as Route[]).map(...))` and another is `new Map(<array>)`.
+ * Finding the array with `indexOf('[')` reads the `[` of the `as Route[]`
+ * annotation, and a regex over the declaration reads whichever bracket comes
+ * first — including one inside a nested literal, and including the `[m, p]` of
+ * the `.map` destructuring that follows the real table.
+ *
+ * Taking the LEADING array is not enough either, which is the adversarial review
+ * finding this answers: `(<array>.concat([['GET', 'gone']]) as Route[]).map(...)`
+ * type-checks, puts a route in the Set, and leaves the leading array — the one a
+ * leading-array reader compares — without it. The extra route is then a route the
+ * mirror lists and the comparison never sees, which is the false all-clear this
+ * whole file exists to refuse.
+ *
+ * So the initializer must REDUCE to the array, and every piece of it is
+ * whitelisted:
+ *
+ * - wrapping parentheses, however many;
+ * - a trailing `as <type>`, the annotation being the point of the parentheses;
+ * - one trailing `.map(...)`, which cannot change how many elements there are —
+ *   that is what makes it safe to look through, and `concat`, `filter`, `flatMap`
+ *   and a spread are all refused because they can.
+ *
+ * Anything else is a table this reader would compare part of. It throws instead,
+ * naming what it could not reduce.
+ */
+/** The one destructured parameter the permitted projection takes. */
+const DESTRUCTURED_PAIR =
+  /^\[\s*([A-Za-z_$][\w$]*)\s*,\s*([A-Za-z_$][\w$]*)\s*,?\s*\](?:\s*:\s*[^=]*)?$/;
+
+/**
+ * Whether `text` is the one projection this reader can account for: the
+ * destructured pair joined by a space.
+ *
+ * Parsed rather than matched with one regex, which is what the third round of this
+ * finding cost. `(?::[^)]*)?` for the parameter's type annotation also swallowed
+ * ADDITIONAL parameters, and `.map` passes only three arguments — so a fourth
+ * parameter with a default ran that default:
+ * `([m, p]: Route, _i, _a, unused = p = 'gone') => ${'`${m} ${p}`'}` type-checks, returns
+ * `GET gone` at runtime, and matched. So the parameter list is split with
+ * `listItems` and there has to be exactly ONE of them, carrying no `=`.
+ *
+ * The call's arguments are split the same way, for the false refusal alongside it:
+ * a formatter wrapping the call leaves a trailing comma after the callback, and a
+ * regex anchored at the template's backtick refused a legal projection — a gate
+ * that a reformat takes down is a broken gate.
+ */
+/**
+ * Whether a parameter list holds exactly one parameter.
+ *
+ * `listItems` cannot answer this, and that is the whole reason this exists: it
+ * balances `()`, `[]` and `{}` and knows nothing about `<>`, so a legal
+ * `([m, p]: Route<string, string>)` reads as two parameters. Matching the whole
+ * list against one pattern instead — with the annotation as `[^=]*` — was the
+ * other direction of the same mistake, and it admitted a PROVEN false all-clear:
+ * an extra destructured parameter whose computed key runs without containing an
+ * `=` changed the value the callback returned while the reader went on reporting
+ * the routes of the array it could see.
+ *
+ * So the commas are counted with the angle brackets balanced too. A `>` whose
+ * previous character is `=` is an arrow's and closes nothing, and `<`/`>` count
+ * only at bracket depth zero — inside `()`, `[]` or `{}` a `<` may be a
+ * comparison, and a wrong angle depth there would be a wrong answer rather than a
+ * refusal.
+ */
+function oneParameter(paramsText) {
+  const spans = new Map();
+  let brackets = 0;
+  let angles = 0;
+  let i = 0;
+  /** Whether only whitespace and comments are left, which makes a comma terminal. */
+  const nothingAfter = (from) => {
+    let j = from;
+    while (j < paramsText.length) {
+      if (/\s/.test(paramsText[j])) {
+        j++;
+        continue;
+      }
+      if (paramsText[j] === '/' && paramsText[j + 1] === '/') {
+        j = lineCommentEnd(paramsText, j + 2, spans);
+        continue;
+      }
+      if (paramsText[j] === '/' && paramsText[j + 1] === '*') {
+        const end = blockCommentEnd(paramsText, j, spans);
+        if (end === -1) return false;
+        j = end + 2;
+        continue;
+      }
+      return false;
+    }
+    return true;
+  };
+  while (i < paramsText.length) {
+    const ch = paramsText[i];
+    if (ch === "'" || ch === '"' || ch === '`') {
+      i = quotedEnd(paramsText, i);
+      continue;
+    }
+    // Comments are stepped over BEFORE anything is counted, because a bracket
+    // inside one is not a bracket: `([m, p]: Route /* < */, _i, { [++(p as any)]: u })`
+    // left the angle depth positive for the rest of the list, hid the commas after
+    // it, and read as one parameter — the same false all-clear in a new spelling
+    // (second review round of OPL-4830).
+    if (ch === '/' && paramsText[i + 1] === '/') {
+      i = lineCommentEnd(paramsText, i + 2, spans);
+      continue;
+    }
+    if (ch === '/' && paramsText[i + 1] === '*') {
+      const end = blockCommentEnd(paramsText, i, spans);
+      // An unterminated comment is not something to read past.
+      if (end === -1) return false;
+      i = end + 2;
+      continue;
+    }
+    if (ch === '(' || ch === '[' || ch === '{') brackets++;
+    else if (ch === ')' || ch === ']' || ch === '}') brackets--;
+    else if (ch === '<' && brackets === 0) angles++;
+    else if (ch === '>' && brackets === 0 && paramsText[i - 1] !== '=' && angles > 0) angles--;
+    else if (ch === ',' && brackets === 0 && angles === 0) {
+      // A TERMINAL comma is punctuation, not a parameter: `([m, p]: Route,) => …`
+      // is one parameter and a formatter writes it that way on a wrapped line.
+      // Refusing it made a supported projection fail over a comma (second review
+      // round).
+      if (!nothingAfter(i + 1)) return false;
+      break;
+    }
+    i++;
+  }
+  // A depth that does not come back to zero means this reader lost track of the
+  // list rather than read it, and the answer it would give is a guess.
+  return brackets === 0 && angles === 0;
+}
+
+function joinsThePair(argsText) {
+  const args = listItems(argsText);
+  if (args.length !== 1) return false;
+  const arrow = args[0].trim();
+  if (!arrow.startsWith('(')) return false;
+  const params = balanced(arrow, 0, '(', ')');
+  const body = arrow.slice(params.length + 2).trim();
+  // The arrow and its body trimmed apart, because a formatter puts the template on
+  // its own line when the parameter's annotation is long, and comparing the whole
+  // tail to one string refused exactly that.
+  if (!body.startsWith('=>')) return false;
+  // The whole parameter text against one pattern rather than split into
+  // parameters first: `listItems` does not balance angle brackets, so a legal
+  // `([m, p]: Route<string, string>)` read as TWO parameters and a mirror a
+  // formatter would produce was refused. What actually has to be excluded is a
+  // DEFAULT — the only thing an extra parameter can do to a value, since `.map`
+  // passes three arguments and a default runs — and every default contains an
+  // `=`, which the annotation here may not. An extra parameter without one cannot
+  // change what the callback returns.
+  // Exactly one parameter, counted with the angle brackets balanced, BEFORE the
+  // shape is matched. `DESTRUCTURED_PAIR`'s annotation tail is `[^=]*`, which
+  // swallows further parameters whole, and a default is not the only thing an
+  // extra parameter can do to the value: `([m, p]: Route, _i, { [++(p as any)]: u })`
+  // type-checks, holds no `=` at all, and returns `GET NaN` from a reader that
+  // reported `GET sizes` (review of OPL-4830).
+  if (!oneParameter(params)) return false;
+  const named = DESTRUCTURED_PAIR.exec(params.trim());
+  if (!named) return false;
+  return body.slice(2).trim() === `\`\${${named[1]}} \${${named[2]}}\``;
+}
+
+export function tableArrayLiteral(text, what = 'this declaration', projections = null) {
+  const refuse = (why, at) => {
+    throw new Error(`${what} ${why}: ${JSON.stringify(at.trim().slice(0, 60))}`);
+  };
+  let t = text.trim();
+  let maps = 0;
+  // Ten is past any nesting a formatter produces and stops a rule that fails
+  // to shorten `t` from spinning. Each pass below strips at least one construct.
+  for (let pass = 0; pass < 10; pass++) {
+    // The trailing comma a formatter leaves on a multi-line argument. Stripped
+    // first, because every rule below reads the last character.
+    if (t.endsWith(',')) {
+      t = t.slice(0, -1).trimEnd();
+      continue;
+    }
+    // One trailing `.map(...)`, stripped before the parentheses around it: the
+    // call's own `(` would otherwise read as a wrapper that never closes here.
+    //
+    // And the CALLBACK is checked, not waved through, which is the second round
+    // of the same finding. `.map` preserving the element count is not enough:
+    // `([['GET', 'sizes']] as Route[]).map(() => 'GET gone')` type-checks and puts
+    // a route in the Set that is in no array this reader can see. The one
+    // projection it knows how to account for is the pair joined by a space, so
+    // that is the one it accepts — spelled any way, with any two parameter names,
+    // and anything else refused. Pinning the shape means a rewrite of the callback
+    // breaks this gate LOUDLY, which is the correct direction for a gate to fail.
+    const map = trailingCall(t, '.map');
+    if (map !== undefined) {
+      if (maps++ > 0) refuse('chains more than one .map, which this reader cannot follow', t);
+      if (!joinsThePair(map.argument)) {
+        refuse('maps its entries with a callback this reader cannot account for', map.argument);
+      }
+      t = map.receiver.trim();
+      continue;
+    }
+    if (t.startsWith('(')) {
+      const inner = balanced(t, 0, '(', ')');
+      // Only when the `)` is the END of it. `(a) + (b)` opens with a parenthesis
+      // and is not a parenthesised expression.
+      if (`(${inner})` === t) {
+        t = inner.trim();
+        continue;
+      }
+    }
+    // `as <type>` — an identifier, dots and `[]`, and NO type arguments at all.
+    //
+    // Three rounds of narrowing a pattern here each admitted the next spelling, and
+    // the third is the one that settles it. `as any<X, Y>[]` is not a type:
+    // TypeScript ends the type at `any` and reads `< X, Y > []` as comparisons and a
+    // comma expression, so the value reaching the call is a boolean while the reader
+    // erased the suffix and certified the array it could see. Restricting the
+    // arguments to keyword types looked sufficient — `string` is not a value — until
+    // `const string: any = 1` made it one, and `as any<string, string>[]` type-checks
+    // and returns `true` at runtime (review of OPL-4830). Nothing about the SHAPE of
+    // a generic suffix can tell the two apart, because which reading TypeScript
+    // takes depends on what names are in scope, which this reader cannot see.
+    //
+    // So no generic suffix is read through. The body reader in this same file
+    // refuses every `as` suffix for exactly this reason and pays a refusal for it;
+    // this is the same answer, kept as narrow as the tables need — `as Route[]` is
+    // how every mirror spells its own, and a generic one is refused by name rather
+    // than guessed at.
+    //
+    // THE COMPATIBILITY LOSS IS DELIBERATE AND WORTH WRITING DOWN: `as
+    // Route<string, string>[]` and `as Iterable<string>` are legal casts this reader
+    // used to reduce and now refuses. A mirror that wants either can spell the type
+    // as a non-generic alias — `type Routes = Route<string, string>[]` — and this
+    // reads `as Routes` happily. A refusal that names the declaration is a minute's
+    // work for whoever wrote it; the alternative was a reader that certifies the
+    // wrong route set and says nothing.
+    const as = /\sas\s+[A-Za-z_$][\w$.]*(?:\s*\[\s*\])*\s*$/.exec(t);
+    if (as) {
+      t = t.slice(0, as.index).trim();
+      continue;
+    }
+    break;
+  }
+  // The projection is REQUIRED where the table has one, not merely permitted at
+  // most once. `new Set([['GET', 'sizes']] as unknown as Iterable<string>)` reduces
+  // to the array this reader compares and builds a Set of ARRAYS at runtime, so
+  // every `has()` on it is false — a mirror that matches and asserts nothing. The
+  // caller says how many projections its table is built with, and zero is as wrong
+  // as two when the answer is one.
+  if (projections !== null && maps !== projections) {
+    refuse(`is built with ${maps} projections where this reader expects ${projections}`, text);
+  }
+  if (!t.startsWith('[')) refuse('is not an array literal this reader can read', t);
+  const body = balanced(t, 0, '[', ']');
+  // The array has to BE the whole of what is left, not the front of it: the
+  // `.concat` above ends in a `)` and a `[0]` index ends in a `]`, and both would
+  // otherwise pass as "starts with an array".
+  if (`[${body}]` !== t) refuse('holds more than one array literal expression', t);
+  return body;
+}
+
+/**
+ * The argument text of a trailing `<name>(...)` call, or `undefined`.
+ *
+ * Both halves come back: `X.map(f)` answers `{ receiver: 'X', argument: 'f' }`.
+ * Literal-aware, so a `.map(` inside a string is not one, and the call's closing
+ * parenthesis has to be the last character — a call in the middle of an expression
+ * is not something to look through.
+ */
+function trailingCall(text, name) {
+  const spans = new Map();
+  let i = 0;
+  while (i < text.length) {
+    const ch = text[i];
+    if (ch === "'" || ch === '"' || ch === '`') {
+      i = quotedEnd(text, i);
+      continue;
+    }
+    if (ch === '/' && text[i + 1] === '/') {
+      i = lineCommentEnd(text, i + 2, spans);
+      continue;
+    }
+    if (ch === '/' && text[i + 1] === '*') {
+      const end = blockCommentEnd(text, i, spans);
+      i = end === -1 ? text.length : end + 2;
+      continue;
+    }
+    if (ch === '/' && regexCanStart(text, i, spans)) {
+      i = regexEnd(text, i);
+      continue;
+    }
+    if (ch === '(' || ch === '[' || ch === '{') {
+      const close = { '(': ')', '[': ']', '{': '}' }[ch];
+      const inner = balanced(text, i, ch, close, spans);
+      const after = i + inner.length + 2;
+      const opensCall = text.slice(0, i).trimEnd().endsWith(name);
+      if (ch === '(' && opensCall && after === text.length) {
+        return {
+          receiver: text.slice(0, text.slice(0, i).trimEnd().length - name.length),
+          argument: inner,
+        };
+      }
+      i = after;
+      continue;
+    }
+    i++;
+  }
+  return undefined;
+}
+
+/**
+ * The offset just past the `=` of a module-level declaration starting at `from`.
+ *
+ * Written because a regex could not do it. `export const NAME\s*:[^=]*=\s*new
+ * Map\(` looks like it reads a declaration and its initializer, and
+ * `moduleDeclarations` only guarantees where the match STARTS — so `[^=]*` is
+ * free to run through a quote and find its `new Map(` inside a STRING in the type
+ * annotation. An annotation carrying `& { decoy?: "= new Map([['GET x', []]])" }`
+ * type-checks, and the reader compared the mirror against the decoy's table.
+ *
+ * The same regex refuses a legal annotation for the mirror image of the reason:
+ * `{ optional?: () => string }` holds an `=`, so `[^=]*` stops at it and the
+ * `new Map(` never matches. A depth-aware walk answers both — that `=` is inside
+ * braces, and this only stops at depth zero.
+ *
+ * `=>`, `==`, `!=`, `<=` and `>=` are not assignments and are stepped over.
+ *
+ * So is an `=` inside a generic's own brackets, which is a type parameter's
+ * DEFAULT and not this declaration's initializer. `Box<<U = string>() => U>` is a
+ * legal annotation, and stopping at its `U =` reported the table as declared
+ * without an initializer — a false refusal of valid source (review of OPL-4830).
+ * The angle depth is tracked only at bracket depth zero, where a `<` in a type
+ * annotation can only be a generic's: inside `()`, `[]` or `{}` the depth rule
+ * above already steps over every `=`, and guessing at a `<` there would risk
+ * stepping over the real assignment instead.
+ */
+export function declarationAssignment(source, from) {
+  const spans = new Map();
+  let depth = 0;
+  let angles = 0;
+  let i = from;
+  while (i < source.length) {
+    const ch = source[i];
+    if (ch === "'" || ch === '"' || ch === '`') {
+      i = quotedEnd(source, i);
+      continue;
+    }
+    if (ch === '/' && source[i + 1] === '/') {
+      i = lineCommentEnd(source, i + 2, spans);
+      continue;
+    }
+    if (ch === '/' && source[i + 1] === '*') {
+      const end = blockCommentEnd(source, i, spans);
+      i = end === -1 ? source.length : end + 2;
+      continue;
+    }
+    if (ch === '/' && regexCanStart(source, i, spans)) {
+      i = regexEnd(source, i);
+      continue;
+    }
+    if (ch === '(' || ch === '[' || ch === '{') depth++;
+    else if (ch === ')' || ch === ']' || ch === '}') {
+      // A closer at depth zero ends the declaration without an initializer, and
+      // reading on would find the NEXT one's.
+      if (depth-- === 0) return -1;
+    } else if (ch === '<' && depth === 0) angles++;
+    else if (ch === '>' && depth === 0 && source[i - 1] !== '=' && angles > 0) angles--;
+    else if (ch === ';' && depth === 0) return -1;
+    else if (ch === '=' && depth === 0 && angles === 0) {
+      const next = source[i + 1];
+      const prev = source[i - 1];
+      // `=>`, `==`, `===` and `!=` only. A `<` or `>` in FRONT is not a comparison
+      // here: in a type annotation it is a generic's bracket, and
+      // `ReadonlyMap<string, readonly string[]>=new Map(...)` — unformatted, but
+      // legal — was read as `>=`, so the real assignment was skipped and the table
+      // reported undeclared.
+      if (next === '=' || next === '>' || prev === '=' || prev === '!') {
+        i += 2;
+        continue;
+      }
+      return i + 1;
+    }
+    i++;
+  }
+  return -1;
 }

@@ -5,10 +5,13 @@ import { join, relative, resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   balanced,
+  declarationAssignment,
   entries,
   listItems,
   objectFields,
+  stringLiteral,
   stripComments,
+  tableArrayLiteral,
   topLevelField,
   topLevelKeys,
 } from '../scripts/surface-text.mjs';
@@ -329,10 +332,181 @@ describe('the surface source scanner', () => {
     expect(clean).not.toContain('and this');
   });
 
-  it('reads a regex that follows a keyword', () => {
-    for (const word of ['typeof', 'in', 'of', 'instanceof', 'new', 'void', 'delete', 'else']) {
+  it('reads a regex that follows a RESERVED keyword', () => {
+    // A reserved word cannot also be a variable name, so a slash after one can only
+    // begin a regex and reading it as division walks into the regex's body.
+    for (const word of ['typeof', 'in', 'instanceof', 'new', 'void', 'delete', 'else']) {
       const source = `x = a ${word} /b['c]/; // remove this\n`;
       expect(stripComments(source)).not.toContain('remove this');
+    }
+  });
+
+  it('refuses a slash after a word that is both a keyword and a name', () => {
+    // `of` was in the list above, and that is the ambiguity this reader cannot
+    // resolve: `for (const x of /re/)` is a regex and `of / 2` is a division, and
+    // which one an occurrence is takes a parser's token context rather than a word
+    // list. Both guesses are wrong in a way that matters — read as a regex, `of / 2`
+    // inside a template swallowed the rest of the interpolation and dropped two
+    // documented fields from the answer while still reporting a match (review of
+    // OPL-4830); read as a division, a real regex's `}` closes a scope nobody opened.
+    //
+    // So it refuses, by name, and whoever wrote it renames a variable.
+    for (const word of ['of', 'type', 'from', 'is', 'as', 'await', 'yield', 'static']) {
+      expect(() => stripComments(`x = a ${word} /b['c]/;\n`), word).toThrow(
+        /cannot tell a regex from a division/,
+      );
+    }
+    // The documented-fields case from that review, end to end: two fields after the
+    // ambiguous slash, which used to vanish silently.
+    expect(() =>
+      topLevelKeys(`first: str(\`\${of / 2} /\`), omitted: str("required"), last: str(\`} tail\`)`),
+    ).toThrow(/cannot tell a regex from a division/);
+  });
+
+  it('reads a division after a postfix operator, and a regex after a comment', () => {
+    // Two more from the same review, and both were silent. `count++ / 2` read the
+    // slash as a regex — `+` is in the openers list as a prefix and infix operator —
+    // and consumed the rest of the template and then the rest of the file, so a
+    // legal mirror was reported undeclared. And a regex written after a block comment
+    // had the COMMENT's closing slash inspected, which answered division, after which
+    // the regex's `}` counted as syntax and its backtick ended the template early:
+    // a route table inside that template read as the real one.
+    expect(stripComments('let n = count++ / 2; // remove this\n')).not.toContain('remove this');
+    // `--` was never in the openers list, so this one held before the fix too: a
+    // compatibility check beside the regression, not a second regression.
+    expect(stripComments('let n = count-- / 2; // remove this\n')).not.toContain('remove this');
+    const afterComment = 'const s = `${ /*c*/ /}`/.source }`; // remove this\n';
+    const clean = stripComments(afterComment);
+    expect(clean).not.toContain('remove this');
+    // The regex survived whole rather than being walked into, so the backtick inside
+    // it never ended the template.
+    expect(clean).toContain('/}`/');
+  });
+
+  it('steps back over a comment by what the forward scan recorded, not by a guess', () => {
+    // `lastIndexOf('/*')` guessed where a block comment began, and a `/*` inside the
+    // comment's own text had it stop short: the `+` before the inner marker was
+    // handed back as the preceding token, the division after the comment read as a
+    // regex, and two documented fields vanished with the check still reporting a
+    // match (sixth review). The forward scan has already decided what every earlier
+    // character IS, so the comment it stepped over is the one stepped back over.
+    expect(
+      topLevelKeys(
+        `first: str(\`\${count /* outer + /* inner */ / 2} /\`), omitted: str("required"), last: str(\`} tail\`)`,
+      ),
+    ).toEqual(['first', 'omitted', 'last']);
+    // A LINE comment holding a block-comment closer: crossing the newline used to
+    // inspect that closer and step back to the `+` in front of it.
+    expect(stripComments('let n = count // c + /* t */\n / 2; // remove this\n')).not.toContain(
+      'remove this',
+    );
+  });
+
+  it('stays linear when the line endings are not LF', () => {
+    // The line-comment lookup recognised LF alone, so a table with CR endings had
+    // every slash re-scan the whole accumulated prefix — 134 KB was over the budget
+    // the LF case had already been held to (sixth review). Nothing is scanned now,
+    // whatever the terminator: the comment a step crosses is looked up, not found.
+    for (const nl of ['\r', '\r\n', '\u2028', '\u2029']) {
+      const source = `const x = ${Array.from({ length: 12_000 }, (_, i) => `a${i}${nl} / b${i}`).join(' + ')};${nl}// remove this${nl}`;
+      const started = Date.now();
+      expect(stripComments(source), JSON.stringify(nl)).not.toContain('remove this');
+      expect(Date.now() - started, JSON.stringify(nl)).toBeLessThan(1000);
+    }
+  });
+
+  it('reads a division after a property name, whatever the name is', () => {
+    // After `.` or `?.` the engine reads any word as a name, keyword or not, so the
+    // refusal above had no rename to offer for `obj.of / 2` — the name is the
+    // object's, not the author's (sixth review). Reserved words are names there
+    // too: `obj.return / 2` read the slash as a regex and kept what followed.
+    for (const expr of ['obj.of', 'obj.type', 'obj?.of', 'obj . of', 'obj.return', 'obj.if']) {
+      expect(stripComments(`x = ${expr} / 2; // remove this\n`), expr).not.toContain('remove this');
+    }
+    // Three dots are a spread, where the word is a value again and the ambiguity
+    // is real.
+    expect(() => stripComments('x = [...of /b/];\n')).toThrow(
+      /cannot tell a regex from a division/,
+    );
+  });
+
+  it('steps back over a line comment that ends in whitespace', () => {
+    // A line comment ends at its newline, and the spaces before that newline are
+    // INSIDE it. The step that skipped whitespace first walked into the comment,
+    // past the offset the scan had recorded, and handed the `+` before the spaces
+    // back as the preceding token — two documented fields gone, with a match
+    // still reported (seventh review). The record is consulted before every step.
+    expect(
+      topLevelKeys(
+        `first: str(\`\${\ncount // +   \n / 2} /\`), omitted: str("required"), last: str(\`} tail\`)`,
+      ),
+    ).toEqual(['first', 'omitted', 'last']);
+    expect(stripComments('let n = count // +\t\t\n / 2; // remove this\n')).not.toContain(
+      'remove this',
+    );
+  });
+
+  it('reads a comment the same way whether or not an equal string was scanned before', () => {
+    // The comment record is the scan's own, not a module-wide memory keyed by the
+    // text: with that memory, a top-level reader that did not record comments
+    // answered the same string differently depending on what had been scanned
+    // earlier in the process (seventh review). Every scanner records what it steps
+    // over, and nothing outlives the scan.
+    const fresh = `first: /* seventh */ /['x]/, omitted: "required", last: 'tail'`;
+    expect(topLevelKeys(fresh)).toEqual(['first', 'omitted', 'last']);
+    stripComments(fresh);
+    expect(topLevelKeys(fresh)).toEqual(['first', 'omitted', 'last']);
+  });
+
+  it('does not slow down with what it has already scanned', () => {
+    // A module-wide record keyed by the text kept every input alive for the life of
+    // the process, and made the twentieth scan of a distinct 190 KB input take
+    // seconds (seventh review). Twenty distinct inputs, each held to the budget the
+    // single one is.
+    for (let n = 0; n < 20; n++) {
+      const source = `const x = ${Array.from({ length: 12_000 }, (_, i) => `a${i} / b${i}`).join(' + ')}; // remove this ${n}\n`;
+      const started = Date.now();
+      expect(stripComments(source)).not.toContain('remove this');
+      expect(Date.now() - started, `scan ${n}`).toBeLessThan(1000);
+    }
+  });
+
+  it('refuses every word that is both a keyword and a name, not most of them', () => {
+    // `abstract` and `asserts` were in the keyword list and not in the refusal
+    // list, so a slash after either read as a regex and the same two fields
+    // vanished with no refusal at all (sixth review). The whole list, against that
+    // reproduction, so the next word added to one list and not the other fails here.
+    const both = [
+      'abstract',
+      'as',
+      'asserts',
+      'async',
+      'await',
+      'declare',
+      'from',
+      'infer',
+      'is',
+      'keyof',
+      'let',
+      'namespace',
+      'of',
+      'out',
+      'override',
+      'readonly',
+      'satisfies',
+      'static',
+      'type',
+      'unique',
+      'yield',
+    ];
+    for (const word of both) {
+      expect(
+        () =>
+          topLevelKeys(
+            `first: str(\`\${${word} / 2} /\`), omitted: str("required"), last: str(\`} tail\`)`,
+          ),
+        word,
+      ).toThrow(/cannot tell a regex from a division/);
     }
   });
 
@@ -371,6 +545,22 @@ describe('the surface source scanner', () => {
     expect(() => topLevelField(String.raw`pattern: 'a\u{ZZ}b'`, 'pattern')).toThrow(/malformed/);
     expect(() => topLevelField(String.raw`pattern: 'a\u{FFFFFF}b'`, 'pattern')).toThrow(/range/);
     expect(topLevelField(String.raw`pattern: 'a\x41B\u{43}'`, 'pattern')).toBe('aABC');
+  });
+
+  it('reads a literal continued across a line the way the engine does', () => {
+    // A backslash before a newline spells NOTHING: `'si\<newline>zes'` is `sizes`
+    // to the engine. A reader that kept the newline compared a route with a line
+    // break in it — reporting the real one missing and inventing one nobody
+    // serves. All four terminators, since a checkout on either platform can carry
+    // CRLF and U+2028/U+2029 are line terminators to the engine too.
+    expect(topLevelField("pattern: 'si\\\nzes'", 'pattern')).toBe('sizes');
+    expect(topLevelField("pattern: 'si\\\r\nzes'", 'pattern')).toBe('sizes');
+    expect(topLevelField("pattern: 'si\\\rzes'", 'pattern')).toBe('sizes');
+    expect(topLevelField("pattern: 'si\\\u2028zes'", 'pattern')).toBe('sizes');
+    expect(topLevelField("pattern: 'si\\\u2029zes'", 'pattern')).toBe('sizes');
+    // `\n` is still the escape it always was, and is not confused with the
+    // terminator a continuation swallows.
+    expect(topLevelField(String.raw`pattern: 'si\nzes'`, 'pattern')).toBe('si\nzes');
   });
 
   it('reads back to the start of a word rather than over the whole prefix', () => {
@@ -1017,5 +1207,289 @@ export const V1_ROUTES: Route[] = [{ method: 'GET', pattern: 'two' }];
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+/**
+ * The table-initializer readers, which this repo's own check:surface does not
+ * call yet.
+ *
+ * They travel with the file because scripts/surface-text.mjs is kept
+ * byte-identical with the copy in the TypeScript SDK, where the mirror tables
+ * ARE array initializers and these read them. This mirror (test/allowlist.ts) is
+ * read a different way, so nothing here would be exercised by check:surface at
+ * all — and an unexercised reader is one that rots between the two copies until
+ * the next port has to rediscover what it was for. These are its tests, held on
+ * this side too, so the next parser bug found in either copy has something to
+ * fail against here as well.
+ */
+describe('the table-initializer readers', () => {
+  it('reads a plain quoted element in any of the three quote styles', () => {
+    expect(stringLiteral(`'sizes'`)).toBe('sizes');
+    expect(stringLiteral(`"sizes"`)).toBe('sizes');
+    expect(stringLiteral('`sizes`')).toBe('sizes');
+    expect(stringLiteral('  "sizes"  ')).toBe('sizes');
+  });
+
+  it('resolves an element’s escapes rather than handing back the source text', () => {
+    // `"a\x2Fb"` is the four characters `a/b`, and a reader answering `a\x2Fb`
+    // compares a route nobody serves.
+    expect(stringLiteral(String.raw`"a\x2Fb"`)).toBe('a/b');
+    expect(stringLiteral(String.raw`'ab'`)).toBe('ab');
+  });
+
+  it('declines an element that merely STARTS with a literal', () => {
+    // Both of these read as `a` to a reader that took the leading literal, and
+    // both mean something else at runtime.
+    expect(stringLiteral(`'a' + b`)).toBeUndefined();
+    expect(stringLiteral(`'a'.repeat(2)`)).toBeUndefined();
+    expect(stringLiteral('identifier')).toBeUndefined();
+  });
+
+  it('declines a template that interpolates and reads one that does not', () => {
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: the spelling is the subject
+    expect(stringLiteral('`a${b}`')).toBeUndefined();
+    expect(stringLiteral('`plain`')).toBe('plain');
+  });
+
+  it('reads an initializer that reduces to its array through the permitted wrappers', () => {
+    const one = `(([['GET', 'sizes']] as Route[]).map(([m, p]) => \`\${m} \${p}\`))`;
+    expect(tableArrayLiteral(one, 'ALLOWED', 1)).toBe(`['GET', 'sizes']`);
+    expect(tableArrayLiteral(`[['GET', 'sizes']]`, 'PARAMETERS', 0)).toBe(`['GET', 'sizes']`);
+  });
+
+  it('refuses an initializer that adds to the array after it', () => {
+    // `.concat` puts a route in the table that is in no array this reader can
+    // see, so a leading-array reader compared a table short by it — and the extra
+    // route surfaces as one the mirror invented. `.map` is safe to look through
+    // because it cannot change how many elements there are; `concat`, `filter`,
+    // `flatMap` and a spread can, so all of them are refused.
+    expect(() =>
+      tableArrayLiteral(
+        `([['GET', 'sizes']].concat([['GET', 'gone']]) as Route[]).map(([m, p]) => \`\${m} \${p}\`)`,
+        'ALLOWED',
+        1,
+      ),
+    ).toThrow(/holds more than one array literal expression/);
+  });
+
+  it('refuses a projection that does not join the pair it was handed', () => {
+    // Preserving the element count is not enough: `.map(() => 'GET gone')` puts a
+    // route in the table that is in no array this reader compares.
+    expect(() =>
+      tableArrayLiteral(`([['GET', 'sizes']] as Route[]).map(() => 'GET gone')`, 'ALLOWED', 1),
+    ).toThrow(/callback this reader cannot account for/);
+  });
+
+  it('refuses a fourth callback parameter whose default runs', () => {
+    // `.map` passes THREE arguments, so a fourth parameter's default executes —
+    // and a default can assign. `unused = p = 'gone'` rewrites the pattern on its
+    // way through a callback that otherwise looks exactly like the permitted one.
+    expect(() =>
+      tableArrayLiteral(
+        `([['GET', 'sizes']] as Route[]).map(([m, p]: Route, _i, _a, unused = p = 'gone') => \`\${m} \${p}\`)`,
+        'ALLOWED',
+        1,
+      ),
+    ).toThrow(/callback this reader cannot account for/);
+  });
+
+  it('refuses an extra callback parameter that changes the pair without an =', () => {
+    // A default is not the only thing an extra parameter can do. A computed key in
+    // a destructured parameter RUNS, and holds no `=` at all: this type-checks,
+    // survives the formatter, returns `GET NaN` at runtime, and the reader went on
+    // certifying the route it could see in the array (review of OPL-4830). So the
+    // parameter list is counted rather than pattern-matched, with the angle
+    // brackets balanced so a generic annotation is still one parameter.
+    expect(() =>
+      tableArrayLiteral(
+        `([['GET', 'sizes']] as Route[]).map(([m, p]: Route, _i, { [++(p as any)]: unused }) => \`\${m} \${p}\`)`,
+        'ALLOWED',
+        1,
+      ),
+    ).toThrow(/callback this reader cannot account for/);
+    // Even one that does nothing: an extra parameter this reader cannot account
+    // for is refused rather than judged harmless.
+    expect(() =>
+      tableArrayLiteral(
+        `([['GET', 'sizes']] as Route[]).map(([m, p]: Route, _i) => \`\${m} \${p}\`)`,
+        'ALLOWED',
+        1,
+      ),
+    ).toThrow(/callback this reader cannot account for/);
+  });
+
+  it('refuses parameters hidden behind a comment', () => {
+    // A bracket inside a comment is not a bracket. `/* < */` left the angle depth
+    // positive for the rest of the list, which hid every comma after it, and the
+    // same computed-key bypass read as one parameter again (second review round).
+    expect(() =>
+      tableArrayLiteral(
+        `([['GET', 'sizes']] as Route[]).map(([m, p]: Route /* < */, _i, { [++(p as any)]: unused }) => \`\${m} \${p}\`)`,
+        'ALLOWED',
+        1,
+      ),
+    ).toThrow(/callback this reader cannot account for/);
+    // BALANCED comments, and the closer AFTER the last parameter — which is the
+    // arrangement that isolates the skipping. With `/* > */` between the second and
+    // third, the third parameter's comma is still outside the angle depth and the
+    // count refuses it anyway, so that version passed with comment skipping removed
+    // and proved nothing (review of OPL-4830).
+    expect(() =>
+      tableArrayLiteral(
+        `([['GET', 'sizes']] as Route[]).map(([m, p]: Route /* < */, _i, { [++(p as any)]: unused } /* > */) => \`\${m} \${p}\`)`,
+        'ALLOWED',
+        1,
+      ),
+    ).toThrow(/callback this reader cannot account for/);
+  });
+
+  it('refuses parameters hidden by a comment inside a template type', () => {
+    // The scanner that skips comments is not reached when the walk is inside a
+    // template literal's `${...}`: that scan counted a brace and a backtick in a
+    // COMMENT as syntax, mispaired the interpolation, and from there had the wrong
+    // idea of where the template ended. An annotation carrying `${string // }` then
+    // hid the remaining parameters and the reader certified a route the runtime
+    // never produced — `GET NaN` at runtime, `GET sizes` from the reader (fourth
+    // review round of OPL-4830).
+    const hidden =
+      "([['GET','sizes']] as Route[]).map(([m,p]: Route | `${string // }`<{\r}`, _i, { [++(p as any)]: u } // ` >\n) => `${m} ${p}`)";
+    expect(() => tableArrayLiteral(hidden, 'ALLOWED', 1)).toThrow();
+  });
+
+  it('reads the one projection through a terminal comma', () => {
+    // A comma with nothing after it is punctuation a formatter leaves on a wrapped
+    // parameter, not another parameter — and refusing it made a supported
+    // projection fail over punctuation (second review round).
+    expect(
+      tableArrayLiteral(
+        `([['GET', 'sizes']] as Route[]).map(([m, p]: Route<string, string>,) => \`\${m} \${p}\`)`,
+        'ALLOWED',
+        1,
+      ),
+    ).toBe(`['GET', 'sizes']`);
+  });
+
+  it('refuses any type assertion carrying type arguments, because it may not be a type', () => {
+    // `as any<X, Y>[]` matched the `as` pattern and is not a type: TypeScript ends
+    // the type at `any` and reads `< X, Y > []` as comparisons and a comma
+    // expression, so the value reaching the call is a boolean. It type-checks, and
+    // erasing the suffix as a type certified routes the runtime never produces.
+    //
+    // Restricting the arguments to keyword types looked like enough — `string` is
+    // not a value — until `const string: any = 1` makes it one, and the keyword
+    // spelling type-checks and returns `true` at runtime. Which reading TypeScript
+    // takes depends on what names are in scope, which this reader cannot see, so no
+    // generic suffix is read through at all. The body reader in this file pays the
+    // same price for the same reason.
+    for (const suffix of ['any<X, Y>[]', 'any<string, string>[]', 'Route<string, string>[]']) {
+      expect(
+        () =>
+          tableArrayLiteral(
+            `(([['GET', 'sizes']] as Route[]).map(([m, p]) => \`\${m} \${p}\`) as ${suffix} as any)`,
+            'ALLOWED',
+            1,
+          ),
+        suffix,
+      ).toThrow();
+    }
+    // The spelling every mirror actually uses still reduces.
+    expect(
+      tableArrayLiteral(
+        `([['GET', 'sizes']] as Route[]).map(([m, p]) => \`\${m} \${p}\`)`,
+        'ALLOWED',
+        1,
+      ),
+    ).toBe(`['GET', 'sizes']`);
+  });
+
+  it.each([
+    ['a carriage return', '\r'],
+    ['U+2028', '\u2028'],
+  ])('ends a line comment at %s, the way the engine does', (_what, terminator) => {
+    // Every line-comment scanner in this reader looked for LF alone. The engine ends
+    // a comment at CR, LF, U+2028 and U+2029 — so a comment ended by one of the
+    // others left the rest of a physical line looking like comment here while the
+    // engine had gone back to reading code, and the parameters after it were hidden
+    // from the count (review of OPL-4830). Runtime: `GET NaN`.
+    expect(() =>
+      tableArrayLiteral(
+        `([['GET', 'sizes']] as Route[]).map(([m, p]: Route, //${terminator} _i, { [++(p as any)]: u }\n) => \`\${m} \${p}\`)`,
+        'ALLOWED',
+        1,
+      ),
+    ).toThrow(/callback this reader cannot account for/);
+  });
+
+  it('refuses a table built with no projection where its caller expects one', () => {
+    // A cast in place of the `.map` leaves the array this reader compares intact
+    // and builds a Set of ARRAYS, so every `has()` on it is false — a mirror that
+    // matches and asserts nothing. The count is required, not merely capped.
+    expect(() =>
+      tableArrayLiteral(`[['GET', 'sizes']] as unknown as Iterable<string>`, 'ALLOWED', 1),
+    ).toThrow(/is built with 0 projections where this reader expects 1/);
+    expect(() =>
+      tableArrayLiteral(
+        `([['GET', 'sizes']] as Route[]).map(([m, p]) => \`\${m} \${p}\`).map(([m, p]) => \`\${m} \${p}\`)`,
+        'ALLOWED',
+        1,
+      ),
+    ).toThrow(/chains more than one \.map/);
+  });
+
+  it('reads a projection the formatter has wrapped, annotation and trailing comma', () => {
+    // The false refusals beside those: wrapping the call leaves a trailing comma
+    // after the callback, the annotation may be generic — `listItems` does not
+    // balance angle brackets, so `([m, p]: Route<string, string>)` once read as
+    // two parameters — and the template may sit on its own line.
+    const wrapped = `(
+  [['GET', 'sizes']] as Route[]
+).map(
+  ([m, p]: Route<string, string>) =>
+    \`\${m} \${p}\`,
+)`;
+    expect(tableArrayLiteral(wrapped, 'ALLOWED', 1)).toContain(`['GET', 'sizes']`);
+  });
+
+  it('finds the assignment past an annotation carrying a decoy in a string', () => {
+    // `[^=]*=` in a regex is free to run through a quote and find its `new Map(`
+    // inside a STRING in the type annotation, and the reader then compared the
+    // mirror against the decoy's table.
+    const source = `export const T: X & { decoy?: "= new Map([['GET x', []]])" } = new Map([['real', []]]);`;
+    const at = declarationAssignment(source, 0);
+    expect(at).toBeGreaterThan(0);
+    expect(source.slice(at).trimStart().startsWith(`new Map([['real'`)).toBe(true);
+  });
+
+  it('finds the assignment past a legal annotation that contains an =', () => {
+    // The mirror image of the same regex's failure: `{ optional?: () => string }`
+    // holds an `=`, so `[^=]*` stopped at it and the table read as undeclared.
+    const source = `export const T: { optional?: () => string } = new Map([['real', []]]);`;
+    const at = declarationAssignment(source, 0);
+    expect(source.slice(at).trimStart().startsWith('new Map')).toBe(true);
+  });
+
+  it('does not read a generic closing onto the = as a comparison', () => {
+    // `ReadonlyMap<string, readonly string[]>=new Map(...)` is unformatted but
+    // legal, and reading `>=` there skipped the real assignment.
+    const source = `export const T: ReadonlyMap<string, readonly string[]>=new Map([['real', []]]);`;
+    const at = declarationAssignment(source, 0);
+    expect(source.slice(at).startsWith('new Map')).toBe(true);
+  });
+
+  it('finds the assignment past a generic type parameter’s own default', () => {
+    // `<U = string>` is a type parameter DEFAULT, not this declaration's
+    // initializer, and stopping at it reported a legal table as declared without
+    // one — a false refusal of source that type-checks (review of OPL-4830).
+    const source = `export const T: Box<<U = string>() => U> = new Map([['real', []]]);`;
+    const at = declarationAssignment(source, 0);
+    expect(at).toBeGreaterThan(0);
+    expect(source.slice(at).trimStart().startsWith('new Map')).toBe(true);
+  });
+
+  it('reports no assignment rather than finding the NEXT declaration’s', () => {
+    const source = `export const T: Route[];\nexport const U: Route[] = [];`;
+    expect(declarationAssignment(source, 0)).toBe(-1);
+    expect(declarationAssignment('declare const T: Route[] }', 0)).toBe(-1);
   });
 });
