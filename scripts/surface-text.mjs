@@ -32,6 +32,7 @@ function quotedClose(text, from) {
  * literal can hold the same characters, so it is skipped too.
  */
 function holeEnd(text, from) {
+  const spans = new Map();
   let depth = 0;
   for (let i = from; i < text.length; i++) {
     const ch = text[i];
@@ -40,14 +41,14 @@ function holeEnd(text, from) {
       if (end === -1) return -1;
       i = end - 1;
     } else if (ch === '/' && text[i + 1] === '/') {
-      i = lineCommentEnd(text, i + 2) - 1;
+      i = lineCommentEnd(text, i + 2, spans) - 1;
     } else if (ch === '/' && text[i + 1] === '*') {
-      const end = blockCommentEnd(text, i);
+      const end = blockCommentEnd(text, i, spans);
       // An unterminated block comment swallows the rest of the file, so there is no
       // closing brace to find and saying so is the only honest answer.
       if (end === -1) return -1;
       i = end + 1;
-    } else if (ch === '/' && regexCanStart(text, i)) {
+    } else if (ch === '/' && regexCanStart(text, i, spans)) {
       i = regexEnd(text, i) - 1;
     } else if (ch === '{') depth++;
     else if (ch === '}' && --depth === 0) return i;
@@ -201,37 +202,6 @@ const AMBIGUOUS_WORD = new Set([
 ]);
 
 /**
- * Every comment a forward scan has stepped over, by text: the offset where each
- * ends, mapped to where it began.
- *
- * Recorded so that a scan looking BACKWARDS from a slash can step over a comment
- * exactly, rather than guess where it began. Guessing was `lastIndexOf('/*')`,
- * and a `/*` inside the comment's own text — an "outer + inner" comment — had it
- * stop short and hand the `+` back as the preceding token, which read the
- * division after the comment as a regex and dropped two documented fields from
- * the answer while still reporting a match (review of OPL-4830). The line-comment
- * case was worse: it re-scanned the whole line at every slash, and a table with CR
- * line endings made that quadratic again after the LF case had been fixed.
- *
- * The forward scan is the authority because it has already decided what every
- * earlier character IS — string, regex, comment or code — and a comment opener
- * inside a string is not a comment to it. Backwards, nothing can tell. Every
- * scanner in this file that steps over a comment does so through `lineCommentEnd`
- * or `blockCommentEnd`, which record here; keyed by the text so a scanner working
- * on a slice records and reads its own offsets.
- */
-const COMMENTS = new Map();
-
-function noteComment(text, start, end) {
-  let spans = COMMENTS.get(text);
-  if (!spans) {
-    spans = new Map();
-    COMMENTS.set(text, spans);
-  }
-  spans.set(end, start);
-}
-
-/**
  * The last character before `from` that the engine would read as code.
  *
  * Whitespace AND comments, because a comment is not a token: a regex written
@@ -240,24 +210,48 @@ function noteComment(text, start, end) {
  * `}` counted as syntax and its backtick ended the template early, and a route
  * table inside that template was read as the real one (review of OPL-4830).
  *
- * A comment is stepped over only where the forward scan recorded one ending
- * exactly here; see COMMENTS. Nothing is scanned, so this is linear in the
- * whitespace and comments it crosses, whatever the line endings.
+ * `spans` is every comment the scan asking has stepped over so far, the offset
+ * each ends at mapped to where it began: a comment is stepped back over only
+ * where the FORWARD scan recorded one ending exactly there. Recorded rather than
+ * found, because backwards nothing can tell a comment opener inside a comment or
+ * a string from a real one — `lastIndexOf('/*')` stopped short on an "outer +
+ * inner" comment and handed the `+` back, and the division after it read as a
+ * regex that swallowed two documented fields (sixth review). The forward scan
+ * has already decided what every earlier character IS. Nothing is scanned here,
+ * so this is linear in what it crosses, whatever the line endings.
+ *
+ * The map is the SCAN's, created by each entry point and handed to the helpers
+ * it calls, never a module-wide memory keyed by the text: that kept every input
+ * alive for the life of the process, made the twentieth scan of a distinct 190 KB
+ * input take seconds, and gave a reader that did not record comments a different
+ * answer to the same string depending on what had been scanned before it
+ * (seventh review).
  */
-function significantBefore(text, from) {
+function significantBefore(text, from, spans) {
   let i = from - 1;
   for (;;) {
-    while (i >= 0 && /\s/.test(text[i])) i--;
+    // The map FIRST, before the whitespace step: a line comment ends at its
+    // newline and the spaces before that newline are INSIDE it, so a step that
+    // skipped whitespace first walked into the comment, past the offset the scan
+    // had recorded, and handed back whatever the comment's text ended in
+    // (seventh review).
+    const start = spans.get(i + 1);
+    if (start !== undefined) {
+      i = start - 1;
+      continue;
+    }
     if (i < 0) return i;
-    const start = COMMENTS.get(text)?.get(i + 1);
-    if (start === undefined) return i;
-    i = start - 1;
+    if (/\s/.test(text[i])) {
+      i--;
+      continue;
+    }
+    return i;
   }
 }
 
 /** Whether a slash here can begin a regex literal rather than divide values. */
-function regexCanStart(text, from) {
-  const i = significantBefore(text, from);
+function regexCanStart(text, from, spans) {
+  const i = significantBefore(text, from, spans);
   if (i < 0) return true;
   const ch = text[i];
   // A POSTFIX operator ends an expression, so the slash after it divides. `+` and
@@ -276,7 +270,7 @@ function regexCanStart(text, from) {
     // division read as a regex can carry a phantom literal over code.
     const open = openerOf(text, i);
     if (open === -1) return false;
-    const word = significantBefore(text, open);
+    const word = significantBefore(text, open, spans);
     return STATEMENT_HEADS.has(identifierBefore(text, word + 1));
   }
   // `]` closes an index or an array literal, both of them values, and no
@@ -292,7 +286,7 @@ function regexCanStart(text, from) {
   // whatever object it is read from (sixth review). Three dots are a spread
   // (`[...of /re/]`), where the word is a value again and the ambiguity is real.
   if (word) {
-    const dot = significantBefore(text, i + 1 - word.length);
+    const dot = significantBefore(text, i + 1 - word.length, spans);
     if (dot >= 0 && text[dot] === '.' && text[dot - 1] !== '.') return false;
   }
   if (AMBIGUOUS_WORD.has(word)) {
@@ -425,6 +419,7 @@ function escapeRegExp(text) {
 
 /** Remove comments without treating comment markers inside strings as syntax. */
 export function stripComments(text) {
+  const spans = new Map();
   let clean = '';
   for (let i = 0; i < text.length; i++) {
     const ch = text[i];
@@ -433,15 +428,15 @@ export function stripComments(text) {
       clean += text.slice(i, end);
       i = end - 1;
     } else if (ch === '/' && text[i + 1] === '/') {
-      const stop = lineCommentEnd(text, i + 2);
+      const stop = lineCommentEnd(text, i + 2, spans);
       clean += ' '.repeat(stop - i);
       i = stop - 1;
     } else if (ch === '/' && text[i + 1] === '*') {
-      const end = blockCommentEnd(text, i);
+      const end = blockCommentEnd(text, i, spans);
       const stop = end === -1 ? text.length : end + 2;
       clean += text.slice(i, stop).replace(/[^\r\n]/g, ' ');
       i = stop - 1;
-    } else if (ch === '/' && regexCanStart(text, i)) {
+    } else if (ch === '/' && regexCanStart(text, i, spans)) {
       const end = regexEnd(text, i);
       clean += text.slice(i, end);
       i = end - 1;
@@ -466,7 +461,7 @@ export function stripComments(text) {
  *
  * Returns the length of the text when the comment runs to the end.
  */
-function lineCommentEnd(text, from) {
+function lineCommentEnd(text, from, spans) {
   // `from` is the first character AFTER the `//`, at every call site; the span
   // recorded starts at the `//` itself.
   let end = text.length;
@@ -477,7 +472,7 @@ function lineCommentEnd(text, from) {
       break;
     }
   }
-  noteComment(text, from - 2, end);
+  spans.set(end, from - 2);
   return end;
 }
 
@@ -485,15 +480,15 @@ function lineCommentEnd(text, from) {
  * The index of the `*` in the closer of the block comment that opens at `from`,
  * or -1 when it never closes — the same answer `indexOf` gave, because the
  * callers each do something different with an unterminated one — and recorded
- * in COMMENTS so a backwards step can find where it began.
+ * in the scan's `spans` so a backwards step can find where it began.
  */
-function blockCommentEnd(text, from) {
+function blockCommentEnd(text, from, spans) {
   const end = text.indexOf('*/', from + 2);
-  if (end !== -1) noteComment(text, from, end + 2);
+  if (end !== -1) spans.set(end + 2, from);
   return end;
 }
 
-export function balanced(text, from, open, close) {
+export function balanced(text, from, open, close, spans = new Map()) {
   // The caller's `indexOf` answers -1 for a delimiter that is not there, and -1
   // is a legal loop start: what came back was the text from offset 0 to whatever
   // closer turned up first, a slice that looks like an answer and is not one.
@@ -508,11 +503,11 @@ export function balanced(text, from, open, close) {
     if (ch === "'" || ch === '"' || ch === '`') {
       i = quotedEnd(text, i) - 1;
     } else if (ch === '/' && text[i + 1] === '/') {
-      i = lineCommentEnd(text, i + 2);
+      i = lineCommentEnd(text, i + 2, spans);
     } else if (ch === '/' && text[i + 1] === '*') {
-      const end = blockCommentEnd(text, i);
+      const end = blockCommentEnd(text, i, spans);
       i = end === -1 ? text.length : end + 1;
-    } else if (ch === '/' && regexCanStart(text, i)) {
+    } else if (ch === '/' && regexCanStart(text, i, spans)) {
       i = regexEnd(text, i) - 1;
     } else if (ch === open) depth++;
     else if (ch === close && --depth === 0) return text.slice(from + 1, i);
@@ -550,6 +545,7 @@ export function balanced(text, from, open, close) {
  * that field and the comparison will say the mirror invented it.
  */
 export function topLevelKeys(body) {
+  const spans = new Map();
   const keys = [];
   // A key sits at the start of the object or just after a comma; nothing else
   // in an object literal is a key, whatever follows it. `tag: flag ? 'a' : 'b'`
@@ -621,7 +617,7 @@ export function topLevelKeys(body) {
       // colon is the whole of the confirmation: `make<[A, B]>()` also puts a `[`
       // where a key could be, and it names no field.
       if (ch === '[') {
-        const closed = i + balanced(body, i, '[', ']').length + 2;
+        const closed = i + balanced(body, i, '[', ']', spans).length + 2;
         if (body.slice(closed).match(/^\s*:/)) {
           throw new Error(`a computed key this reader cannot resolve: ${seen(i)}`);
         }
@@ -671,7 +667,19 @@ export function topLevelKeys(body) {
     } else if (ch === "'" || ch === '"' || ch === '`') {
       i = quotedEnd(body, i);
       continue;
-    } else if (ch === '/' && regexCanStart(body, i)) {
+    } else if (ch === '/' && body[i + 1] === '/') {
+      // Stepped over AND recorded, like every other scanner: this one read a
+      // comment's text as code, which was wrong on its own, and once the step
+      // back over a comment relied on what the scan had recorded it also gave a
+      // different answer to the same string depending on what had been scanned
+      // before (seventh review).
+      i = lineCommentEnd(body, i + 2, spans);
+      continue;
+    } else if (ch === '/' && body[i + 1] === '*') {
+      const end = blockCommentEnd(body, i, spans);
+      i = end === -1 ? body.length : end + 2;
+      continue;
+    } else if (ch === '/' && regexCanStart(body, i, spans)) {
       i = regexEnd(body, i);
       continue;
     }
@@ -701,6 +709,7 @@ export function topLevelKeys(body) {
  * about which quote closes the literal and hands back a truncated value.
  */
 export function topLevelField(body, name) {
+  const spans = new Map();
   const at = new RegExp(`${escapeRegExp(name)}\\s*:\\s*`, 'y');
   let depth = 0;
   let i = 0;
@@ -715,7 +724,19 @@ export function topLevelField(body, name) {
     } else if (ch === "'" || ch === '"' || ch === '`') {
       i = quotedEnd(body, i);
       continue;
-    } else if (ch === '/' && regexCanStart(body, i)) {
+    } else if (ch === '/' && body[i + 1] === '/') {
+      // Stepped over AND recorded, like every other scanner: this one read a
+      // comment's text as code, which was wrong on its own, and once the step
+      // back over a comment relied on what the scan had recorded it also gave a
+      // different answer to the same string depending on what had been scanned
+      // before (seventh review).
+      i = lineCommentEnd(body, i + 2, spans);
+      continue;
+    } else if (ch === '/' && body[i + 1] === '*') {
+      const end = blockCommentEnd(body, i, spans);
+      i = end === -1 ? body.length : end + 2;
+      continue;
+    } else if (ch === '/' && regexCanStart(body, i, spans)) {
       i = regexEnd(body, i);
       continue;
     }
@@ -765,6 +786,7 @@ export function topLevelField(body, name) {
  * one of them reports the other as absent.
  */
 export function topLevelValueAt(body, name) {
+  const spans = new Map();
   const lit = escapeRegExp(name);
   const key = new RegExp(`(?:'${lit}'|"${lit}"|${lit})\\s*:\\s*`, 'y');
   let depth = 0;
@@ -786,7 +808,19 @@ export function topLevelValueAt(body, name) {
     } else if (ch === "'" || ch === '"' || ch === '`') {
       i = quotedEnd(body, i);
       continue;
-    } else if (ch === '/' && regexCanStart(body, i)) {
+    } else if (ch === '/' && body[i + 1] === '/') {
+      // Stepped over AND recorded, like every other scanner: this one read a
+      // comment's text as code, which was wrong on its own, and once the step
+      // back over a comment relied on what the scan had recorded it also gave a
+      // different answer to the same string depending on what had been scanned
+      // before (seventh review).
+      i = lineCommentEnd(body, i + 2, spans);
+      continue;
+    } else if (ch === '/' && body[i + 1] === '*') {
+      const end = blockCommentEnd(body, i, spans);
+      i = end === -1 ? body.length : end + 2;
+      continue;
+    } else if (ch === '/' && regexCanStart(body, i, spans)) {
       i = regexEnd(body, i);
       continue;
     }
@@ -816,6 +850,7 @@ export function topLevelValueAt(body, name) {
  * the mirror invented rather than as a list nobody read whole.
  */
 export function entries(body) {
+  const spans = new Map();
   const out = [];
   let depth = 0;
   let from = 0;
@@ -832,15 +867,15 @@ export function entries(body) {
       continue;
     }
     if (ch === '/' && body[i + 1] === '/') {
-      i = lineCommentEnd(body, i + 2);
+      i = lineCommentEnd(body, i + 2, spans);
       continue;
     }
     if (ch === '/' && body[i + 1] === '*') {
-      const end = blockCommentEnd(body, i);
+      const end = blockCommentEnd(body, i, spans);
       i = end === -1 ? body.length : end + 2;
       continue;
     }
-    if (ch === '/' && regexCanStart(body, i)) {
+    if (ch === '/' && regexCanStart(body, i, spans)) {
       if (depth === 0) throw stray(i);
       i = regexEnd(body, i);
       continue;
@@ -875,6 +910,7 @@ export function entries(body) {
  * handed one element fewer.
  */
 export function listItems(body) {
+  const spans = new Map();
   const items = [];
   const opener = { '}': '{', ']': '[', ')': '(' };
   const stack = [];
@@ -887,15 +923,15 @@ export function listItems(body) {
       continue;
     }
     if (ch === '/' && body[i + 1] === '/') {
-      i = lineCommentEnd(body, i + 2);
+      i = lineCommentEnd(body, i + 2, spans);
       continue;
     }
     if (ch === '/' && body[i + 1] === '*') {
-      const end = blockCommentEnd(body, i);
+      const end = blockCommentEnd(body, i, spans);
       i = end === -1 ? body.length : end + 2;
       continue;
     }
-    if (ch === '/' && regexCanStart(body, i)) {
+    if (ch === '/' && regexCanStart(body, i, spans)) {
       i = regexEnd(body, i);
       continue;
     }
@@ -990,6 +1026,7 @@ export function objectFields(body) {
  * declaration counts as nested and a second declaration cannot be found there.
  */
 export function moduleDeclarations(source, pattern) {
+  const spans = new Map();
   const found = [];
   const opener = { '}': '{', ']': '[', ')': '(' };
   const stack = [];
@@ -1002,15 +1039,15 @@ export function moduleDeclarations(source, pattern) {
       continue;
     }
     if (ch === '/' && source[i + 1] === '/') {
-      i = lineCommentEnd(source, i + 2);
+      i = lineCommentEnd(source, i + 2, spans);
       continue;
     }
     if (ch === '/' && source[i + 1] === '*') {
-      const end = blockCommentEnd(source, i);
+      const end = blockCommentEnd(source, i, spans);
       i = end === -1 ? source.length : end + 2;
       continue;
     }
-    if (ch === '/' && regexCanStart(source, i)) {
+    if (ch === '/' && regexCanStart(source, i, spans)) {
       i = regexEnd(source, i);
       continue;
     }
@@ -1134,6 +1171,7 @@ const DESTRUCTURED_PAIR =
  * refusal.
  */
 function oneParameter(paramsText) {
+  const spans = new Map();
   let brackets = 0;
   let angles = 0;
   let i = 0;
@@ -1146,11 +1184,11 @@ function oneParameter(paramsText) {
         continue;
       }
       if (paramsText[j] === '/' && paramsText[j + 1] === '/') {
-        j = lineCommentEnd(paramsText, j + 2);
+        j = lineCommentEnd(paramsText, j + 2, spans);
         continue;
       }
       if (paramsText[j] === '/' && paramsText[j + 1] === '*') {
-        const end = blockCommentEnd(paramsText, j);
+        const end = blockCommentEnd(paramsText, j, spans);
         if (end === -1) return false;
         j = end + 2;
         continue;
@@ -1171,11 +1209,11 @@ function oneParameter(paramsText) {
     // it, and read as one parameter — the same false all-clear in a new spelling
     // (second review round of OPL-4830).
     if (ch === '/' && paramsText[i + 1] === '/') {
-      i = lineCommentEnd(paramsText, i + 2);
+      i = lineCommentEnd(paramsText, i + 2, spans);
       continue;
     }
     if (ch === '/' && paramsText[i + 1] === '*') {
-      const end = blockCommentEnd(paramsText, i);
+      const end = blockCommentEnd(paramsText, i, spans);
       // An unterminated comment is not something to read past.
       if (end === -1) return false;
       i = end + 2;
@@ -1335,6 +1373,7 @@ export function tableArrayLiteral(text, what = 'this declaration', projections =
  * is not something to look through.
  */
 function trailingCall(text, name) {
+  const spans = new Map();
   let i = 0;
   while (i < text.length) {
     const ch = text[i];
@@ -1343,21 +1382,21 @@ function trailingCall(text, name) {
       continue;
     }
     if (ch === '/' && text[i + 1] === '/') {
-      i = lineCommentEnd(text, i + 2);
+      i = lineCommentEnd(text, i + 2, spans);
       continue;
     }
     if (ch === '/' && text[i + 1] === '*') {
-      const end = blockCommentEnd(text, i);
+      const end = blockCommentEnd(text, i, spans);
       i = end === -1 ? text.length : end + 2;
       continue;
     }
-    if (ch === '/' && regexCanStart(text, i)) {
+    if (ch === '/' && regexCanStart(text, i, spans)) {
       i = regexEnd(text, i);
       continue;
     }
     if (ch === '(' || ch === '[' || ch === '{') {
       const close = { '(': ')', '[': ']', '{': '}' }[ch];
-      const inner = balanced(text, i, ch, close);
+      const inner = balanced(text, i, ch, close, spans);
       const after = i + inner.length + 2;
       const opensCall = text.slice(0, i).trimEnd().endsWith(name);
       if (ch === '(' && opensCall && after === text.length) {
@@ -1401,6 +1440,7 @@ function trailingCall(text, name) {
  * stepping over the real assignment instead.
  */
 export function declarationAssignment(source, from) {
+  const spans = new Map();
   let depth = 0;
   let angles = 0;
   let i = from;
@@ -1411,15 +1451,15 @@ export function declarationAssignment(source, from) {
       continue;
     }
     if (ch === '/' && source[i + 1] === '/') {
-      i = lineCommentEnd(source, i + 2);
+      i = lineCommentEnd(source, i + 2, spans);
       continue;
     }
     if (ch === '/' && source[i + 1] === '*') {
-      const end = blockCommentEnd(source, i);
+      const end = blockCommentEnd(source, i, spans);
       i = end === -1 ? source.length : end + 2;
       continue;
     }
-    if (ch === '/' && regexCanStart(source, i)) {
+    if (ch === '/' && regexCanStart(source, i, spans)) {
       i = regexEnd(source, i);
       continue;
     }

@@ -430,6 +430,47 @@ describe('the surface source scanner', () => {
     );
   });
 
+  it('steps back over a line comment that ends in whitespace', () => {
+    // A line comment ends at its newline, and the spaces before that newline are
+    // INSIDE it. The step that skipped whitespace first walked into the comment,
+    // past the offset the scan had recorded, and handed the `+` before the spaces
+    // back as the preceding token — two documented fields gone, with a match
+    // still reported (seventh review). The record is consulted before every step.
+    expect(
+      topLevelKeys(
+        `first: str(\`\${\ncount // +   \n / 2} /\`), omitted: str("required"), last: str(\`} tail\`)`,
+      ),
+    ).toEqual(['first', 'omitted', 'last']);
+    expect(stripComments('let n = count // +\t\t\n / 2; // remove this\n')).not.toContain(
+      'remove this',
+    );
+  });
+
+  it('reads a comment the same way whether or not an equal string was scanned before', () => {
+    // The comment record is the scan's own, not a module-wide memory keyed by the
+    // text: with that memory, a top-level reader that did not record comments
+    // answered the same string differently depending on what had been scanned
+    // earlier in the process (seventh review). Every scanner records what it steps
+    // over, and nothing outlives the scan.
+    const fresh = `first: /* seventh */ /['x]/, omitted: "required", last: 'tail'`;
+    expect(topLevelKeys(fresh)).toEqual(['first', 'omitted', 'last']);
+    stripComments(fresh);
+    expect(topLevelKeys(fresh)).toEqual(['first', 'omitted', 'last']);
+  });
+
+  it('does not slow down with what it has already scanned', () => {
+    // A module-wide record keyed by the text kept every input alive for the life of
+    // the process, and made the twentieth scan of a distinct 190 KB input take
+    // seconds (seventh review). Twenty distinct inputs, each held to the budget the
+    // single one is.
+    for (let n = 0; n < 20; n++) {
+      const source = `const x = ${Array.from({ length: 12_000 }, (_, i) => `a${i} / b${i}`).join(' + ')}; // remove this ${n}\n`;
+      const started = Date.now();
+      expect(stripComments(source)).not.toContain('remove this');
+      expect(Date.now() - started, `scan ${n}`).toBeLessThan(1000);
+    }
+  });
+
   it('refuses every word that is both a keyword and a name, not most of them', () => {
     // `abstract` and `asserts` were in the keyword list and not in the refusal
     // list, so a slash after either read as a regex and the same two fields
