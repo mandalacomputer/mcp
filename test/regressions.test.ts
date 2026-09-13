@@ -84,7 +84,9 @@ describe('platform response deadlines', () => {
     let dispatcher: unknown;
     globalThis.fetch = (async (_input: unknown, init?: RequestInit) => {
       dispatcher = (init as RequestInit & { dispatcher?: unknown })?.dispatcher;
-      return new Response('{}', { headers: { 'Content-Type': 'application/json' } });
+      return new Response('{}', {
+        headers: { 'Content-Type': 'application/json' },
+      });
     }) as typeof fetch;
     try {
       await new Api('com_test', BASE).json('GET', 'computers');
@@ -362,7 +364,11 @@ describe('a computer that would not boot', () => {
     // The outer value was written unconditionally, so a nested reason was
     // replaced with `undefined` — losing the only account of why a machine
     // that exists and is billable never came up.
-    expect(unwrapComputer({ computer: { id: 'vm-1', start_error: 'no host capacity' } })).toEqual({
+    expect(
+      unwrapComputer({
+        computer: { id: 'vm-1', start_error: 'no host capacity' },
+      }),
+    ).toEqual({
       id: 'vm-1',
       start_error: 'no host capacity',
     });
@@ -386,7 +392,11 @@ describe('window actions', () => {
 
   it('leaves the actions that take no geometry alone', () => {
     expect(windowBody({ action: 'focus' })).toEqual({ action: 'focus' });
-    expect(windowBody({ action: 'move', x: 5, y: 6 })).toEqual({ action: 'move', x: 5, y: 6 });
+    expect(windowBody({ action: 'move', x: 5, y: 6 })).toEqual({
+      action: 'move',
+      x: 5,
+      y: 6,
+    });
   });
 
   it('does not forward geometry that belongs to another action', () => {
@@ -431,7 +441,9 @@ describe('an empty body from a route that should have answered', () => {
 
   it('rejects JSON null on a route that must answer', async () => {
     globalThis.fetch = (async () =>
-      new Response('null', { headers: { 'Content-Type': 'application/json' } })) as typeof fetch;
+      new Response('null', {
+        headers: { 'Content-Type': 'application/json' },
+      })) as typeof fetch;
     const api = new Api('com_test', BASE);
     await expect(api.json('GET', 'computers/vm-1')).rejects.toThrow(/JSON null/);
   });
@@ -452,7 +464,11 @@ describe('a desktop link the platform did not send', () => {
     // promising full control of the machine.
     globalThis.fetch = (async () =>
       new Response(
-        JSON.stringify({ id: 'vm-1', status: 'running', vnc: { view_url: 'wss://v' } }),
+        JSON.stringify({
+          id: 'vm-1',
+          status: 'running',
+          vnc: { view_url: 'wss://v' },
+        }),
         {
           headers: { 'Content-Type': 'application/json' },
         },
@@ -491,7 +507,10 @@ describe('refusals this server decides on its own', () => {
 
   it('does not clear a schedule that was sent alongside a set', async () => {
     const { call, close } = await connect();
-    await call('snapshot_schedule', { set: { enabled: true, hour: 3 }, clear: true });
+    await call('snapshot_schedule', {
+      set: { enabled: true, hour: 3 },
+      clear: true,
+    });
     expect(platform.calls.filter((c) => c.method === 'DELETE')).toHaveLength(0);
     await close();
   });
@@ -672,7 +691,10 @@ describe('the version a user quotes in a bug report', () => {
     };
     const plugin = JSON.parse(
       readFileSync(new URL('../plugin/.claude-plugin/plugin.json', import.meta.url), 'utf8'),
-    ) as { version: string; mcpServers: Record<string, { command: string; args: string[] }> };
+    ) as {
+      version: string;
+      mcpServers: Record<string, { command: string; args: string[] }>;
+    };
     expect(plugin.version).toBe(pkg.version);
     // And it starts the package this repository publishes, not a path.
     expect(plugin.mcpServers.mandala.command).toBe('npx');
@@ -841,11 +863,21 @@ describe('a wait that never reached what it waited for', () => {
     // that will never resolve from a guest that answered. The file's own
     // `cancelled` helper had said why that was wrong since the beginning.
     globalThis.fetch = (async () =>
-      new Response(JSON.stringify({ id: 'vm-1', status: 'build-failed', build: { source: 'x' } }), {
-        headers: { 'Content-Type': 'application/json' },
-      })) as typeof fetch;
+      new Response(
+        JSON.stringify({
+          id: 'vm-1',
+          status: 'build-failed',
+          build: { source: 'x' },
+        }),
+        {
+          headers: { 'Content-Type': 'application/json' },
+        },
+      )) as typeof fetch;
     const { call, close } = await connect();
-    const res = await call('wait_for_computer', { until: 'running', timeout_s: 5 });
+    const res = await call('wait_for_computer', {
+      until: 'running',
+      timeout_s: 5,
+    });
     expect(res.isError).toBe(true);
     await close();
   });
@@ -856,7 +888,10 @@ describe('a wait that never reached what it waited for', () => {
         headers: { 'Content-Type': 'application/json' },
       })) as typeof fetch;
     const { call, close } = await connect();
-    const res = await call('wait_for_computer', { until: 'running', timeout_s: 5 });
+    const res = await call('wait_for_computer', {
+      until: 'running',
+      timeout_s: 5,
+    });
     expect(res.isError).toBe(true);
     expect(said(res)).toMatch(/Gave up/);
     await close();
@@ -1220,7 +1255,10 @@ describe('a fourth adversarial review', () => {
         { headers: { 'Content-Type': 'application/json' } },
       )) as typeof fetch;
     const { call, close } = await connect();
-    const res = await call('wait_for_computer', { computer_id: 'vm-1', timeout_s: 5 });
+    const res = await call('wait_for_computer', {
+      computer_id: 'vm-1',
+      timeout_s: 5,
+    });
     expect(res.isError).toBe(true);
     expect(said(res)).toMatch(/no capacity in region/);
     expect(said(res)).not.toMatch(/Build failed: ubuntu-22\.04/);
@@ -1236,7 +1274,10 @@ describe('a fourth adversarial review', () => {
     const { call, close } = await connect({ computerId: undefined });
     const bound = await call('use_computer', { computer_id: ' vm-1 ' });
     expect(bound.isError, 'the binding call itself failed').toBeFalsy();
-    const gone = await call('delete_computer', { computer_id: 'vm-1', confirm: true });
+    const gone = await call('delete_computer', {
+      computer_id: 'vm-1',
+      confirm: true,
+    });
     expect(gone.isError, 'the delete itself failed').toBeFalsy();
     // The binding has to be gone with it. Left in place, the next call drives a
     // machine that no longer exists.
@@ -1257,7 +1298,10 @@ describe('flags that are a yes-or-no', () => {
     // silent skip that still starts HTTP.
     expect(() => parse(['--http', 'false'])).toThrow(/unexpected argument false/);
     expect(() => parse(['--no-lifecycle', '0'])).toThrow(/unexpected argument 0/);
-    expect(parse(['--http', '--port', '3000'])).toEqual({ http: true, port: '3000' });
+    expect(parse(['--http', '--port', '3000'])).toEqual({
+      http: true,
+      port: '3000',
+    });
   });
 
   it('reads an explicit --flag=false as false', () => {
@@ -1499,7 +1543,10 @@ describe('a wait that means the deadline it was given', () => {
     }) as typeof fetch;
     const { call, close } = await connect();
     const started = Date.now();
-    const res = await call('wait_for_computer', { computer_id: 'vm-1', timeout_s: 5 });
+    const res = await call('wait_for_computer', {
+      computer_id: 'vm-1',
+      timeout_s: 5,
+    });
     const elapsed = Date.now() - started;
     expect(res.isError).toBe(true);
     expect(said(res)).toMatch(/Gave up after 5s/);
@@ -1548,7 +1595,10 @@ describe('ids that differ only in whitespace', () => {
     // on driving a computer that had been deleted.
     const platform = installFakePlatform();
     const { call, close } = await connect({ computerId: ' vm-1\n' });
-    const gone = await call('delete_computer', { computer_id: 'vm-1', confirm: true });
+    const gone = await call('delete_computer', {
+      computer_id: 'vm-1',
+      confirm: true,
+    });
     expect(gone.isError, 'the delete itself failed').toBeFalsy();
     const res = await call('screenshot');
     expect(res.isError).toBe(true);
@@ -1765,7 +1815,10 @@ describe('wait failures that are worth another poll', () => {
     globalThis.fetch = (async () =>
       new Response('{"error":"slow down"}', {
         status: 429,
-        headers: { 'Content-Type': 'application/json', 'Retry-After': header },
+        headers: {
+          'Content-Type': 'application/json',
+          'Retry-After': header,
+        },
       })) as typeof fetch;
     try {
       const err = await new Api('com_test', BASE).json('GET', 'computers').catch((e) => e);
@@ -1790,7 +1843,10 @@ describe('wait failures that are worth another poll', () => {
       globalThis.fetch = (async () =>
         new Response('{"error":"slow down"}', {
           status: 429,
-          headers: { 'Content-Type': 'application/json', 'Retry-After': header },
+          headers: {
+            'Content-Type': 'application/json',
+            'Retry-After': header,
+          },
         })) as typeof fetch;
       try {
         const err = await new Api('com_test', BASE).json('GET', 'computers').catch((e) => e);
@@ -1838,7 +1894,9 @@ describe('wait failures that are worth another poll', () => {
       code: 'ECONNREFUSED',
       syscall: 'connect',
     });
-    const reset = Object.assign(new Error('other side closed'), { code: 'UND_ERR_SOCKET' });
+    const reset = Object.assign(new Error('other side closed'), {
+      code: 'UND_ERR_SOCKET',
+    });
     try {
       for (const [cause, expected] of [
         [refused, 'could not reach https://example.test'],
@@ -1874,7 +1932,10 @@ describe('results that did not reach their requested condition', () => {
       })) as typeof fetch;
     try {
       const { call, close } = await connect();
-      const res = await call('wait_for_computer', { until: 'guest', timeout_s: 5 });
+      const res = await call('wait_for_computer', {
+        until: 'guest',
+        timeout_s: 5,
+      });
       expect(res.isError).toBe(true);
       expect(said(res)).toMatch(/start_computer/);
       await close();
@@ -2059,7 +2120,9 @@ describe('response-body failures', () => {
     await expect(api.json('GET', 'computers')).rejects.toBeInstanceOf(ConnectivityError);
 
     globalThis.fetch = (async () => response(409)) as typeof fetch;
-    await expect(api.json('GET', 'computers')).rejects.toMatchObject({ status: 409 });
+    await expect(api.json('GET', 'computers')).rejects.toMatchObject({
+      status: 409,
+    });
   });
 
   it('classifies binary and streamed body aborts as transport failures', async () => {
@@ -2178,7 +2241,11 @@ describe('a selection concurrent with deletion', () => {
         selectionStarted();
         await held;
         return new Response(
-          JSON.stringify({ id: 'vm-2', status: 'running', resolution: '1280x800x24' }),
+          JSON.stringify({
+            id: 'vm-2',
+            status: 'running',
+            resolution: '1280x800x24',
+          }),
           { headers: { 'Content-Type': 'application/json' } },
         );
       }
@@ -2186,7 +2253,9 @@ describe('a selection concurrent with deletion', () => {
         return new Response(null, { status: 204 });
       }
       if (url.pathname.endsWith('/screenshot')) {
-        return new Response(new Uint8Array([1]), { headers: { 'Content-Type': 'image/png' } });
+        return new Response(new Uint8Array([1]), {
+          headers: { 'Content-Type': 'image/png' },
+        });
       }
       throw new Error(`unexpected request: ${method} ${url.pathname}`);
     }) as typeof fetch;
@@ -2284,7 +2353,9 @@ describe('truthful recovery results', () => {
 
   it('does not invent zero holdings or a missing fingerprint', async () => {
     globalThis.fetch = (async () =>
-      new Response('{}', { headers: { 'Content-Type': 'application/json' } })) as typeof fetch;
+      new Response('{}', {
+        headers: { 'Content-Type': 'application/json' },
+      })) as typeof fetch;
     const { call, close } = await connect();
     const out = said(await call('snapshot_holdings'));
     expect(out).toContain('unknown count');
@@ -2683,7 +2754,10 @@ describe('a snapshot with a reason attached to it', () => {
     await call('create_snapshot', { name: 'before the upgrade', memory: true });
     await close();
     expect(captures()).toHaveLength(1);
-    expect(captures()[0].body).toEqual({ name: 'before the upgrade', memory: true });
+    expect(captures()[0].body).toEqual({
+      name: 'before the upgrade',
+      memory: true,
+    });
   });
 
   it('omits a name nobody gave, rather than sending an empty one', async () => {
@@ -2833,7 +2907,13 @@ describe('a guest that will not shut down', () => {
     };
     const vnc = { url: 'wss://app.test/vnc?token=SECRET-CONTROL' };
     try {
-      answer({ id: 'vm-1', name: 'desk', status: 'suspended', running_ram_mb: 0, vnc });
+      answer({
+        id: 'vm-1',
+        name: 'desk',
+        status: 'suspended',
+        running_ram_mb: 0,
+        vnc,
+      });
       const record = await call('suspend_computer', {});
       expect(said(record)).toContain('suspend: desk · vm-1 · suspended');
       expect(JSON.stringify(record)).not.toContain('SECRET-CONTROL');
@@ -2886,7 +2966,10 @@ describe('an environment for a command, rather than a shell prefix', () => {
 
   it('sends the variables the caller named', async () => {
     const { call, close } = await connect();
-    await call('exec', { command: 'npm run build', env: { NODE_ENV: 'production' } });
+    await call('exec', {
+      command: 'npm run build',
+      env: { NODE_ENV: 'production' },
+    });
     await close();
     expect(execs()).toHaveLength(1);
     expect(execs()[0].body).toMatchObject({ env: { NODE_ENV: 'production' } });
@@ -2956,7 +3039,9 @@ describe('an environment for a command, rather than a shell prefix', () => {
   it('drops an empty environment at the body rather than at the tool', () => {
     expect(P.execEnv(undefined)).toBeUndefined();
     expect(P.execEnv({})).toBeUndefined();
-    expect(P.execBody({ command: 'true', env: {} })).toEqual({ command: 'true' });
+    expect(P.execBody({ command: 'true', env: {} })).toEqual({
+      command: 'true',
+    });
     expect(P.execBody({ command: 'true', env: { A: '1' } })).toEqual({
       command: 'true',
       env: { A: '1' },
@@ -3426,7 +3511,10 @@ describe('the tools our own prose tells a model to call', () => {
     // The server's own instructions, which are prose a model reads BEFORE any
     // tool description and which name eight tools. They were outside the scan
     // entirely — the largest single piece of tool-naming text we ship.
-    prose.push({ where: 'server instructions', text: client.getInstructions() ?? '' });
+    prose.push({
+      where: 'server instructions',
+      text: client.getInstructions() ?? '',
+    });
     // The Claude Code skill (OPL-3914), which is prose a model reads before it
     // has even started this server, and which names more tools than the
     // instructions do. It is the text most likely to drift: a tool renamed here
@@ -3751,9 +3839,14 @@ describe('a computer whose background slots are all held', () => {
   });
 
   it('is answered with the tool that frees a slot, not with another attempt', async () => {
-    conflict({ error: 'this computer already has 16 background commands running' });
+    conflict({
+      error: 'this computer already has 16 background commands running',
+    });
     const { call, close } = await connect();
-    const res = await call('exec', { command: 'npm run dev', background: true });
+    const res = await call('exec', {
+      command: 'npm run dev',
+      background: true,
+    });
     await close();
 
     expect(res.isError).toBe(true);
@@ -3773,7 +3866,9 @@ describe('a computer whose background slots are all held', () => {
   it('reads the cap back off the message rather than writing sixteen into it', async () => {
     // The count is the platform's, so raising the cap there cannot turn this
     // paragraph into a lie about how many are running.
-    conflict({ error: 'this computer already has 32 background commands running' });
+    conflict({
+      error: 'this computer already has 32 background commands running',
+    });
     const { call, close } = await connect();
     const text = said(await call('exec', { command: 'sleep 600', background: true }));
     await close();
@@ -3814,7 +3909,9 @@ describe('a computer whose background slots are all held', () => {
     // The refusal is only reachable by asking for a slot, so a foreground exec
     // that somehow met this sentence is a platform this client does not
     // understand — and the conservative answer there is the one it gave before.
-    conflict({ error: 'this computer already has 16 background commands running' });
+    conflict({
+      error: 'this computer already has 16 background commands running',
+    });
     const { call, close } = await connect();
     const text = said(await call('exec', { command: 'true' }));
     await close();
@@ -3832,7 +3929,9 @@ describe('a computer whose background slots are all held', () => {
 
     const exec = tools.get('exec');
     expect(exec?.description).toMatch(/sixteen background commands/);
-    const background = exec?.inputSchema.properties?.background as { description?: string };
+    const background = exec?.inputSchema.properties?.background as {
+      description?: string;
+    };
     expect(background.description).toMatch(/sixteen/);
     expect(background.description).toContain('exec_kill');
     // And the two tools that hold the other end of a handle say what a slot is
@@ -3943,7 +4042,12 @@ describe('a window action whose outcome came back unknown', () => {
       // is the current platform's exact wire message.
       answering(504, { error });
       const { call, close } = await connect();
-      const text = said(await call('window_action', { window_id: '0x2600003', action: 'close' }));
+      const text = said(
+        await call('window_action', {
+          window_id: '0x2600003',
+          action: 'close',
+        }),
+      );
       await close();
 
       expect(text).toContain(error);
@@ -3962,7 +4066,12 @@ describe('a window action whose outcome came back unknown', () => {
     // make the tool contradict the one hop that can settle that question.
     answering(504, { error });
     const { call, close } = await connect();
-    const text = said(await call('window_action', { window_id: '0x2600003', action: 'close' }));
+    const text = said(
+      await call('window_action', {
+        window_id: '0x2600003',
+        action: 'close',
+      }),
+    );
     await close();
 
     expect(text).toBe(`${error} (HTTP 504)`);
@@ -4017,7 +4126,9 @@ describe('a window action whose outcome came back unknown', () => {
     expect(bare).toBeInstanceOf(GatewayTimeoutError);
     expect(bare.message).not.toBe('HTTP 504');
     expect(platformSaid(bare.body)).toBeUndefined();
-    const named = errorForStatus(504, 'upstream gave up', { error: 'upstream gave up' });
+    const named = errorForStatus(504, 'upstream gave up', {
+      error: 'upstream gave up',
+    });
     expect(platformSaid(named.body)).toBe('upstream gave up');
     // Shape-checked like every other body read here: a non-string reads as
     // nothing said rather than being printed as a sentence.
@@ -4159,7 +4270,10 @@ describe('deleting a computer that is already gone', () => {
     }) as typeof fetch;
     try {
       const { call, close } = await connect();
-      const res = await call('delete_computer', { computer_id: 'vm-1', confirm: true });
+      const res = await call('delete_computer', {
+        computer_id: 'vm-1',
+        confirm: true,
+      });
       // Not an error: the state the caller asked for is the state that holds.
       expect(res.isError).toBeFalsy();
       // It names both readings of a 404 rather than asserting a deletion: the
@@ -4453,7 +4567,9 @@ describe('a build whose response carries no ref', () => {
       })) as typeof fetch;
     try {
       const { call, close } = await connect();
-      const res = await call('build_template', { document: '{"apiVersion":"mandala/v1"}' });
+      const res = await call('build_template', {
+        document: '{"apiVersion":"mandala/v1"}',
+      });
       expect(said(res)).toMatch(/Build bld-1 started\./);
       expect(said(res)).not.toMatch(/undefined/);
       await close();
@@ -4573,7 +4689,11 @@ describe('an event stream that stopped with events still in it', () => {
         const url = new URL(String(input));
         if (url.pathname.endsWith('/computers/vm-1')) {
           return new Response(
-            JSON.stringify({ id: 'vm-1', status: 'suspended', running_ram_mb: 0 }),
+            JSON.stringify({
+              id: 'vm-1',
+              status: 'suspended',
+              running_ram_mb: 0,
+            }),
             {
               headers: { 'Content-Type': 'application/json' },
             },
@@ -4613,7 +4733,11 @@ describe('a stopped stream holding more than one batch', () => {
     try {
       await call('poll_events', {});
       for (let i = 1; i <= 5; i++) {
-        events.last().send({ type: 'process.exited', cursor: `cur-${i}`, data: { pid: i } });
+        events.last().send({
+          type: 'process.exited',
+          cursor: `cur-${i}`,
+          data: { pid: i },
+        });
       }
       await new Promise((r) => setTimeout(r, 20));
 
@@ -4622,7 +4746,11 @@ describe('a stopped stream holding more than one batch', () => {
         const url = new URL(String(input));
         if (url.pathname.endsWith('/computers/vm-1')) {
           return new Response(
-            JSON.stringify({ id: 'vm-1', status: 'suspended', running_ram_mb: 0 }),
+            JSON.stringify({
+              id: 'vm-1',
+              status: 'suspended',
+              running_ram_mb: 0,
+            }),
             {
               headers: { 'Content-Type': 'application/json' },
             },
@@ -4719,7 +4847,9 @@ describe('an origin-only base URL', () => {
     const real = globalThis.fetch;
     globalThis.fetch = (async (input: string | URL | Request) => {
       calls.push(String(input));
-      return new Response('{}', { headers: { 'Content-Type': 'application/json' } });
+      return new Response('{}', {
+        headers: { 'Content-Type': 'application/json' },
+      });
     }) as typeof fetch;
     try {
       for (const base of ['https://gateway.example.com', 'https://gateway.example.com/']) {
@@ -4737,7 +4867,9 @@ describe('an origin-only base URL', () => {
     const real = globalThis.fetch;
     globalThis.fetch = (async (input: string | URL | Request) => {
       calls.push(String(input));
-      return new Response('{}', { headers: { 'Content-Type': 'application/json' } });
+      return new Response('{}', {
+        headers: { 'Content-Type': 'application/json' },
+      });
     }) as typeof fetch;
     try {
       void new Api('com_test', 'https://app.mandala.computer/api/v1').json('GET', 'computers');
@@ -4812,7 +4944,9 @@ describe('a command with a NUL in it', () => {
     // argv boundary: a shorter command runs and its exit code is reported as an
     // ordinary success. execEnv has refused the same byte since it was written.
     expect(() => P.execBody({ command: 'echo hello\0rm -rf /' })).toThrow(/NUL/);
-    expect(P.execBody({ command: 'echo hello' })).toEqual({ command: 'echo hello' });
+    expect(P.execBody({ command: 'echo hello' })).toEqual({
+      command: 'echo hello',
+    });
   });
 
   it('refuses half a character in the command for the same reason it refuses a NUL', () => {
@@ -4835,7 +4969,9 @@ describe('a command with a NUL in it', () => {
       /url must not contain an unpaired surrogate/,
     );
     // A whole character is text, not corruption, and still goes.
-    expect(P.execBody({ command: 'echo "hi 😀"' })).toEqual({ command: 'echo "hi 😀"' });
+    expect(P.execBody({ command: 'echo "hi 😀"' })).toEqual({
+      command: 'echo "hi 😀"',
+    });
   });
 });
 
@@ -5011,11 +5147,16 @@ describe('delete_snapshot answering 404', () => {
           headers: { 'Content-Type': 'application/json' },
         });
       }
-      return new Response('{}', { headers: { 'Content-Type': 'application/json' } });
+      return new Response('{}', {
+        headers: { 'Content-Type': 'application/json' },
+      });
     }) as typeof fetch;
     try {
       const { call, close } = await connect();
-      const res = await call('delete_snapshot', { snapshot_id: 'snap-1', confirm: true });
+      const res = await call('delete_snapshot', {
+        snapshot_id: 'snap-1',
+        confirm: true,
+      });
       expect(res.isError).toBeFalsy();
       // And it does not claim a deletion either: a 404 is equally the answer
       // for an id that was never on this account.
@@ -5061,7 +5202,9 @@ describe('a server with the lifecycle tools withheld', () => {
       globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
         const url = new URL(String(input));
         if (url.pathname.endsWith('/api/v1/computers')) {
-          return new Response('[]', { headers: { 'Content-Type': 'application/json' } });
+          return new Response('[]', {
+            headers: { 'Content-Type': 'application/json' },
+          });
         }
         return real(input as never, init);
       }) as typeof fetch;
@@ -5130,8 +5273,14 @@ describe('a stdio server whose client closed the pipe', () => {
     });
     const realIn = Object.getOwnPropertyDescriptor(process, 'stdin');
     const realOut = Object.getOwnPropertyDescriptor(process, 'stdout');
-    Object.defineProperty(process, 'stdin', { value: stdin, configurable: true });
-    Object.defineProperty(process, 'stdout', { value: stdout, configurable: true });
+    Object.defineProperty(process, 'stdin', {
+      value: stdin,
+      configurable: true,
+    });
+    Object.defineProperty(process, 'stdout', {
+      value: stdout,
+      configurable: true,
+    });
     const platform = installFakePlatform();
     const events = fakeEvents();
     try {
@@ -5259,7 +5408,10 @@ describe('a platform address that answers with a redirect', () => {
     // is the whole reason this is not just a bare HTTP 301.
     const real = globalThis.fetch;
     globalThis.fetch = (async () =>
-      new Response(null, { status: 301, headers: { Location: '/moved/api/v1' } })) as typeof fetch;
+      new Response(null, {
+        status: 301,
+        headers: { Location: '/moved/api/v1' },
+      })) as typeof fetch;
     try {
       await new Api('com_test', BASE).json('GET', 'computers');
       expect.unreachable('a 3xx should not resolve');
@@ -5333,7 +5485,12 @@ describe('exec output arrives as base64', () => {
     // `echo hi` passes against a server that decodes straight to a string and
     // destroys every byte the JSON encoder cannot carry.
     const bytes = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0xff, 0xfe];
-    answering({ exit_code: 0, stdout_b64: b64(bytes), stderr_b64: '', timed_out: false });
+    answering({
+      exit_code: 0,
+      stdout_b64: b64(bytes),
+      stderr_b64: '',
+      timed_out: false,
+    });
     const { call, close } = await connect();
     const res = await call('exec', { command: 'cat /bin/true' });
     await close();
@@ -5350,7 +5507,12 @@ describe('exec output arrives as base64', () => {
 
   it('will not read a NUL-bearing stream as text', async () => {
     const bytes = [0x41, 0x00, 0x42];
-    answering({ exit_code: 0, stdout_b64: b64(bytes), stderr_b64: '', timed_out: false });
+    answering({
+      exit_code: 0,
+      stdout_b64: b64(bytes),
+      stderr_b64: '',
+      timed_out: false,
+    });
     const { call, close } = await connect();
     const res = await call('exec', { command: 'head -c3 /dev/zero' });
     await close();
@@ -5408,7 +5570,12 @@ describe('exec output arrives as base64', () => {
     // counts decoded bytes and names the end of this chunk — is what tells the
     // two apart. Stripping here would delete a byte the command really wrote and
     // explain it with a cut that never happened.
-    answering({ pid: 4242, running: true, stdout_b64: b64([0x80, 0x41, 0x42]), stdout_offset: 3 });
+    answering({
+      pid: 4242,
+      running: true,
+      stdout_b64: b64([0x80, 0x41, 0x42]),
+      stdout_offset: 3,
+    });
     const { call, close } = await connect();
     const res = await call('exec_poll', { pid: 4242 });
     await close();
@@ -5424,7 +5591,11 @@ describe('exec output arrives as base64', () => {
     // last chunk stops wherever the deadline fell — on a byte offset, like every
     // other cut. Read as the whole of the output, a plain build log ending in
     // half a character would be declared binary.
-    answering({ exit_code: -1, timed_out: true, stdout_b64: b64([0x6f, 0x6b, 0xf0, 0x9f]) });
+    answering({
+      exit_code: -1,
+      timed_out: true,
+      stdout_b64: b64([0x6f, 0x6b, 0xf0, 0x9f]),
+    });
     const { call, close } = await connect();
     const res = await call('exec', { command: 'sleep 600' });
     await close();
@@ -5460,11 +5631,16 @@ describe('exec output arrives as base64', () => {
     // sentence included. Asserted through the API layer rather than the tool:
     // the point is the body arriving, not what a tool result does with it.
     const output = Buffer.alloc(13 * 1024 * 1024, 0x78);
-    const body = JSON.stringify({ exit_code: 0, stdout_b64: output.toString('base64') });
+    const body = JSON.stringify({
+      exit_code: 0,
+      stdout_b64: output.toString('base64'),
+    });
     expect(body.length).toBeGreaterThan(16 * 1024 * 1024);
     const real = globalThis.fetch;
     globalThis.fetch = (async () =>
-      new Response(body, { headers: { 'Content-Type': 'application/json' } })) as typeof fetch;
+      new Response(body, {
+        headers: { 'Content-Type': 'application/json' },
+      })) as typeof fetch;
     try {
       const res = await new Api('com_test', BASE).json<Record<string, string>>(
         'POST',
@@ -5495,7 +5671,11 @@ describe('exec output arrives as base64', () => {
   it('reads a stream that ends mid-character as bytes once nothing more can arrive', async () => {
     // The same three bytes, with no continuation to expect. A completed command
     // whose output stops inside a character did not write text.
-    answering({ exit_code: 0, stdout_b64: b64([0x61, 0xf0, 0x9f]), timed_out: false });
+    answering({
+      exit_code: 0,
+      stdout_b64: b64([0x61, 0xf0, 0x9f]),
+      timed_out: false,
+    });
     const { call, close } = await connect();
     const res = await call('exec', { command: 'printf' });
     await close();
@@ -5548,7 +5728,12 @@ describe('exec output arrives as base64', () => {
   });
 
   it('decodes what a kill hands back, which is output no poll had taken', async () => {
-    answering({ pid: 4242, killed: true, exit_code: null, stdout_b64: b64('half a build\n') });
+    answering({
+      pid: 4242,
+      killed: true,
+      exit_code: null,
+      stdout_b64: b64('half a build\n'),
+    });
     const { call, close } = await connect();
     const res = await call('exec_kill', { pid: 4242 });
     await close();
@@ -5559,7 +5744,10 @@ describe('exec output arrives as base64', () => {
   it('decodes the 202 as well, since a background start carries the same fields', async () => {
     answering({ pid: 4242, running: true, stdout_b64: b64('starting\n') });
     const { call, close } = await connect();
-    const res = await call('exec', { command: 'npm run dev', background: true });
+    const res = await call('exec', {
+      command: 'npm run dev',
+      background: true,
+    });
     await close();
 
     expect(bodyOf(res).stdout).toBe('starting\n');
@@ -5612,8 +5800,18 @@ describe('a computer described by the record rather than by its host', () => {
     // state and no status, and `c.status ?? 'unknown'` printed the one word
     // that tells a reader nothing about a machine that is on its way out.
     rows([
-      { id: 'vm-1', name: 'gone', state: 'deleted', deleted_at: '2026-09-01T00:00:00Z' },
-      { id: 'vm-2', name: 'missing', state: 'lost', lost_at: '2026-09-02T00:00:00Z' },
+      {
+        id: 'vm-1',
+        name: 'gone',
+        state: 'deleted',
+        deleted_at: '2026-09-01T00:00:00Z',
+      },
+      {
+        id: 'vm-2',
+        name: 'missing',
+        state: 'lost',
+        lost_at: '2026-09-02T00:00:00Z',
+      },
     ]);
     const { call, close } = await connect();
     const res = await call('list_computers');
@@ -5739,7 +5937,10 @@ describe('a start the platform has already admitted', () => {
       }) as typeof fetch;
       try {
         const { call, close } = await connect();
-        const res = await call('wait_for_computer', { until: 'running', timeout_s: 30 });
+        const res = await call('wait_for_computer', {
+          until: 'running',
+          timeout_s: 30,
+        });
         expect(res.isError).toBeFalsy();
         expect(said(res)).toMatch(/Running/);
         await close();
@@ -5757,7 +5958,10 @@ describe('a start the platform has already admitted', () => {
       })) as typeof fetch;
     try {
       const { call, close } = await connect();
-      const res = await call('wait_for_computer', { until: 'running', timeout_s: 30 });
+      const res = await call('wait_for_computer', {
+        until: 'running',
+        timeout_s: 30,
+      });
       expect(res.isError).toBe(true);
       expect(said(res)).toMatch(/start_computer boots it/);
       await close();
@@ -5788,7 +5992,10 @@ describe('a start the platform has already admitted', () => {
       }) as typeof fetch;
       try {
         const { call, close } = await connect();
-        const res = await call('wait_for_computer', { until: 'running', timeout_s: 5 });
+        const res = await call('wait_for_computer', {
+          until: 'running',
+          timeout_s: 5,
+        });
         expect(res.isError).toBe(true);
         // The wait ran, rather than the schema refusing the arguments.
         expect(reads).toBeGreaterThan(1);
@@ -5901,14 +6108,21 @@ describe('the wait and the states nothing can start', () => {
     globalThis.fetch = (async () => {
       reads += 1;
       return new Response(
-        JSON.stringify({ id: 'vm-1', status: 'half-removed', running_ram_mb: 0 }),
+        JSON.stringify({
+          id: 'vm-1',
+          status: 'half-removed',
+          running_ram_mb: 0,
+        }),
         { headers: { 'Content-Type': 'application/json' } },
       );
     }) as typeof fetch;
     try {
       const { call, close } = await connect();
       const started = Date.now();
-      const res = await call('wait_for_computer', { until: 'running', timeout_s: 30 });
+      const res = await call('wait_for_computer', {
+        until: 'running',
+        timeout_s: 30,
+      });
       expect(res.isError).toBe(true);
       expect(said(res)).toMatch(/delete_computer is what clears it/);
       expect(Date.now() - started).toBeLessThan(3_000);
@@ -5918,6 +6132,269 @@ describe('the wait and the states nothing can start', () => {
       globalThis.fetch = real;
     }
   }, 40_000);
+});
+
+describe('a refusal that is about the caller rather than the computer', () => {
+  /** Everything `failed` would put in front of a model for one status. */
+  const shown = (status: number, message: string, body?: unknown) =>
+    said(failed(errorForStatus(status, message, body)));
+
+  it('tells a model to re-authenticate rather than to send the mutation again', () => {
+    // Authentication and role are checked again while a call is in flight, so
+    // one of these can land after part of the work is done. A model reads the
+    // sentence and nothing else, and a bare "unauthorized (HTTP 401)" reads like
+    // a transport failure — which is the one thing it must not be treated as:
+    // the instinct is to send the call again, and for a create, a start, a move
+    // or a write that is how the same work happens twice.
+    const unauthorized = shown(401, 'unauthorized');
+    expect(unauthorized).toMatch(/stopped being accepted/);
+    expect(unauthorized).toMatch(/partway through a call/);
+    expect(unauthorized).toMatch(/check what already took effect/);
+    // Not a word telling it to try again, which is what the 409 vocabulary says
+    // and what this status must never borrow.
+    expect(unauthorized).not.toMatch(/worth sending again/);
+
+    const forbidden = shown(403, 'This requires member access to this account.');
+    // The platform's own sentence survives — it is the half that says WHAT was
+    // refused — and the advice is added to it.
+    expect(forbidden).toMatch(/This requires member access to this account\./);
+    expect(forbidden).toMatch(/role that changed or an account suspended/);
+    expect(forbidden).not.toMatch(/worth sending again/);
+
+    // A plan limit is not a fault on the machine, and it is the same answer
+    // whether it arrives at once or after a wait.
+    expect(shown(402, 'Choose a plan to start a computer.')).toMatch(/as it stands now/);
+  });
+
+  it('leaves a refusal the platform classified with the sentence written for it', () => {
+    // The platform's word is specific to one refusal, and on every status but
+    // the three above it comes first. A 409 it classified has advice of its own,
+    // and this must not displace or duplicate it.
+    const contended = shown(409, 'the guest agent is busy', {
+      reason: 'contention',
+    });
+    expect(contended).toMatch(/worth sending again/);
+    expect(contended).not.toMatch(/stopped being accepted/);
+    // And a status with no advice at all reads exactly as it did before.
+    expect(shown(404, 'computer not found')).toBe('computer not found (HTTP 404)');
+  });
+
+  it('does not let a busy-sounding reason word invite a replay of an auth refusal', () => {
+    // Nothing constrains the two from arriving together: `reason` is a word
+    // about a computer, and these three statuses are about the caller. Read in
+    // the other order, a 403 carrying `contention` told the model "the same call
+    // works once it finishes" — the exact replay this ticket exists to prevent,
+    // on the one status where replaying a mutation is dangerous (Codex review).
+    for (const reason of ['contention', 'starting', 'unavailable', 'unsupported']) {
+      for (const status of [401, 403, 402]) {
+        const text = shown(status, 'refused', { reason });
+        expect(text, `${status} + ${reason}`).not.toMatch(/worth sending again/);
+      }
+    }
+  });
+
+  it('keeps the work a mid-call refusal says was already done', () => {
+    // The completed steps and what they billed are in the error body, and the
+    // sentence was all this used to show — so a run that drove the desktop for
+    // two steps and was then stopped looked exactly like one that never started,
+    // and a model reading it starts again and pays for both a second time.
+    const text = shown(401, 'unauthorized', {
+      error: 'unauthorized',
+      steps_taken: ['1. screenshot', '2. click 40,80'],
+      usage: { input_tokens: 1200, output_tokens: 90 },
+    });
+    expect(text).toMatch(/already recorded work/);
+    expect(text).toMatch(/2\. click 40,80/);
+    expect(text).toMatch(/input_tokens/);
+    // Only the fields that record work. The body's own `error` is the sentence
+    // already shown above it, and repeating it would be the same fact twice.
+    expect(text.split('unauthorized').length - 1).toBe(1);
+  });
+
+  it('does not turn a record of work into a claim about what changed', () => {
+    // The fields say what ran and what it cost. Neither is proof that anything
+    // on the computer was written — billed model work need not have touched it —
+    // and a sentence asserting one is a sentence a caller repeats to a user as a
+    // change that happened (Codex review).
+    const text = shown(401, 'unauthorized', { usage: { input_tokens: 40 } });
+    expect(text).toMatch(/NOT proof of what changed/);
+    expect(text).toMatch(/yours to check/);
+  });
+
+  it('says nothing extra when the body records no work', () => {
+    expect(shown(401, 'unauthorized', { error: 'unauthorized' })).not.toMatch(/already recorded/);
+    // Nor when the fields are there and empty: a stopped call that did nothing
+    // is what the sentence above already says, and an empty list dressed as a
+    // record of work reads as though something is in it.
+    const nothing = shown(401, 'unauthorized', {
+      steps: 0,
+      steps_taken: [],
+      usage: {},
+    });
+    expect(nothing).not.toMatch(/steps_taken/);
+    expect(nothing).not.toMatch(/already recorded/);
+  });
+
+  it('bounds the record it puts in front of a model', () => {
+    // Three field names bound nothing — a step's detail is text from the guest,
+    // and an error body is allowed a megabyte of it. One enormous entry became
+    // an enormous tool result, which either buries the sentence saying what to
+    // do or is cut off by the client, and a record truncated by somebody else
+    // supports no conclusion at all (Codex review).
+    const text = shown(401, 'unauthorized', {
+      steps_taken: ['x'.repeat(900_000)],
+    });
+    expect(text.length).toBeLessThan(10_000);
+    expect(text).toMatch(/shortened here/);
+    expect(text).toMatch(/not enough to establish what the call did/);
+  });
+});
+
+describe('an agent run stopped part way through', () => {
+  const errorFrame = (data: Record<string, unknown>) =>
+    `event: step\ndata: ${JSON.stringify({ n: 1, detail: 'screenshot' })}\n\n` +
+    `event: error\ndata: ${JSON.stringify(data)}\n\n`;
+
+  it('names an auth stop as one, and says not to run the same prompt again', async () => {
+    // The stream is the one place the status cannot be read off the response:
+    // HTTP 200 went out before the first step, so a run stopped by the
+    // credential or the role arrives as a frame. "The run failed" plus a JSON
+    // blob left a model with one obvious move — call run_agent again — which
+    // pays for every completed step a second time and is refused identically.
+    const real = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      new Response(
+        errorFrame({
+          error: 'unauthorized',
+          status: 401,
+          steps: 1,
+          usage: { input_tokens: 10 },
+        }),
+        { headers: { 'Content-Type': 'text/event-stream' } },
+      )) as typeof fetch;
+    try {
+      const { call, close } = await connect({ modelKey: 'sk-test' });
+      const res = await call('run_agent', { prompt: 'finish the task' });
+      expect(res.isError).toBe(true);
+      expect(said(res)).toMatch(/no longer accepted \(HTTP 401\)/);
+      expect(said(res)).toMatch(/not by anything wrong with the computer/);
+      expect(said(res)).toMatch(/Do NOT call run_agent again with the same prompt/);
+      expect(said(res)).toMatch(/until the credential is fixed/);
+      // And what it did get through, because that is what the next decision is
+      // made from — and it is billed.
+      expect(said(res)).toMatch(/1\. screenshot/);
+      await close();
+    } finally {
+      globalThis.fetch = real;
+    }
+  });
+
+  it('does not tell a run refused on role or suspension to authenticate again', async () => {
+    // The recovery is not the same one as a 401's. A shared clause sent a caller
+    // whose role had been taken away off to re-authenticate, which restores
+    // nothing — and then round the same refusal with another prompt's worth of
+    // billed steps behind it (Codex review).
+    const real = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      new Response(
+        errorFrame({
+          error: 'This requires member access to this account; your current role is viewer.',
+          status: 403,
+        }),
+        { headers: { 'Content-Type': 'text/event-stream' } },
+      )) as typeof fetch;
+    try {
+      const { call, close } = await connect({ modelKey: 'sk-test' });
+      const res = await call('run_agent', { prompt: 'finish the task' });
+      expect(res.isError).toBe(true);
+      expect(said(res)).toMatch(/does not permit the run \(HTTP 403\)/);
+      expect(said(res)).toMatch(/your current role is viewer\./);
+      expect(said(res)).toMatch(/say what was refused and stop/);
+      expect(said(res)).not.toMatch(/[Rr]e-authenticate/);
+      expect(said(res)).not.toMatch(/until the credential is fixed/);
+      await close();
+    } finally {
+      globalThis.fetch = real;
+    }
+  });
+
+  it('calls a plan stop a plan stop rather than a broken computer', async () => {
+    const real = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      new Response(
+        errorFrame({
+          error: 'Choose a plan to start a computer.',
+          status: 402,
+        }),
+        {
+          headers: { 'Content-Type': 'text/event-stream' },
+        },
+      )) as typeof fetch;
+    try {
+      const { call, close } = await connect({ modelKey: 'sk-test' });
+      const res = await call('run_agent', { prompt: 'finish the task' });
+      expect(res.isError).toBe(true);
+      expect(said(res)).toMatch(/stopped by the plan on this account/);
+      expect(said(res)).toMatch(/Choose a plan to start a computer\./);
+      await close();
+    } finally {
+      globalThis.fetch = real;
+    }
+  });
+
+  it('leaves a stop it has no verdict for as the platform worded it', async () => {
+    // A run can fail for something worth another attempt, and inventing a
+    // verdict for a status this version was not told about would be the same
+    // mistake pointed the other way.
+    const real = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      new Response(errorFrame({ error: 'the guest agent stopped answering' }), {
+        headers: { 'Content-Type': 'text/event-stream' },
+      })) as typeof fetch;
+    try {
+      const { call, close } = await connect({ modelKey: 'sk-test' });
+      const res = await call('run_agent', { prompt: 'finish the task' });
+      expect(res.isError).toBe(true);
+      expect(said(res)).toMatch(/the guest agent stopped answering/);
+      expect(said(res)).not.toMatch(/Do NOT call run_agent again/);
+      await close();
+    } finally {
+      globalThis.fetch = real;
+    }
+  });
+});
+
+describe('what the prose a model reads first says about a mid-call refusal', () => {
+  it('covers the three statuses that are about the caller, in both texts', async () => {
+    // The server's instructions and the Claude Code skill are read before any
+    // tool description, and they carried a retry policy for 400, 402, 404, 409
+    // and 5xx with nothing at all about authentication dying inside a call. This
+    // asserts only that both texts speak about it and that neither invites a
+    // retry; what they actually say is a judgement no test can make.
+    const platform = installFakePlatform();
+    const { client, close } = await connect({ modelKey: 'sk-test' });
+    try {
+      const skill = readFileSync(
+        new URL('../plugin/skills/mandala-computer/SKILL.md', import.meta.url),
+        'utf8',
+      );
+      for (const [where, text] of [
+        ['server instructions', client.getInstructions() ?? ''],
+        ['the skill', skill],
+      ] as const) {
+        expect(text, where).toMatch(/401/);
+        expect(text, where).toMatch(/403/);
+        expect(text, where).toMatch(/402/);
+        // The two facts a model has to be told, since neither is visible from a
+        // status alone: the refusal can arrive mid-call, and resending is wrong.
+        expect(text, where).toMatch(/in flight/);
+        expect(text, where).toMatch(/resen[dt]/i);
+      }
+    } finally {
+      await close();
+      platform.restore();
+    }
+  });
 });
 
 describe('a gap one call previewed and another call reads', () => {
@@ -5949,7 +6426,9 @@ describe('a gap one call previewed and another call reads', () => {
     const events = fakeEvents();
     const real = globalThis.fetch;
     let reconciling: AbortSignal | null | undefined;
-    const { call, client, close } = await connect({ webSocket: events.factory });
+    const { call, client, close } = await connect({
+      webSocket: events.factory,
+    });
     try {
       await call('poll_events', {});
       // Reconciliation is what the preview's answer buys, and it hangs here so
@@ -5966,7 +6445,10 @@ describe('a gap one call previewed and another call reads', () => {
       const cancelled = client.callTool(
         // A cursor this session cannot place: from before a reap, or from another
         // stream. The gap is real and belongs to THIS call.
-        { name: 'wait_for_event', arguments: { since: 'cur-elsewhere', timeout_s: 5 } },
+        {
+          name: 'wait_for_event',
+          arguments: { since: 'cur-elsewhere', timeout_s: 5 },
+        },
         undefined,
         { signal: controller.signal },
       );
@@ -6034,7 +6516,11 @@ describe('a gap one call previewed and another call reads', () => {
       // Unread and over the cap, so the ring establishes a numeric loss of its
       // own before anybody reads.
       for (let i = 1; i <= MAX_BUFFERED + 1; i++) {
-        events.last().send({ type: 'window.opened', cursor: `cur-${i}`, data: { id: `0x${i}` } });
+        events.last().send({
+          type: 'window.opened',
+          cursor: `cur-${i}`,
+          data: { id: `0x${i}` },
+        });
       }
 
       const plain = sub.read({ since: 'cur-elsewhere', limit: 100 });
@@ -6042,7 +6528,11 @@ describe('a gap one call previewed and another call reads', () => {
       expect(plain.loss?.reason).toMatch(/not a place this session can find/);
       // And the same through a `through` read that also had to step over events
       // to reach its match, which is where the two counts would be added.
-      const matched = sub.read({ since: 'cur-elsewhere', limit: 1, through: MAX_BUFFERED });
+      const matched = sub.read({
+        since: 'cur-elsewhere',
+        limit: 1,
+        through: MAX_BUFFERED,
+      });
       expect(matched.loss?.events).toBeNull();
       expect(matched.loss?.reason).toMatch(/not a place this session can find/);
     } finally {

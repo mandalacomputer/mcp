@@ -140,6 +140,12 @@ user to export a variable the server will never read.
   the last step yourself or run again with a narrower prompt from where it got
   to. Do not re-run the same prompt with a bigger number without looking first.
 - A run is minutes. Do not start one and then poll `screenshot` beside it.
+- A run can be stopped part way through by something that is about the caller
+  rather than the computer — a key revoked, a role changed, an account
+  suspended, a plan that no longer covers the work. The answer says so and
+  lists the steps that did run; those are billed. Re-running the same prompt
+  pays for them again and is refused the same way, so fix the cause first, and
+  when you do resume, resume from what the completed steps already did.
 
 **Drive by hand** — `screenshot`, `click`, `type_text`, `press_key`, `scroll`,
 `drag` — when you need to see each frame yourself, when there is no model key,
@@ -213,8 +219,19 @@ The server renders every failure as one sentence, and the sentence usually
 says what to do. The judgement it cannot make for you:
 
 - **A 400 never clears.** Do not resend it. Change the request or stop.
+- **A 401 or a 403 is about you, not the computer, and either can arrive
+  mid-request.** Who you are is checked again while a call is in flight, before
+  anything further is done — so a revoked key, a role that changed or an account
+  suspended stops a long call after part of its work is already done. Neither
+  clears by being resent. The dangerous case is resending one that creates,
+  starts, moves, writes or deletes: check what took effect first. Re-authenticate
+  for a 401; for a 403 say what was refused and stop. Do not report either as the
+  computer being broken or gone, and do not read it as a transport failure worth
+  retrying.
 - **A 402 is a plan limit.** Waiting does not fix it and neither do you — tell
-  the user what was refused and leave it there.
+  the user what was refused and leave it there. One that arrives after a long
+  wait means the same thing rather than something going wrong on the machine:
+  the plan, as it stands now, does not cover the work.
 - **A 404 is not proof the computer is gone.** An API key can be scoped to a
   single workspace, and a computer in a *different* workspace answers 404 and
   not 403 — deliberately, so a key that cannot reach a machine is not told the
