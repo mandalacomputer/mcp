@@ -11,3 +11,8 @@ coverage/
 
 # Local issue-tracker wiring. Names a workspace, and no build reads it.
 .claude/linear-sync.json
+
+# Adversarial-review transcripts from the /fix-lanes workflow. They quote
+# whatever the reviewer read, which in this repo means the platform, and
+# check:internals does not scan this path.
+.fix-lanes/
