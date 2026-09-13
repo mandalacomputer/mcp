@@ -48,6 +48,7 @@ import {
   RangeNotSatisfiableError,
   RateLimitError,
   RedirectError,
+  reasonAdvice,
   reasonKind,
   UnavailableError,
 } from '../src/errors.js';
@@ -1004,6 +1005,22 @@ describe('the classification of a refusal, for whoever is embedding this (OPL-45
     expect(reasonKind('starting')).toBe('clears');
     expect(reasonKind('unavailable')).toBe('permanent');
     expect(reasonKind('unsupported')).toBe('permanent');
+    // The platform's fifth word, and the first about the CALLER rather than about
+    // a computer: the authority the request arrived with no longer holds
+    // (OPL-4801/4826). Named rather than left to fall through — a 401 or a 403 is
+    // none of the transient classes, so it already answered "not transient", and
+    // the point of naming it is that a future status for this refusal cannot
+    // quietly make it look replayable.
+    expect(reasonKind('revoked')).toBe('permanent');
+  });
+
+  it('tells a model the refusal is about the caller when the status has no sentence', () => {
+    // The formatter asks `statusAdvice` first, and the platform sends `revoked` on
+    // 401 and 403, which both have sentences — so this clause is for a status those do
+    // not cover. It exists so that a different status tomorrow still says the one
+    // thing a model has to be told: this is about who is calling, not the computer.
+    expect(reasonAdvice('revoked')).toMatch(/authority this server is calling with no longer holds/);
+    expect(reasonAdvice('revoked')).toMatch(/refused the same way/);
   });
 
   it('has no opinion about a word this version has not heard of', () => {
@@ -1019,11 +1036,15 @@ describe('the classification of a refusal, for whoever is embedding this (OPL-45
     // One source of truth: `isTransient` reads this classifier rather than the
     // sets directly, so what an embedder is told and what this server does
     // cannot drift into two answers.
-    for (const reason of ['contention', 'starting', 'unavailable', 'unsupported']) {
+    for (const reason of ['contention', 'starting', 'unavailable', 'unsupported', 'revoked']) {
       const err = errorForStatus(409, 'refused', { reason });
       expect(err.reason, reason).toBe(reason);
       expect(isTransient(err), reason).toBe(reasonKind(reason) === 'clears');
     }
+    // 409 above is the status that proves the WORD is answering for `revoked`: a
+    // ConflictError is transient by class, so an unnamed word there says "send it
+    // again" to a caller whose authority has gone.
+    expect(isTransient(errorForStatus(409, 'refused', { reason: 'revoked' }))).toBe(false);
   });
 
   it('classifies the word, which is not the same as deciding a retry', () => {
