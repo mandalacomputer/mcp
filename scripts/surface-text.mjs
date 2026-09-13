@@ -19,7 +19,18 @@ function quotedClose(text, from) {
   return -1;
 }
 
-/** The `}` closing a `${` interpolation opened at `from`, or -1 if unclosed. */
+/**
+ * The `}` closing a `${` interpolation opened at `from`, or -1 if unclosed.
+ *
+ * Comments are skipped here as well as literals, which is not symmetry for its own
+ * sake: a brace or a backtick inside a comment is not syntax, and counting one as
+ * syntax mispairs the interpolation — after which the reader's idea of where the
+ * template ends is wrong for the rest of the expression. That was a false
+ * ALL-CLEAR, not merely a confused one: an annotation carrying `` `${string // }` ``
+ * hid the callback's remaining parameters from the count, and the reader went on
+ * certifying a route the runtime never produced (review of OPL-4830). A regex
+ * literal can hold the same characters, so it is skipped too.
+ */
 function holeEnd(text, from) {
   let depth = 0;
   for (let i = from; i < text.length; i++) {
@@ -28,6 +39,16 @@ function holeEnd(text, from) {
       const end = quotedClose(text, i);
       if (end === -1) return -1;
       i = end - 1;
+    } else if (ch === '/' && text[i + 1] === '/') {
+      i = lineCommentEnd(text, i + 2) - 1;
+    } else if (ch === '/' && text[i + 1] === '*') {
+      const end = text.indexOf('*/', i + 2);
+      // An unterminated block comment swallows the rest of the file, so there is no
+      // closing brace to find and saying so is the only honest answer.
+      if (end === -1) return -1;
+      i = end + 1;
+    } else if (ch === '/' && regexCanStart(text, i)) {
+      i = regexEnd(text, i) - 1;
     } else if (ch === '{') depth++;
     else if (ch === '}' && --depth === 0) return i;
   }
@@ -1141,6 +1162,14 @@ export function tableArrayLiteral(text, what = 'this declaration', projections =
     // this is the same answer, kept as narrow as the tables need — `as Route[]` is
     // how every mirror spells its own, and a generic one is refused by name rather
     // than guessed at.
+    //
+    // THE COMPATIBILITY LOSS IS DELIBERATE AND WORTH WRITING DOWN: `as
+    // Route<string, string>[]` and `as Iterable<string>` are legal casts this reader
+    // used to reduce and now refuses. A mirror that wants either can spell the type
+    // as a non-generic alias — `type Routes = Route<string, string>[]` — and this
+    // reads `as Routes` happily. A refusal that names the declaration is a minute's
+    // work for whoever wrote it; the alternative was a reader that certifies the
+    // wrong route set and says nothing.
     const as = /\sas\s+[A-Za-z_$][\w$.]*(?:\s*\[\s*\])*\s*$/.exec(t);
     if (as) {
       t = t.slice(0, as.index).trim();

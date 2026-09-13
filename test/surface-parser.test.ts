@@ -1159,15 +1159,31 @@ describe('the table-initializer readers', () => {
         1,
       ),
     ).toThrow(/callback this reader cannot account for/);
-    // BALANCED comments, so the final-depth check cannot be what refuses it and the
-    // skipping is the only thing standing between this and a count of one parameter.
+    // BALANCED comments, and the closer AFTER the last parameter — which is the
+    // arrangement that isolates the skipping. With `/* > */` between the second and
+    // third, the third parameter's comma is still outside the angle depth and the
+    // count refuses it anyway, so that version passed with comment skipping removed
+    // and proved nothing (review of OPL-4830).
     expect(() =>
       tableArrayLiteral(
-        `([['GET', 'sizes']] as Route[]).map(([m, p]: Route /* < */, _i /* > */, { [++(p as any)]: unused }) => \`\${m} \${p}\`)`,
+        `([['GET', 'sizes']] as Route[]).map(([m, p]: Route /* < */, _i, { [++(p as any)]: unused } /* > */) => \`\${m} \${p}\`)`,
         'ALLOWED',
         1,
       ),
     ).toThrow(/callback this reader cannot account for/);
+  });
+
+  it('refuses parameters hidden by a comment inside a template type', () => {
+    // The scanner that skips comments is not reached when the walk is inside a
+    // template literal's `${...}`: that scan counted a brace and a backtick in a
+    // COMMENT as syntax, mispaired the interpolation, and from there had the wrong
+    // idea of where the template ended. An annotation carrying `${string // }` then
+    // hid the remaining parameters and the reader certified a route the runtime
+    // never produced — `GET NaN` at runtime, `GET sizes` from the reader (fourth
+    // review round of OPL-4830).
+    const hidden =
+      "([['GET','sizes']] as Route[]).map(([m,p]: Route | `${string // }`<{\r}`, _i, { [++(p as any)]: u } // ` >\n) => `${m} ${p}`)";
+    expect(() => tableArrayLiteral(hidden, 'ALLOWED', 1)).toThrow();
   });
 
   it('reads the one projection through a terminal comma', () => {
