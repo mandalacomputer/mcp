@@ -67,7 +67,7 @@ const ALLOWED = new Set([
   'scripts/check-surface.mjs',
   'scripts/check-internals.mjs',
   'test/allowlist.ts',
-  'test/surface-parser.test.ts',
+  'test/check-surface.test.ts',
   'test/api-parity.test.ts',
   'test/check-internals.test.ts',
 ]);

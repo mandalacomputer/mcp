@@ -1,3 +1,4 @@
+import { LIMITS } from './limits.js';
 /**
  * Every path this server can reach, and every body it can send.
  *
@@ -641,7 +642,7 @@ export function windowBody(args: {
  * deliberately not mirrored: nothing here can meet it, since that text comes
  * from the guest.
  */
-export const MAX_CLIPBOARD_BYTES = 64 * 1024;
+export const MAX_CLIPBOARD_BYTES = LIMITS['clipboard.writeMaxBytes'];
 
 /**
  * Said in full, because the model reading it did not choose those bytes on
@@ -771,8 +772,8 @@ export const webhook = (id: string) => `${WEBHOOKS}/${segment('webhook_id', id)}
 export const webhookAction = (id: string, action: string) => `${webhook(id)}/${action}`;
 
 /** The platform's own caps (`DESCRIPTION_MAX` and `COMPUTERS_MAX` on the platform side). */
-export const WEBHOOK_DESCRIPTION_MAX = 200;
-export const WEBHOOK_COMPUTERS_MAX = 64;
+export const WEBHOOK_DESCRIPTION_MAX = LIMITS['webhook.descriptionMaxChars'];
+export const WEBHOOK_COMPUTERS_MAX = LIMITS['webhook.computersMax'];
 
 /**
  * The body for a webhook create or update — the fields, checked before they

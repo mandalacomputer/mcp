@@ -630,11 +630,13 @@ written down in `UNIMPLEMENTED`. A route added upstream becomes a failing test
 here rather than a feature nobody noticed.
 
 `npm run check:surface` goes further and diffs the mirror against the platform's
-own route table, whenever the platform repository happens to be checked out next
-door — or wherever `MANDALA_PLATFORM_REPO` points. Without it the script says
-it is skipping and exits 0, which is what it does for anyone outside the
-platform team; the diff is enforced from the platform's own CI, which checks
-this repository out beside itself and runs the same script.
+published surface manifest — a file the platform generates from its own tables
+and commits like a lockfile — whenever the platform repository happens to be
+checked out next door, or wherever `MANDALA_PLATFORM_REPO` points. Without it
+the script says it is skipping and exits 0, which is what it does for anyone
+outside the platform team; a manifest it cannot read is a failure, never a
+comparison of nothing. The diff is enforced from the platform's own CI, which
+checks this repository out beside itself and runs the same script.
 
 ```
 check:surface — the mirror matches the platform (N routes, N parameters, from …).
