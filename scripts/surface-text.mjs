@@ -947,6 +947,44 @@ const DESTRUCTURED_PAIR =
  * regex anchored at the template's backtick refused a legal projection — a gate
  * that a reformat takes down is a broken gate.
  */
+/**
+ * Whether a parameter list holds exactly one parameter.
+ *
+ * `listItems` cannot answer this, and that is the whole reason this exists: it
+ * balances `()`, `[]` and `{}` and knows nothing about `<>`, so a legal
+ * `([m, p]: Route<string, string>)` reads as two parameters. Matching the whole
+ * list against one pattern instead — with the annotation as `[^=]*` — was the
+ * other direction of the same mistake, and it admitted a PROVEN false all-clear:
+ * an extra destructured parameter whose computed key runs without containing an
+ * `=` changed the value the callback returned while the reader went on reporting
+ * the routes of the array it could see.
+ *
+ * So the commas are counted with the angle brackets balanced too. A `>` whose
+ * previous character is `=` is an arrow's and closes nothing, and `<`/`>` count
+ * only at bracket depth zero — inside `()`, `[]` or `{}` a `<` may be a
+ * comparison, and a wrong angle depth there would be a wrong answer rather than a
+ * refusal.
+ */
+function oneParameter(paramsText) {
+  let brackets = 0;
+  let angles = 0;
+  let i = 0;
+  while (i < paramsText.length) {
+    const ch = paramsText[i];
+    if (ch === "'" || ch === '"' || ch === '`') {
+      i = quotedEnd(paramsText, i);
+      continue;
+    }
+    if (ch === '(' || ch === '[' || ch === '{') brackets++;
+    else if (ch === ')' || ch === ']' || ch === '}') brackets--;
+    else if (ch === '<' && brackets === 0) angles++;
+    else if (ch === '>' && brackets === 0 && paramsText[i - 1] !== '=' && angles > 0) angles--;
+    else if (ch === ',' && brackets === 0 && angles === 0) return false;
+    i++;
+  }
+  return true;
+}
+
 function joinsThePair(argsText) {
   const args = listItems(argsText);
   if (args.length !== 1) return false;
@@ -966,6 +1004,13 @@ function joinsThePair(argsText) {
   // passes three arguments and a default runs — and every default contains an
   // `=`, which the annotation here may not. An extra parameter without one cannot
   // change what the callback returns.
+  // Exactly one parameter, counted with the angle brackets balanced, BEFORE the
+  // shape is matched. `DESTRUCTURED_PAIR`'s annotation tail is `[^=]*`, which
+  // swallows further parameters whole, and a default is not the only thing an
+  // extra parameter can do to the value: `([m, p]: Route, _i, { [++(p as any)]: u })`
+  // type-checks, holds no `=` at all, and returns `GET NaN` from a reader that
+  // reported `GET sizes` (review of OPL-4830).
+  if (!oneParameter(params)) return false;
   const named = DESTRUCTURED_PAIR.exec(params.trim());
   if (!named) return false;
   return body.slice(2).trim() === `\`\${${named[1]}} \${${named[2]}}\``;
@@ -1107,9 +1152,19 @@ function trailingCall(text, name) {
  * braces, and this only stops at depth zero.
  *
  * `=>`, `==`, `!=`, `<=` and `>=` are not assignments and are stepped over.
+ *
+ * So is an `=` inside a generic's own brackets, which is a type parameter's
+ * DEFAULT and not this declaration's initializer. `Box<<U = string>() => U>` is a
+ * legal annotation, and stopping at its `U =` reported the table as declared
+ * without an initializer — a false refusal of valid source (review of OPL-4830).
+ * The angle depth is tracked only at bracket depth zero, where a `<` in a type
+ * annotation can only be a generic's: inside `()`, `[]` or `{}` the depth rule
+ * above already steps over every `=`, and guessing at a `<` there would risk
+ * stepping over the real assignment instead.
  */
 export function declarationAssignment(source, from) {
   let depth = 0;
+  let angles = 0;
   let i = from;
   while (i < source.length) {
     const ch = source[i];
@@ -1136,8 +1191,10 @@ export function declarationAssignment(source, from) {
       // A closer at depth zero ends the declaration without an initializer, and
       // reading on would find the NEXT one's.
       if (depth-- === 0) return -1;
-    } else if (ch === ';' && depth === 0) return -1;
-    else if (ch === '=' && depth === 0) {
+    } else if (ch === '<' && depth === 0) angles++;
+    else if (ch === '>' && depth === 0 && source[i - 1] !== '=' && angles > 0) angles--;
+    else if (ch === ';' && depth === 0) return -1;
+    else if (ch === '=' && depth === 0 && angles === 0) {
       const next = source[i + 1];
       const prev = source[i - 1];
       // `=>`, `==`, `===` and `!=` only. A `<` or `>` in FRONT is not a comparison

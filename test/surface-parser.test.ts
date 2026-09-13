@@ -1123,6 +1123,44 @@ describe('the table-initializer readers', () => {
     ).toThrow(/callback this reader cannot account for/);
   });
 
+  it('refuses an extra callback parameter that changes the pair without an =', () => {
+    // A default is not the only thing an extra parameter can do. A computed key in
+    // a destructured parameter RUNS, and holds no `=` at all: this type-checks,
+    // survives the formatter, returns `GET NaN` at runtime, and the reader went on
+    // certifying the route it could see in the array (review of OPL-4830). So the
+    // parameter list is counted rather than pattern-matched, with the angle
+    // brackets balanced so a generic annotation is still one parameter.
+    expect(() =>
+      tableArrayLiteral(
+        `([['GET', 'sizes']] as Route[]).map(([m, p]: Route, _i, { [++(p as any)]: unused }) => \`\${m} \${p}\`)`,
+        'ALLOWED',
+        1,
+      ),
+    ).toThrow(/callback this reader cannot account for/);
+    // Even one that does nothing: an extra parameter this reader cannot account
+    // for is refused rather than judged harmless.
+    expect(() =>
+      tableArrayLiteral(
+        `([['GET', 'sizes']] as Route[]).map(([m, p]: Route, _i) => \`\${m} \${p}\`)`,
+        'ALLOWED',
+        1,
+      ),
+    ).toThrow(/callback this reader cannot account for/);
+  });
+
+  it('still reads the one projection through a generic annotation', () => {
+    // The refusal above counts commas, and a generic's commas are not parameter
+    // separators — `listItems` does not know that, which is why this is counted
+    // with the angle brackets balanced. A formatter produces this shape.
+    expect(
+      tableArrayLiteral(
+        `([['GET', 'sizes']] as Route[]).map(([m, p]: Route<string, string>) => \`\${m} \${p}\`)`,
+        'ALLOWED',
+        1,
+      ),
+    ).toBe(`['GET', 'sizes']`);
+  });
+
   it('refuses a table built with no projection where its caller expects one', () => {
     // A cast in place of the `.map` leaves the array this reader compares intact
     // and builds a Set of ARRAYS, so every `has()` on it is false — a mirror that
@@ -1177,6 +1215,16 @@ describe('the table-initializer readers', () => {
     const source = `export const T: ReadonlyMap<string, readonly string[]>=new Map([['real', []]]);`;
     const at = declarationAssignment(source, 0);
     expect(source.slice(at).startsWith('new Map')).toBe(true);
+  });
+
+  it('finds the assignment past a generic type parameter’s own default', () => {
+    // `<U = string>` is a type parameter DEFAULT, not this declaration's
+    // initializer, and stopping at it reported a legal table as declared without
+    // one — a false refusal of source that type-checks (review of OPL-4830).
+    const source = `export const T: Box<<U = string>() => U> = new Map([['real', []]]);`;
+    const at = declarationAssignment(source, 0);
+    expect(at).toBeGreaterThan(0);
+    expect(source.slice(at).trimStart().startsWith('new Map')).toBe(true);
   });
 
   it('reports no assignment rather than finding the NEXT declaration’s', () => {
