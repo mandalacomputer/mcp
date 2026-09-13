@@ -98,8 +98,9 @@ describe('check:surface', () => {
     // Compared here, in the script the platform's own CI runs, rather than in a
     // test that skips without a checkout — where none of these could drift.
     // Whichever limits this repo mirrors: the first moved, the last withdrawn.
-    const keys = Object.keys(LIMITS) as (keyof typeof LIMITS)[];
-    const [moved, gone] = [keys[0], keys[keys.length - 1]];
+    const keys = Object.keys(LIMITS) as [keyof typeof LIMITS, ...(keyof typeof LIMITS)[]];
+    const moved = keys[0];
+    const gone = keys.at(-1) ?? moved;
     const manifest = inStep();
     manifest.limits[moved] = LIMITS[moved] + 1;
     delete manifest.limits[gone];
