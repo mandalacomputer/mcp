@@ -969,20 +969,69 @@ function oneParameter(paramsText) {
   let brackets = 0;
   let angles = 0;
   let i = 0;
+  /** Whether only whitespace and comments are left, which makes a comma terminal. */
+  const nothingAfter = (from) => {
+    let j = from;
+    while (j < paramsText.length) {
+      if (/\s/.test(paramsText[j])) {
+        j++;
+        continue;
+      }
+      if (paramsText[j] === '/' && paramsText[j + 1] === '/') {
+        const end = paramsText.indexOf('\n', j + 2);
+        j = end === -1 ? paramsText.length : end;
+        continue;
+      }
+      if (paramsText[j] === '/' && paramsText[j + 1] === '*') {
+        const end = paramsText.indexOf('*/', j + 2);
+        if (end === -1) return false;
+        j = end + 2;
+        continue;
+      }
+      return false;
+    }
+    return true;
+  };
   while (i < paramsText.length) {
     const ch = paramsText[i];
     if (ch === "'" || ch === '"' || ch === '`') {
       i = quotedEnd(paramsText, i);
       continue;
     }
+    // Comments are stepped over BEFORE anything is counted, because a bracket
+    // inside one is not a bracket: `([m, p]: Route /* < */, _i, { [++(p as any)]: u })`
+    // left the angle depth positive for the rest of the list, hid the commas after
+    // it, and read as one parameter — the same false all-clear in a new spelling
+    // (second review round of OPL-4830).
+    if (ch === '/' && paramsText[i + 1] === '/') {
+      const end = paramsText.indexOf('\n', i + 2);
+      i = end === -1 ? paramsText.length : end;
+      continue;
+    }
+    if (ch === '/' && paramsText[i + 1] === '*') {
+      const end = paramsText.indexOf('*/', i + 2);
+      // An unterminated comment is not something to read past.
+      if (end === -1) return false;
+      i = end + 2;
+      continue;
+    }
     if (ch === '(' || ch === '[' || ch === '{') brackets++;
     else if (ch === ')' || ch === ']' || ch === '}') brackets--;
     else if (ch === '<' && brackets === 0) angles++;
     else if (ch === '>' && brackets === 0 && paramsText[i - 1] !== '=' && angles > 0) angles--;
-    else if (ch === ',' && brackets === 0 && angles === 0) return false;
+    else if (ch === ',' && brackets === 0 && angles === 0) {
+      // A TERMINAL comma is punctuation, not a parameter: `([m, p]: Route,) => …`
+      // is one parameter and a formatter writes it that way on a wrapped line.
+      // Refusing it made a supported projection fail over a comma (second review
+      // round).
+      if (!nothingAfter(i + 1)) return false;
+      break;
+    }
     i++;
   }
-  return true;
+  // A depth that does not come back to zero means this reader lost track of the
+  // list rather than read it, and the answer it would give is a guess.
+  return brackets === 0 && angles === 0;
 }
 
 function joinsThePair(argsText) {
@@ -1014,6 +1063,19 @@ function joinsThePair(argsText) {
   const named = DESTRUCTURED_PAIR.exec(params.trim());
   if (!named) return false;
   return body.slice(2).trim() === `\`\${${named[1]}} \${${named[2]}}\``;
+}
+
+/**
+ * Whether every argument of a generic in an `as` suffix is a keyword type.
+ *
+ * The one thing that makes a generic in a type assertion unambiguous. See the
+ * `as` rule below for why an identifier argument is not.
+ */
+const KEYWORD_TYPE =
+  /^(?:readonly\s+)?(?:any|unknown|never|void|null|undefined|string|number|boolean|object|symbol|bigint)(?:\s*\[\s*\])*$/;
+function keywordTypeArguments(inside) {
+  const args = inside.split(',');
+  return args.length > 0 && args.every((a) => KEYWORD_TYPE.test(a.trim()));
 }
 
 export function tableArrayLiteral(text, what = 'this declaration', projections = null) {
@@ -1060,10 +1122,24 @@ export function tableArrayLiteral(text, what = 'this declaration', projections =
         continue;
       }
     }
-    // `as <type>` — identifiers, dots, generics and `[]`, which is every
-    // annotation these tables carry and nothing that can call a method.
-    const as = /\sas\s+[A-Za-z_$][\w$.]*(?:<[\w$.,\s[\]]*>)?(?:\s*\[\s*\])*\s*$/.exec(t);
-    if (as) {
+    // `as <type>` — identifiers, dots, `[]`, and generics ONLY over keyword types.
+    //
+    // The last clause is the whole of a finding. `as any<X, Y>[]` matched the
+    // pattern and is not a type at all: TypeScript ends the type at `any`, reads
+    // the rest as `< X, Y > []` — comparisons and a comma expression — and the
+    // value that reaches the call is a boolean. It type-checks, and a reader that
+    // erased the suffix as a type certified routes the runtime never produces
+    // (review of OPL-4841/4830; the body reader beside this refuses every `as`
+    // suffix for the same reason and pays a refusal for it).
+    //
+    // A type ARGUMENT that is a keyword type cannot make that mistake possible,
+    // because the executable reading needs its operands to be values and `string`
+    // is not one — so `as Route<string, string>[]` and `as Iterable<string>` stay
+    // readable while `Route<X, Y>` does not. `readonly` is allowed in front of an
+    // argument because `ReadonlyMap<string, readonly string[]>` is how these
+    // tables are spelled.
+    const as = /\sas\s+[A-Za-z_$][\w$.]*(?:<([\w$.,\s[\]]*)>)?(?:\s*\[\s*\])*\s*$/.exec(t);
+    if (as && (as[1] === undefined || keywordTypeArguments(as[1]))) {
       t = t.slice(0, as.index).trim();
       continue;
     }

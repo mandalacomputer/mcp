@@ -1148,6 +1148,56 @@ describe('the table-initializer readers', () => {
     ).toThrow(/callback this reader cannot account for/);
   });
 
+  it('refuses parameters hidden behind a comment', () => {
+    // A bracket inside a comment is not a bracket. `/* < */` left the angle depth
+    // positive for the rest of the list, which hid every comma after it, and the
+    // same computed-key bypass read as one parameter again (second review round).
+    expect(() =>
+      tableArrayLiteral(
+        `([['GET', 'sizes']] as Route[]).map(([m, p]: Route /* < */, _i, { [++(p as any)]: unused }) => \`\${m} \${p}\`)`,
+        'ALLOWED',
+        1,
+      ),
+    ).toThrow(/callback this reader cannot account for/);
+  });
+
+  it('reads the one projection through a terminal comma', () => {
+    // A comma with nothing after it is punctuation a formatter leaves on a wrapped
+    // parameter, not another parameter — and refusing it made a supported
+    // projection fail over punctuation (second review round).
+    expect(
+      tableArrayLiteral(
+        `([['GET', 'sizes']] as Route[]).map(([m, p]: Route<string, string>,) => \`\${m} \${p}\`)`,
+        'ALLOWED',
+        1,
+      ),
+    ).toBe(`['GET', 'sizes']`);
+  });
+
+  it('refuses a type assertion whose generic is not a type at all', () => {
+    // `as any<X, Y>[]` matched the `as` pattern and is not a type: TypeScript ends
+    // the type at `any` and reads `< X, Y > []` as comparisons and a comma
+    // expression, so the value reaching the call is a boolean. It type-checks, and
+    // erasing the suffix as a type certified routes the runtime never produces.
+    // Keyword type arguments cannot do that — `string` is not a value — so the
+    // spellings these tables actually use stay readable.
+    expect(() =>
+      tableArrayLiteral(
+        `(([['GET', 'sizes']] as Route[]).map(([m, p]) => \`\${m} \${p}\`) as any<X, Y>[] as any)`,
+        'ALLOWED',
+        1,
+      ),
+    ).toThrow(/is built with 0 projections/);
+    // And the legal generic assertions still reduce.
+    expect(
+      tableArrayLiteral(
+        `([['GET', 'sizes']] as Route<string, string>[]).map(([m, p]) => \`\${m} \${p}\`)`,
+        'ALLOWED',
+        1,
+      ),
+    ).toBe(`['GET', 'sizes']`);
+  });
+
   it('still reads the one projection through a generic annotation', () => {
     // The refusal above counts commas, and a generic's commas are not parameter
     // separators — `listItems` does not know that, which is why this is counted
