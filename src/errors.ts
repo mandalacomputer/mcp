@@ -21,9 +21,10 @@ export class APIError extends MandalaError {
   override name = 'APIError';
   /**
    * The platform's own word for what KIND of refusal this is, where it sent
-   * one: `contention`, `starting`, `unavailable` or `unsupported` (OPL-3898).
-   * `undefined` for most errors, and always will be — the platform is explicit
-   * that an absent value means unclassified rather than "none of the four".
+   * one: `contention`, `starting`, `unavailable` or `unsupported` (OPL-3898),
+   * or `revoked` (OPL-4801) — the one word about the caller rather than the
+   * computer. `undefined` for most errors, and always will be — the platform is
+   * explicit that an absent value means unclassified rather than "none of these".
    *
    * Read on the base class rather than on the one 409 it was filed for, because
    * the platform keys it on the ERROR and not on the route: the same sentinel is
@@ -57,7 +58,16 @@ export class APIError extends MandalaError {
  * `_REASON_PERMANENT` in mandala-computer-python's `_exceptions.py`.
  */
 const REASON_CLEARS: ReadonlySet<string> = new Set(['contention', 'starting']);
-const REASON_PERMANENT: ReadonlySet<string> = new Set(['unavailable', 'unsupported']);
+/**
+ * `revoked` is the first of these about the CALLER rather than about a computer:
+ * the authority the request arrived with no longer holds — suspended, demoted,
+ * removed, or a session the platform has retired (platform OPL-4801). Permanent,
+ * and named rather than left to fall through: a 401 or a 403 is none of the four
+ * transient classes, so an unrecognised word already answered "not transient" and
+ * nothing changes today. What changes is that a future status for this refusal
+ * cannot quietly make it look replayable.
+ */
+const REASON_PERMANENT: ReadonlySet<string> = new Set(['unavailable', 'unsupported', 'revoked']);
 
 /** Whether waiting can change a classified refusal's answer. */
 export type ReasonKind = 'clears' | 'permanent';
@@ -128,6 +138,13 @@ export function reasonAdvice(reason: string | undefined): string | undefined {
       return 'the computer is not running; if nothing is starting it this will not clear on its own and start_computer is the fix, and if a start is already under way wait_for_computer says so without starting a second one';
     case 'unsupported':
       return 'this computer cannot do it at all, so do not retry it — the answer is the same forever';
+    case 'revoked':
+      // Reached only on a status statusAdvice has no sentence for, because the
+      // formatter asks that one first and the platform sends this word on 401 and
+      // 403 today. It is here so that a different status tomorrow still says the
+      // one thing a model has to be told: this is about who is calling, not about
+      // the computer, and sending it again unchanged changes nothing.
+      return 'the authority this server is calling with no longer holds — a credential, role or account that changed, rather than anything wrong with the computer. Sending this again unchanged is refused the same way, and it can be decided partway through a call, so check what already took effect';
     default:
       return undefined;
   }
