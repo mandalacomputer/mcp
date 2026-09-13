@@ -259,6 +259,15 @@ function unescaped(text) {
     } else if (next === 'u') {
       out += String.fromCharCode(hexValue(text.slice(i + 1, i + 5), text));
       i += 4;
+    } else if (next === '\n' || next === '\u2028' || next === '\u2029') {
+      // A line continuation spells NOTHING. `'si\<newline>zes'` is `sizes` to the
+      // engine, and a reader that kept the newline compared a route with a line
+      // break in it — reporting the real one missing and inventing one nobody
+      // serves.
+    } else if (next === '\r') {
+      // CRLF is one terminator. Swallow the LF with it, or the value keeps a
+      // newline the engine never put there.
+      if (text[i + 1] === '\n') i++;
     } else {
       // Anything else stands for itself: `\'`, `\"`, `` \` ``, `\\`, `\$`.
       out += SHORT_ESCAPES[next] ?? next;
@@ -856,4 +865,293 @@ export function moduleDeclarations(source, pattern) {
   }
   if (stack.length) throw new Error('unbalanced module scope');
   return found;
+}
+
+/**
+ * The value of `text` when it is exactly one plain quoted literal, else
+ * `undefined`.
+ *
+ * Any of the three quote styles, which is the point of it. The mirror tables
+ * were read with `/'([^']+)'/g`, so an entry a formatter or an author wrote with
+ * double quotes matched nothing and was skipped — and a skipped entry is not a
+ * complaint, it is a table that is short by however much it held. The caller
+ * decides what to do about an unreadable element; this only answers whether the
+ * element IS a plain string.
+ *
+ * Escapes are RESOLVED rather than refused, through the same `unescaped` the rest
+ * of this file reads literals with: `"a\x2Fb"` is the four characters `a/b` and a
+ * reader that answered `a\x2Fb` would compare a route nobody serves. A template
+ * that interpolates is the one thing refused, because what it spells depends on
+ * values this reader cannot see.
+ */
+export function stringLiteral(text) {
+  const t = text.trim();
+  const quote = t[0];
+  if (quote !== "'" && quote !== '"' && quote !== '`') return undefined;
+  // The literal has to be the WHOLE of the element. `'a' + b` and `'a'.repeat(2)`
+  // both start with a readable literal and mean something else.
+  if (quotedEnd(t, 0) !== t.length) return undefined;
+  const inner = t.slice(1, -1);
+  if (quote === '`' && hasHole(inner)) return undefined;
+  return unescaped(inner);
+}
+
+/**
+ * The body of the array literal a table's initializer IS, and a throw for an
+ * initializer that is anything more than one.
+ *
+ * The tables read here are arrays, but not always the initializer itself: one is
+ * `new Set((<array> as Route[]).map(...))` and another is `new Map(<array>)`.
+ * Finding the array with `indexOf('[')` reads the `[` of the `as Route[]`
+ * annotation, and a regex over the declaration reads whichever bracket comes
+ * first — including one inside a nested literal, and including the `[m, p]` of
+ * the `.map` destructuring that follows the real table.
+ *
+ * Taking the LEADING array is not enough either, which is the adversarial review
+ * finding this answers: `(<array>.concat([['GET', 'gone']]) as Route[]).map(...)`
+ * type-checks, puts a route in the Set, and leaves the leading array — the one a
+ * leading-array reader compares — without it. The extra route is then a route the
+ * mirror lists and the comparison never sees, which is the false all-clear this
+ * whole file exists to refuse.
+ *
+ * So the initializer must REDUCE to the array, and every piece of it is
+ * whitelisted:
+ *
+ * - wrapping parentheses, however many;
+ * - a trailing `as <type>`, the annotation being the point of the parentheses;
+ * - one trailing `.map(...)`, which cannot change how many elements there are —
+ *   that is what makes it safe to look through, and `concat`, `filter`, `flatMap`
+ *   and a spread are all refused because they can.
+ *
+ * Anything else is a table this reader would compare part of. It throws instead,
+ * naming what it could not reduce.
+ */
+/** The one destructured parameter the permitted projection takes. */
+const DESTRUCTURED_PAIR =
+  /^\[\s*([A-Za-z_$][\w$]*)\s*,\s*([A-Za-z_$][\w$]*)\s*,?\s*\](?:\s*:\s*[^=]*)?$/;
+
+/**
+ * Whether `text` is the one projection this reader can account for: the
+ * destructured pair joined by a space.
+ *
+ * Parsed rather than matched with one regex, which is what the third round of this
+ * finding cost. `(?::[^)]*)?` for the parameter's type annotation also swallowed
+ * ADDITIONAL parameters, and `.map` passes only three arguments — so a fourth
+ * parameter with a default ran that default:
+ * `([m, p]: Route, _i, _a, unused = p = 'gone') => ${'`${m} ${p}`'}` type-checks, returns
+ * `GET gone` at runtime, and matched. So the parameter list is split with
+ * `listItems` and there has to be exactly ONE of them, carrying no `=`.
+ *
+ * The call's arguments are split the same way, for the false refusal alongside it:
+ * a formatter wrapping the call leaves a trailing comma after the callback, and a
+ * regex anchored at the template's backtick refused a legal projection — a gate
+ * that a reformat takes down is a broken gate.
+ */
+function joinsThePair(argsText) {
+  const args = listItems(argsText);
+  if (args.length !== 1) return false;
+  const arrow = args[0].trim();
+  if (!arrow.startsWith('(')) return false;
+  const params = balanced(arrow, 0, '(', ')');
+  const body = arrow.slice(params.length + 2).trim();
+  // The arrow and its body trimmed apart, because a formatter puts the template on
+  // its own line when the parameter's annotation is long, and comparing the whole
+  // tail to one string refused exactly that.
+  if (!body.startsWith('=>')) return false;
+  // The whole parameter text against one pattern rather than split into
+  // parameters first: `listItems` does not balance angle brackets, so a legal
+  // `([m, p]: Route<string, string>)` read as TWO parameters and a mirror a
+  // formatter would produce was refused. What actually has to be excluded is a
+  // DEFAULT — the only thing an extra parameter can do to a value, since `.map`
+  // passes three arguments and a default runs — and every default contains an
+  // `=`, which the annotation here may not. An extra parameter without one cannot
+  // change what the callback returns.
+  const named = DESTRUCTURED_PAIR.exec(params.trim());
+  if (!named) return false;
+  return body.slice(2).trim() === `\`\${${named[1]}} \${${named[2]}}\``;
+}
+
+export function tableArrayLiteral(text, what = 'this declaration', projections = null) {
+  const refuse = (why, at) => {
+    throw new Error(`${what} ${why}: ${JSON.stringify(at.trim().slice(0, 60))}`);
+  };
+  let t = text.trim();
+  let maps = 0;
+  // Ten is past any nesting a formatter produces and stops a rule that fails
+  // to shorten `t` from spinning. Each pass below strips at least one construct.
+  for (let pass = 0; pass < 10; pass++) {
+    // The trailing comma a formatter leaves on a multi-line argument. Stripped
+    // first, because every rule below reads the last character.
+    if (t.endsWith(',')) {
+      t = t.slice(0, -1).trimEnd();
+      continue;
+    }
+    // One trailing `.map(...)`, stripped before the parentheses around it: the
+    // call's own `(` would otherwise read as a wrapper that never closes here.
+    //
+    // And the CALLBACK is checked, not waved through, which is the second round
+    // of the same finding. `.map` preserving the element count is not enough:
+    // `([['GET', 'sizes']] as Route[]).map(() => 'GET gone')` type-checks and puts
+    // a route in the Set that is in no array this reader can see. The one
+    // projection it knows how to account for is the pair joined by a space, so
+    // that is the one it accepts — spelled any way, with any two parameter names,
+    // and anything else refused. Pinning the shape means a rewrite of the callback
+    // breaks this gate LOUDLY, which is the correct direction for a gate to fail.
+    const map = trailingCall(t, '.map');
+    if (map !== undefined) {
+      if (maps++ > 0) refuse('chains more than one .map, which this reader cannot follow', t);
+      if (!joinsThePair(map.argument)) {
+        refuse('maps its entries with a callback this reader cannot account for', map.argument);
+      }
+      t = map.receiver.trim();
+      continue;
+    }
+    if (t.startsWith('(')) {
+      const inner = balanced(t, 0, '(', ')');
+      // Only when the `)` is the END of it. `(a) + (b)` opens with a parenthesis
+      // and is not a parenthesised expression.
+      if (`(${inner})` === t) {
+        t = inner.trim();
+        continue;
+      }
+    }
+    // `as <type>` — identifiers, dots, generics and `[]`, which is every
+    // annotation these tables carry and nothing that can call a method.
+    const as = /\sas\s+[A-Za-z_$][\w$.]*(?:<[\w$.,\s[\]]*>)?(?:\s*\[\s*\])*\s*$/.exec(t);
+    if (as) {
+      t = t.slice(0, as.index).trim();
+      continue;
+    }
+    break;
+  }
+  // The projection is REQUIRED where the table has one, not merely permitted at
+  // most once. `new Set([['GET', 'sizes']] as unknown as Iterable<string>)` reduces
+  // to the array this reader compares and builds a Set of ARRAYS at runtime, so
+  // every `has()` on it is false — a mirror that matches and asserts nothing. The
+  // caller says how many projections its table is built with, and zero is as wrong
+  // as two when the answer is one.
+  if (projections !== null && maps !== projections) {
+    refuse(`is built with ${maps} projections where this reader expects ${projections}`, text);
+  }
+  if (!t.startsWith('[')) refuse('is not an array literal this reader can read', t);
+  const body = balanced(t, 0, '[', ']');
+  // The array has to BE the whole of what is left, not the front of it: the
+  // `.concat` above ends in a `)` and a `[0]` index ends in a `]`, and both would
+  // otherwise pass as "starts with an array".
+  if (`[${body}]` !== t) refuse('holds more than one array literal expression', t);
+  return body;
+}
+
+/**
+ * The argument text of a trailing `<name>(...)` call, or `undefined`.
+ *
+ * Both halves come back: `X.map(f)` answers `{ receiver: 'X', argument: 'f' }`.
+ * Literal-aware, so a `.map(` inside a string is not one, and the call's closing
+ * parenthesis has to be the last character — a call in the middle of an expression
+ * is not something to look through.
+ */
+function trailingCall(text, name) {
+  let i = 0;
+  while (i < text.length) {
+    const ch = text[i];
+    if (ch === "'" || ch === '"' || ch === '`') {
+      i = quotedEnd(text, i);
+      continue;
+    }
+    if (ch === '/' && text[i + 1] === '/') {
+      const end = text.indexOf('\n', i + 2);
+      i = end === -1 ? text.length : end;
+      continue;
+    }
+    if (ch === '/' && text[i + 1] === '*') {
+      const end = text.indexOf('*/', i + 2);
+      i = end === -1 ? text.length : end + 2;
+      continue;
+    }
+    if (ch === '/' && regexCanStart(text, i)) {
+      i = regexEnd(text, i);
+      continue;
+    }
+    if (ch === '(' || ch === '[' || ch === '{') {
+      const close = { '(': ')', '[': ']', '{': '}' }[ch];
+      const inner = balanced(text, i, ch, close);
+      const after = i + inner.length + 2;
+      const opensCall = text.slice(0, i).trimEnd().endsWith(name);
+      if (ch === '(' && opensCall && after === text.length) {
+        return {
+          receiver: text.slice(0, text.slice(0, i).trimEnd().length - name.length),
+          argument: inner,
+        };
+      }
+      i = after;
+      continue;
+    }
+    i++;
+  }
+  return undefined;
+}
+
+/**
+ * The offset just past the `=` of a module-level declaration starting at `from`.
+ *
+ * Written because a regex could not do it. `export const NAME\s*:[^=]*=\s*new
+ * Map\(` looks like it reads a declaration and its initializer, and
+ * `moduleDeclarations` only guarantees where the match STARTS — so `[^=]*` is
+ * free to run through a quote and find its `new Map(` inside a STRING in the type
+ * annotation. An annotation carrying `& { decoy?: "= new Map([['GET x', []]])" }`
+ * type-checks, and the reader compared the mirror against the decoy's table.
+ *
+ * The same regex refuses a legal annotation for the mirror image of the reason:
+ * `{ optional?: () => string }` holds an `=`, so `[^=]*` stops at it and the
+ * `new Map(` never matches. A depth-aware walk answers both — that `=` is inside
+ * braces, and this only stops at depth zero.
+ *
+ * `=>`, `==`, `!=`, `<=` and `>=` are not assignments and are stepped over.
+ */
+export function declarationAssignment(source, from) {
+  let depth = 0;
+  let i = from;
+  while (i < source.length) {
+    const ch = source[i];
+    if (ch === "'" || ch === '"' || ch === '`') {
+      i = quotedEnd(source, i);
+      continue;
+    }
+    if (ch === '/' && source[i + 1] === '/') {
+      const end = source.indexOf('\n', i + 2);
+      i = end === -1 ? source.length : end;
+      continue;
+    }
+    if (ch === '/' && source[i + 1] === '*') {
+      const end = source.indexOf('*/', i + 2);
+      i = end === -1 ? source.length : end + 2;
+      continue;
+    }
+    if (ch === '/' && regexCanStart(source, i)) {
+      i = regexEnd(source, i);
+      continue;
+    }
+    if (ch === '(' || ch === '[' || ch === '{') depth++;
+    else if (ch === ')' || ch === ']' || ch === '}') {
+      // A closer at depth zero ends the declaration without an initializer, and
+      // reading on would find the NEXT one's.
+      if (depth-- === 0) return -1;
+    } else if (ch === ';' && depth === 0) return -1;
+    else if (ch === '=' && depth === 0) {
+      const next = source[i + 1];
+      const prev = source[i - 1];
+      // `=>`, `==`, `===` and `!=` only. A `<` or `>` in FRONT is not a comparison
+      // here: in a type annotation it is a generic's bracket, and
+      // `ReadonlyMap<string, readonly string[]>=new Map(...)` — unformatted, but
+      // legal — was read as `>=`, so the real assignment was skipped and the table
+      // reported undeclared.
+      if (next === '=' || next === '>' || prev === '=' || prev === '!') {
+        i += 2;
+        continue;
+      }
+      return i + 1;
+    }
+    i++;
+  }
+  return -1;
 }

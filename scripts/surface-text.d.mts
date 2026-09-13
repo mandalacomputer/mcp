@@ -10,3 +10,6 @@ export function moduleDeclarations(
   source: string,
   pattern: string,
 ): { index: number; length: number; groups: string[] }[];
+export function stringLiteral(text: string): string | undefined;
+export function tableArrayLiteral(text: string, what?: string, projections?: number | null): string;
+export function declarationAssignment(source: string, from: number): number;

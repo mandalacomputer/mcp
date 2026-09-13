@@ -5,10 +5,13 @@ import { join, relative, resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   balanced,
+  declarationAssignment,
   entries,
   listItems,
   objectFields,
+  stringLiteral,
   stripComments,
+  tableArrayLiteral,
   topLevelField,
   topLevelKeys,
 } from '../scripts/surface-text.mjs';
@@ -371,6 +374,22 @@ describe('the surface source scanner', () => {
     expect(() => topLevelField(String.raw`pattern: 'a\u{ZZ}b'`, 'pattern')).toThrow(/malformed/);
     expect(() => topLevelField(String.raw`pattern: 'a\u{FFFFFF}b'`, 'pattern')).toThrow(/range/);
     expect(topLevelField(String.raw`pattern: 'a\x41B\u{43}'`, 'pattern')).toBe('aABC');
+  });
+
+  it('reads a literal continued across a line the way the engine does', () => {
+    // A backslash before a newline spells NOTHING: `'si\<newline>zes'` is `sizes`
+    // to the engine. A reader that kept the newline compared a route with a line
+    // break in it — reporting the real one missing and inventing one nobody
+    // serves. All four terminators, since a checkout on either platform can carry
+    // CRLF and U+2028/U+2029 are line terminators to the engine too.
+    expect(topLevelField("pattern: 'si\\\nzes'", 'pattern')).toBe('sizes');
+    expect(topLevelField("pattern: 'si\\\r\nzes'", 'pattern')).toBe('sizes');
+    expect(topLevelField("pattern: 'si\\\rzes'", 'pattern')).toBe('sizes');
+    expect(topLevelField("pattern: 'si\\\u2028zes'", 'pattern')).toBe('sizes');
+    expect(topLevelField("pattern: 'si\\\u2029zes'", 'pattern')).toBe('sizes');
+    // `\n` is still the escape it always was, and is not confused with the
+    // terminator a continuation swallows.
+    expect(topLevelField(String.raw`pattern: 'si\nzes'`, 'pattern')).toBe('si\nzes');
   });
 
   it('reads back to the start of a word rather than over the whole prefix', () => {
@@ -1017,5 +1036,152 @@ export const V1_ROUTES: Route[] = [{ method: 'GET', pattern: 'two' }];
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+/**
+ * The table-initializer readers, which this repo's own check:surface does not
+ * call yet.
+ *
+ * They travel with the file because scripts/surface-text.mjs is kept
+ * byte-identical with the copy in the TypeScript SDK, where the mirror tables
+ * ARE array initializers and these read them. This mirror (test/allowlist.ts) is
+ * read a different way, so nothing here would be exercised by check:surface at
+ * all — and an unexercised reader is one that rots between the two copies until
+ * the next port has to rediscover what it was for. These are its tests, held on
+ * this side too, so the next parser bug found in either copy has something to
+ * fail against here as well.
+ */
+describe('the table-initializer readers', () => {
+  it('reads a plain quoted element in any of the three quote styles', () => {
+    expect(stringLiteral(`'sizes'`)).toBe('sizes');
+    expect(stringLiteral(`"sizes"`)).toBe('sizes');
+    expect(stringLiteral('`sizes`')).toBe('sizes');
+    expect(stringLiteral('  "sizes"  ')).toBe('sizes');
+  });
+
+  it('resolves an element’s escapes rather than handing back the source text', () => {
+    // `"a\x2Fb"` is the four characters `a/b`, and a reader answering `a\x2Fb`
+    // compares a route nobody serves.
+    expect(stringLiteral(String.raw`"a\x2Fb"`)).toBe('a/b');
+    expect(stringLiteral(String.raw`'ab'`)).toBe('ab');
+  });
+
+  it('declines an element that merely STARTS with a literal', () => {
+    // Both of these read as `a` to a reader that took the leading literal, and
+    // both mean something else at runtime.
+    expect(stringLiteral(`'a' + b`)).toBeUndefined();
+    expect(stringLiteral(`'a'.repeat(2)`)).toBeUndefined();
+    expect(stringLiteral('identifier')).toBeUndefined();
+  });
+
+  it('declines a template that interpolates and reads one that does not', () => {
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: the spelling is the subject
+    expect(stringLiteral('`a${b}`')).toBeUndefined();
+    expect(stringLiteral('`plain`')).toBe('plain');
+  });
+
+  it('reads an initializer that reduces to its array through the permitted wrappers', () => {
+    const one = `(([['GET', 'sizes']] as Route[]).map(([m, p]) => \`\${m} \${p}\`))`;
+    expect(tableArrayLiteral(one, 'ALLOWED', 1)).toBe(`['GET', 'sizes']`);
+    expect(tableArrayLiteral(`[['GET', 'sizes']]`, 'PARAMETERS', 0)).toBe(`['GET', 'sizes']`);
+  });
+
+  it('refuses an initializer that adds to the array after it', () => {
+    // `.concat` puts a route in the table that is in no array this reader can
+    // see, so a leading-array reader compared a table short by it — and the extra
+    // route surfaces as one the mirror invented. `.map` is safe to look through
+    // because it cannot change how many elements there are; `concat`, `filter`,
+    // `flatMap` and a spread can, so all of them are refused.
+    expect(() =>
+      tableArrayLiteral(
+        `([['GET', 'sizes']].concat([['GET', 'gone']]) as Route[]).map(([m, p]) => \`\${m} \${p}\`)`,
+        'ALLOWED',
+        1,
+      ),
+    ).toThrow(/holds more than one array literal expression/);
+  });
+
+  it('refuses a projection that does not join the pair it was handed', () => {
+    // Preserving the element count is not enough: `.map(() => 'GET gone')` puts a
+    // route in the table that is in no array this reader compares.
+    expect(() =>
+      tableArrayLiteral(`([['GET', 'sizes']] as Route[]).map(() => 'GET gone')`, 'ALLOWED', 1),
+    ).toThrow(/callback this reader cannot account for/);
+  });
+
+  it('refuses a fourth callback parameter whose default runs', () => {
+    // `.map` passes THREE arguments, so a fourth parameter's default executes —
+    // and a default can assign. `unused = p = 'gone'` rewrites the pattern on its
+    // way through a callback that otherwise looks exactly like the permitted one.
+    expect(() =>
+      tableArrayLiteral(
+        `([['GET', 'sizes']] as Route[]).map(([m, p]: Route, _i, _a, unused = p = 'gone') => \`\${m} \${p}\`)`,
+        'ALLOWED',
+        1,
+      ),
+    ).toThrow(/callback this reader cannot account for/);
+  });
+
+  it('refuses a table built with no projection where its caller expects one', () => {
+    // A cast in place of the `.map` leaves the array this reader compares intact
+    // and builds a Set of ARRAYS, so every `has()` on it is false — a mirror that
+    // matches and asserts nothing. The count is required, not merely capped.
+    expect(() =>
+      tableArrayLiteral(`[['GET', 'sizes']] as unknown as Iterable<string>`, 'ALLOWED', 1),
+    ).toThrow(/is built with 0 projections where this reader expects 1/);
+    expect(() =>
+      tableArrayLiteral(
+        `([['GET', 'sizes']] as Route[]).map(([m, p]) => \`\${m} \${p}\`).map(([m, p]) => \`\${m} \${p}\`)`,
+        'ALLOWED',
+        1,
+      ),
+    ).toThrow(/chains more than one \.map/);
+  });
+
+  it('reads a projection the formatter has wrapped, annotation and trailing comma', () => {
+    // The false refusals beside those: wrapping the call leaves a trailing comma
+    // after the callback, the annotation may be generic — `listItems` does not
+    // balance angle brackets, so `([m, p]: Route<string, string>)` once read as
+    // two parameters — and the template may sit on its own line.
+    const wrapped = `(
+  [['GET', 'sizes']] as Route[]
+).map(
+  ([m, p]: Route<string, string>) =>
+    \`\${m} \${p}\`,
+)`;
+    expect(tableArrayLiteral(wrapped, 'ALLOWED', 1)).toContain(`['GET', 'sizes']`);
+  });
+
+  it('finds the assignment past an annotation carrying a decoy in a string', () => {
+    // `[^=]*=` in a regex is free to run through a quote and find its `new Map(`
+    // inside a STRING in the type annotation, and the reader then compared the
+    // mirror against the decoy's table.
+    const source = `export const T: X & { decoy?: "= new Map([['GET x', []]])" } = new Map([['real', []]]);`;
+    const at = declarationAssignment(source, 0);
+    expect(at).toBeGreaterThan(0);
+    expect(source.slice(at).trimStart().startsWith(`new Map([['real'`)).toBe(true);
+  });
+
+  it('finds the assignment past a legal annotation that contains an =', () => {
+    // The mirror image of the same regex's failure: `{ optional?: () => string }`
+    // holds an `=`, so `[^=]*` stopped at it and the table read as undeclared.
+    const source = `export const T: { optional?: () => string } = new Map([['real', []]]);`;
+    const at = declarationAssignment(source, 0);
+    expect(source.slice(at).trimStart().startsWith('new Map')).toBe(true);
+  });
+
+  it('does not read a generic closing onto the = as a comparison', () => {
+    // `ReadonlyMap<string, readonly string[]>=new Map(...)` is unformatted but
+    // legal, and reading `>=` there skipped the real assignment.
+    const source = `export const T: ReadonlyMap<string, readonly string[]>=new Map([['real', []]]);`;
+    const at = declarationAssignment(source, 0);
+    expect(source.slice(at).startsWith('new Map')).toBe(true);
+  });
+
+  it('reports no assignment rather than finding the NEXT declaration’s', () => {
+    const source = `export const T: Route[];\nexport const U: Route[] = [];`;
+    expect(declarationAssignment(source, 0)).toBe(-1);
+    expect(declarationAssignment('declare const T: Route[] }', 0)).toBe(-1);
   });
 });
