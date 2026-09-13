@@ -1,5 +1,8 @@
+import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
+import { ConflictError } from '../errors.js';
 import {
+  failed,
   guarded,
   INLINE_IMAGE_TYPES,
   image,
@@ -43,6 +46,49 @@ const point = {
   y: z.number().int().optional(),
 };
 
+/**
+ * A refused capture, and the one other question this tool can ask.
+ *
+ * The platform's own sentence first and whole — it is the half that says which
+ * computer and what state it is in — and the platform's classification with it,
+ * since `failed` is what composes both. What this adds is the thing neither can
+ * know: that this tool has an argument which asks for something else, and that
+ * the something else may be answerable when a new capture is not.
+ *
+ * Offered as a FALLBACK and not as a promise, which is the whole of the care
+ * needed here (Codex review). Two different refusals reach this, and it cannot
+ * tell them apart: a computer that is asleep has nothing to capture from, while
+ * a computer whose agent is busy for an instant has and will answer the very
+ * same call moments later. `fresh: false` only permits the cache — it does not
+ * establish that anything is in it — so a sentence guaranteeing a frame sends a
+ * caller from a refusal that clears by itself to one that does not clear at all.
+ * Hence: the platform's sentence is pointed back at, the fallback is conditional,
+ * and what the frame would MEAN is stated, because a saved frame read as the
+ * present is a worse answer than no frame.
+ *
+ * And it promises nothing about the OTHER branch either (Codex review). The
+ * platform's classification says the thing in the way can finish; it does not
+ * say the computer will then be in a state that can be photographed — a disk
+ * still being built clears into a computer that is merely stopped, and the next
+ * look is a 400 rather than a picture. So the retry is named as the first thing
+ * to try, and the caller is told what it is not.
+ */
+const cachedFrameOffered = (err: ConflictError): CallToolResult => {
+  const sentence = failed(err)
+    .content.map((c) => ('text' in c ? c.text : ''))
+    .join('\n');
+  return refused(
+    `${sentence}\n\nThat was a request for a NEW capture. Read the sentence above before anything else: where ` +
+      `it says this is worth another attempt, sending the same call again in a moment is the first thing to ` +
+      `try — it is not a promise that the capture then works, since a computer that turns out not to be ` +
+      `running needs starting rather than another look. The other option is fresh: false, which asks for the ` +
+      `last frame the platform saved rather than a new one and so needs nothing captured; it is refused in ` +
+      `the same way when there is no saved frame to serve, so it is a fallback and not a guarantee either. ` +
+      `Whatever comes back is the screen as it was when that frame was taken and not the screen now: it ` +
+      `cannot show the result of anything sent since.`,
+  );
+};
+
 export const registerInput: Registrar = (server, session) => {
   const post = (
     computerId: string | undefined,
@@ -74,7 +120,7 @@ export const registerInput: Registrar = (server, session) => {
           .boolean()
           .default(true)
           .describe(
-            "Skip the platform's frame cache, which serves any capture under 1.5s old. True by default: after a click, a cached frame can predate the action entirely, and a model reading it concludes the click missed and clicks again.",
+            'Skip the platform\'s frame cache, which serves any capture under 1.5s old. True by default: after a click, a cached frame can predate the action entirely, and a model reading it concludes the click missed and clicks again. A capture needs a computer that is awake, so on a suspended one this is refused rather than answered — pass false to ask for the last saved frame instead, which is refused in turn when there is no saved frame to serve. A saved frame answers "what was on the screen" and cannot answer "did my click land".',
           ),
       },
       annotations: { readOnlyHint: true },
@@ -82,14 +128,29 @@ export const registerInput: Registrar = (server, session) => {
     ({ computer_id, width, fresh }, extra) =>
       guarded(async () => {
         const id = session.resolve(computer_id);
-        const shot = await session.api.with(extra.signal).bytes(
-          'GET',
-          P.computerAction(id, 'screenshot'),
-          {
-            query: { w: width, fresh: fresh ? 1 : undefined },
-          },
-          MAX_INLINE_IMAGE_BYTES,
-        );
+        let shot: Awaited<ReturnType<typeof session.api.bytes>>;
+        try {
+          shot = await session.api.with(extra.signal).bytes(
+            'GET',
+            P.computerAction(id, 'screenshot'),
+            {
+              query: { w: width, fresh: fresh ? 1 : undefined },
+            },
+            MAX_INLINE_IMAGE_BYTES,
+          );
+        } catch (err) {
+          // The refusal whose next step is a PARAMETER, caught here for the
+          // reason `backgroundFull` is caught in exec: the answer names one of
+          // this tool's own arguments, and the error classes are shared with
+          // every embedder and with two other clients.
+          //
+          // Only when this call asked for a capture, which is the only way the
+          // refusal can be about asking for one. A model that meets a bare 409
+          // here has nothing to try, and the thing it does instead is ask again
+          // — a loop over a computer that cannot answer it.
+          if (fresh && err instanceof ConflictError) return cachedFrameOffered(err);
+          throw err;
+        }
         // The bound `read_file` observes, observed here too. A 3840x2160 capture
         // of a dense screen is the case it exists for: refused with its size and
         // the parameter that fixes it, rather than turned into ~85 MB of base64

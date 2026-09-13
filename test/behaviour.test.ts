@@ -142,6 +142,134 @@ describe('screenshots', () => {
     // reading it concludes the click missed and clicks again.
     expect(shot?.query.get('fresh')).toBe('1');
   });
+
+  it('offers the saved frame when a new capture is refused', async () => {
+    // The default asks for a capture, and a capture needs a computer that is
+    // awake — so on a suspended one the default is refused. A bare 409 leaves a
+    // model with nothing to try but the same call again, and this tool has an
+    // argument that asks a question the platform CAN answer: the last frame it
+    // saved. The refusal is where a model meets the problem, so it is where the
+    // option has to be named.
+    const real = globalThis.fetch;
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      if (String(input).includes('/screenshot')) {
+        return Response.json(
+          { error: 'computer is suspended; resume it to capture the screen' },
+          {
+            status: 409,
+          },
+        );
+      }
+      return real(input as never, init);
+    }) as typeof fetch;
+    try {
+      const { call, close } = await connect();
+      const res = await call('screenshot', { width: 1280 });
+      await close();
+      expect(res.isError).toBe(true);
+      // The platform's own sentence survives — it is the half that says which
+      // computer and what state it is in.
+      expect(textOf(res)).toContain('resume it to capture the screen');
+      expect(textOf(res)).toContain('fresh: false');
+      // Offered as a fallback, not as a promise: `fresh: false` permits the
+      // cache, it does not establish that anything is in it.
+      expect(textOf(res)).toContain('fallback and not a guarantee');
+      // And it does not pass that saved frame off as the present.
+      expect(textOf(res)).toContain('not the screen now');
+    } finally {
+      globalThis.fetch = real;
+    }
+  });
+
+  it('and that fallback is one the platform actually answers', async () => {
+    // The half a sentence cannot prove. A refusal naming a parameter is only
+    // worth having if the call it names goes through, so the recovery is walked
+    // rather than asserted: the refused capture, then the saved frame.
+    let asked = 0;
+    const real = globalThis.fetch;
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      if (String(input).includes('/screenshot')) {
+        asked += 1;
+        if (new URL(String(input)).searchParams.get('fresh') === '1') {
+          return Response.json({ error: 'computer is suspended' }, { status: 409 });
+        }
+      }
+      return real(input as never, init);
+    }) as typeof fetch;
+    try {
+      const { call, close } = await connect();
+      expect((await call('screenshot', {})).isError).toBe(true);
+      const saved = await call('screenshot', { fresh: false });
+      await close();
+      expect(saved.isError).toBeFalsy();
+      expect(saved.content.some((c) => c.type === 'image')).toBe(true);
+      expect(asked).toBe(2);
+    } finally {
+      globalThis.fetch = real;
+    }
+  });
+
+  it('does not send a conflict that clears by itself off to a different parameter', async () => {
+    // A busy agent and a sleeping computer refuse a capture identically here, and
+    // this cannot tell them apart — so the platform's own classification has to
+    // stay in front of the fallback. Sent to `fresh: false` instead, a caller
+    // trades a refusal that clears by waiting for one that may not clear at all
+    // (Codex review).
+    const real = globalThis.fetch;
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      if (String(input).includes('/screenshot')) {
+        return Response.json(
+          { error: 'a capture is already running', reason: 'contention' },
+          {
+            status: 409,
+          },
+        );
+      }
+      return real(input as never, init);
+    }) as typeof fetch;
+    try {
+      const { call, close } = await connect();
+      const res = await call('screenshot', {});
+      await close();
+      expect(res.isError).toBe(true);
+      // The platform's word still speaks, and it says to wait.
+      expect(textOf(res)).toContain('worth sending again');
+      // And the fallback is subordinate to it rather than the headline.
+      expect(textOf(res)).toContain('Read the sentence above before anything else');
+      // Nothing tells an awake computer to wake up.
+      expect(textOf(res)).not.toContain('has to be awake');
+      // And the retry is not promised to produce a picture. What the platform's
+      // word establishes is that the thing in the way can finish — a computer
+      // that turns out to be stopped when it does needs starting, and a sentence
+      // saying waiting is the answer sends a caller round a loop instead
+      // (Codex review).
+      expect(textOf(res)).toContain('not a promise that the capture then works');
+    } finally {
+      globalThis.fetch = real;
+    }
+  });
+
+  it('leaves a refusal alone when the caller already asked for the saved frame', async () => {
+    // Nothing left to offer: the option has been taken, so naming it again is
+    // advice to do what the caller just did.
+    const real = globalThis.fetch;
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      if (String(input).includes('/screenshot')) {
+        return Response.json({ error: 'no saved frame for this computer' }, { status: 409 });
+      }
+      return real(input as never, init);
+    }) as typeof fetch;
+    try {
+      const { call, close } = await connect();
+      const res = await call('screenshot', { fresh: false });
+      await close();
+      expect(res.isError).toBe(true);
+      expect(textOf(res)).toContain('no saved frame for this computer');
+      expect(textOf(res)).not.toContain('fresh: false');
+    } finally {
+      globalThis.fetch = real;
+    }
+  });
 });
 
 describe('input bodies', () => {

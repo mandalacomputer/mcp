@@ -802,7 +802,12 @@ export class Subscription {
     const attached = !this.#read;
     this.#read = true;
 
-    const from = this.resolveFrom(opts.since);
+    // The one place a gap the `since` cursor implies is turned into a standing
+    // loss, because this is the call that hands it to the model. Establishing it
+    // in the placement itself would stamp it on the subscription from every
+    // preview — and a preview whose caller then cancels, or a concurrent read on
+    // the same subscription, would take the gap away with it.
+    const { from, loss: standing } = this.#place(opts.since);
     const end = opts.through !== undefined ? opts.through + 1 : this.#nextIndex;
     const window = this.#ring.filter((b) => b.index >= from && b.index < end);
     // The OLDEST `limit`, not the newest, and the position advances only over
@@ -832,12 +837,12 @@ export class Subscription {
           // An unknown count plus a known one is still unknown. Adding the two
           // would report a precise number for a hole nobody can measure, which
           // is the one thing a loss report must not do.
-          events: this.#loss?.events === null ? null : (this.#loss?.events ?? 0) + omitted,
-          reason: this.#loss
-            ? `${this.#loss.reason}; and ${omitted} more than limit allowed were stepped over to reach the event you waited for`
+          events: standing?.events === null ? null : (standing?.events ?? 0) + omitted,
+          reason: standing
+            ? `${standing.reason}; and ${omitted} more than limit allowed were stepped over to reach the event you waited for`
             : `${omitted} events older than the one you waited for did not fit in limit and were stepped over`,
         }
-      : this.#loss;
+      : standing;
     this.#loss = undefined;
 
     return {
@@ -855,12 +860,17 @@ export class Subscription {
    *
    * Asked before {@link read}, because reconciliation awaits network reads and
    * a caller can cancel during them. Consuming first would advance the shared
-   * cursor and clear the loss into a response that caller never receives. This
-   * preview may establish a loss for an unknown `since`, but consumes nothing.
+   * cursor and clear the loss into a response that caller never receives.
+   *
+   * A pure preview, and that is load-bearing rather than tidiness. It sees the
+   * gap an unplaceable `since` implies, but it does not record one: a subscription
+   * is shared by every call on its computer, so a predicate that stamped `#loss`
+   * would hand that gap to whichever call read next — the cancelled caller's hole
+   * reported against a later read that named a different cursor, or none at all.
    */
   needsReconciliation(opts: { since?: string; limit: number; through?: number }): boolean {
-    const from = this.resolveFrom(opts.since);
-    if (this.#loss) return true;
+    const { from, loss } = this.#place(opts.since);
+    if (loss) return true;
     if (opts.through === undefined) return false;
     const end = opts.through + 1;
     let count = 0;
@@ -879,47 +889,77 @@ export class Subscription {
    * server holds, and saying so is the whole of the gap discipline — never a
    * frame the model has to interpret, always a sentence and, from the tool, the
    * state it would otherwise have gone to reconcile against.
+   *
+   * Reads nothing back into the subscription: see {@link #place}, which is where
+   * the sentence that gap discipline owes the model is composed, and {@link read},
+   * which is the only caller allowed to make it standing.
    */
   resolveFrom(since?: string): number {
+    return this.#place(since).from;
+  }
+
+  /**
+   * Placing a `since` cursor, and the loss a read from there would report.
+   *
+   * Pure. The returned `loss` is the standing loss MERGED with whatever this
+   * cursor implies, so a caller that reports it reports one hole rather than two
+   * overlapping accounts of the same evicted prefix — and a caller that only
+   * wanted the position, or only wanted to know whether there is a hole, leaves
+   * the subscription exactly as it found it.
+   */
+  #place(since?: string): { from: number; loss?: Loss } {
     // Where the model is, which is not where the socket is: it may be four
     // turns behind, and everything between the two is exactly what it has not
     // been handed yet.
-    if (since === undefined) return Math.max(this.#delivered, this.#oldest);
+    if (since === undefined) {
+      return { from: Math.max(this.#delivered, this.#oldest), loss: this.#loss };
+    }
     const at = this.#ring.findIndex((b) => b.event.cursor === since);
-    if (at >= 0) return this.#ring[at].index + 1;
+    if (at >= 0) return { from: this.#ring[at].index + 1, loss: this.#loss };
     // An opening cursor can outlive everything that followed it in the ring.
     // Evicting already delivered events is harmless for implicit reads, but a
     // deliberate rewind asks for those events again and must hear about the hole.
     if (since === this.#hello?.cursor) {
       const missing = Math.max(0, this.#oldest - this.#helloFrom);
-      if (missing && this.#loss?.events !== null) {
-        this.#loss = {
-          // Unread overflow and this rewind describe overlapping evicted
-          // prefixes. Count their union, rather than adding the same loss twice.
-          events: Math.max(missing, this.#loss?.events ?? 0),
-          reason:
-            'events requested from that opening cursor were dropped from this session’s buffer',
-        };
-      }
-      return Math.max(this.#helloFrom, this.#oldest);
+      const loss: Loss | undefined =
+        missing && this.#loss?.events !== null
+          ? {
+              // Unread overflow and this rewind describe overlapping evicted
+              // prefixes. Count their union, rather than adding the same loss twice.
+              events: Math.max(missing, this.#loss?.events ?? 0),
+              reason:
+                'events requested from that opening cursor were dropped from this session’s buffer',
+            }
+          : this.#loss;
+      return { from: Math.max(this.#helloFrom, this.#oldest), loss };
     }
     // An empty `through` read can advance the delivery position to the oldest
     // survivor without handing over an event. Its cursor is the predecessor
     // retained during eviction, which is no longer in the ring but is still an
     // exact, lossless place from which to resume those survivors.
-    if (since === this.#beforeOldestCursor) return this.#oldest;
+    if (since === this.#beforeOldestCursor) return { from: this.#oldest, loss: this.#loss };
     // Otherwise: the unread frontier, NOT the oldest thing still in the ring.
     // A delivered event stays in the ring until the cap evicts it, so answering
     // an unplaceable cursor with `#oldest` re-sent events the model already
     // had — while attaching a loss note that said they "were not kept", which
     // was false about exactly the events being re-sent.
-    this.#loss ??= {
-      events: null,
-      reason:
-        'that cursor is not a place this session can find, so whatever happened between it and ' +
-        'the events below was not kept here',
+    //
+    // `events: null` whatever else is standing, and that is the same rule
+    // {@link read} applies to its own overflow: a cursor this session cannot
+    // place may be any distance back, so a count taken from this buffer offered
+    // as the size of that hole would be a precise answer to a question nobody
+    // can measure. The standing reason is kept alongside, because an eviction
+    // here and an unplaceable cursor are two true things about one gap.
+    const unplaceable =
+      'that cursor is not a place this session can find, so whatever happened between it and ' +
+      'the events below was not kept here';
+    return {
+      from: Math.max(this.#delivered, this.#oldest),
+      loss: {
+        events: null,
+        reason: this.#loss ? `${this.#loss.reason}; and ${unplaceable}` : unplaceable,
+      },
     };
-    return Math.max(this.#delivered, this.#oldest);
   }
 
   /**
@@ -1645,11 +1685,16 @@ export class Subscription {
       return false;
     }
 
-    if (recovery.phase === 'fallback' && recovery.pending.length === 1) {
-      // Two failures of the full set followed immediately by the last working
-      // set opening isolate its only addition without another round trip.
-      this.#watchRefused.add(recovery.pending.shift()!);
-    } else if (recovery.phase === 'recover') {
+    // A `fallback` that opens proves only that the host is up and that the last
+    // working set still works. It is deliberately NOT a branch here, not even
+    // for a single addition: the full set failed twice, and a host that was down
+    // for those two attempts fails exactly as a refused nomination does, so the
+    // one thing the fallback opening cannot tell us is which of the two it was.
+    // Filing the only pending tree as refused from here read an outage as a
+    // refusal — the addition fell out of the watch set, and the model was told
+    // this host would not carry a tree it would have carried. The probe below
+    // costs one round trip and answers the question instead of guessing at it.
+    if (recovery.phase === 'recover') {
       // A fallback failed too, so the outage made the preceding evidence
       // ambiguous. Now that the known-good set is back, test that candidate
       // again instead of filing a refusal from before the outage.

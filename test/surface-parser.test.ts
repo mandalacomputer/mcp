@@ -229,6 +229,68 @@ describe('the surface source scanner', () => {
     expect(topLevelKeys(`name: 'real', other: "fake: value"`)).toEqual(['name', 'other']);
   });
 
+  it('refuses body fields it cannot account for rather than reading none', () => {
+    // The three shapes that used to be nothing. Each carries fields of the route
+    // and none of them can be resolved here, so each was a body read as shorter
+    // than it is — and under-reading has no symptom of its own: the mirror
+    // listing the field is reported as having invented it, and a mirror written
+    // by somebody who missed it too agrees with this reader about nothing at
+    // all. A body read as having NO fields is a route documenting no body, which
+    // is the vacuous all-clear the whole gate exists to refuse (OPL-4812).
+    expect(() => topLevelKeys('...SHARED_FIELDS, name: 1')).toThrow(/spread/);
+    expect(() => topLevelKeys('name: 1, ...SHARED_FIELDS')).toThrow(/spread/);
+    expect(() => topLevelKeys('[FIELD_NAME]: 1')).toThrow(/computed key/);
+    expect(() => topLevelKeys('name: 1, [`${prefix}_id`]: 2')).toThrow(/computed key/);
+    expect(() => topLevelKeys('`${prefix}_id`: 1')).toThrow(/interpolated key/);
+    // A template with no hole in it is an ordinary key, and an escaped `${` is
+    // two of the characters a name is spelled with rather than a hole.
+    expect(topLevelKeys('`name`: 1')).toEqual(['name']);
+    expect(topLevelKeys('`\\${name}`: 1')).toEqual(['${name}']);
+  });
+
+  it('does not read a type argument as a key, or refuse the value carrying it', () => {
+    // A colon confirms every refusal above, and this is why. `inKeyPosition`
+    // reads the raw prefix, and angle brackets are not depth — so an identifier,
+    // a tuple or a quoted type argument one character after a comma inside
+    // `make<…>` sits exactly where a key sits. None is followed by a colon, so
+    // none of the refusals fires; a version of this that refused whatever it
+    // could not classify failed the surface check over a valid value, and one
+    // that read it as shorthand reported a field the platform does not document
+    // (Codex review).
+    expect(topLevelKeys('name: make<A, B>(), next: 1')).toEqual(['name', 'next']);
+    expect(topLevelKeys('name: make<A, [B, C]>(), next: 1')).toEqual(['name', 'next']);
+    expect(topLevelKeys(`name: make<A, 'b'>(), next: 1`)).toEqual(['name', 'next']);
+    // The computed-key refusal is still a refusal where the colon IS there.
+    expect(() => topLevelKeys('name: make<A, B>(), [K]: 1')).toThrow(/computed key/);
+  });
+
+  it('reads the key forms that have no identifier and no colon between them', () => {
+    // Two more fields that were silently nothing. A number IS confirmed by a
+    // colon and only needed the pattern widening; a getter has no colon, but
+    // `get` followed by a name followed by `(` is a shape nothing else here
+    // produces, so the keyword confirms it instead (Codex review).
+    expect(topLevelKeys(`123: str('Name'), name: 1`)).toEqual(['123', 'name']);
+    // Plain digits only. A property's name is the number's VALUE, so `1_000`,
+    // `0x10` and `123n` name `1000`, `16` and `123`; handing back the source
+    // text would report three fields nobody serves while the three that are
+    // served go unmentioned, so they are refused instead (Codex review).
+    for (const key of ['1_000', '0x10', '123n', '1e3', '1.5']) {
+      expect(() => topLevelKeys(`${key}: 1`), key).toThrow(/numeric key/);
+    }
+    expect(topLevelKeys(`get name() { return str('Name'); }, age: 1`)).toEqual(['name', 'age']);
+    expect(topLevelKeys('set name(v) { store(v); }')).toEqual(['name']);
+    // And neither reads a type argument: a numeral in one is followed by no
+    // colon, and `get` in one is followed by no call.
+    expect(topLevelKeys('name: make<A, 1>(), next: 1')).toEqual(['name', 'next']);
+  });
+
+  it('still reads an object laid out across lines', () => {
+    // The position after a comma is whitespace before it is anything, and a
+    // reader that classified that would refuse every object a formatter has
+    // touched. Kept alongside the refusals above, because they are one change.
+    expect(topLevelKeys('\n  name: 1,\n  age: 2,\n')).toEqual(['name', 'age']);
+  });
+
   it('refuses a body whose delimiters close more than they opened', () => {
     // Silent truncation is the failure this gate exists to refuse: the depth
     // never climbs back, so every key after the stray closer is dropped and the
@@ -585,6 +647,62 @@ describe('the route table reader', () => {
     expect(code).toBe(1);
     expect(said).toContain("'GET sizes' documents a body in a form this reader does not know");
     expect(said).not.toContain('offset -1');
+  });
+
+  it('names the route when a body field cannot be accounted for', async () => {
+    // The field walk was forgiving of exactly the shapes that hide fields: a
+    // spread's fields live somewhere this cannot see, and a computed or
+    // interpolated key names something it cannot resolve. Each read as no field
+    // at all, so a body of nothing but a spread reported a route documenting no
+    // body — matching a mirror that lists none, which is the vacuous all-clear
+    // the query and header halves of this reader already refuse (OPL-4812).
+    for (const body of [
+      'object({ ...SHARED_FIELDS })',
+      'object({ name: str("x"), ...SHARED_FIELDS })',
+      'object({ [FIELD]: str("x") })',
+      'object({ `${prefix}_id`: str("x") })',
+    ]) {
+      const { said, code } = await refuseParams(
+        `export const DOCS: Record<string, Doc> = { 'GET sizes': { body: ${body} } };\n`,
+      );
+      expect(code, body).toBe(1);
+      // The route, because the walk's own message is an offset into a slice of
+      // a file and there is nowhere to go and look at that.
+      expect(said, body).toContain("'GET sizes' documents a body this reader cannot account for");
+    }
+  });
+
+  it('does not let a literal nested in an object() call stand for its fields', async () => {
+    // The first brace ANYWHERE in the call was taken as the start of the field
+    // literal, so a wrapper or a conditional around the real fields handed over
+    // an empty literal nested inside it: no body fields, nothing said, and a
+    // mirror that lists none agrees (Codex review). Each of these reads as a
+    // shape this reader does not know, which is the answer `object(IDENTIFIER)`
+    // already gets — and it names the route.
+    for (const body of [
+      'object(Object.assign({}, SHARED_FIELDS))',
+      'object(flag ? {} : { name: str("x") })',
+      // A literal the call OPENS with is still only a prefix of the argument:
+      // this one hands over a different map, and the outer field name was read
+      // in place of the field the platform documents.
+      'object({ fields: { name: str("x") } }.fields)',
+    ]) {
+      const { said, code } = await refuseParams(
+        `export const DOCS: Record<string, Doc> = { 'GET sizes': { body: ${body} } };\n`,
+      );
+      expect(code, body).toBe(1);
+      expect(said, body).toContain(
+        "'GET sizes' documents a body in a form this reader does not know",
+      );
+    }
+    // And the second argument these calls really do take is still read.
+    expect(
+      await scanParams(`
+        export const DOCS: Record<string, Doc> = {
+          'GET sizes': { body: object({ name: str('Name') }, { title: 'Sizes' }) },
+        };
+      `),
+    ).toEqual(['body:name']);
   });
 
   it('reads a query list whose bracket the formatter wrapped', async () => {

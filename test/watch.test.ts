@@ -1115,6 +1115,61 @@ describe('a tree the model nominates', () => {
     }
   });
 
+  it('does not blame a single addition for the outage its shed happened during', {
+    timeout: 30_000,
+  }, async () => {
+    // The narrowest case of the same rule, and the one that used to be exempt:
+    // exactly ONE tree was added, so the fallback set opening looked like proof
+    // by elimination and the tree was filed as refused there and then. It is not
+    // proof. The two failures that triggered the shed are indistinguishable from
+    // a host that was down for them, and this host was — it came back in time
+    // for the fallback and would have carried the addition perfectly well. The
+    // model was told this computer would not watch a tree it would.
+    const ev = selectiveEvents();
+    const hub = new EventHub(new Api('com_test', BASE), ev.factory);
+    try {
+      const sub = hub.open('vm-1');
+      sub.nominate('/base');
+      await until('the base watch', () => {
+        const socket = ev.sockets.at(-1);
+        return socket?.greeted === true && socket.watches.join(',') === '/base';
+      });
+      // Down for exactly the attempts that carry the addition, which is what
+      // makes those two failures evidence about the host and not about the tree.
+      ev.state.failAll = true;
+      sub.nominate('/good');
+      await until(
+        'both attempts carrying the addition to fail',
+        // Closed, not merely created: the factory decides an attempt's fate when
+        // it runs, so flipping the host back up on the sight of a second socket
+        // would let that second attempt succeed and no shed would happen at all.
+        () => ev.sockets.filter((s) => s.watches.includes('/good') && s.closed).length === 2,
+        20_000,
+      );
+      // Back before the shed's fallback connection is made, so the known-good
+      // set opens on the first try.
+      ev.state.failAll = false;
+      const baseAlone = () =>
+        ev.sockets.filter((s) => s.greeted && s.watches.join(',') === '/base').length;
+      await until('the fallback set to open', () => baseAlone() >= 2, 20_000);
+      expect(sub.watchWasRefused('/good')).toBe(false);
+      // And the addition is tested rather than dropped: it goes back on the URL
+      // beside the known-good set, which is the round trip that answers this.
+      await until(
+        'the addition to be probed beside the known-good set',
+        () => {
+          const socket = ev.last();
+          return socket.greeted && socket.watches.join(',') === '/base,/good';
+        },
+        20_000,
+      );
+      expect(sub.watchWasRefused('/good')).toBe(false);
+      expect(sub.nominationLive('/good')).toBe(true);
+    } finally {
+      hub.closeAll();
+    }
+  });
+
   it('does not count a socket it closed itself as a refused upgrade', async () => {
     // `nominate` closes the socket to put a new watch set on the URL, and if it
     // does so before the opening frame lands the connection reads as one that
@@ -1162,8 +1217,14 @@ describe('a tree the model nominates', () => {
       // anything: this is the window.
       sub.nominate('/a');
       await until('the tree to be shed', () => sub.watchWasRefused('/a'), 25_000);
-      // WATCH_SHED_AFTER is two, and both of them carried /a.
-      expect(ev.sockets.filter((s) => s.watches.includes('/a'))).toHaveLength(2);
+      // WATCH_SHED_AFTER is two, and both of them carried /a: the shed happens
+      // on the second failure, not a third. Counted up to the first connection
+      // that carried nothing, which is the fallback the shed reconnects with —
+      // everything after it belongs to the probe that confirms the refusal, and
+      // a fallback opening is never itself the proof (see `#cleared`).
+      const shedAt = ev.sockets.findIndex((s) => s.watches.length === 0);
+      expect(shedAt).toBeGreaterThan(0);
+      expect(ev.sockets.slice(0, shedAt).filter((s) => s.watches.includes('/a'))).toHaveLength(2);
     } finally {
       hub.closeAll();
     }
