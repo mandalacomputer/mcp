@@ -161,12 +161,111 @@ const NOT_A_VALUE = new Set([
 // The heads whose closing `)` is followed by a statement rather than by a value.
 const STATEMENT_HEADS = new Set(['if', 'while', 'for']);
 
+// The words above that can equally be a variable name, where a slash after one
+// cannot be decided without knowing which of the two this occurrence is — and that
+// takes a parser's token context, not a word list.
+//
+// So this reader REFUSES them rather than guessing, because both guesses are wrong
+// in a way that matters. Read as a regex, `of / 2` inside a template swallowed the
+// rest of the interpolation and dropped two documented fields from the answer while
+// still reporting a match; read as a division, a real regex's `}` closes a scope
+// nobody opened. A refusal naming the line is a variable rename for whoever wrote
+// it (review of OPL-4830).
+const AMBIGUOUS_WORD = new Set([
+  'as',
+  'async',
+  'await',
+  'declare',
+  'from',
+  'infer',
+  'is',
+  'keyof',
+  'let',
+  'namespace',
+  'of',
+  'out',
+  'override',
+  'readonly',
+  'satisfies',
+  'static',
+  'type',
+  'unique',
+  'yield',
+]);
+
+/**
+ * The last character before `from` that the engine would read as code.
+ *
+ * Whitespace AND comments, because a comment is not a token. A regex written after
+ * a block comment inside a template interpolation had the comment's own closing
+ * slash inspected, which answered "division" — after which the regex's `}` counted
+ * as syntax and its backtick ended the template early, and a route table inside that
+ * template was read as the real one (review of OPL-4830).
+ *
+ * Line comments are found by scanning the line from its start rather than by
+ * looking backwards for `//`, because a `//` inside a string is not a comment and
+ * walking backwards cannot tell. The scan is bounded by the line.
+ */
+function significantBefore(text, from) {
+  let i = from - 1;
+  for (;;) {
+    // Whether a NEWLINE was crossed, which is the only way a line comment can be in
+    // front of this position: every caller scans forward and steps over comments as
+    // it goes, so a slash it is asking about is never itself inside one. Checked
+    // rather than assumed because the line scan below is the length of the line, and
+    // running it at every slash made this quadratic on a one-line table — a 190 KB
+    // line of 12,000 divisions took seconds, which the perf regression in
+    // surface-parser.test pins.
+    let crossed = false;
+    while (i >= 0 && /\s/.test(text[i])) {
+      if (text[i] === '\n' || text[i] === '\r' || text[i] === '\u2028' || text[i] === '\u2029')
+        crossed = true;
+      i--;
+    }
+    if (i < 1) return i;
+    // A block comment ends here: step over it and look again.
+    if (text[i] === '/' && text[i - 1] === '*') {
+      const open = text.lastIndexOf('/*', i - 1);
+      if (open === -1) return i;
+      i = open - 1;
+      continue;
+    }
+    if (!crossed) return i;
+    // A line comment ended at the newline just crossed: the last code before it is
+    // whatever precedes the `//` that opened it.
+    const start = text.lastIndexOf('\n', i) + 1;
+    const opened = lineCommentStart(text.slice(start, i + 1));
+    if (opened === -1) return i;
+    i = start + opened - 1;
+  }
+}
+
+/** Where an unquoted `//` opens a comment in one line of text, or -1. */
+function lineCommentStart(line) {
+  let quote = '';
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (quote) {
+      if (ch === '\\') i++;
+      else if (ch === quote) quote = '';
+      continue;
+    }
+    if (ch === "'" || ch === '"' || ch === '`') quote = ch;
+    else if (ch === '/' && line[i + 1] === '/') return i;
+  }
+  return -1;
+}
+
 /** Whether a slash here can begin a regex literal rather than divide values. */
 function regexCanStart(text, from) {
-  let i = from - 1;
-  while (i >= 0 && /\s/.test(text[i])) i--;
+  const i = significantBefore(text, from);
   if (i < 0) return true;
   const ch = text[i];
+  // A POSTFIX operator ends an expression, so the slash after it divides. `+` and
+  // `-` are in the list below as prefix/infix operators, and reading `count++ / 2`
+  // as a regex consumed the rest of the template and then the rest of the file —
+  // valid arithmetic in an unrelated template broke the gate (review of OPL-4830).
+  if ((ch === '+' || ch === '-') && text[i - 1] === ch) return false;
   if ('([{=,:;!?&|~+*%^<>'.includes(ch)) return true;
   if (ch === ')') {
     // A `)` alone decides nothing: `(a + b) / c` divides, `if (ok) /re/.test(s)`
@@ -178,8 +277,7 @@ function regexCanStart(text, from) {
     // division read as a regex can carry a phantom literal over code.
     const open = openerOf(text, i);
     if (open === -1) return false;
-    let word = open - 1;
-    while (word >= 0 && /\s/.test(text[word])) word--;
+    const word = significantBefore(text, open);
     return STATEMENT_HEADS.has(identifierBefore(text, word + 1));
   }
   // `]` closes an index or an array literal, both of them values, and no
@@ -188,7 +286,13 @@ function regexCanStart(text, from) {
   // which is read as division here; neither file this scans is written that way,
   // and there is no local evidence that would tell the two apart.
   if (ch === ']') return false;
-  return NOT_A_VALUE.has(identifierBefore(text, i + 1));
+  const word = identifierBefore(text, i + 1);
+  if (AMBIGUOUS_WORD.has(word)) {
+    throw new Error(
+      `cannot tell a regex from a division after \`${word}\`, which is both a keyword and a legal name: rename the variable or hoist the expression out of the literal`,
+    );
+  }
+  return NOT_A_VALUE.has(word);
 }
 
 /** Advance past a regex literal, including escaped delimiters and flags. */

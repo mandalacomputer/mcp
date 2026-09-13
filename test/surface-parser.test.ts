@@ -332,11 +332,53 @@ describe('the surface source scanner', () => {
     expect(clean).not.toContain('and this');
   });
 
-  it('reads a regex that follows a keyword', () => {
-    for (const word of ['typeof', 'in', 'of', 'instanceof', 'new', 'void', 'delete', 'else']) {
+  it('reads a regex that follows a RESERVED keyword', () => {
+    // A reserved word cannot also be a variable name, so a slash after one can only
+    // begin a regex and reading it as division walks into the regex's body.
+    for (const word of ['typeof', 'in', 'instanceof', 'new', 'void', 'delete', 'else']) {
       const source = `x = a ${word} /b['c]/; // remove this\n`;
       expect(stripComments(source)).not.toContain('remove this');
     }
+  });
+
+  it('refuses a slash after a word that is both a keyword and a name', () => {
+    // `of` was in the list above, and that is the ambiguity this reader cannot
+    // resolve: `for (const x of /re/)` is a regex and `of / 2` is a division, and
+    // which one an occurrence is takes a parser's token context rather than a word
+    // list. Both guesses are wrong in a way that matters — read as a regex, `of / 2`
+    // inside a template swallowed the rest of the interpolation and dropped two
+    // documented fields from the answer while still reporting a match (review of
+    // OPL-4830); read as a division, a real regex's `}` closes a scope nobody opened.
+    //
+    // So it refuses, by name, and whoever wrote it renames a variable.
+    for (const word of ['of', 'type', 'from', 'is', 'as', 'await', 'yield', 'static']) {
+      expect(() => stripComments(`x = a ${word} /b['c]/;\n`), word).toThrow(
+        /cannot tell a regex from a division/,
+      );
+    }
+    // The documented-fields case from that review, end to end: two fields after the
+    // ambiguous slash, which used to vanish silently.
+    expect(() =>
+      topLevelKeys(`first: str(\`\${of / 2} /\`), omitted: str("required"), last: str(\`} tail\`)`),
+    ).toThrow(/cannot tell a regex from a division/);
+  });
+
+  it('reads a division after a postfix operator, and a regex after a comment', () => {
+    // Two more from the same review, and both were silent. `count++ / 2` read the
+    // slash as a regex — `+` is in the openers list as a prefix and infix operator —
+    // and consumed the rest of the template and then the rest of the file, so a
+    // legal mirror was reported undeclared. And a regex written after a block comment
+    // had the COMMENT's closing slash inspected, which answered division, after which
+    // the regex's `}` counted as syntax and its backtick ended the template early:
+    // a route table inside that template read as the real one.
+    expect(stripComments('let n = count++ / 2; // remove this\n')).not.toContain('remove this');
+    expect(stripComments('let n = count-- / 2; // remove this\n')).not.toContain('remove this');
+    const afterComment = 'const s = `${ /*c*/ /}`/.source }`; // remove this\n';
+    const clean = stripComments(afterComment);
+    expect(clean).not.toContain('remove this');
+    // The regex survived whole rather than being walked into, so the backtick inside
+    // it never ended the template.
+    expect(clean).toContain('/}`/');
   });
 
   it('reads a slash after a subscript as division, which is the residual case', () => {
