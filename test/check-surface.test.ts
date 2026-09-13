@@ -97,13 +97,18 @@ describe('check:surface', () => {
   it('names a limit that moved, or one the platform stopped publishing', async () => {
     // Compared here, in the script the platform's own CI runs, rather than in a
     // test that skips without a checkout — where none of these could drift.
+    // Whichever limits this repo mirrors: the first moved, the last withdrawn.
+    const keys = Object.keys(LIMITS) as (keyof typeof LIMITS)[];
+    const [moved, gone] = [keys[0], keys[keys.length - 1]];
     const manifest = inStep();
-    manifest.limits['exec.maxEnvEntries'] = 65;
-    delete manifest.limits['webhook.computersMax'];
+    manifest.limits[moved] = LIMITS[moved] + 1;
+    delete manifest.limits[gone];
     const { said, code } = await runCheck(fixture(manifest));
-    expect(said).toContain("! exec.maxEnvEntries is 64 here, but the platform's is 65");
     expect(said).toContain(
-      '! webhook.computersMax is 64 here, and the platform does not publish it',
+      `! ${moved} is ${LIMITS[moved]} here, but the platform's is ${LIMITS[moved] + 1}`,
+    );
+    expect(said).toContain(
+      `! ${gone} is ${LIMITS[gone]} here, and the platform does not publish it`,
     );
     expect(said).not.toContain('matches');
     expect(code).toBe(1);
