@@ -613,6 +613,15 @@ npm run lint
 CI runs the suite on Node 20, 22, 24 and 26 — the floor `package.json`
 declares and the ceiling a current `npx` will actually use.
 
+**The server runs on Node 20. The maintainer tooling wants 22.18 or newer**,
+which is why that floor is `devEngines` and not `engines`: `check:surface` reads
+`test/allowlist.ts` with a plain `import`, and Node enables TypeScript type
+stripping by default only from 22.18. Nothing in `src/` depends on it. On an
+older runtime the check's own skip path — no platform checkout, which is every
+CI run here — is reached before that import, so `npm test` passes on the whole
+matrix; the tests that spawn the checker against a synthetic checkout skip
+themselves below 22.18 and say why.
+
 ### Where the platform's rules live
 
 This server gets no privileged access. Everything it does goes through the same

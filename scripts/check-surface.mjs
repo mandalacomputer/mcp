@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 /**
- * Diff the mirrors in test/allowlist.ts against the real tables in the platform
- * repo — the routes, and the parameters each route takes.
+ * Diff the mirrors in test/allowlist.ts against the platform's published
+ * surface manifest — the routes, the parameters each route takes, and the
+ * numeric limits this server refuses against.
  *
  * The mirror is the thing that keeps this server honest about what exists, and
  * a mirror nobody compares is just a comment. This does the comparison whenever
@@ -18,6 +19,15 @@
  * argument that made it worth making. read_file went on telling models it
  * "cannot page" for as long as nobody happened to read the platform's changelog.
  *
+ * The limits half is new (OPL-4851) and closes the same kind of hole one step
+ * further out. `src/paths.ts` turns away a clipboard write over 64 KiB and a
+ * webhook description over 200 characters before the request is made, to save a
+ * round trip. Nothing compared those numbers to the platform's, so a ceiling
+ * that drifted upward would have this server refusing calls the platform would
+ * have taken — with no failure anywhere, because the request that would have
+ * proved it is the one never sent. What a model is told about a refusal it
+ * cannot see through is the whole of what it knows.
+ *
  * Exits 0 and says so when the platform repo is not checked out. That is the
  * ordinary case in CI on this repository, and failing over it would make the
  * check something people learn to ignore. What is not that case is an operator
@@ -29,39 +39,67 @@
  * beside itself and runs this script against it (OPL-3916). This repository had
  * a job of its own that did the reverse, and it never once ran: the token it
  * needed was never set, so every run printed the skip above and passed. Beyond
- * that, what this prints is routes and parameters that have not shipped yet,
- * and this repository's Actions logs are world-readable the day it goes public,
- * where the platform's are not.
+ * that, what this prints is routes, parameters and limits that have not shipped
+ * yet, and this repository's Actions logs are world-readable the day it goes
+ * public, where the platform's are not.
  *
  * So on a machine that has both this is what catches drift before a push, and
  * everywhere else it is what the platform runs.
+ *
+ * NOTHING HERE PARSES TYPESCRIPT ANY MORE (OPL-4851)
+ * =================================================
+ *
+ * This script used to read the platform's `web/lib/surface.ts` and
+ * `web/lib/apidoc.ts` as TEXT, through ~860 lines of hand-written scanner in
+ * `scripts/surface-text.mjs`, and to read its own mirror with regexes over
+ * `test/allowlist.ts`.
+ *
+ * Across eleven adversarial review rounds the three clients' scanners produced,
+ * and then closed, at least a dozen distinct FAIL-OPENS — runs that printed "the mirror
+ * matches the platform" without having read it. A `.concat` after the leading
+ * array. A decoy table inside a type annotation. A projection callback that
+ * ignored its argument. `.add` after the constructor. An extra callback
+ * parameter whose default ran. A computed key in a destructured parameter. A
+ * type assertion that was really a comparison chain. A line comment ended by a
+ * carriage return. Each was fixed and the next spelling arrived, because
+ * recognising TypeScript is a TypeScript parser's job and this was not one.
+ *
+ * Both sides are now read rather than recognised:
+ *
+ * - The platform's, from `surface-manifest.json` (platform OPL-4827), which it
+ *   generates from the same tables its API reference and OpenAPI document are
+ *   built from. One `JSON.parse`.
+ * - This repo's, by importing `test/allowlist.ts` directly. Node strips the
+ *   types; the tables arrive as the objects the suite itself uses, so there is
+ *   no second reading of the mirror that can disagree with the first.
  */
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, realpathSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
-import {
-  balanced,
-  entries,
-  listItems,
-  moduleDeclarations,
-  objectFields,
-  stripComments,
-  topLevelField,
-  topLevelKeys,
-  topLevelValueAt,
-} from './surface-text.mjs';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repo = resolve(here, '..');
 
-// One marker identifies the checkout, and the rest of the layout is then
-// required of it rather than searched for. Asking for both at once conflates
-// two different answers: "this directory is not the platform, so there is
-// nothing here to compare" and "this is the platform and a file this reads has
-// moved" — and the second, answered as the first, takes the ROUTE half of the
-// gate down as well, silently, over a file the route half never opens.
-const MARKER = 'web/lib/surface.ts';
-const ALSO_READ = ['web/lib/apidoc.ts'];
+/**
+ * What identifies a platform checkout, and what is then required of it.
+ *
+ * Asking for both at once conflates two different answers: "this directory is
+ * not the platform, so there is nothing here to compare" and "this is the
+ * platform and a file this reads has moved" — and the second, answered as the
+ * first, takes the whole gate down silently.
+ *
+ * The MARKER is deliberately NOT the manifest, even though the manifest is now
+ * the only platform file read. A marker and a read file have opposite failure
+ * modes: make them the same and a checkout that has LOST its manifest stops
+ * being recognised as the platform at all, so the loud "a platform checkout
+ * with no …" at exit 1 becomes a silent "platform repo not found, skipping" at
+ * exit 0. That is the original fail-open, wearing a tidier hat.
+ */
+export const MARKER = 'web/lib/surface.ts';
+export const MANIFEST = 'surface-manifest.json';
+
+/** The manifest layouts this reader understands. */
+const SUPPORTED_VERSIONS = new Set([1]);
 
 /** The platform checkout to compare against, or null when there is none. */
 function platformRepo() {
@@ -98,17 +136,16 @@ function platformRepo() {
     console.log(
       'check:surface — platform repo not found, skipping.\n' +
         `  Looked in: ${candidates.join(', ')}\n` +
-        '  Set MANDALA_PLATFORM_REPO to compare against web/lib.',
+        `  Set MANDALA_PLATFORM_REPO to compare against ${MANIFEST}.`,
     );
     return null;
   }
 
-  const missing = ALSO_READ.filter((file) => !existsSync(join(found, file)));
-  if (missing.length) {
+  if (!existsSync(join(found, MANIFEST))) {
     console.error(
-      `check:surface — ${found} is a platform checkout missing ${missing.join(', ')}.\n` +
-        '  The file moved or was renamed. Until this reader is pointed at the new one\n' +
-        '  the comparison below is partly blind, which is worse than it failing.',
+      `check:surface — ${found} is a platform checkout with no ${MANIFEST}.\n` +
+        '  That file IS the comparison, so its absence is drift rather than a reason to\n' +
+        '  skip: either the platform stopped generating it, or this is a partial checkout.',
     );
     process.exitCode = 1;
     return null;
@@ -116,436 +153,305 @@ function platformRepo() {
   return found;
 }
 
-main();
+/**
+ * The first key named twice in one object, anywhere in `text`, or null.
+ *
+ * Only ever called on text `JSON.parse` has already accepted, which is what
+ * makes this total: it never has to decide whether the document is valid, only
+ * where its object keys are.
+ *
+ * A string literal is the one construct that can hide a `{`, `}` or `:`, so
+ * skipping strings correctly — respecting backslash escapes — is the whole of
+ * the work. Within an object, a string is a KEY when it is the first token
+ * after `{` or after a `,` at that object's own depth; `:` ends that position.
+ * Arrays push a frame too, so `[{"a":1},{"a":2}]` is two objects and not a
+ * duplicate.
+ */
+function duplicateKey(text) {
+  // One frame per `{` or `[`. `keys` is null for an array frame, and
+  // `expectKey` says whether the next string at this depth is a key.
+  const stack = [];
+  let expectKey = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (ch === '"') {
+      // The whole quoted token, quotes included, so it can be DECODED. Compared
+      // raw, `"routes"` and `"\u0072outes"` are two different spellings — and
+      // they are one key to `JSON.parse`, so the second silently replaces the
+      // first and this would have seen no duplicate at all. Every escape is the
+      // same hole: `\/`, `\"`, `\\`.
+      const start = i;
+      for (i++; text[i] !== '"'; i++) if (text[i] === '\\') i++;
+      const top = stack[stack.length - 1];
+      if (expectKey && top?.keys) {
+        // Safe: this only ever runs on text `JSON.parse` has already accepted,
+        // so the token between these quotes is a valid JSON string.
+        const key = JSON.parse(text.slice(start, i + 1));
+        if (top.keys.has(key)) return key;
+        top.keys.add(key);
+        expectKey = false;
+      }
+      continue;
+    }
+    if (ch === '{') {
+      stack.push({ keys: new Set() });
+      expectKey = true;
+    } else if (ch === '[') {
+      stack.push({ keys: null });
+      expectKey = false;
+    } else if (ch === '}' || ch === ']') {
+      stack.pop();
+      expectKey = false;
+    } else if (ch === ',') {
+      expectKey = Boolean(stack[stack.length - 1]?.keys);
+    }
+  }
+  return null;
+}
 
-function main() {
+/**
+ * The platform's inventory of its own v1 surface, or a thrown explanation.
+ *
+ * Every shape this cannot read throws. Reading JSON removes the grammar that
+ * defeated the old scanner; it does not by itself remove the failure mode,
+ * because a missing key read as an empty table is the same green run over
+ * nothing. So none of these may be forgiven:
+ *
+ * - a file that is not JSON, or is JSON that is not an object;
+ * - a `version` this reader does not know, which is the sharpest of them — a
+ *   future layout that moved `parameters` under a new key reads, leniently, as
+ *   a platform that documents no parameters at all;
+ * - a missing top-level key, a malformed route, a duplicate route, a parameter
+ *   table naming a route that is not in `routes`, a parameter with no
+ *   `query:`/`header:`/`body:` kind, or a non-integer limit.
+ */
+function readManifest(platform) {
+  const path = join(platform, MANIFEST);
+  const bad = (why) => new Error(`${MANIFEST} ${why}`);
+
+  const text = readFileSync(path, 'utf8');
+  let data;
+  try {
+    data = JSON.parse(text);
+  } catch (err) {
+    throw bad(`could not be read as JSON: ${err.message}`);
+  }
+  // `JSON.parse` keeps the LAST occurrence of a repeated key and says nothing,
+  // at every depth — and a reviver cannot see it, because the object is already
+  // built by the time the reviver runs. So a manifest carrying two `routes`
+  // tables, two entries for one route under `parameters`, or one limit written
+  // twice with different values would be compared against whichever copy came
+  // last, with the other discarded before any check below saw it: a green run
+  // over data this never read.
+  //
+  // Found by an adversarial review of the Python SDK's copy of this check,
+  // where `object_pairs_hook` closes it in one line. There is no such hook here,
+  // hence `duplicateKey` — which is a scanner, and therefore worth saying why it
+  // is not the thing this change deletes. JSON's grammar is tiny and total, the
+  // text has ALREADY been accepted by a real parser before this looks at it, and
+  // the only construct that can hide a brace or a colon is a string literal,
+  // which is four lines to skip correctly. A bug in it refuses a manifest that
+  // was fine; a bug in the TypeScript reader accepted a platform it had not read.
+  // `!== null`, not truthiness. A repeated EMPTY key returns `''`, and a
+  // truthiness test reads that as "no duplicate" — so `{"":0,"":1,...}` ahead of
+  // a conflicting table disabled the rest of this scan entirely.
+  const duplicate = duplicateKey(text);
+  if (duplicate !== null) throw bad(`names ${JSON.stringify(duplicate)} twice in one object`);
+  if (data === null || typeof data !== 'object' || Array.isArray(data)) {
+    throw bad('is not a JSON object');
+  }
+  if (!Number.isInteger(data.version)) {
+    throw bad(`has no integer 'version' (got ${JSON.stringify(data.version)})`);
+  }
+  if (!SUPPORTED_VERSIONS.has(data.version)) {
+    throw bad(
+      `is version ${data.version}, and this reader knows ${[...SUPPORTED_VERSIONS].join(', ')}. ` +
+        'Teach it the new layout rather than comparing against a guess',
+    );
+  }
+  for (const key of ['routes', 'parameters', 'limits']) {
+    if (!(key in data)) throw bad(`has no '${key}'`);
+  }
+
+  if (!Array.isArray(data.routes) || data.routes.length === 0) {
+    throw bad("'routes' is not a non-empty array");
+  }
+  const routes = new Set();
+  for (const entry of data.routes) {
+    if (typeof entry !== 'string') {
+      throw bad(`'routes' holds a non-string entry: ${JSON.stringify(entry)}`);
+    }
+    // One space, method first. A pattern cannot contain a space, so a second
+    // one is a malformed entry rather than something to normalise away.
+    const space = entry.indexOf(' ');
+    const method = space === -1 ? '' : entry.slice(0, space);
+    const pattern = space === -1 ? '' : entry.slice(space + 1);
+    if (!method || !pattern || method !== method.toUpperCase() || pattern.includes(' ')) {
+      throw bad(`'routes' entry is not 'METHOD pattern': ${JSON.stringify(entry)}`);
+    }
+    if (routes.has(entry)) throw bad(`'routes' lists ${JSON.stringify(entry)} twice`);
+    routes.add(entry);
+  }
+
+  const documented = data.parameters;
+  if (documented === null || typeof documented !== 'object' || Array.isArray(documented)) {
+    throw bad("'parameters' is not an object");
+  }
+  // The manifest omits a route that documents none, so those are filled back in
+  // as empty sets. Read literally it would be 27 routes "no longer documented
+  // upstream" on a mirror that is exactly right — the kind of noise that gets a
+  // check ignored, which is the failure one step past a false green.
+  const parameters = new Map([...routes].map((route) => [route, new Set()]));
+  for (const [route, names] of Object.entries(documented)) {
+    if (!routes.has(route)) {
+      throw bad(`'parameters' documents '${route}', which is not in 'routes'`);
+    }
+    if (!Array.isArray(names)) throw bad(`'parameters' for '${route}' is not an array`);
+    const set = new Set();
+    for (const name of names) {
+      if (typeof name !== 'string') {
+        throw bad(`'parameters' for '${route}' holds a non-string: ${JSON.stringify(name)}`);
+      }
+      // An unprefixed name would compare equal to nothing in the mirror and
+      // read as one missing parameter plus one stale one, which describes a
+      // reader that has lost the vocabulary rather than a platform that changed.
+      if (!/^(query|header|body):/.test(name)) {
+        throw bad(
+          `'parameters' for '${route}' holds '${name}', which names no query:, header: ` +
+            'or body: field',
+        );
+      }
+      set.add(name);
+    }
+    parameters.set(route, set);
+  }
+
+  const published = data.limits;
+  if (published === null || typeof published !== 'object' || Array.isArray(published)) {
+    throw bad("'limits' is not an object");
+  }
+  const limits = new Map();
+  for (const [key, value] of Object.entries(published)) {
+    if (!Number.isInteger(value)) {
+      throw bad(`'limits' entry '${key}' is ${JSON.stringify(value)}, which is not an integer`);
+    }
+    limits.set(key, value);
+  }
+
+  return { routes, parameters, limits };
+}
+
+/**
+ * Whether this module was RUN rather than imported.
+ *
+ * Same shape as check-internals.mjs's, and for the same reason: the test suite
+ * imports this file to read {@link MARKER} and {@link MANIFEST} rather than
+ * spelling a platform path of its own, and an import that ran the gate would
+ * compare the real checkout as a side effect of collecting tests.
+ */
+function isEntrypoint() {
+  if (!process.argv[1]) return false;
+  if (import.meta.url === pathToFileURL(process.argv[1]).href) return true;
+  try {
+    return import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href;
+  } catch {
+    // An importing process can have an argv entry that is not a file.
+    return false;
+  }
+}
+
+if (isEntrypoint()) await main();
+
+async function main() {
   const platform = platformRepo();
   if (!platform) return;
 
-  // --- reading TypeScript without a TypeScript loader ------------------------
+  let manifest;
+  try {
+    manifest = readManifest(platform);
+  } catch (err) {
+    console.error(
+      `\ncheck:surface — ${err.message}.\n\n` +
+        '  This check compares nothing it cannot read: a manifest it does not understand\n' +
+        '  is a failure rather than a green run over an empty table.',
+    );
+    process.exitCode = 1;
+    return;
+  }
+
+  // The mirror, as the objects the suite itself uses. Imported rather than
+  // scraped: a second reading of our own tables is one more thing that can
+  // disagree with what the tests actually pin.
   //
-  // Both files are read as text and matched over, so this runs with no build
-  // step and no dependency. Comments are stripped from anything matched, because
-  // both are heavily commented and several of those comments quote the very
-  // shapes being matched — over them, the regexes invent routes and parameters.
-  // See scripts/surface-text.mjs, which is a copy of the same helpers in the
-  // TypeScript SDK: a parser bug found in one is worth carrying to the other.
-
-  // --- routes ---------------------------------------------------------------
-
-  // Stripped once, and every read below is of this rather than of the raw file
-  // — the same discipline `docClean` applies to apidoc.ts, and for the same
-  // reason: `surface.ts` explains itself by quoting the shapes matched here, and
-  // a commented copy of the table declaration is where an `indexOf` starts.
-  // `balanced()` then walks from a bracket inside a block comment into the real
-  // table, and what comes back is a short route set or — from the script whose
-  // only job is not to give one — a false all-clear. Blanking rather than
-  // deleting keeps every offset an offset into the original.
-  const surfaceSource = stripComments(readFileSync(join(platform, 'web/lib/surface.ts'), 'utf8'));
-
-  /**
-   * Pull one `export const NAME: Route[] = [...]` table out, entry by entry.
-   *
-   * Split by brace depth rather than matched with one regex across the whole
-   * table. A `/method:.*?pattern:/` over the flat text is correct only while
-   * every entry happens to write its method first: reorder two fields and the
-   * lazy match joins one entry's method to the next entry's pattern. What comes
-   * out is a route neither table has — and a route that is in neither is not a
-   * failure here, it is silence. A checker whose failure mode is a false
-   * all-clear is worse than no checker, which is what the brace walk is for and
-   * why it survived the port.
-   *
-   * Slicing the entry is only half of it. Within one entry the fields are read
-   * at that entry's own depth, because a nested literal can quote a `pattern` of
-   * its own — an options bag, a `handler: {}` with a path in it — and a regex
-   * over the entry takes whichever comes first.
-   *
-   * The split itself is `entries`, which skips literals rather than counting
-   * every brace it sees. A raw count is the same bug one level down: a lone `}`
-   * in a string desyncs the depth for good, and the entries after it are dropped
-   * without a word.
-   *
-   * The `!routes.size` guard below only catches a parse that found nothing at
-   * all, which is exactly what a mispaired parse is not.
-   */
-  function routeTable(name) {
-    // In module code, and exactly once. `indexOf` found the first spelling of
-    // the declaration anywhere in the file, and anywhere includes inside a
-    // regex literal — `export default /a; export const V1_ROUTES … ; z/;` is
-    // legal, and the table written in it was read as the real one, ahead of the
-    // real one further down.
-    const declared = moduleDeclarations(surfaceSource, `export const ${name}: Route\\[\\] = \\[`);
-    if (declared.length !== 1) {
-      throw new Error(
-        `${name} in web/lib/surface.ts is ${declared.length ? 'declared more than once' : 'not declared'} ` +
-          'where this reader can read it',
-      );
-    }
-    // The opening bracket of the table, not the one in `Route[]` a few
-    // characters earlier — which is what an indexOf('[') from the declaration
-    // finds, and which closes immediately.
-    const body = balanced(surfaceSource, declared[0].index + declared[0].length - 1, '[', ']');
-    const routes = new Set();
-    for (const entry of entries(body)) {
-      // Both, out of ONE entry and at that entry's own depth. An entry carrying
-      // only half of the pair is not a route, and must borrow the other half
-      // neither from its neighbour nor from a literal nested in it.
-      const method = topLevelField(entry, 'method');
-      const pattern = topLevelField(entry, 'pattern');
-      // Refused rather than skipped. An entry this reader cannot read both
-      // halves of is not a half-written route — it is a spelling the walk above
-      // got wrong, or a value built from something it cannot see, and dropping
-      // it reports a route the platform serves as one the mirror invented.
-      if (!method || !pattern) {
-        throw new Error(
-          `an entry of ${name} in web/lib/surface.ts has no literal method and pattern ` +
-            `this reader can read: ${JSON.stringify(entry.trim().slice(0, 60))}`,
-        );
-      }
-      routes.add(`${method} ${pattern}`);
-    }
-    if (!routes.size)
-      throw new Error(`parsed ${name} but found no routes — has its shape changed?`);
-    return routes;
+  // Node strips the types. A runtime old enough to refuse that is told so
+  // plainly, because the alternative — falling back to reading the file as text
+  // — is the thing this change exists to delete.
+  let mirror;
+  try {
+    mirror = await import('../test/allowlist.ts');
+  } catch (err) {
+    console.error(
+      `check:surface — could not import test/allowlist.ts: ${err.message}\n` +
+        '  This needs a Node with TypeScript type stripping (22.18+ or 24+); this is ' +
+        `${process.version}.`,
+    );
+    process.exitCode = 1;
+    return;
   }
-
-  const platformRoutes = routeTable('V1_ROUTES');
-
-  // Stripped for the reason the platform's two files are: this file documents
-  // each route it mirrors in prose above it, and a declaration named in one of
-  // those comments is where `mirrorSection` would start reading.
-  const mirrorSource = stripComments(readFileSync(join(repo, 'test/allowlist.ts'), 'utf8'));
-
-  /** The text of one `export const NAME` declaration in the mirror. */
-  function mirrorSection(name, until) {
-    const from = mirrorSource.indexOf(`export const ${name}`);
-    if (from === -1) throw new Error(`${name} not found in test/allowlist.ts`);
-    const to = mirrorSource.indexOf(`export const ${until}`, from);
-    return mirrorSource.slice(from, to === -1 ? undefined : to);
-  }
-
-  const mirrorRoutes = new Set(
-    [...mirrorSection('V1_ROUTES', 'key').matchAll(/r\('([A-Z]+)',\s*'([^']+)'\)/g)].map(
-      (m) => `${m[1]} ${m[2]}`,
-    ),
-  );
-
-  // --- parameters -----------------------------------------------------------
-
-  const docSource = readFileSync(join(platform, 'web/lib/apidoc.ts'), 'utf8');
-  // Every scan below reads this rather than the raw file. A declaration or a
-  // route key quoted in a comment — which is how apidoc.ts explains itself, and
-  // its comment above ALLOW_PARTIAL spells out the very shape this file matches
-  // on — is source to a regex and prose to a reader, and the regex wins.
-  // Length-preserving by construction: comments are blanked, not deleted, so
-  // every offset here indexes the same character in either text.
-  const docClean = stripComments(docSource);
-
-  /**
-   * Module-level `const NAME: Query = {...}` entries.
-   *
-   * A route's `query` or `headers` array can reference one of these by
-   * identifier instead of spelling it out — ALLOW_PARTIAL is shared by two
-   * routes — so the identifier has to resolve to a parameter name or those
-   * routes read as taking none. `Query` is the type of both lists over there
-   * (`headers?: Query[]`), so what these name is a parameter of whichever list
-   * cites it rather than a query parameter by construction.
-   *
-   * `export` and indentation are both allowed for, because neither changes what
-   * the declaration means and a reader that insists on today's spelling reports
-   * every route citing a re-spelled constant as taking no parameters at all.
-   * Allowing indentation is also why this reads `docClean`: a superseded copy of
-   * a declaration quoted in a block comment is indented under its `*`, so the
-   * relaxed pattern reaches it, and the later copy wins the Map. Every route
-   * citing the identifier then reports one missing and one extra parameter,
-   * both naming the name nobody serves.
-   */
-  const sharedParams = new Map();
-  for (const declaration of moduleDeclarations(
-    docClean,
-    '(?:export\\s+)?const ([A-Za-z_$][\\w$]*)\\s*:\\s*Query\\s*=\\s*\\{',
-  )) {
-    const [identifier] = declaration.groups;
-    const body = balanced(docClean, declaration.index + declaration.length - 1, '{', '}');
-    const named = topLevelField(body, 'name');
-    if (named === undefined) {
-      throw new Error(
-        `the shared parameter ${identifier} in web/lib/apidoc.ts has no name this reader can read`,
-      );
-    }
-    // Two declarations of one identifier is one of them winning by read order,
-    // over a name every route citing it is compared against.
-    if (sharedParams.has(identifier)) {
-      throw new Error(`the shared parameter ${identifier} is declared twice in web/lib/apidoc.ts`);
-    }
-    sharedParams.set(identifier, named);
-  }
-
-  /** Every query, header and body field the platform documents, by route. */
-  function platformParameters() {
-    // In module code and exactly once, for the reason routeTable reads its
-    // table that way: `indexOf` answers with the first spelling of the
-    // declaration anywhere in the file, including inside a regex literal.
-    const declared = moduleDeclarations(docClean, 'export const DOCS: Record<string, Doc> = \\{');
-    if (declared.length !== 1) {
-      throw new Error(
-        `DOCS in web/lib/apidoc.ts is ${declared.length ? 'declared more than once' : 'not declared'} ` +
-          'where this reader can read it',
-      );
-    }
-    // The comments are already gone: the key is captured by a regex over this
-    // text, and a comment quoting a route key — which is how apidoc.ts explains
-    // itself — reads as an entry of its own; `table.set` then puts its empty
-    // parameter set where the real route's belongs, and the route is compared
-    // against nothing.
-    // Located AND sliced out of the stripped copy, the way `routeTable` strips
-    // before it splits. This file quotes the shapes being matched in its own
-    // comments, and everything here is run over text rather than over a parse —
-    // so a commented `'GET x': {` is an entry as far as it can tell, and a
-    // comment quoting this very declaration is where the table starts. The
-    // invented route is the lesser half: `lastIndex` then moves past a
-    // `balanced()` walk that began at a brace inside the comment, which can
-    // carry it over the genuine entry, and that route reads as taking no
-    // parameters at all.
-    const docs = balanced(docClean, declared[0].index + declared[0].length - 1, '{', '}');
-
-    const table = new Map();
-    // Every entry accounted for, rather than every entry a regex recognises.
-    // `'([A-Z]+) ([^']+)':` reads the keys written in single quotes and passes
-    // over the rest without a word: a route key spelled with double quotes is
-    // then absent from this table, compared against nothing, and the scan's own
-    // "found no routes" guard stays quiet because the others counted. A spread
-    // or a computed key is refused here for the same reason — what it carries
-    // cannot be seen, and a table short by an unknown amount must not read as
-    // agreement.
-    for (const [route, value] of objectFields(docs)) {
-      if (!/^[A-Z]+ .+/.test(route)) {
-        throw new Error(`web/lib/apidoc.ts DOCS holds a key this reader cannot read: '${route}'`);
-      }
-      if (value[0] !== '{') {
-        throw new Error(
-          `'${route}' in web/lib/apidoc.ts is documented in a shape this reader ` +
-            'does not know — not an object literal.',
-        );
-      }
-      const body = balanced(value, 0, '{', '}');
-      const params = new Set();
-
-      for (const [key, kind] of [
-        ['query', 'query'],
-        ['headers', 'header'],
-      ]) {
-        // At the entry's own depth, and located rather than spelled — the two
-        // failures are different and this has to avoid both.
-        //
-        // A description or a response example can nest a `query: [` of its own,
-        // and an `indexOf` takes the first at ANY depth: a parameter list read
-        // out of prose is a set the platform never documented, reported against
-        // the mirror as if it had, while the route's real list further down goes
-        // unread. And the one space after the colon is a spelling, not a shape:
-        // a list the formatter wrapped — `query:\n  [{ name: 'limit' }]` — is
-        // the same list, but a reader insisting on today's spelling skips the
-        // route's parameters entirely and says nothing. With a full table the
-        // guard for a scan that counted nothing does not fire either, because
-        // the other routes counted, so the route's real parameters surface as
-        // ones the mirror invented — which sends the operator to the wrong file.
-        const at = topLevelValueAt(body, key);
-        if (at === -1) continue;
-        if (body[at] !== '[') {
-          throw new Error(
-            `'${route}' in web/lib/apidoc.ts documents ${key} in a shape this reader does not ` +
-              'know — not an array literal.',
-          );
-        }
-        const list = balanced(body, at, '[', ']');
-        // Element by element, and every element accounted for. The two regexes
-        // this replaces each had a hole of its own. `name:\s*'([^']+)'` read
-        // the whole list flat, so a `name` nested in a schema counted as a
-        // parameter of the route and a `name: "x"` counted as nothing; and the
-        // identifier scan, reading the same flat text, could only be forgiving
-        // of what it did not recognise, because the prose in each entry's
-        // description is full of ordinary capitalised words — RFC, UTC — that
-        // look exactly like a shared constant. Reading the elements is what
-        // makes an unresolved identifier a real answer: there is no prose at
-        // this depth to mistake for one.
-        for (const item of listItems(list)) {
-          if (item[0] === '{') {
-            const inner = balanced(item, 0, '{', '}');
-            if (inner.length + 2 !== item.length) {
-              throw new Error(
-                `'${route}' has a ${key} entry with an expression after its literal: ` +
-                  JSON.stringify(item.slice(0, 60)),
-              );
-            }
-            const name = topLevelField(inner, 'name');
-            if (name === undefined) {
-              throw new Error(
-                `'${route}' has a ${key} entry with no name this reader can read: ` +
-                  JSON.stringify(item.slice(0, 60)),
-              );
-            }
-            params.add(`${kind}:${name}`);
-          } else if (/^[A-Za-z_$][\w$]*$/.test(item)) {
-            const shared = sharedParams.get(item);
-            // Unresolved is refused rather than ignored: a constant this reader
-            // cannot resolve is a parameter the route takes and the comparison
-            // cannot see, which is the shape of every drift this script exists
-            // to catch.
-            if (shared === undefined) {
-              throw new Error(
-                `'${route}' cites ${item} in its ${key} list, which is not a shared ` +
-                  'parameter this reader resolved.',
-              );
-            }
-            params.add(`${kind}:${shared}`);
-          } else {
-            throw new Error(
-              `'${route}' has a ${key} entry this reader cannot read: ` +
-                JSON.stringify(item.slice(0, 60)),
-            );
-          }
-        }
-      }
-
-      // Only the `object(...)` bodies have named fields. A raw one — the file
-      // upload's and the template document's `{ type: 'string', format:
-      // 'binary' }` — has none to name. Anything else spelled where a body goes
-      // is a shape this cannot read, and reading it as no fields would say the
-      // route documents no body at all: the mirror lists none for such a route
-      // either, so the two agree about nothing.
-      //
-      // All three cases are decided at the entry's own depth. Asking the whole
-      // entry text whether it holds a readable body lets a nested one answer:
-      // a `body: { … }` inside a response example vouches for the entry's own
-      // `body: SHARED_BODY`, the throw is skipped, and the route reports no
-      // fields — which matches a mirror that lists none. That is the vacuous
-      // all-clear this guard exists to refuse, arriving through the guard.
-      const bodyAt = topLevelValueAt(body, 'body');
-      if (bodyAt !== -1) {
-        const object = /^object\s*\(/.exec(body.slice(bodyAt));
-        const args = object && balanced(body, bodyAt + object[0].length - 1, '(', ')');
-        // An `object(SHARED_FIELDS)` is as unreadable as a bare identifier is,
-        // and it belongs in the message that names the route: fed to `balanced`
-        // unchecked, its missing `{` came back as an offset assertion naming
-        // neither the route nor the file it is in.
-        // The FIRST argument, and only when it is a literal in its own right.
-        // `indexOf` took the first brace anywhere in the call, so a wrapper or a
-        // conditional around the real fields — `object(Object.assign({}, X))`,
-        // `object(flag ? {} : { name })` — handed over an empty literal nested
-        // inside it, and the route reported no body fields with nothing said
-        // (Codex review). A -1 falls through to the refusal below, which is the
-        // same sentence `object(IDENTIFIER)` already gets: the shape is one this
-        // reader does not know, and the route is named.
-        //
-        // And a literal the call OPENS with is still only a prefix of the
-        // argument: `object({ fields: { name } }.fields)` starts with one and
-        // hands over a different map, so the route reported the outer field name
-        // and not the one the platform documents. So what follows the literal is
-        // checked too — another argument or nothing — which is the rule the
-        // parameter entries above are already read by (Codex review).
-        const leading = args === null ? '' : args.slice(0, args.length - args.trimStart().length);
-        let brace = args !== null && args.trimStart().startsWith('{') ? leading.length : -1;
-        let literal;
-        if (brace !== -1) {
-          literal = balanced(args, brace, '{', '}');
-          const after = args.slice(brace + literal.length + 2).trimStart();
-          if (after !== '' && !after.startsWith(',')) brace = -1;
-        }
-        if (brace !== -1) {
-          // The field walk refuses a spread, a computed key and an interpolated
-          // one: each is a field of THIS route that it cannot resolve, and
-          // reading none of them is how a route with a body passes for a route
-          // with none. Re-thrown with the route named, because on its own the
-          // message gives an offset into a slice of a file — which is not
-          // somewhere anybody can go and look (OPL-4812).
-          let fields;
-          try {
-            fields = topLevelKeys(literal);
-          } catch (err) {
-            throw new Error(
-              `'${route}' documents a body this reader cannot account for: ${err.message}`,
-            );
-          }
-          for (const k of fields) params.add(`body:${k}`);
-        } else if (body[bodyAt] !== '{') {
-          throw new Error(
-            `'${route}' documents a body in a form this reader does not know — ` +
-              'neither object(...) nor a raw schema literal.',
-          );
-        }
-      }
-      table.set(route, params);
-    }
-    return table;
-  }
-
-  /** The same, read out of the mirror's PARAMETERS map. */
-  function mirrorParameters() {
-    const section = mirrorSection('PARAMETERS', 'UNIMPLEMENTED_PARAMETERS');
-    const table = new Map();
-    const entry = /\[\s*'([A-Z]+ [^']+)'\s*,\s*\[/g;
-    for (let m = entry.exec(section); m; m = entry.exec(section)) {
-      const list = balanced(section, m.index + m[0].length - 1, '[', ']');
-      table.set(m[1], new Set([...list.matchAll(/'([^']+)'/g)].map((p) => p[1])));
-    }
-    return table;
-  }
-
-  // --- the comparison -------------------------------------------------------
+  const { ALLOWED: mirrorRoutes, PARAMETERS: mirrorParams, LIMITS: mirrorLimits } = mirror;
 
   const problems = [];
 
-  const missingRoutes = [...platformRoutes].filter((r) => !mirrorRoutes.has(r)).sort();
-  const extraRoutes = [...mirrorRoutes].filter((r) => !platformRoutes.has(r)).sort();
+  // --- routes ---------------------------------------------------------------
+
+  const missingRoutes = [...manifest.routes].filter((r) => !mirrorRoutes.has(r)).sort();
+  const extraRoutes = [...mirrorRoutes].filter((r) => !manifest.routes.has(r)).sort();
 
   if (missingRoutes.length) {
     problems.push(
       'routes the platform exposes that the mirror does not list:\n' +
         missingRoutes.map((r) => `  + ${r}`).join('\n') +
-        '\n\n  Add each to V1_ROUTES in test/allowlist.ts, and either write a tool for it\n' +
-        '  or pin it in UNIMPLEMENTED, so the gap stays a line somebody has to edit.',
+        '\n\n  Add each to V1_ROUTES in test/allowlist.ts. If this server cannot call it,\n' +
+        '  add it to UNIMPLEMENTED too, so the gap stays a number somebody has to edit down.',
     );
   }
   if (extraRoutes.length) {
     problems.push(
       'routes the mirror lists that the platform does not expose:\n' +
         extraRoutes.map((r) => `  - ${r}`).join('\n') +
-        '\n\n  Either the platform dropped these, or the mirror invented them. A tool\n' +
-        "  calling one of these 404s in a user's hands.",
+        '\n\n  Either the platform dropped these, or the mirror invented them. A call to\n' +
+        "  one of these 404s in a user's hands.",
     );
   }
 
-  const platformParams = platformParameters();
-  const mirrorParams = mirrorParameters();
+  // --- parameters -----------------------------------------------------------
 
   // Only over the routes both tables agree exist. A route missing from the
   // mirror is already reported above, and reporting each of its parameters again
   // buries the one line that says what to do about it.
-  const shared = [...platformRoutes].filter((r) => mirrorRoutes.has(r)).sort();
+  const shared = [...manifest.routes].filter((r) => mirrorRoutes.has(r)).sort();
   const missingParams = [];
   const extraParams = [];
   let counted = 0;
 
   for (const route of shared) {
-    const theirs = platformParams.get(route) ?? new Set();
-    const ours = mirrorParams.get(route) ?? new Set();
+    const theirs = manifest.parameters.get(route) ?? new Set();
+    // The mirror stores each route's parameters as an ARRAY, which is the
+    // readable shape for a table people edit. Into a Set here rather than
+    // `.includes` in the loop below, so a name listed twice over there cannot
+    // change what this compares.
+    const ours = new Set(mirrorParams.get(route) ?? []);
     counted += theirs.size;
     for (const p of [...theirs].sort()) if (!ours.has(p)) missingParams.push(`${route}  ${p}`);
     for (const p of [...ours].sort()) if (!theirs.has(p)) extraParams.push(`${route}  ${p}`);
   }
 
-  if (!platformParams.size) {
-    problems.push(
-      'no parameters could be read out of web/lib/apidoc.ts.\n\n' +
-        '  The DOCS table moved or changed shape. This check is silently vacuous until\n' +
-        '  the reader above is fixed — which is worse than it failing, so it fails.',
-    );
-  }
   // The number the success line prints is also the one thing that says the
-  // comparison happened at all. Every route the platform documents carries at
-  // least one parameter or field today, so a run that agrees about every route
-  // and compared none of them read the DOCS keys in a shape that no longer
-  // matches the mirror's — a green line over an empty loop.
+  // parameter comparison happened at all. Many routes document parameters, so a
+  // run that agreed about every route and compared none of them read the route
+  // keys in a shape the two sides no longer share — a green line over an empty
+  // loop. Kept from the text-scanning version, because the failure it guards
+  // against is about the two key formats agreeing, not about how they were read.
   if (shared.length && !counted) {
     problems.push(
       `compared zero parameters across ${shared.length} shared routes.\n\n` +
@@ -557,7 +463,7 @@ function main() {
     problems.push(
       'parameters the platform documents that the mirror does not list:\n' +
         missingParams.map((p) => `  + ${p}`).join('\n') +
-        '\n\n  Add each to PARAMETERS in test/allowlist.ts. If this server does not send it,\n' +
+        '\n\n  Add each to PARAMETERS in test/allowlist.ts. If this server cannot send it,\n' +
         '  add it to UNIMPLEMENTED_PARAMETERS too — which is the line that makes the gap\n' +
         "  somebody's to close rather than nobody's to notice.",
     );
@@ -571,16 +477,55 @@ function main() {
     );
   }
 
+  // --- limits ---------------------------------------------------------------
+
+  const drifted = [];
+  const withdrawn = [];
+  for (const [key, ours] of mirrorLimits) {
+    if (!manifest.limits.has(key)) {
+      // Refused rather than skipped, and it is the quietest of the three
+      // drifts: the server goes on refusing values early against a ceiling the
+      // platform has stopped publishing, so a call it would have taken is
+      // turned away here and nothing anywhere says why.
+      withdrawn.push(`  ! ${key} (mirrored as ${ours}) is not in the manifest's limits`);
+      continue;
+    }
+    const theirs = manifest.limits.get(key);
+    if (theirs !== ours) {
+      drifted.push(`  ! ${key} is ${ours} in this server, but ${theirs} upstream`);
+    }
+  }
+  if (withdrawn.length) {
+    problems.push(
+      'limits this server refuses against that the platform no longer publishes:\n' +
+        `${withdrawn.join('\n')}\n\n` +
+        '  Has the number been renamed, or withdrawn? Until this is answered the server\n' +
+        '  is turning callers away on a ceiling nobody upstream is asserting.',
+    );
+  }
+  if (drifted.length) {
+    problems.push(
+      'limits that have drifted from the platform:\n' +
+        `${drifted.join('\n')}\n\n` +
+        '  Update the constant in src/, and LIMITS in test/allowlist.ts beside it —\n' +
+        '  test/limits.test.ts is what holds those two together.',
+    );
+  }
+
   if (!problems.length) {
     console.log(
       `check:surface — the mirror matches the platform (${mirrorRoutes.size} routes, ` +
-        `${counted} parameters, from ${platform}).`,
+        `${counted} parameters, ${mirrorLimits.size} limits).`,
     );
     return;
   }
 
   for (const p of problems) console.error(`\ncheck:surface — ${p}`);
-  console.error(`\n  Platform: ${join(platform, 'web/lib')}`);
+  // The checkout location is deliberately NOT printed. This output gets pasted
+  // into pull requests on a public repository, and the absolute path of a
+  // developer's checkout of the private platform repo has no business there.
+  // Whoever runs this knows where they pointed it; set MANDALA_PLATFORM_REPO
+  // if it needs saying.
   // Set rather than exited on. stdout and stderr are asynchronous when they are
   // a pipe, which is what CI gives them, and `process.exit` abandons whatever is
   // still queued — on the one path whose whole output is the report that says

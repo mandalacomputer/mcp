@@ -407,3 +407,39 @@ export function patternFor(path: string): string {
     })
     .join('/');
 }
+
+/**
+ * The platform's numeric limits this server refuses against, by manifest key.
+ *
+ * The third table, and the one that was missing entirely until OPL-4851. A
+ * number copied out of the platform is a route by another name: `src/paths.ts`
+ * turns away a clipboard write over 64 KiB and a webhook description over 200
+ * characters BEFORE the request is made, to save a round trip. A ceiling that
+ * has drifted turns that favour into a refusal of a call the platform would
+ * have taken — and nothing anywhere says why, because the request that would
+ * have proved it is the one never sent.
+ *
+ * Which matters more here than in a library. A model does not see a status
+ * code; it sees the sentence this server writes, and a refusal it cannot see
+ * through is the whole of what it knows. Told "the clipboard accepts at most N
+ * bytes" against a stale N, it will trim its own text and try again, and the
+ * call it was refused would have worked.
+ *
+ * Three of the manifest's eight. The rest are numbers this server does not
+ * refuse against: it forwards what the caller asked for and lets the platform
+ * answer. A table of ceilings we do not hold would compare nothing to nothing.
+ * `MAX_WATCHES`, `MAX_BUFFERED` and `MAX_INLINE_IMAGE_BYTES` are this server's
+ * own and have no upstream to drift from.
+ *
+ * WRITTEN OUT, rather than imported from `src/paths.ts`. This module is read by
+ * `scripts/check-surface.mjs` through a plain `import` under Node's type
+ * stripping, which resolves no `./errors.js` specifier — so a mirror that
+ * imported the source could not be read by the checker at all. What keeps these
+ * honest against the source is `test/limits.test.ts`, which imports both and
+ * asserts they are the same number. Two mechanical links, no parser in either.
+ */
+export const LIMITS: ReadonlyMap<string, number> = new Map([
+  ['clipboard.writeMaxBytes', 64 * 1024],
+  ['webhook.descriptionMaxChars', 200],
+  ['webhook.computersMax', 64],
+]);
