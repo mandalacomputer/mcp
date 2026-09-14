@@ -40,7 +40,7 @@ export const registerAgent: Registrar = (server, session) => {
           .max(100)
           .default(20)
           .describe(
-            'Each step is a model call plus a screenshot on your key, so this is a spending cap as much as a loop bound.',
+            'How many ACTIONS the loop may take on the desktop. Not a count of model calls and not a proxy for what your key is billed: one model reply can ask for several actions and spends a step on each, a paused turn is resubmitted for tokens and no step, and a bash call or a cursor read takes no screenshot. So a run can make more model calls than steps AND more steps than screenshots — bound the work with this, and budget the bill on the key itself. Defaults to 20 and is capped at 100 here, so a larger value is refused before the call rather than after it.',
           ),
       },
       annotations: { openWorldHint: true },
@@ -69,7 +69,7 @@ export const registerAgent: Registrar = (server, session) => {
             // shared/protocol.js resets a pending request's timer, and
             // `notifications/message` — what sendLoggingMessage emits — never
             // touches it. This tool had only the logging half, so a run of the
-            // default 20 steps, each a model call plus a screenshot, sailed past
+            // default 20 steps, most of them a model call and a screenshot, sailed past
             // the client's 60s default and was cancelled while the platform went
             // on driving the desktop on the caller's own Anthropic key.
             //

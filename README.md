@@ -157,9 +157,11 @@ time — `screenshot`, `click`, `screenshot` — puts an image in the calling
 model's context for every step. `run_agent` hands a task in plain language to
 the platform's own loop instead, which screenshots, decides and clicks inside
 the platform and answers with a sentence and the list of what it did. It is
-registered only when a model key is present (see [Configuration](#configuration)),
-bills that key for every step, and `max_steps` is the spending cap as much as
-the loop bound.
+registered only when a model key is present (see [Configuration](#configuration))
+and bills that key for the run. `max_steps` bounds the WORK rather than the
+bill: a step is one action on the desktop, one model reply can ask for several
+and spends a step on each, a paused turn costs tokens and no step, and not every
+step takes a screenshot. It defaults to 20 and is capped at 100 here.
 
 **A screenshot is how you find out what the screen looks like.** A click that
 landed and a click that did nothing produce the same tool result, so a model
