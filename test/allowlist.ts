@@ -73,6 +73,7 @@ export const V1_ROUTES: Route[] = [
   // Files in and out of the guest.
   r('PUT', 'computers/:id/files'),
   r('GET', 'computers/:id/files'),
+  r('GET', 'computers/:id/files/list'),
 
   // Snapshots.
   r('GET', 'snapshots'),
@@ -255,11 +256,12 @@ export const PARAMETERS: ReadonlyMap<string, readonly string[]> = new Map([
   ],
 
   // The upload's body is the file, raw — there are no named fields to mirror.
-  ['PUT computers/:id/files', ['query:path']],
+  ['PUT computers/:id/files', ['query:path', 'query:no_wake']],
   // And the download's answer is the file. `Range` is the one header a caller
   // sends that reaches the daemon, and read_file's whole ability to page
   // through a file larger than one request moves is this line.
-  ['GET computers/:id/files', ['query:path', 'header:Range']],
+  ['GET computers/:id/files', ['query:path', 'query:no_wake', 'header:Range']],
+  ['GET computers/:id/files/list', ['query:path']],
 
   ['GET snapshots', ['query:allow_partial', 'query:include']],
   ['GET computers/:id/snapshots', []],
@@ -321,6 +323,9 @@ export const PARAMETERS: ReadonlyMap<string, readonly string[]> = new Map([
  * would say nothing that route's own line does not.
  */
 export const UNIMPLEMENTED_PARAMETERS: ReadonlySet<string> = new Set([
+  // GAP. File transfers cannot yet opt out of waking a suspended computer.
+  'GET computers/:id/files  query:no_wake',
+  'PUT computers/:id/files  query:no_wake',
   // DECISION. start_computer requests a boot or resume. With resume_only=true,
   // a stopped computer without a saved session returns 200 without starting.
   // Keep that successful no-op out of the tool so a model cannot mistake the
@@ -346,7 +351,7 @@ export const key = (route: Route) => `${route.method} ${route.pattern}`;
 export const ALLOWED = new Set(V1_ROUTES.map(key));
 
 /**
- * Routes the platform exposes that this server deliberately does not call.
+ * Routes this server cannot yet call or deliberately omits.
  *
  * Pinned rather than left implicit, because "every call lands on an allowlisted
  * route" stays true no matter how few calls there are. Making the gap a set that
@@ -360,11 +365,8 @@ export const UNIMPLEMENTED = new Set([
   // pointed somewhere; it is nothing at all to an MCP client, which has neither
   // a base URL to redirect nor a reason to prefer the vocabulary.
   'POST chat/completions',
-  // The two template document routes were pinned here, behind a comment saying
-  // they "become worth a tool with publish and launch-by-ref". Publish shipped
-  // in OPL-3789 and launch-by-ref in OPL-3788, so the line became
-  // somebody's to delete and this is it (OPL-3835). Nothing has replaced them:
-  // every route this server can reach, it calls.
+  // GAP. The server has file-transfer tools, but no directory-listing tool yet.
+  'GET computers/:id/files/list',
 ]);
 
 /**
