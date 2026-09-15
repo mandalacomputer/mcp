@@ -58,6 +58,8 @@ export const V1_ROUTES: Route[] = [
   r('POST', 'computers/:id/exec'),
   r('GET', 'computers/:id/exec/:pid'),
   r('DELETE', 'computers/:id/exec/:pid'),
+  r('GET', 'computers/:id/executions/:executionId'),
+  r('GET', 'computers/:id/executions/:executionId/output'),
   r('GET', 'computers/:id/windows'),
   r('POST', 'computers/:id/windows/:window'),
   // The desktop's clipboard (OPL-3743, OPL-3768). Session-only for its
@@ -224,6 +226,11 @@ export const PARAMETERS: ReadonlyMap<string, readonly string[]> = new Map([
   ],
   ['GET computers/:id/exec/:pid', []],
   ['DELETE computers/:id/exec/:pid', []],
+  ['GET computers/:id/executions/:executionId', []],
+  [
+    'GET computers/:id/executions/:executionId/output',
+    ['query:stdout_offset', 'query:stderr_offset', 'query:limit'],
+  ],
   ['GET computers/:id/windows', ['query:include']],
   [
     'POST computers/:id/windows/:window',
@@ -367,6 +374,9 @@ export const UNIMPLEMENTED = new Set([
   'POST chat/completions',
   // GAP. The server has file-transfer tools, but no directory-listing tool yet.
   'GET computers/:id/files/list',
+  // Stable execution reads have no client convenience methods yet.
+  'GET computers/:id/executions/:executionId',
+  'GET computers/:id/executions/:executionId/output',
 ]);
 
 /**
