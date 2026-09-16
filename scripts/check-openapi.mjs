@@ -88,8 +88,8 @@ export function parseOperations(document) {
         throw new Error('Invalid OpenAPI operation');
       const bases = operation.servers === undefined ? pathBases : serverBases(operation.servers);
       for (const base of bases) {
-        // Some publishers already include the v1 prefix in paths.
-        const full = inScope(path) && (base === '' || base === '/api/v1') ? path : `${base}${path}`;
+        // OpenAPI appends the path to the effective server URL, including repeated segments.
+        const full = `${base}${path}`;
         const segments = validPath(full);
         const key = `${method.toUpperCase()} ${full}`;
         if (!inScope(full)) {

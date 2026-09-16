@@ -51,11 +51,16 @@ const directorySchema = z.object({
   path: label,
   entries: z
     .array(
-      z.object({
-        name: label,
-        type: z.enum(['file', 'directory', 'symlink', 'special', 'unavailable']),
-        size_bytes: count.optional(),
-      }),
+      z
+        .object({
+          name: label,
+          type: z.enum(['file', 'directory', 'symlink', 'special', 'unavailable']),
+          size_bytes: count.optional(),
+        })
+        .refine(
+          (entry) => entry.type === 'file' || entry.size_bytes === undefined,
+          'Only regular files may report size_bytes',
+        ),
     )
     .max(512),
   truncated: z.boolean(),

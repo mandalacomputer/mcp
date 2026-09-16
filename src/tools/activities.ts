@@ -87,7 +87,7 @@ const resultLinks = z.object({
           stdout: stream(false),
           stderr: stream(false),
           diagnostic: z.object({ bytes: count.max(65536), truncated: z.boolean() }),
-          observation: observation.optional(),
+          observation,
         }),
         link('synchronous-output', 'synchronous_exec_response', {
           stdout: stream(true),

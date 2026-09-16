@@ -77,6 +77,16 @@ const steps = z.array(
     error: z.string().optional(),
   }),
 );
+const failedAgent = z.object({
+  computer_id: label,
+  usage: z.object({
+    input_tokens: count,
+    output_tokens: count,
+    cache_read_tokens: count,
+    cache_write_tokens: count,
+  }),
+  steps,
+});
 function chatFailure(error: unknown): CallToolResult {
   if (!(error instanceof APIError)) return failed(error);
   const nested = isRecord(error.body) && isRecord(error.body.error) ? error.body.error : undefined;
@@ -86,6 +96,8 @@ function chatFailure(error: unknown): CallToolResult {
     const parsed = schema.safeParse(source[key]);
     if (parsed.success) projected[key] = parsed.data;
   }
+  const native = failedAgent.safeParse(nested?.agent);
+  const incompleteNative = nested?.agent !== undefined && !native.success;
   const detail = nested && typeof nested.message === 'string' ? nested.message : error.message;
   const result = failed(new APIError(detail, error.status, projected, error.retryAfterMs));
   if (nested && error.status === 401) {
@@ -99,9 +111,11 @@ function chatFailure(error: unknown): CallToolResult {
   }
   result.content.push(
     ...said(
-      'Chat refusal metadata; recorded work may already be billed. Inspect what took effect before another run.',
+      `${incompleteNative ? 'Native agent failure metadata was malformed and omitted. ' : ''}Chat refusal metadata; recorded work may already be billed. Inspect what took effect before another run.`,
       {
         status: error.status,
+        ...(native.success ? { agent: native.data } : {}),
+        ...(incompleteNative ? { incomplete: true } : {}),
         ...(typeof projected.reason === 'string' ? { reason: projected.reason } : {}),
         ...(error.retryAfterMs === undefined ? {} : { retry_after_ms: error.retryAfterMs }),
       },

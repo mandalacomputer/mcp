@@ -829,7 +829,10 @@ This tool deliberately sends `stream:false` and uses the JSON response so the
 result preserves the underlying `agent.stop`, step count and token usage.
 Only explicit `end_turn` consistent with the completion's finish reason can
 report success. Limits, refusal, missing or conflicting terminal fields remain
-errors with valid partial results. A failed call may include completed, billed
+errors with valid partial results. Nested failures preserve the agent computer,
+recorded steps and native usage, including separate cache-read and cache-write
+token counts, alongside OpenAI-shaped aggregate usage. Malformed native detail
+is explicitly marked incomplete. A failed call may include completed, billed
 work: inspect it before deciding what remains, and do not automatically replay.
 Neither agent tool starts the computer or switches endpoints after a failure.
 
@@ -860,18 +863,26 @@ npx vitest run --config vitest.openapi.config.ts
 It anonymously fetches the fixed publication at
 `https://app.mandala.computer/api/docs/openapi.json` once, with a 20-second
 overall deadline and an 8 MiB body ceiling, then exercises the real MCP tools
-and requires request evidence for every published `/api/v1` operation.
+and requires request evidence for every published `/api/v1` operation. Every
+exercise variant must succeed and dispatch a request, including later variants
+of a tool that already dispatched successfully.
 Non-v1 operations are explicitly excluded and reported. The check uses OpenAPI
 server inheritance and literal-path precedence, not the local route allowlist.
+Each path is appended to its effective server base; repeated prefixes are not
+removed. Fully prefixed paths work with an absent or root server.
 It fails on a blocked fetch, redirect, invalid document or missing operation;
 there is no fixture fallback, credential requirement or skip branch.
 
 The committed OpenAPI fixture is synthetic, assembled from the public MCP route
 inventory, and is never presented as a downloaded publication. Offline green
-proves deterministic implementation coverage only. Live-publication verification
-remains unresolved until the dedicated job succeeds; a blocked or red public
-gate must not be merged or described as universal coverage. Parameters and
-response modes are tested separately, with documented parameter exceptions.
+proves deterministic implementation coverage only. Anonymous CI at
+[commit 1b04314](https://github.com/mandalacomputer/mcp/commit/1b04314e84f5701e2e15c65cbb1c44a0c14a4948)
+returned HTTP 200 and matched all 56 operations in the fetched v1 contract using
+123 requests from 83 tools. That result applies to that commit and publication;
+every subsequent head must pass the gate independently. These counts are
+observations, never fixed thresholds or exemptions. A blocked or red public gate
+must not be merged. Parameters and response modes remain separate contracts,
+with documented parameter exceptions and JSON-only chat support.
 
 ### Where the platform's rules live
 

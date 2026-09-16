@@ -97,6 +97,41 @@ it.each(['error', 'protocol', 'no-request'] as const)(
   },
 );
 
+it('requires a request from a later variant even when the earlier variant dispatched', async () => {
+  const realFetch = globalThis.fetch;
+  let earlierDispatched = 0;
+  let suppressed = 0;
+  let activeConnections = 0;
+  const verdict = await collectExercises(EXERCISE, async (cfg) => {
+    const connection = await connect(cfg);
+    activeConnections++;
+    return {
+      ...connection,
+      close: async () => {
+        await connection.close();
+        activeConnections--;
+      },
+      call: async (name, args) => {
+        if (name === 'run_agent_chat' && args?.model === 'claude-test') {
+          suppressed++;
+          return { content: [{ type: 'text', text: 'No request made' }] };
+        }
+        const result = await connection.call(name, args);
+        if (name === 'run_agent_chat' && !result.isError) earlierDispatched++;
+        return result;
+      },
+    };
+  }).then(
+    () => 'accepted without a request',
+    (error: unknown) => (error instanceof Error ? error.message : 'unknown failure'),
+  );
+  expect(verdict).toBe('Zero request coverage for tool run_agent_chat variant 2');
+  expect(earlierDispatched).toBe(1);
+  expect(suppressed).toBe(1);
+  expect(activeConnections).toBe(0);
+  expect(globalThis.fetch).toBe(realFetch);
+});
+
 describe('independent OpenAPI parser and literal matcher', () => {
   it('supports parameter renaming and metadata keys without adding operations', () => {
     const contract = parseOperations(
@@ -164,7 +199,7 @@ describe('independent OpenAPI parser and literal matcher', () => {
       ),
     ).toThrow('Ambiguous');
   });
-  it('honors operation > path > root server inheritance and already-prefixed paths', () => {
+  it('honors operation > path > root server inheritance', () => {
     const contract = parseOperations(
       document(
         {
@@ -174,7 +209,7 @@ describe('independent OpenAPI parser and literal matcher', () => {
             post: operation(),
           },
           '/two': { servers: [{ url: '/api/v1' }], get: operation() },
-          '/api/v1/three': { get: operation() },
+          '/three': { get: operation() },
         },
         { servers: [{ url: '/api/v1' }] },
       ),
@@ -195,6 +230,16 @@ describe('independent OpenAPI parser and literal matcher', () => {
         .operations,
     ).toHaveLength(1);
   });
+  it.each([undefined, [{ url: '/' }]])(
+    'accepts fully prefixed paths with absent or root servers: %j',
+    (servers) => {
+      const contract = parseOperations(
+        document({ '/api/v1/one': { get: operation() } }, { servers }),
+      );
+      expect(contract.operations.map((op) => op.path)).toEqual(['/api/v1/one']);
+      expect(compareCoverage(contract, evidence('GET', '/api/v1/one')).operations).toBe(1);
+    },
+  );
   it('does not erase an operation server override with an already-prefixed path', () => {
     const contract = parseOperations(
       document({
@@ -204,6 +249,14 @@ describe('independent OpenAPI parser and literal matcher', () => {
     );
     expect(contract.excluded).toEqual(['GET /api/v10/api/v1/one']);
     expect(contract.operations.map((op) => op.path)).toEqual(['/api/v1/keep']);
+  });
+  it('appends the OpenAPI path to the effective server base even when prefixes repeat', () => {
+    const contract = parseOperations(document({ '/api/v1/one': { get: operation() } }));
+    expect(contract.operations.map((op) => op.path)).toEqual(['/api/v1/api/v1/one']);
+    expect(() => compareCoverage(contract, evidence('GET', '/api/v1/one'))).toThrow(
+      'GET /api/v1/api/v1/one',
+    );
+    expect(compareCoverage(contract, evidence('GET', '/api/v1/api/v1/one')).operations).toBe(1);
   });
   it('keeps root and trailing-slash operations distinct', () => {
     const contract = parseOperations(

@@ -295,16 +295,22 @@ export async function collectExercises(
       const connection = await connectTools(config);
       const requests: Recorded[] = [];
       try {
-        for (const args of variants) {
+        for (const [index, args] of variants.entries()) {
           const before = platform.calls.length;
           let result: Awaited<ReturnType<typeof connection.call>>;
           try {
             result = await connection.call(name, args);
           } catch {
-            throw new Error(`Tool ${name} failed at the MCP protocol boundary`);
+            throw new Error(
+              `Tool ${name} variant ${index + 1} failed at the MCP protocol boundary`,
+            );
           }
-          if (result.isError) throw new Error(`Tool ${name} returned an error`);
-          requests.push(...platform.calls.slice(before));
+          if (result.isError)
+            throw new Error(`Tool ${name} variant ${index + 1} returned an error`);
+          const observed = platform.calls.slice(before);
+          if (!observed.length)
+            throw new Error(`Zero request coverage for tool ${name} variant ${index + 1}`);
+          requests.push(...observed);
         }
         if (!requests.length) throw new Error(`Zero request coverage for tool ${name}`);
         evidence.push({ tool: name, requests });

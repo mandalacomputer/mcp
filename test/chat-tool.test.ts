@@ -230,6 +230,101 @@ describe('flat and nested chat failures', () => {
       if (status === 402) expect(text(result)).toContain('not something waiting fixes');
     },
   );
+  it.each([
+    { read: 80, write: 10 },
+    { read: 0, write: 0 },
+  ])(
+    'preserves native usage and cache counts in the nested agent failure extension: %j',
+    async (cache) => {
+      const native = {
+        input_tokens: 100,
+        output_tokens: 5,
+        cache_read_tokens: cache.read,
+        cache_write_tokens: cache.write,
+      };
+      const recordedStep = {
+        n: 1,
+        tool: 'computer',
+        action: 'left_click',
+        detail: `clicked ${MODEL} ${ACCOUNT}`,
+      };
+      answer(
+        {
+          error: {
+            message: 'Authority changed after billed work',
+            code: 200,
+            reason: 'revoked',
+            usage: { prompt_tokens: 100, completion_tokens: 5, total_tokens: 105 },
+            steps: [recordedStep],
+            agent: {
+              computer_id: 'vm-1',
+              usage: { ...native, unknown_usage: 'DO-NOT-ECHO' },
+              steps: [{ ...recordedStep, unknown_step: 'DO-NOT-ECHO' }],
+              unknown_agent: 'DO-NOT-ECHO',
+            },
+          },
+        },
+        403,
+        { 'Retry-After': '2' },
+      );
+      const result = await connection.call('run_agent_chat', task);
+      expect(result.isError).toBe(true);
+      const last = result.content.at(-1);
+      const metadata = JSON.parse(last?.type === 'text' ? last.text.split('\n\n')[1] : '{}');
+      expect(metadata.agent).toEqual({
+        computer_id: 'vm-1',
+        usage: native,
+        steps: [{ ...recordedStep, detail: 'clicked [redacted] [redacted]' }],
+      });
+      expect(metadata.status).toBe(403);
+      expect(metadata.retry_after_ms).toBe(2000);
+      expect(text(result)).toContain('prompt_tokens');
+      expect(text(result)).toContain('already recorded work');
+      expect(text(result)).toContain('Retrying does not help');
+      expect(text(result)).not.toContain('DO-NOT-ECHO');
+      expect(text(result)).not.toContain(ACCOUNT);
+      expect(text(result)).not.toContain(MODEL);
+      expect(platform.calls).toHaveLength(1);
+      expect(release).toHaveBeenCalledOnce();
+    },
+  );
+  it.each([undefined, -1, '80'])(
+    'marks invalid native cache metadata as incomplete: %j',
+    async (cacheRead) => {
+      answer(
+        {
+          error: {
+            message: 'Run failed',
+            usage: CHAT_COMPLETION.usage,
+            steps: [{ n: 1, tool: 'computer', detail: 'Valid recorded action' }],
+            agent: {
+              computer_id: 'vm-1',
+              usage: {
+                input_tokens: 23,
+                output_tokens: 7,
+                cache_read_tokens: cacheRead,
+                cache_write_tokens: 0,
+              },
+              steps: [],
+              unknown: 'DO-NOT-ECHO',
+            },
+          },
+        },
+        403,
+      );
+      const result = await connection.call('run_agent_chat', task);
+      const last = result.content.at(-1);
+      const metadata = JSON.parse(last?.type === 'text' ? last.text.split('\n\n')[1] : '{}');
+      expect(result.isError).toBe(true);
+      expect(metadata.incomplete).toBe(true);
+      expect(metadata).not.toHaveProperty('agent');
+      expect(text(result)).toContain('Valid recorded action');
+      expect(text(result)).toContain('prompt_tokens');
+      expect(text(result)).toContain('Native agent failure metadata');
+      expect(text(result)).not.toContain('DO-NOT-ECHO');
+      expect(platform.calls).toHaveLength(1);
+    },
+  );
   it('continues to support flat preflight errors', async () => {
     answer({ error: 'model key is required', reason: 'unsupported' }, 400);
     const result = await connection.call('run_agent_chat', task);

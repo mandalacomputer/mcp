@@ -182,6 +182,34 @@ describe('metadata meanings survive projection', () => {
     expect(data.skipped).toBe(2);
     expect(data).not.toHaveProperty('next_cursor');
   });
+  it.each(['unavailable', 'directory', 'symlink', 'special'])(
+    'rejects size metadata on a non-file directory entry: %s',
+    async (type) => {
+      answer({
+        path: '/tmp',
+        entries: [{ name: 'not-a-file', type, size_bytes: 0 }],
+        skipped: 0,
+        truncated: false,
+      });
+      expect((await conn.call('list_directory', { path: '/tmp' })).isError).toBe(true);
+      expect(platform.calls).toHaveLength(1);
+    },
+  );
+  it('distinguishes an empty regular file from unavailable or unknown size', async () => {
+    const entries = [
+      { name: 'empty', type: 'file', size_bytes: 0 },
+      { name: 'unknown-size', type: 'file' },
+      { name: 'unavailable', type: 'unavailable' },
+    ];
+    answer({ path: '/tmp', entries, skipped: 0, truncated: false });
+    const result = await conn.call('list_directory', { path: '/tmp' });
+    expect(result.isError).not.toBe(true);
+    const first = result.content[0];
+    expect(JSON.parse(first.type === 'text' ? first.text.split('\n\n')[1] : '{}').entries).toEqual(
+      entries,
+    );
+    expect(platform.calls).toHaveLength(1);
+  });
   it('accepts an empty complete directory', async () => {
     answer({ path: '/', entries: [], truncated: false, skipped: 0 });
     expect((await conn.call('list_directory', { path: '/' })).isError).not.toBe(true);
@@ -260,6 +288,65 @@ describe('metadata meanings survive projection', () => {
     expect(prose(result)).not.toContain('DO-NOT-ECHO');
     expect(platform.calls).toHaveLength(1);
   });
+  it.each([undefined, null, {}, { status: 'exited' }, { status: 'exited', exit_code: 1.5 }])(
+    'requires a valid observation for an available background result link: %j',
+    async (observation) => {
+      answer({
+        activity_id: ACTIVITY_ID,
+        revision: 1,
+        more: false,
+        items: [
+          {
+            id: RETAINED_ID,
+            kind: 'background-output',
+            association: 'background_execution_output',
+            availability: 'available',
+            captured_at: '2026-09-16T00:00:00Z',
+            expires_at: '2026-09-17T00:00:00Z',
+            stdout: { bytes: 5, retained_truncated: true, upstream_truncated: null },
+            stderr: { bytes: 0, retained_truncated: false, upstream_truncated: null },
+            diagnostic: { bytes: 1, truncated: true },
+            observation,
+          },
+        ],
+      });
+      expect((await conn.call('get_activity_results', { activity_id: ACTIVITY_ID })).isError).toBe(
+        true,
+      );
+      expect(platform.calls).toHaveLength(1);
+    },
+  );
+  it.each([{ status: 'running' }, { status: 'exited', exit_code: -7 }])(
+    'preserves the required available background observation: %j',
+    async (observation) => {
+      answer({
+        activity_id: ACTIVITY_ID,
+        revision: 1,
+        more: false,
+        items: [
+          {
+            id: RETAINED_ID,
+            kind: 'background-output',
+            association: 'background_execution_output',
+            availability: 'available',
+            captured_at: '2026-09-16T00:00:00Z',
+            expires_at: '2026-09-17T00:00:00Z',
+            stdout: { bytes: 5, retained_truncated: true, upstream_truncated: null },
+            stderr: { bytes: 0, retained_truncated: false, upstream_truncated: null },
+            diagnostic: { bytes: 1, truncated: true },
+            observation,
+          },
+        ],
+      });
+      const result = await conn.call('get_activity_results', { activity_id: ACTIVITY_ID });
+      expect(result.isError).not.toBe(true);
+      const first = result.content[0];
+      expect(
+        JSON.parse(first.type === 'text' ? first.text.split('\n\n')[1] : '{}').items[0].observation,
+      ).toEqual(observation);
+      expect(platform.calls).toHaveLength(1);
+    },
+  );
   it('rejects an available artifact link with absent byte metadata', async () => {
     answer({
       activity_id: ACTIVITY_ID,
