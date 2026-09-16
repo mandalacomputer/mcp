@@ -11,7 +11,7 @@ import {
   executionOutput,
   executionReadQuery,
 } from '../executions.js';
-import { refused, said } from '../format.js';
+import { refused, said, withErrorMetadata } from '../format.js';
 import * as P from '../paths.js';
 import type { Registrar } from './types.js';
 
@@ -57,11 +57,14 @@ async function readResult(
           : status === 409
             ? 'The output is unavailable in the current state; no resume was requested.'
             : status === 401
-              ? 'Re-authenticate before another read.'
+              ? 'A credential was refused; inspect the supplied classification before another read.'
               : status === 403
                 ? 'The current credential does not have permission for this read.'
                 : 'The platform refused this read; no fallback was attempted.';
-      return refused(`Execution read failed (HTTP ${status}). ${advice} No command was replayed.`);
+      return withErrorMetadata(
+        refused(`Execution read failed (HTTP ${status}). ${advice} No command was replayed.`),
+        err,
+      );
     }
     // Network/JSON errors and redirect locations can contain untrusted text or private URLs.
     return refused(

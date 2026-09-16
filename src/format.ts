@@ -79,17 +79,65 @@ export function image(bytes: Uint8Array, mimeType: string, note?: string): CallT
   return { content };
 }
 
-/**
- * A failure the model should read and act on, not an exception the client shows
- * as a protocol error.
- *
- * MCP draws this line deliberately: a transport error is the client's problem,
- * while "the guest agent is not answering yet (the computer may still be
- * booting)" is the model's — it is the sentence that tells it to wait and try
- * again rather than to give up or to report a broken tool. So everything the
- * platform refuses comes back as content with `isError`.
- */
-export function failed(err: unknown): CallToolResult {
+/** Only bounded diagnostic scalars enter a tool result; full evidence stays on APIError. */
+export function errorMetadata(source: APIError | Record<string, unknown>): {
+  fields: Record<string, string | number>;
+  omitted: boolean;
+} {
+  const data =
+    source instanceof APIError
+      ? {
+          status: source.status,
+          reason: source.reason,
+          request_id: source.requestId,
+          allow: source.allow,
+          www_authenticate: source.wwwAuthenticate,
+          retry_after_ms: source.retryAfterMs,
+        }
+      : source;
+  const fields: Record<string, string | number> = {};
+  let omitted = false;
+  for (const [name, limit] of Object.entries({
+    reason: 128,
+    request_id: 256,
+    allow: 512,
+    www_authenticate: 512,
+  })) {
+    const value = data[name];
+    if (typeof value !== 'string' || !value.trim()) continue;
+    if (value.length > limit) {
+      omitted = true;
+      continue;
+    }
+    fields[name] = value.replace(/\b(?:com_|sk-)[A-Za-z0-9_-]+/g, '[redacted]');
+  }
+  for (const name of ['status', 'retry_after_ms']) {
+    const value = data[name];
+    if (typeof value === 'number' && Number.isFinite(value) && value >= 0) fields[name] = value;
+  }
+  return { fields, omitted };
+}
+
+export function withErrorMetadata(
+  result: CallToolResult,
+  source: APIError | Record<string, unknown>,
+): CallToolResult {
+  const { fields, omitted } = errorMetadata(source);
+  if (!Object.keys(fields).some((name) => name !== 'status') && !omitted) return result;
+  return {
+    ...result,
+    content: [
+      ...result.content,
+      ...said(
+        `Response metadata:${omitted ? ' Oversized diagnostic metadata was omitted.' : ''}`,
+        fields,
+      ).content,
+    ],
+  };
+}
+
+/** A model-visible refusal. A projected run failure must withhold reason-based replay advice. */
+export function failed(err: unknown, includeReasonAdvice = true): CallToolResult {
   const message = err instanceof MandalaError || err instanceof Error ? err.message : String(err);
   const status = (err as { status?: number })?.status;
   const withStatus =
@@ -115,13 +163,24 @@ export function failed(err: unknown): CallToolResult {
   // stop (Codex review). Every other status keeps the platform's word ahead of
   // anything generic, which is where it belongs: it is specific to one refusal.
   const advice =
-    err instanceof APIError ? (statusAdvice(err.status) ?? reasonAdvice(err.reason)) : undefined;
+    err instanceof APIError
+      ? (statusAdvice(err.status, err.reason) ??
+        (includeReasonAdvice &&
+        ![404, 405].includes(err.status) &&
+        (!err.body ||
+          typeof err.body !== 'object' ||
+          !('error' in err.body) ||
+          typeof err.body.error !== 'object')
+          ? reasonAdvice(err.reason)
+          : undefined))
+      : undefined;
   const line = advice ? `${withStatus} — ${advice}` : withStatus;
   const kept = err instanceof APIError ? keptWork(err.body) : undefined;
-  return {
+  const result: CallToolResult = {
     isError: true,
     content: [{ type: 'text', text: kept ? `${line}\n\n${kept}` : line }],
   };
+  return err instanceof APIError ? withErrorMetadata(result, err) : result;
 }
 
 /**

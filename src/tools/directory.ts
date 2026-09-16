@@ -33,13 +33,24 @@ export async function metadataCall(work: () => Promise<CallToolResult>): Promise
       })
       .safeParse(error.body);
     const detail = fields.success ? fields.data : {};
-    const refusal = failed(new APIError(error.message, error.status, detail, error.retryAfterMs));
+    const nested = (error.body as { error?: unknown } | undefined)?.error;
+    const refusal = failed(
+      new APIError(
+        error.message,
+        error.status,
+        { ...detail, reason: error.reason },
+        error.retryAfterMs,
+        error,
+      ),
+      nested === null || typeof nested !== 'object' || Array.isArray(nested),
+    );
     return {
       ...refusal,
       content: [
         ...refusal.content,
         ...said('Refusal metadata:', {
-          ...detail,
+          code: detail.code,
+          incomplete: detail.incomplete,
           ...(error.retryAfterMs === undefined ? {} : { retry_after_ms: error.retryAfterMs }),
         }).content,
       ],

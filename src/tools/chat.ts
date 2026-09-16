@@ -1,8 +1,8 @@
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
 import { MODEL_KEY_HEADER } from '../api.js';
-import { APIError } from '../errors.js';
-import { failed, refused, said } from '../format.js';
+import { APIError, platformSaid } from '../errors.js';
+import { errorMetadata, failed, refused, said } from '../format.js';
 import * as P from '../paths.js';
 import { heartbeat } from '../poll.js';
 import { count, label } from './directory.js';
@@ -92,32 +92,29 @@ function chatFailure(error: unknown): CallToolResult {
   const nested = isRecord(error.body) && isRecord(error.body.error) ? error.body.error : undefined;
   const source = nested ?? (isRecord(error.body) ? error.body : {});
   const projected: Record<string, unknown> = {};
-  for (const [key, schema] of Object.entries({ reason: label, usage, steps })) {
+  for (const [key, schema] of Object.entries({ usage, steps })) {
     const parsed = schema.safeParse(source[key]);
     if (parsed.success) projected[key] = parsed.data;
   }
+  projected.reason = error.reason;
   const native = failedAgent.safeParse(nested?.agent);
-  const incompleteNative = nested?.agent !== undefined && !native.success;
-  const detail = nested && typeof nested.message === 'string' ? nested.message : error.message;
-  const result = failed(new APIError(detail, error.status, projected, error.retryAfterMs));
-  if (nested && error.status === 401) {
-    // Generic account advice is too specific for a nested model-provider refusal.
-    const text = result.content[0];
-    if (text.type === 'text')
-      text.text = text.text.replace(
-        / — the credential this server is using[^\n]*/,
-        ' — a credential was refused; the nested response alone does not establish whether the account key or model key caused it. Do not replay this run unchanged.',
-      );
-  }
+  const boundedNative = native.success && JSON.stringify(native.data).length <= 4000;
+  const incompleteNative = nested?.agent !== undefined && !boundedNative;
+  const detail = isRecord(error.body)
+    ? (platformSaid(error.body) ?? 'Chat request failed without a usable error message')
+    : error.message;
+  const result = failed(
+    new APIError(detail, error.status, projected, error.retryAfterMs, error),
+    nested === undefined,
+  );
+  const diagnostics = errorMetadata(error);
   result.content.push(
     ...said(
-      `${incompleteNative ? 'Native agent failure metadata was malformed and omitted. ' : ''}Chat refusal metadata; recorded work may already be billed. Inspect what took effect before another run.`,
+      `${incompleteNative ? 'Native agent failure metadata was malformed or oversized and omitted. ' : ''}${diagnostics.omitted ? 'Oversized diagnostic metadata was omitted. ' : ''}Chat refusal metadata; recorded work may already be billed. Inspect what took effect before another run.`,
       {
-        status: error.status,
-        ...(native.success ? { agent: native.data } : {}),
+        ...diagnostics.fields,
+        ...(boundedNative ? { agent: native.data } : {}),
         ...(incompleteNative ? { incomplete: true } : {}),
-        ...(typeof projected.reason === 'string' ? { reason: projected.reason } : {}),
-        ...(error.retryAfterMs === undefined ? {} : { retry_after_ms: error.retryAfterMs }),
       },
     ).content,
   );
@@ -125,7 +122,7 @@ function chatFailure(error: unknown): CallToolResult {
 }
 
 /** Do not let a provider echo session secrets into output, even in a known text field. */
-function safeResult(result: CallToolResult, modelKey: string): CallToolResult {
+export function safeResult(result: CallToolResult, modelKey: string): CallToolResult {
   return {
     ...result,
     content: result.content.map((item) =>

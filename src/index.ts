@@ -6,6 +6,7 @@
 export { Api, DEFAULT_BASE_URL, MODEL_KEY_HEADER } from './api.js';
 export {
   APIError,
+  type APIErrorMetadata,
   AuthenticationError,
   CancelledError,
   ConflictError,
@@ -14,6 +15,7 @@ export {
   GatewayTimeoutError,
   isTransient,
   MandalaError,
+  MethodNotAllowedError,
   MoveRequiredError,
   NotFoundError,
   OriginResponseError,

@@ -17,6 +17,18 @@ export class MandalaError extends Error {
   override name = 'MandalaError';
 }
 
+/** Optional diagnostics supplied by an HTTP response; never permission to replay a request. */
+export interface APIErrorMetadata {
+  requestId?: string;
+  allow?: string;
+  wwwAuthenticate?: string;
+}
+
+const nonblank = (value: unknown): string | undefined =>
+  typeof value === 'string' && value.trim().length > 0 ? value : undefined;
+const record = (value: unknown): value is Record<string, unknown> =>
+  value !== null && typeof value === 'object' && !Array.isArray(value);
+
 export class APIError extends MandalaError {
   override name = 'APIError';
   /**
@@ -33,15 +45,26 @@ export class APIError extends MandalaError {
    * the caller who arrived a moment earlier heard.
    */
   readonly reason?: string;
+  /** Response header first, then the top-level body ID; never an idempotency key. */
+  readonly requestId?: string;
+  /** The received Allow header, when supplied. */
+  readonly allow?: string;
+  /** The received WWW-Authenticate header, when supplied. */
+  readonly wwwAuthenticate?: string;
   constructor(
     message: string,
     readonly status: number,
     readonly body?: unknown,
     /** Parsed Retry-After delay in milliseconds; absent when missing or invalid. */
     readonly retryAfterMs?: number,
+    metadata?: APIErrorMetadata,
   ) {
     super(message);
     this.reason = refusalReason(body);
+    this.requestId =
+      nonblank(metadata?.requestId) ?? (record(body) ? nonblank(body.request_id) : undefined);
+    this.allow = nonblank(metadata?.allow);
+    this.wwwAuthenticate = nonblank(metadata?.wwwAuthenticate);
   }
 }
 
@@ -166,15 +189,30 @@ export function reasonAdvice(reason: string | undefined): string | undefined {
  * the work may already stand. None of the three is a fault on the computer, and
  * a model told only "unauthorized (HTTP 401)" reads it as one.
  *
- * Only these three. A 404 is deliberately not here: it does not separate deleted
+ * A 404 is deliberately not classified here: it does not separate deleted
  * from out of this key's reach, so a single clause would have to be wrong about
  * one of them — that judgement belongs to the tools that know which id they were
  * given. Silence is the same discipline {@link reasonAdvice} keeps.
  */
-export function statusAdvice(status: number | undefined): string | undefined {
+export function authenticationAdvice(reason: string | undefined): string {
+  const classification =
+    reason === 'missing'
+      ? 'a platform authentication credential was not supplied'
+      : reason === 'invalid'
+        ? 'the supplied platform credential was not accepted'
+        : reason === 'revoked'
+          ? 'the platform authority was revoked and no longer holds'
+          : 'a credential was refused; this result alone does not identify whether the account key or model key caused it';
+  return `${classification}. Do not replay this request unchanged. A refusal can occur partway through a call; check what already took effect before repeating anything that creates, starts, moves, writes or deletes`;
+}
+
+/** Status-specific guidance, with authentication provenance supplied by the refusal reason. */
+export function statusAdvice(status: number | undefined, reason?: string): string | undefined {
   switch (status) {
     case 401:
-      return 'the credential this server is using stopped being accepted — revoked, or a session that ended. Sending this again unchanged is refused the same way. This can be decided partway through a call, so check what already took effect before repeating anything that creates, starts, moves, writes or deletes';
+      return authenticationAdvice(reason);
+    case 405:
+      return 'check the request method against the received Allow metadata, when present. Do not automatically switch methods or replay this request';
     case 403:
       return 'this account does not permit this — a role that changed or an account suspended, rather than anything wrong with the computer. Retrying does not help, and it can be decided partway through a call, so check what already took effect before repeating anything that writes';
     case 402:
@@ -195,9 +233,11 @@ export function statusAdvice(status: number | undefined): string | undefined {
  * and the raw word belongs to whoever is embedding this.
  */
 function refusalReason(body: unknown): string | undefined {
-  if (!body || typeof body !== 'object') return undefined;
-  const reason = (body as { reason?: unknown }).reason;
-  return typeof reason === 'string' ? reason : undefined;
+  if (!record(body)) return undefined;
+  if (typeof body.reason === 'string') return body.reason;
+  return record(body.error) && typeof body.error.reason === 'string'
+    ? body.error.reason
+    : undefined;
 }
 
 /** 401 — the key is missing, malformed, or revoked. */
@@ -215,9 +255,14 @@ export class PermissionDeniedError extends APIError {
   override name = 'PermissionDeniedError';
 }
 
-/** 404 — no such computer, snapshot, or route. */
+/** 404 — no such computer, snapshot, guest path, or route. */
 export class NotFoundError extends APIError {
   override name = 'NotFoundError';
+}
+
+/** 405 — the path does not support the requested method; inspect the received Allow. */
+export class MethodNotAllowedError extends APIError {
+  override name = 'MethodNotAllowedError';
 }
 
 /**
@@ -280,8 +325,9 @@ export class MoveRequiredError extends ConflictError {
     /** Whether a host in this region could run the size that was asked for. */
     readonly movePossible: boolean,
     retryAfterMs?: number,
+    metadata?: APIErrorMetadata,
   ) {
-    super(message, status, body, retryAfterMs);
+    super(message, status, body, retryAfterMs, metadata);
   }
 }
 
@@ -324,8 +370,9 @@ export class RangeNotSatisfiableError extends APIError {
     /** The file's real length, off `Content-Range`, when the response sent one. */
     readonly size?: number,
     retryAfterMs?: number,
+    metadata?: APIErrorMetadata,
   ) {
-    super(message, status, body, retryAfterMs);
+    super(message, status, body, retryAfterMs, metadata);
   }
 }
 
@@ -351,8 +398,9 @@ export class RateLimitError extends APIError {
     body?: unknown,
     /** From `Retry-After`, in milliseconds from now, when the response sent one. */
     retryAfterMs?: number,
+    metadata?: APIErrorMetadata,
   ) {
-    super(message, status, body, retryAfterMs);
+    super(message, status, body, retryAfterMs, metadata);
   }
 }
 
@@ -593,13 +641,9 @@ const BY_STATUS: Record<number, typeof APIError> = {
   402: PlanLimitError,
   403: PermissionDeniedError,
   404: NotFoundError,
+  405: MethodNotAllowedError,
   409: ConflictError,
-  // Only ever reached through errorForStatus, which cannot see the response
-  // headers and so cannot fill in `size`. Api.#error builds this one itself for
-  // that reason; the entry is here so the mapping stays complete, and so a 416
-  // arriving from anywhere else is still the right class with the platform's
-  // own message on it.
-  416: RangeNotSatisfiableError,
+  // 416 has a range-specific constructor and is handled directly by the factory.
   // Retry-After is parsed by Api and passed through errorForStatus.
   // A 429 built without headers still has the same public error class.
   429: RateLimitError,
@@ -738,7 +782,7 @@ const ORIGIN_TLS_MESSAGE =
 /**
  * Whether the response named this failure in the shape this surface uses.
  *
- * Only a JSON body with a non-empty `error` string counts. An HTML page and an
+ * A JSON body with a non-empty `error` string or nonblank `error.message` counts. An HTML page and an
  * empty body are an intermediary's, and both are worth discarding for the
  * wording below; a structured message is not. "upstream unavailable before
  * dispatch" is a more specific true thing than anything written here, and
@@ -773,9 +817,13 @@ function platformNamed(body: unknown): boolean {
  * itself.
  */
 export function platformSaid(body: unknown): string | undefined {
-  if (!body || typeof body !== 'object') return undefined;
-  const err = (body as { error?: unknown }).error;
-  return typeof err === 'string' && err.length > 0 ? err : undefined;
+  if (!record(body)) return undefined;
+  const err = body.error;
+  return typeof err === 'string' && err.length > 0
+    ? err
+    : record(err)
+      ? nonblank(err.message)
+      : undefined;
 }
 
 /** Build the error for a status, with the platform's own message when it sent one. */
@@ -784,6 +832,7 @@ export function errorForStatus(
   message: string,
   body?: unknown,
   retryAfterMs?: number,
+  metadata?: APIErrorMetadata,
 ): APIError {
   const Cls = BY_STATUS[status] ?? APIError;
   // The 409 that is an offer, told apart by its body. Before the substitutions
@@ -792,10 +841,11 @@ export function errorForStatus(
   // read by whoever has to agree to it.
   if (Cls === ConflictError) {
     const offer = moveOffer(body);
-    if (offer) return new MoveRequiredError(message, status, body, offer.possible, retryAfterMs);
+    if (offer)
+      return new MoveRequiredError(message, status, body, offer.possible, retryAfterMs, metadata);
   }
-  if (Cls === RangeNotSatisfiableError) {
-    return new RangeNotSatisfiableError(message, status, body, undefined, retryAfterMs);
+  if (status === 416) {
+    return new RangeNotSatisfiableError(message, status, body, undefined, retryAfterMs, metadata);
   }
   // Substituted for an empty body, which says nothing, and for a proxy's HTML
   // page, which says 500 characters of nothing. NOT for a structured message:
@@ -812,21 +862,33 @@ export function errorForStatus(
   // that deployment than the generic outage prose here does, and discarding it
   // was the very thing the 504 and 520 guards exist to prevent.
   if (Cls === GatewayTimeoutError && !platformNamed(body)) {
-    return new GatewayTimeoutError(gatewayTimeoutMessage(status), status, body, retryAfterMs);
+    return new GatewayTimeoutError(
+      gatewayTimeoutMessage(status),
+      status,
+      body,
+      retryAfterMs,
+      metadata,
+    );
   }
   if (Cls === OriginResponseError && !platformNamed(body)) {
     // 502 and 520 share a class and not a message: one knows the request
     // arrived, the other cannot tell. See BAD_GATEWAY_MESSAGE.
     const said = status === 502 ? BAD_GATEWAY_MESSAGE : ORIGIN_RESPONSE_MESSAGE;
-    return new OriginResponseError(said, status, body, retryAfterMs);
+    return new OriginResponseError(said, status, body, retryAfterMs, metadata);
   }
   if (Cls === OriginTLSError && !platformNamed(body)) {
-    return new OriginTLSError(ORIGIN_TLS_MESSAGE, status, body, retryAfterMs);
+    return new OriginTLSError(ORIGIN_TLS_MESSAGE, status, body, retryAfterMs, metadata);
   }
   if (Cls === OriginUnreachableError && !platformNamed(body)) {
-    return new OriginUnreachableError(ORIGIN_UNREACHABLE_MESSAGE, status, body, retryAfterMs);
+    return new OriginUnreachableError(
+      ORIGIN_UNREACHABLE_MESSAGE,
+      status,
+      body,
+      retryAfterMs,
+      metadata,
+    );
   }
-  return new Cls(message, status, body, retryAfterMs);
+  return new Cls(message, status, body, retryAfterMs, metadata);
 }
 
 /**
@@ -838,7 +900,9 @@ export function errorForStatus(
  * including one that creates something — so it names only failures that both
  * clear on their own AND are safe to replay blind.
  *
- * Answered by TYPE, with no status numbers at all, which is the OPL-3724
+ * Terminal authentication, authority, payment, missing-resource and method
+ * refusals stay terminal even with a contradictory reason. Other cases are
+ * answered by TYPE, which is the OPL-3724
  * decision written down. Three clients had drifted into three mechanisms for
  * one question: this file matched classes plus a list of numbers, the
  * TypeScript SDK matched classes alone, and the Python SDK named the fatal
@@ -902,6 +966,7 @@ export function errorForStatus(
  * what it can and cannot tell apart.
  */
 export function isTransient(err: unknown): boolean {
+  if (err instanceof APIError && [401, 402, 403, 404, 405].includes(err.status)) return false;
   // Preparation requires the original template and a token, and may have failed.
   // A generic retry of the unchanged create is not the continuation protocol.
   if (
@@ -931,7 +996,8 @@ export function isTransient(err: unknown): boolean {
     // Through the exported classifier rather than the sets directly, so what an
     // embedder is told and what this server does are one answer and not two.
     const kind = reasonKind(err.reason);
-    if (kind === 'clears') return true;
+    // A nested run reason can arrive after billed work and grants no new replay permission.
+    if (kind === 'clears' && record(err.body) && typeof err.body.reason === 'string') return true;
     if (kind === 'permanent') return false;
   }
   return (

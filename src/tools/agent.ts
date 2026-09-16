@@ -1,7 +1,9 @@
 import { z } from 'zod';
 import { MODEL_KEY_HEADER } from '../api.js';
-import { guarded, refused, said } from '../format.js';
+import { APIError, authenticationAdvice, platformSaid } from '../errors.js';
+import { guarded, refused, said, withErrorMetadata } from '../format.js';
 import * as P from '../paths.js';
+import { safeResult } from './chat.js';
 import type { Registrar } from './types.js';
 
 /**
@@ -136,10 +138,23 @@ export const registerAgent: Registrar = (server, session) => {
             // handed "the run failed" and a JSON blob does the natural thing,
             // which is to call this tool again with the same prompt — paying for
             // every completed step a second time to be refused the same way.
-            return refused(
-              `The run failed after ${steps.length} step(s).${stopReason(ev.data)}` +
-                (steps.length ? `\n\nWhat it did, and is billed for:\n${steps.join('\n')}` : ''),
-              ev.data,
+            const frame = isRecord(ev.data) ? ev.data : {};
+            const diagnostic = new APIError(
+              '',
+              typeof frame.status === 'number' ? frame.status : 0,
+              frame,
+            );
+            return withErrorMetadata(
+              refused(
+                `The run failed after ${steps.length} step(s).${stopReason(ev.data)}` +
+                  (steps.length ? `\n\nWhat it did, and is billed for:\n${steps.join('\n')}` : ''),
+                { error: platformSaid(frame), steps: frame.steps, usage: frame.usage },
+              ),
+              {
+                status: frame.status,
+                reason: diagnostic.reason,
+                request_id: diagnostic.requestId,
+              },
             );
           }
         }
@@ -176,7 +191,7 @@ export const registerAgent: Registrar = (server, session) => {
               : JSON.stringify(done.text);
         const result = `${verdict}\n\n${text}\n\nWhat it did:\n${steps.join('\n')}`;
         return stop === 'end_turn' ? said(result, done) : refused(result, done);
-      }),
+      }).then((result) => safeResult(result, session.modelKey as string)),
   );
 };
 
@@ -201,18 +216,17 @@ export const registerAgent: Registrar = (server, session) => {
 function stopReason(data: unknown): string {
   const frame = isRecord(data) ? data : undefined;
   const status = typeof frame?.status === 'number' ? frame.status : undefined;
-  const said = typeof frame?.error === 'string' && frame.error ? frame.error : undefined;
+  const said = platformSaid(frame);
   const why = said ? ` ${said}` : '';
   // 401 and 403 are split, because the recovery is not the same one. A shared
   // clause told a caller whose ROLE had been taken away to re-authenticate,
   // which restores nothing and sends it round the same refusal with another
   // prompt's worth of billed steps behind it (Codex review).
   if (status === 401) {
+    const reason = new APIError('', status, frame).reason;
     return (
-      ` It was stopped because this server's credential is no longer accepted (HTTP ${status}) —` +
-      ` not by anything wrong with the computer.${why} Do NOT call run_agent again with the same` +
-      ` prompt: it is refused the same way until the credential is fixed. Once it is, read what` +
-      ` the steps below already did before deciding what is left to do.`
+      ` HTTP ${status}: ${authenticationAdvice(reason)}.${why} Do NOT call run_agent again with the same` +
+      ` prompt. Read what the steps below already did before deciding what is left to do.`
     );
   }
   if (status === 403) {
