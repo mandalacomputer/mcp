@@ -641,6 +641,7 @@ function respond(
   // Before the computer routes, and `/moves` before `/move` would be a clash if
   // either were a prefix of the other — they are not, and the two are kept
   // adjacent so that stays visible.
+  if (path === '/account' && method === 'GET') return json(ACCOUNT_QUOTA);
   if (path === '/usage') return json(USAGE);
   if (path === '/retention') return json(RETENTION);
   // The webhooks resource (OPL-4306). The two answers that carry the secret
@@ -929,3 +930,37 @@ export async function connect(cfg: Partial<ServerConfig> = {}) {
     },
   };
 }
+
+/** Synthetic public account quota report; partial variants are tested separately. */
+export const ACCOUNT_QUOTA = {
+  scope: 'account',
+  advisory: true,
+  observed_at: '2026-09-16T12:00:00.000Z',
+  plan: { id: 'starter', label: 'Starter' },
+  limits: {
+    max_computers: 5,
+    vcpu_pool: 16,
+    ram_pool_mb: 32768,
+    disk_pool_gb: 200,
+    snapshot_storage_bytes: 107374182400,
+  },
+  per_computer: { max_vcpu: 8, max_ram_mb: 16384, max_disk_gb: 100 },
+  capabilities: { windows: false },
+  complete: { computers: true, snapshots: true },
+  usage: {
+    kept_computers: 2,
+    configured_vcpu: 6,
+    configured_disk_gb: 60,
+    running_or_reserved_computers: 1,
+    running_or_reserved_vcpu: 2,
+    running_or_reserved_ram_mb: 4096,
+    snapshot_storage_bytes: 1073741825,
+  },
+  remaining: {
+    kept_computers: 3,
+    configured_vcpu: 10,
+    configured_disk_gb: 140,
+    running_or_reserved_ram_mb: 28672,
+    snapshot_storage_bytes: 106300440575,
+  },
+};

@@ -39,6 +39,8 @@ export const MOVES = 'moves';
 
 /** What the account has used, over a window. Account-scoped, like {@link MOVES}. */
 export const USAGE = 'usage';
+/** Current account plan ceilings, consumption and advisory remaining quota. */
+export const ACCOUNT = 'account';
 /**
  * How long automatic snapshots are kept — the plan's retention window.
  *

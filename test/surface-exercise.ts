@@ -95,6 +95,7 @@ export const EXERCISE: Record<string, Record<string, unknown>[]> = {
   // move is the sizing group and never a rename, so there is only one shape.
   move_computer: [{ ram_mb: 26000, cpu: 2, disk_gb: 40 }],
   list_moves: [{}],
+  get_account: [{}],
   // Both bounds, because a call that names neither cannot show the parameter
   // sweep that this server can send either.
   get_usage: [{}, { from: '2026-08-01T00:00:00Z', to: '2026-08-22T00:00:00Z' }],

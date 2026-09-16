@@ -2,6 +2,7 @@ import type { ToolAnnotations } from '@modelcontextprotocol/sdk/types.js';
 
 /** Tags describe capabilities, not whether calling a tool is safe. */
 export const TOOL_TAGS = {
+  account: ['get_account'],
   agent: ['run_agent', 'run_agent_chat'],
   activities: ['list_activities', 'get_activity', 'get_activity_results'],
   signals: ['read_signals'],
