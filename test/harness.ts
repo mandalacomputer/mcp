@@ -223,7 +223,7 @@ export function installFakePlatform(): {
       headers[k.toLowerCase()] = v;
     });
     calls.push({ method, path, body, query: url.searchParams, headers });
-    return respond(method, path, headers, state.status, deleted);
+    return respond(method, path, headers, state.status, deleted, url.searchParams);
   }) as typeof fetch;
 
   return {
@@ -324,6 +324,7 @@ function respond(
   headers: Record<string, string>,
   status = 'running',
   deleted: Set<string> = new Set(),
+  query: URLSearchParams = new URLSearchParams(),
 ): Response {
   const json = (v: unknown, status = 200) =>
     new Response(JSON.stringify(v), { status, headers: { 'Content-Type': 'application/json' } });
@@ -348,6 +349,28 @@ function respond(
   // Output as base64, the way the platform now sends it (OPL-4542). A fixture
   // still holding plain `stdout` would let a server that never decodes pass —
   // and against a current daemon that server reads every command as empty.
+  const executionId = 'exec_0123456789abcdef0123456789abcdef';
+  if (path.endsWith(`/executions/${executionId}/output`))
+    return json({
+      execution_id: executionId,
+      stdout_b64: '',
+      stderr_b64: '',
+      stdout_offset: Number(query.get('stdout_offset')),
+      stderr_offset: Number(query.get('stderr_offset')),
+      stdout_more: false,
+      stderr_more: false,
+      diagnostic_b64: '',
+      diagnostic_truncated: false,
+    });
+  if (path.endsWith(`/executions/${executionId}`))
+    return json({
+      execution_id: executionId,
+      computer_id: 'vm-1',
+      pid: 4242,
+      status: 'running',
+      started_at: '2026-09-15T12:00:00Z',
+      output_source: 'volatile_guest_files',
+    });
   if (path.endsWith('/exec')) {
     return json({
       exit_code: 0,

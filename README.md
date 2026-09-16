@@ -105,7 +105,8 @@ entirely.
 **Driving the desktop** — `screenshot`, `click`, `type_text`, `press_key`,
 `scroll`, `drag`, `move_mouse`, `mouse_button`, `cursor_position`, `wait`
 
-**Inside the guest** — `exec`, `exec_poll`, `exec_kill`, `open_url`,
+**Inside the guest** — `exec`, `exec_poll`, `exec_kill`, `get_execution`,
+`read_execution_output`, `open_url`,
 `list_windows`, `window_action`, `read_clipboard`, `write_clipboard`,
 `read_file`, `write_file`
 
@@ -356,6 +357,44 @@ back inside every `exec_poll` answer.
 foreground comes back as a timeout, with the work still going inside the guest
 and its output unreadable. With a handle you get the exit code and the output,
 and `exec_kill` stops it.
+
+**Stable background reads.** When an accepted `exec` returns `execution_id`,
+use `get_execution` for its last observed `running`, `exited` or `lost` state.
+Only `exited` carries an `ended_at` and signed `exit_code`; `running` does not
+prove the computer is awake, and `lost` establishes neither success nor failure.
+Older replies can omit the ID. A malformed supplied ID leaves the accepted
+command and its valid PID usable, but supplies no stable identity: do not replay
+the command to obtain one. PID polls/kills never reconstruct this association.
+
+`read_execution_output` takes that ID and **both** `stdout_offset` and
+`stderr_offset` byte positions. Start each reader at zero, then pass its own
+returned positions. For example:
+
+```json
+{"execution_id":"exec_0123456789abcdef0123456789abcdef","stdout_offset":0,"stderr_offset":0,"limit":4096}
+```
+
+Each stream is bounded to 4,096 bytes by default, at most 16,384. Complete
+lossless UTF-8 appears as `stdout`/`stderr` with its BOM preserved. NUL, binary
+and split UTF-8 chunks remain exact canonical `stdout_b64`/`stderr_b64`; nothing
+is trimmed or replaced. `stdout_more` and `stderr_more` are independent, and
+false means EOF at that moment, not that the command has finished.
+
+The separate `diagnostic`/`diagnostic_b64` repeats on every read. At most 4,096
+of its up-to-65,536 available bytes are displayed: inspect
+`diagnostic_available_bytes`, `diagnostic_displayed_bytes`, and
+`diagnostic_display_truncated`. The independent `diagnostic_truncated` flag is
+the platform's capture limitation. Diagnostics never advance either cursor.
+Neither new tool consumes output from another reader or the shared `exec_poll`
+cursor, and both carry read-only, non-destructive, idempotent annotations.
+
+These are single requests with cancellation, no automatic resume, retry,
+watcher, capture or command replay. Metadata reads no guest files. Output reads
+perform guest I/O without refreshing activity and are unsuitable for passive
+Activities/history. Files are mutable guest data, not retained artifacts;
+handles can vanish on restart, replacement or cleanup, and observed exits
+expire after ten minutes. An unavailable read is an error, not empty output.
+Every new-tool result is bounded to 256 KiB of serialized data.
 
 Past about **two minutes** it does not even come back as a timeout. A proxy in
 front of the platform abandons a request that has produced no response for

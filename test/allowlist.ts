@@ -380,9 +380,6 @@ export const UNIMPLEMENTED = new Set([
   'POST chat/completions',
   // GAP. The server has file-transfer tools, but no directory-listing tool yet.
   'GET computers/:id/files/list',
-  // Stable execution reads have no client convenience methods yet.
-  'GET computers/:id/executions/:executionId',
-  'GET computers/:id/executions/:executionId/output',
   // Retained API history has no MCP convenience tools yet.
   'GET computers/:id/activities',
   'GET computers/:id/activities/:activity',
@@ -415,6 +412,7 @@ export function patternFor(path: string): string {
         return ':id';
       if (i === 3 && parts[0] === 'computers' && parts[2] === 'windows') return ':window';
       if (i === 3 && parts[0] === 'computers' && parts[2] === 'exec') return ':pid';
+      if (i === 3 && parts[0] === 'computers' && parts[2] === 'executions') return ':executionId';
       // A template ref's two halves, pinned to a THREE-segment path under
       // `templates` — which is what keeps the two-segment literals,
       // `templates/schema` and `templates/validate`, reducing to themselves. The

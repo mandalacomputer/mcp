@@ -3518,6 +3518,10 @@ describe('the tools our own prose tells a model to call', () => {
     // A delivery state on what list_webhook_deliveries answers with (OPL-4306):
     // an attempt is running. A state, not a tool.
     'in_flight',
+    // Stable execution identity and independent byte-position parameters.
+    'execution_id',
+    'stdout_offset',
+    'stderr_offset',
   ]);
 
   it('names only tools that exist', async () => {
@@ -5064,7 +5068,9 @@ describe('the event tools and what their annotations claim', () => {
           'cursor_position',
           'exec_poll',
           'get_desktop_url',
+          'get_execution',
           'poll_events',
+          'read_execution_output',
           'read_file',
           'use_computer',
           'wait_for_computer',
