@@ -375,8 +375,6 @@ export const PARAMETERS: ReadonlyMap<string, readonly string[]> = new Map([
  * would say nothing that route's own line does not.
  */
 export const UNIMPLEMENTED_PARAMETERS: ReadonlySet<string> = new Set([
-  // Synchronous output retention is tracked until runtime support is available.
-  'POST computers/:id/exec  body:retain_output',
   // GAP. File transfers cannot yet opt out of waking a suspended computer.
   'GET computers/:id/files  query:no_wake',
   'PUT computers/:id/files  query:no_wake',
@@ -413,16 +411,6 @@ export const ALLOWED = new Set(V1_ROUTES.map(key));
  * rather than a feature nobody noticed.
  */
 export const UNIMPLEMENTED = new Set([
-  // Explicit retained output is tracked here until MCP tools are available.
-  'POST computers/:id/executions/:executionId/retained-output',
-  'GET computers/:id/results/:resultId',
-  'GET computers/:id/results/:resultId/output',
-  'DELETE computers/:id/results/:resultId',
-  // Explicit artifacts are tracked until runtime helpers are available.
-  'POST computers/:id/artifacts',
-  'GET computers/:id/artifacts/:artifactId',
-  'GET computers/:id/artifacts/:artifactId/download',
-  'DELETE computers/:id/artifacts/:artifactId',
   // The OpenAI-compatible door onto the same agent loop the platform already
   // exposes at computers/:id/agent, which run_agent uses. Two ways to reach one
   // engine is a good thing for a caller who already has an OpenAI client
@@ -465,6 +453,8 @@ export function patternFor(path: string): string {
       if (i === 3 && parts[0] === 'computers' && parts[2] === 'windows') return ':window';
       if (i === 3 && parts[0] === 'computers' && parts[2] === 'exec') return ':pid';
       if (i === 3 && parts[0] === 'computers' && parts[2] === 'executions') return ':executionId';
+      if (i === 3 && parts[0] === 'computers' && parts[2] === 'results') return ':resultId';
+      if (i === 3 && parts[0] === 'computers' && parts[2] === 'artifacts') return ':artifactId';
       // A template ref's two halves, pinned to a THREE-segment path under
       // `templates` — which is what keeps the two-segment literals,
       // `templates/schema` and `templates/validate`, reducing to themselves. The

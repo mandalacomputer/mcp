@@ -1,4 +1,6 @@
+import { artifactId } from './artifacts.js';
 import { LIMITS } from './limits.js';
+import { type RetainOptions, resultId, retainIntent } from './results.js';
 /**
  * Every path this server can reach, and every body it can send.
  *
@@ -309,6 +311,7 @@ export function shellQuote(s: string): string {
 }
 
 export function execBody(args: {
+  retain_output?: boolean | RetainOptions;
   command: string;
   timeout_s?: number;
   desktop?: boolean;
@@ -352,7 +355,9 @@ export function execBody(args: {
         'directory whose name is not the one you sent.',
     );
   }
+  const retain_output = retainIntent(args.retain_output, args.background === true);
   const body: Json = { command: args.command };
+  if (retain_output !== undefined) body.retain_output = retain_output;
   if (args.timeout_s !== undefined) body.timeout_s = args.timeout_s;
   // Omitted rather than sent empty: the platform's default is the system
   // context, and "desktop" is the only other value it accepts.
@@ -862,3 +867,18 @@ export function webhookBody(args: {
     enabled: args.enabled,
   });
 }
+
+export const retainedOutput = (id: string, executionId: string) =>
+  `${execution(id, executionId)}/retained-output`;
+export const result = (id: string, resultID: string) => {
+  if (!resultId(resultID)) throw Error('Invalid result_id');
+  return `${computer(id)}/results/${resultID}`;
+};
+export const resultOutput = (id: string, resultID: string) => `${result(id, resultID)}/output`;
+export const artifacts = (id: string) => `${computer(id)}/artifacts`;
+export const artifact = (id: string, artifactID: string) => {
+  if (!artifactId(artifactID)) throw Error('Invalid artifact_id');
+  return `${artifacts(id)}/${artifactID}`;
+};
+export const artifactDownload = (id: string, artifactID: string) =>
+  `${artifact(id, artifactID)}/download`;
