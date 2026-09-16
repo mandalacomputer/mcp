@@ -5092,6 +5092,7 @@ describe('the event tools and what their annotations claim', () => {
           'create_computer',
           'cursor_position',
           'exec_poll',
+          'get_account',
           'get_activity',
           'get_activity_results',
           'get_artifact',

@@ -133,6 +133,8 @@ Parameter and response-mode support remains a separate contract.
 
 **Building one** — `build_template`, `list_builds`, `get_build`, `watch_build`
 
+**Account quota** — `get_account`
+
 **Spending** — `get_usage`
 
 **Being told somewhere else** — `list_webhooks`, `create_webhook`,
@@ -162,6 +164,7 @@ with an error listing all valid tags.
 
 | Tag | Tools |
 | --- | --- |
+| `account` | `get_account` |
 | `computers` | `list_computers`, `get_computer`, `use_computer`, `wait_for_computer`, `get_desktop_url`, `list_sizes` |
 | `lifecycle` | `create_computer`, `start_computer`, `stop_computer`, `suspend_computer`, `restart_computer`, `update_computer`, `clone_computer`, `delete_computer`, `move_computer`, `list_moves` |
 | `input` | `screenshot`, `click`, `type_text`, `press_key`, `scroll`, `drag`, `move_mouse`, `mouse_button`, `cursor_position`, `wait` |
@@ -196,6 +199,35 @@ HTTP callers must supply their own computer selection. These variables apply
 to both transports and the plugin forwards them. Embedders can pass
 `readOnly: true` and `tags: ['input', 'guest']` in `ServerConfig`; the server
 does not read the environment itself.
+
+### Current account quota
+
+`get_account` takes no arguments and reads `GET /api/v1/account` once with the
+caller's account credential. Viewer or stronger access is required. It reports
+account-wide aggregates, including for a workspace-scoped key, without resource
+identities. It needs no selected computer or model key, opens no event stream,
+and remains available with read-only and no-lifecycle filters. Select the
+`account` tag to expose it on its own.
+
+The report includes the effective plan, pool ceilings, per-computer maxima,
+Windows capability, current consumption and remaining quota. Configured CPU and
+disk include kept computers regardless of power state; running or reserved RAM
+includes current reservations. CPU, MB, GB and snapshot bytes retain the API's
+units. `get_usage` separately reports historical metered consumption over time.
+
+Quota is **advisory**: `observed_at` is an observation time, not a reservation or
+consistency token. Later create, resize, start or snapshot requests can still be
+refused, and existing 402 messages remain unchanged. Snapshot headroom is against
+**indexed stored bytes**; it does not include in-flight capture reservations and
+does not establish that a new capture will fit.
+
+`complete.computers` and `complete.snapshots` are independent. An incomplete group
+has `null` for all its consumption and remaining figures, meaning **unknown**,
+while the other group can retain numeric values. Complete zero usage and zero
+remaining quota remain numeric zeros. Verified plan ceilings remain available in
+a partial report, including a no-plan account that still has retained usage.
+Malformed reports and HTTP failures remain errors, never an empty account.
+The tool prints unknown and advisory guidance before the projected public fields.
 
 ## Things worth knowing
 

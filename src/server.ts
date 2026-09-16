@@ -8,6 +8,7 @@ import {
 } from '@modelcontextprotocol/sdk/types.js';
 import { Session, type SessionConfig } from './session.js';
 import { type ToolFilters, toolFilter } from './tool-filters.js';
+import { registerAccount } from './tools/account.js';
 import { registerActivities } from './tools/activities.js';
 import { registerAgent } from './tools/agent.js';
 import { registerArtifacts } from './tools/artifacts.js';
@@ -128,6 +129,7 @@ export function createServer(cfg: ServerConfig): McpServer {
     return tool;
   }) as typeof server.registerTool;
 
+  registerAccount(server, session, opts);
   registerComputers(server, session, opts);
   registerInput(server, session, opts);
   registerGuest(server, session, opts);

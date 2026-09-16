@@ -11,6 +11,15 @@
     }
   ],
   "paths": {
+    "/account": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "Synthetic account quota response"
+          }
+        }
+      }
+    },
     "/templates": {
       "get": {
         "responses": {

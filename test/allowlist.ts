@@ -33,6 +33,7 @@ export const V1_ROUTES: Route[] = [
   r('GET', 'builds/:id/progress'),
   r('GET', 'builds/:id/events'),
   r('GET', 'sizes'),
+  r('GET', 'account'),
 
   r('GET', 'computers'),
   r('POST', 'computers'),
@@ -176,6 +177,7 @@ export const PARAMETERS: ReadonlyMap<string, readonly string[]> = new Map([
   ['GET builds/:id/progress', []],
   ['GET builds/:id/events', []],
   ['GET sizes', []],
+  ['GET account', []],
 
   // `state` narrows the listing to the control plane's own record of a machine
   // — live, unreachable, deleting, deleted, lost (OPL-4554). Read
