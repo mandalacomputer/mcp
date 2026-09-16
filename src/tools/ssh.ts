@@ -47,6 +47,8 @@ type Setting = {
   available: boolean | null;
   pending: boolean;
   key_count: number;
+  /** Why the hypervisor refused the current setting, when it did. */
+  error: string | null;
 };
 
 function settingOf(body: unknown): Setting | undefined {
@@ -57,12 +59,19 @@ function settingOf(body: unknown): Setting | undefined {
   if (available !== null && typeof available !== 'boolean') return undefined;
   if (typeof key_count !== 'number' || !Number.isSafeInteger(key_count) || key_count < 0)
     return undefined;
-  return { computer, enabled, available, pending, key_count };
+  // Optional, so an answer from before the field existed still reads; anything
+  // other than a string or null is not an answer this can describe.
+  const error = body.error ?? null;
+  if (error !== null && typeof error !== 'string') return undefined;
+  return { computer, enabled, available, pending, key_count, error };
 }
 
 /** The sentence in front of a setting: whether SSH will work, and if not, why. */
 function settingLine(s: Setting): string {
   const state = s.enabled ? 'SSH is ON' : 'SSH is off';
+  if (s.error) {
+    return `${state} for ${s.computer}, but its hypervisor REFUSED this setting, so the computer does not have it: ${s.error}`;
+  }
   if (s.enabled && s.available === false) {
     return `${state} for ${s.computer}, but this computer CANNOT RUN SSH: it was made from a template image that predates SSH. Create a new computer from the current template to use SSH.`;
   }

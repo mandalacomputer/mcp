@@ -138,7 +138,7 @@ export const EXERCISE: Record<string, Record<string, unknown>[]> = {
   add_ssh_key: [{ public_key: SSH_PUBLIC_KEY }, { public_key: SSH_PUBLIC_KEY, name: 'laptop' }],
   remove_ssh_key: [{ key_id: 'sshk-3c9a51d07be2f846', confirm: true }],
   get_computer_ssh: [{}],
-  set_computer_ssh: [{ enabled: true }],
+  set_computer_ssh: [{ enabled: true }, { enabled: false }],
   wait_for_computer: [{ until: 'guest' }],
   get_desktop_url: [{}],
   // A named size and an explicit shape are alternatives, never both.

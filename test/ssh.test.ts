@@ -68,15 +68,22 @@ describe('the SSH tools', () => {
     await close();
   });
 
-  it('reads and sets one computer’s switch', async () => {
+  it('reads and sets one computer’s switch, both ways', async () => {
     const { call, close } = await connect();
-    const read = textOf(await call('get_computer_ssh', { computer_id: 'vm-1' }));
-    expect(read).toContain('SSH is off for vm-1');
-    const set = textOf(await call('set_computer_ssh', { computer_id: 'vm-1', enabled: true }));
-    expect(set).toContain('SSH is ON for vm-1');
-    expect(set).toContain('1 key');
-    const put = platform.calls.find((c) => c.method === 'PUT');
-    expect(put).toMatchObject({ path: '/computers/vm-1/ssh', body: { enabled: true } });
+    const read = textOf(await call('get_computer_ssh', { computer_id: 'vm-7' }));
+    expect(read).toContain('SSH is ON for vm-7');
+    const on = textOf(await call('set_computer_ssh', { computer_id: 'vm-7', enabled: true }));
+    expect(on).toContain('SSH is ON for vm-7');
+    expect(on).toContain('1 key');
+    const off = await call('set_computer_ssh', { computer_id: 'vm-7', enabled: false });
+    expect(off.isError).toBeFalsy();
+    expect(textOf(off)).toMatch(/^SSH is off for vm-7\./);
+    expect(textOf(off)).not.toContain('can log in');
+    const puts = platform.calls.filter((c) => c.method === 'PUT');
+    expect(puts.map((c) => [c.path, c.body])).toEqual([
+      ['/computers/vm-7/ssh', { enabled: true }],
+      ['/computers/vm-7/ssh', { enabled: false }],
+    ]);
     await close();
   });
 });
@@ -151,11 +158,23 @@ describe('the SSH tools over answers they cannot trust', () => {
     expect(text).toContain('not known until it next starts');
   });
 
+  it('says when the hypervisor refused the setting, instead of calling it on', async () => {
+    const error = 'The hypervisor refused this setting (status 400).';
+    const res = await over({ ...SSH_SETTING, error }, 200, 'get_computer_ssh', {
+      computer_id: 'vm-1',
+    });
+    const text = textOf(res);
+    expect(text).toContain('REFUSED');
+    expect(text).toContain(error);
+    expect(text).not.toContain('can log in');
+  });
+
   it('refuses a setting it cannot read, or one that contradicts the request', async () => {
     for (const body of [
       {},
       { ...SSH_SETTING, key_count: -1 },
       { ...SSH_SETTING, available: 'yes' },
+      { ...SSH_SETTING, error: 5 },
     ]) {
       const res = await over(body, 200, 'get_computer_ssh', { computer_id: 'vm-1' });
       expect(res.isError).toBe(true);

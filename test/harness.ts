@@ -171,6 +171,8 @@ export const SSH_SETTING = {
   available: true,
   pending: false,
   key_count: 1,
+  keys_pushed: 1,
+  error: null,
 };
 
 /**
@@ -696,7 +698,17 @@ function respond(
   if (path === '/ssh-keys')
     return json(method === 'GET' ? [SSH_KEY] : SSH_KEY, method === 'GET' ? 200 : 201);
   if (path.startsWith('/ssh-keys/')) return json({ ok: true });
-  if (path.endsWith('/ssh')) return json({ ...SSH_SETTING, enabled: method !== 'GET' });
+  // The computer is the one in the path and a write answers what it was sent,
+  // so a tool that ignored either would be caught rather than echoed a fixture.
+  const ssh = /^\/computers\/([^/]+)\/ssh$/.exec(path);
+  if (ssh) {
+    const sent = (body as { enabled?: unknown } | undefined)?.enabled;
+    return json({
+      ...SSH_SETTING,
+      computer: decodeURIComponent(ssh[1]),
+      enabled: method === 'PUT' && typeof sent === 'boolean' ? sent : SSH_SETTING.enabled,
+    });
+  }
   if (path === '/moves') return json({ moves: [MOVE_DONE] });
   if (path.endsWith('/move')) return json(MOVE_STARTED, 202);
   // A deletion is accepted, not done: 202 with the row that goes when the work
