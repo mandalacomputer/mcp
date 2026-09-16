@@ -1,5 +1,5 @@
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
-import { APIError, MandalaError, reasonAdvice, statusAdvice } from './errors.js';
+import { APIError, MandalaError, platformSaid, reasonAdvice, statusAdvice } from './errors.js';
 
 /** A plain text result. */
 export const text = (s: string): CallToolResult => ({ content: [{ type: 'text', text: s }] });
@@ -136,9 +136,25 @@ export function withErrorMetadata(
   };
 }
 
+/** Keep scalar error prose, without displaying a serialized response body as its message. */
+export function apiErrorMessage(error: APIError): string {
+  const named = platformSaid(error.body);
+  if (named !== undefined) return named;
+  // An unreadable or unclassified JSON envelope can leave a bounded JSON prefix
+  // in message. It is diagnostic body content, not a whitelist of display fields.
+  // Tailored transport warnings and ordinary text messages remain unchanged.
+  if (error.body !== undefined && /^\s*[[{]/.test(error.message)) return `HTTP ${error.status}`;
+  return error.message;
+}
+
 /** A model-visible refusal. A projected run failure must withhold reason-based replay advice. */
 export function failed(err: unknown, includeReasonAdvice = true): CallToolResult {
-  const message = err instanceof MandalaError || err instanceof Error ? err.message : String(err);
+  const message =
+    err instanceof APIError
+      ? apiErrorMessage(err)
+      : err instanceof MandalaError || err instanceof Error
+        ? err.message
+        : String(err);
   const status = (err as { status?: number })?.status;
   const withStatus =
     status && message !== `HTTP ${status}` ? `${message} (HTTP ${status})` : message;

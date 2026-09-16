@@ -2,7 +2,7 @@ import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
 import { MODEL_KEY_HEADER } from '../api.js';
 import { APIError, platformSaid } from '../errors.js';
-import { errorMetadata, failed, refused, said } from '../format.js';
+import { apiErrorMessage, errorMetadata, failed, refused, said } from '../format.js';
 import * as P from '../paths.js';
 import { heartbeat } from '../poll.js';
 import { count, label } from './directory.js';
@@ -102,9 +102,9 @@ function chatFailure(error: unknown): CallToolResult {
   const incompleteNative = nested?.agent !== undefined && !boundedNative;
   const detail = isRecord(error.body)
     ? (platformSaid(error.body) ?? 'Chat request failed without a usable error message')
-    : error.message;
+    : apiErrorMessage(error);
   const result = failed(
-    new APIError(detail, error.status, projected, error.retryAfterMs, error),
+    new APIError(detail, error.status, { ...projected, error: detail }, error.retryAfterMs, error),
     nested === undefined,
   );
   const diagnostics = errorMetadata(error);

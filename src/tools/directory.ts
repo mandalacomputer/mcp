@@ -1,7 +1,7 @@
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
 import { APIError } from '../errors.js';
-import { failed, said } from '../format.js';
+import { apiErrorMessage, failed, said } from '../format.js';
 import * as P from '../paths.js';
 import { computerSchema, readAnnotations } from './results.js';
 import type { Registrar } from './types.js';
@@ -34,11 +34,12 @@ export async function metadataCall(work: () => Promise<CallToolResult>): Promise
       .safeParse(error.body);
     const detail = fields.success ? fields.data : {};
     const nested = (error.body as { error?: unknown } | undefined)?.error;
+    const message = apiErrorMessage(error);
     const refusal = failed(
       new APIError(
-        error.message,
+        message,
         error.status,
-        { ...detail, reason: error.reason },
+        { ...detail, error: message, reason: error.reason },
         error.retryAfterMs,
         error,
       ),

@@ -698,6 +698,11 @@ strings are limited to 128, 256, 512 and 512 characters respectively; an
 oversized field is omitted with a notice, so a shortened Allow is never
 presented as complete. Tool-specific warnings about partial work, retained
 publication, execution reads and explicit template continuation still apply.
+Serialized JSON object or array prefixes are not displayed as error prose.
+Valid scalar error messages retain their wording; embedders still have the
+original `APIError.message` and `APIError.body` for diagnostics. Native agent
+error frames retain their supplied numeric status even without a reason or
+request ID, independently of the successful HTTP stream carrying them.
 
 For a 401, `missing` means a platform credential was not supplied; `invalid`
 means the supplied platform credential was not accepted; `revoked` means its

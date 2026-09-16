@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { MODEL_KEY_HEADER } from '../api.js';
 import { APIError, authenticationAdvice, platformSaid } from '../errors.js';
-import { guarded, refused, said, withErrorMetadata } from '../format.js';
+import { errorMetadata, guarded, refused, said, withErrorMetadata } from '../format.js';
 import * as P from '../paths.js';
 import { safeResult } from './chat.js';
 import type { Registrar } from './types.js';
@@ -148,7 +148,12 @@ export const registerAgent: Registrar = (server, session) => {
               refused(
                 `The run failed after ${steps.length} step(s).${stopReason(ev.data)}` +
                   (steps.length ? `\n\nWhat it did, and is billed for:\n${steps.join('\n')}` : ''),
-                { error: platformSaid(frame), steps: frame.steps, usage: frame.usage },
+                {
+                  error: platformSaid(frame),
+                  status: errorMetadata({ status: frame.status }).fields.status,
+                  steps: frame.steps,
+                  usage: frame.usage,
+                },
               ),
               {
                 status: frame.status,

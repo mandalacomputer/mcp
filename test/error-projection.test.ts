@@ -1,7 +1,8 @@
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { Api } from '../src/api.js';
 import { APIError } from '../src/errors.js';
-import { errorMetadata } from '../src/format.js';
+import { errorMetadata, failed } from '../src/format.js';
 import { connect, RETAINED_ID, RETAINED_MANIFEST } from './harness.js';
 
 const originalFetch = globalThis.fetch;
@@ -94,6 +95,113 @@ const paths = [
 ];
 
 describe('metadata through registered MCP tools', () => {
+  it.each(['list_directory', 'read_file', 'run_agent_chat'])(
+    '%s preserves valid scalar error prose, even when it resembles JSON',
+    async (tool) => {
+      const message = '{operator guidance}: correct the request';
+      const client = await setup(
+        { error: { message }, request_id: 'valid-id', unknown: 'HIDDEN-BODY-FIELD' },
+        405,
+      );
+      const result = await client.call(
+        tool,
+        tool === 'run_agent_chat'
+          ? { messages: [{ role: 'user', content: 'finish' }] }
+          : { path: '/tmp/file' },
+      );
+      expect(prose(result)).toContain(message);
+      expect(prose(result)).toContain('valid-id');
+      expect(prose(result)).not.toContain('HIDDEN-BODY-FIELD');
+    },
+  );
+  it.each([
+    { body: { unknown: 'HIDDEN-BODY-FIELD' } },
+    { body: { error: { message: [] }, unknown: 'HIDDEN-BODY-FIELD' } },
+    { body: [{ unknown: 'HIDDEN-BODY-FIELD' }] },
+    { body: { error: {}, unknown: 'HIDDEN-BODY-FIELD' } },
+  ])(
+    'does not expose unclassified JSON bodies through passive-tool prose: %j',
+    async ({ body }) => {
+      const client = await setup(body, 405);
+      const result = await client.call('list_directory', { path: '/tmp/file' });
+      expect(prose(result)).toContain('HTTP 405');
+      expect(prose(result)).not.toContain('HIDDEN-BODY-FIELD');
+    },
+  );
+  it.each(['list_directory', 'read_file', 'run_agent_chat'])(
+    '%s omits incomplete JSON body prefixes from model-visible prose',
+    async (tool) => {
+      const client = await setup({});
+      globalThis.fetch = vi.fn(
+        async () =>
+          new Response(`  {"unknown":"HIDDEN-BODY-FIELD","request_id":"${'ID'.repeat(150)}`, {
+            status: 405,
+            headers: { 'X-Request-ID': 'header-id' },
+          }),
+      );
+      const result = await client.call(
+        tool,
+        tool === 'run_agent_chat'
+          ? { messages: [{ role: 'user', content: 'finish' }] }
+          : { path: '/tmp/file' },
+      );
+      expect(prose(result)).toContain('header-id');
+      expect(prose(result)).not.toContain('HIDDEN-BODY-FIELD');
+      expect(prose(result)).not.toContain('ID'.repeat(150));
+    },
+  );
+  it('keeps the original API error body and message after safe tool projection', async () => {
+    const body = {
+      error: { message: null },
+      unknown: 'HIDDEN-BODY-FIELD',
+      request_id: 'ID'.repeat(150),
+    };
+    globalThis.fetch = async () => Response.json(body, { status: 405 });
+    const error = await new Api('com_synthetic', 'https://api.example.invalid/api/v1')
+      .json('GET', 'computers')
+      .catch((error: unknown) => error);
+    expect(error).toBeInstanceOf(APIError);
+    const originalMessage = (error as APIError).message;
+    const result = failed(error);
+    expect((error as APIError).message).toBe(originalMessage);
+    expect((error as APIError).message).toContain('HIDDEN-BODY-FIELD');
+    expect((error as APIError).body).toEqual(body);
+    expect((error as APIError).requestId).toBe(body.request_id);
+    expect(prose(result)).not.toContain('HIDDEN-BODY-FIELD');
+  });
+  it('does not treat discarded JSON fields as a background-slot refusal', async () => {
+    const client = await setup(
+      {
+        error: { message: null },
+        unknown: 'already has 16 background commands running HIDDEN-BODY-FIELD',
+        request_id: 'ID'.repeat(150),
+      },
+      409,
+    );
+    const result = await client.call('exec', { command: 'echo example', background: true });
+    expect(result.isError).toBe(true);
+    expect(prose(result)).not.toContain('HIDDEN-BODY-FIELD');
+    expect(prose(result)).not.toContain('ID'.repeat(150));
+    expect(prose(result)).not.toContain('A slot is held');
+    expect(globalThis.fetch).toHaveBeenCalledOnce();
+  });
+  it.each(['list_directory', 'read_file'])(
+    '%s does not render discarded body fields through a malformed-message fallback',
+    async (tool) => {
+      const requestId = 'ID'.repeat(150);
+      const client = await setup(
+        { error: { message: null }, request_id: requestId, unknown: 'HIDDEN-BODY-FIELD' },
+        405,
+      );
+      const result = await client.call(tool, { path: '/tmp/file' });
+      expect(result.isError).toBe(true);
+      expect(prose(result)).not.toContain(requestId);
+      expect(prose(result)).not.toContain('HIDDEN-BODY-FIELD');
+      expect(prose(result)).toContain('Oversized diagnostic metadata was omitted');
+      expect(prose(result)).toContain('HTTP 405');
+      expect(globalThis.fetch).toHaveBeenCalledOnce();
+    },
+  );
   it.each(paths)(
     '$tool preserves diagnostics on HTTP $status and its own safety wording',
     async ({ tool, args, status, warning }) => {
@@ -205,6 +313,61 @@ describe('metadata through registered MCP tools', () => {
 });
 
 describe('bounded diagnostics and native stream failures', () => {
+  it.each(['429', null, {}, [], -1])(
+    'does not coerce an invalid native status: %j',
+    async (status) => {
+      const client = await setup({});
+      globalThis.fetch = vi.fn(
+        async () =>
+          new Response(
+            `event: error\ndata: ${JSON.stringify({ error: 'provider refused run', status })}\n\n`,
+            { headers: { 'Content-Type': 'text/event-stream', 'X-Request-ID': 'outer-stream-id' } },
+          ),
+      );
+      const result = await client.call('run_agent', { prompt: 'finish' });
+      expect(result.isError).toBe(true);
+      expect(prose(result)).not.toContain('"status"');
+      expect(prose(result)).not.toContain('outer-stream-id');
+      expect(globalThis.fetch).toHaveBeenCalledOnce();
+    },
+  );
+  it.each([429, 504, 520])(
+    'preserves native status %i when optional reason and correlation are absent',
+    async (status) => {
+      const client = await setup({});
+      const cancel = vi.fn();
+      const frame = { error: 'provider refused run', status, steps: 1, usage: { input_tokens: 3 } };
+      globalThis.fetch = vi.fn(
+        async () =>
+          new Response(
+            new ReadableStream({
+              start(controller) {
+                controller.enqueue(
+                  new TextEncoder().encode(`event: error\ndata: ${JSON.stringify(frame)}\n\n`),
+                );
+              },
+              cancel,
+            }),
+            {
+              headers: {
+                'Content-Type': 'text/event-stream',
+                'X-Request-ID': 'outer-stream-id',
+                'Retry-After': '30',
+              },
+            },
+          ),
+      );
+      const result = await client.call('run_agent', { prompt: 'finish' });
+      expect(result.isError).toBe(true);
+      expect(prose(result)).toContain(`"status": ${status}`);
+      expect(prose(result)).toContain('input_tokens');
+      expect(prose(result)).not.toMatch(
+        /outer-stream-id|retry_after_ms|worth sending again|gateway|proxy/,
+      );
+      expect(globalThis.fetch).toHaveBeenCalledOnce();
+      expect(cancel).toHaveBeenCalledOnce();
+    },
+  );
   it('omits oversized fields rather than publishing a partial method list or challenge', async () => {
     const client = await setup(
       { error: 'refused', reason: 'r'.repeat(129), request_id: 'i'.repeat(257) },

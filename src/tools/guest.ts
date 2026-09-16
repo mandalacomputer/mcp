@@ -8,6 +8,7 @@ import {
   RangeNotSatisfiableError,
 } from '../errors.js';
 import {
+  apiErrorMessage,
   guarded,
   image,
   isInlineImage,
@@ -99,7 +100,7 @@ const BACKGROUND_SLOTS_FULL = /already has (\d+) background commands? running/i;
 
 function backgroundSlotsFull(err: unknown): number | undefined {
   if (!(err instanceof ConflictError) || err.reason !== undefined) return undefined;
-  const held = Number(BACKGROUND_SLOTS_FULL.exec(err.message)?.[1]);
+  const held = Number(BACKGROUND_SLOTS_FULL.exec(apiErrorMessage(err))?.[1]);
   return Number.isSafeInteger(held) && held > 0 ? held : undefined;
 }
 
@@ -124,7 +125,7 @@ function backgroundSlotsFull(err: unknown): number | undefined {
 const backgroundFull = (err: ConflictError, held: number) =>
   withErrorMetadata(
     refused(
-      `${err.message}\n\nA slot is held for as long as its command runs, and all ${held} are held now. ` +
+      `${apiErrorMessage(err)}\n\nA slot is held for as long as its command runs, and all ${held} are held now. ` +
         `Nothing on this side frees one: a command that has already finished is not counted, so there is ` +
         `nothing to reap, and a poll reads output rather than releasing anything. If any of the ${held} are ` +
         `servers, they do not exit on their own and another exec with background: true gets this same answer ` +
