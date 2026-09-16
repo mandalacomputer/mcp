@@ -2,6 +2,7 @@
 import { realpathSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import { DEFAULT_BASE_URL } from './api.js';
+import { CredentialsError } from './credentials.js';
 import { runHttp } from './http.js';
 import { SERVER_VERSION } from './server.js';
 import { runStdio } from './stdio.js';
@@ -13,8 +14,11 @@ const USAGE = `mandala-computer-mcp — drive a Mandala Computer desktop over MC
   mandala-computer-mcp --http [--port 3000]   hosted, callers bring their own key
 
 Environment
-  MANDALA_API_KEY      com_… from Settings → API keys. Required on stdio; over
-                       HTTP each caller sends their own as a bearer token.
+  MANDALA_API_KEY      API key; otherwise stdio loads ~/.mandala/credentials.json
+                       saved by mandala login (TypeScript CLI). Over HTTP each
+                       caller sends their own bearer token.
+  MANDALA_PROFILE      saved profile for local stdio; --profile overrides it.
+                       Ignored by HTTP. Explicit/environment keys take priority.
   MANDALA_BASE_URL     default ${DEFAULT_BASE_URL}
   MANDALA_COMPUTER_ID  bind a computer at startup, so use_computer is not needed.
                        stdio only — over HTTP it is ignored rather than bound
@@ -73,6 +77,7 @@ const KNOWN = new Set([
   'base-url',
   'computer',
   'key',
+  'profile',
   'allowed-hosts',
   'allowed-origins',
 ]);
@@ -356,12 +361,10 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     return;
   }
 
-  // `??` rather than `||` throughout, now that `str` distinguishes "not given"
-  // from "given as empty". `--base-url=` means the default, not the
-  // environment; a flag that is present says what it says.
+  // Shared tool settings do not resolve local authentication. HTTP establishes
+  // its own base below; stdio preserves the explicit base for profile binding.
   const base = {
     ...filtersFromEnv(),
-    baseUrl: (str(flags['base-url'], 'base-url') ?? env('MANDALA_BASE_URL')) || DEFAULT_BASE_URL,
     computerId: str(flags.computer, 'computer') ?? env('MANDALA_COMPUTER_ID'),
     modelKey: env('MANDALA_MODEL_KEY'),
     lifecycle: lifecycleEnabled(flags),
@@ -370,6 +373,7 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
   if (flags.http) {
     await runHttp({
       ...base,
+      baseUrl: (str(flags['base-url'], 'base-url') ?? env('MANDALA_BASE_URL')) || DEFAULT_BASE_URL,
       port: port(flags.port),
       host: (str(flags.host, 'host') ?? env('HOST')) || '127.0.0.1',
       allowedHosts: list(
@@ -383,7 +387,6 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
   }
 
   const fromFlag = str(flags.key, 'key');
-  const apiKey = fromFlag ?? env('MANDALA_API_KEY') ?? '';
   // An argument vector is not a private place. `--key com_…` is readable by any
   // `ps` on the machine, is what a shell writes into its history, and is what a
   // process-exec audit log records verbatim — none of which is true of the
@@ -397,17 +400,14 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
         'history and any exec audit log can read it. Prefer MANDALA_API_KEY.',
     );
   }
-  if (!apiKey) {
-    // stderr and a non-zero exit, not a thrown stack. On stdio the client sees
-    // a process that died; the person reading the log needs the one sentence
-    // that tells them what to set.
-    console.error(
-      'No API key. Set MANDALA_API_KEY (Settings → API keys at https://app.mandala.computer), ' +
-        'or run with --http and let each caller send their own.',
-    );
-    process.exit(2);
-  }
-  await runStdio({ ...base, apiKey });
+  await runStdio({
+    ...base,
+    apiKey: fromFlag,
+    // Keep explicit presence, including an empty flag, for file base binding.
+    baseUrl: str(flags['base-url'], 'base-url'),
+    // Preserve malformed unused selectors so a winning key can ignore them.
+    profile: flags.profile as string | undefined,
+  });
 }
 
 /**
@@ -432,6 +432,6 @@ export function isEntrypoint(moduleUrl: string, arg: string | undefined): boolea
 if (isEntrypoint(import.meta.url, process.argv[1])) {
   main().catch((err) => {
     console.error(err instanceof Error ? err.message : String(err));
-    process.exit(1);
+    process.exit(err instanceof CredentialsError ? 2 : 1);
   });
 }

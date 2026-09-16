@@ -12,17 +12,54 @@ model looks at the screen and clicks what it sees.
 
 ## Install
 
-You need an API key from the dashboard — **Settings → API keys**, a `com_…`
-string. It is scoped to your account and it is every computer on it, so treat it
-the way you would treat a password.
+MCP requires Node 20.3 or newer. The **TypeScript CLI** login setup requires
+Node 22 or newer (`mandala-computer` on npm). Sign in once, then add the MCP
+server:
 
-Node 20.3 or newer. There is nothing else to install: `npx` fetches the server
-the first time a client starts it.
+```sh
+npm install -g mandala-computer
+mandala login
+claude mcp add mandala -- npx -y mandala-computer-mcp
+```
+
+On Node 20, MCP can use an existing saved profile or an environment key.
+The TypeScript CLI guides you through browser approval and saves an API key in
+`~/.mandala/credentials.json`. MCP only reads that file; it never issues or
+approves a device, writes credentials, or starts login automatically. The
+Python distribution also provides a `mandala` command; use the TypeScript
+CLI for `login`.
+
+To select a separate profile and workspace:
+
+```sh
+mandala login --profile Work --workspace Research
+claude mcp add mandala -- npx -y mandala-computer-mcp --profile Work
+```
+
+`--profile` takes precedence over `MANDALA_PROFILE`, then the saved default.
+Names are case-sensitive. An explicit key or nonempty `MANDALA_API_KEY` takes
+precedence over every profile and avoids accessing the credential store.
+Empty explicit keys fail; an empty or whitespace-only environment key is absent.
+You can still use a key from **Settings → API keys** with `MANDALA_API_KEY`.
+
+Saved credentials require POSIX protection: a real directory owned by you with
+mode `0700`, and an owned regular file with mode `0600` and one link. Symlinks,
+hardlinks, unsafe permissions, malformed files and unsupported protection are
+refused before any API request. Windows file loading is unsupported; explicit
+or environment keys remain available. Only your home directory's store is read.
+
+A saved profile also binds its API base URL. `--base-url` or `MANDALA_BASE_URL`
+must match that stored base after canonicalization, including the entire path
+prefix and port. An explicitly empty base flag is invalid with saved credentials.
+Each stdio session resolves once: restart to pick up another saved key. Revoking
+the key in **Settings → API keys** makes later calls fail; MCP does not switch
+profiles, reread the file, or retry a refused action. Run login explicitly when
+new credentials are needed.
 
 **Claude Code** — as a plugin, which installs the server and a skill together:
 
 ```sh
-export MANDALA_API_KEY=com_…       # in the shell Claude Code starts from
+# Run mandala login first, or export MANDALA_API_KEY in this shell.
 /plugin marketplace add mandalacomputer/mcp
 /plugin install mandala-computer@mandala
 ```
@@ -36,7 +73,7 @@ not a second client; once the server is installed it stays out of the way.
 `MANDALA_MODEL_KEY`, if exported alongside, is passed through and turns on
 `run_agent` when the configured filters permit it.
 
-Or the server on its own, with the key inline:
+To use an environment key instead of a saved profile:
 
 ```sh
 claude mcp add mandala -e MANDALA_API_KEY=com_… -- npx -y mandala-computer-mcp
@@ -49,8 +86,7 @@ claude mcp add mandala -e MANDALA_API_KEY=com_… -- npx -y mandala-computer-mcp
   "mcpServers": {
     "mandala": {
       "command": "npx",
-      "args": ["-y", "mandala-computer-mcp"],
-      "env": { "MANDALA_API_KEY": "com_…" }
+      "args": ["-y", "mandala-computer-mcp"]
     }
   }
 }
@@ -59,8 +95,11 @@ claude mcp add mandala -e MANDALA_API_KEY=com_… -- npx -y mandala-computer-mcp
 **Cursor, Windsurf and the rest** take the same three fields — `command`,
 `args`, `env` — in whichever file they keep their MCP servers in.
 
-Nothing is hosted and nothing is operated: your MCP client starts this as a
-subprocess, and it talks to `https://app.mandala.computer/api/v1` with your key.
+Your MCP client starts this as a subprocess. It uses the saved profile’s API
+base, or `https://app.mandala.computer/api/v1` by default with an environment key.
+Programmatic local hosts can call `runStdio({ profile: 'Work' })`; the exported
+`StdioConfig` allows a local key or profile. `createServer` still requires an
+explicit API key, and `HttpConfig` has no local credential options.
 
 ## Use
 
@@ -818,7 +857,9 @@ for whatever is checking that the process is up.
 bearer token and is used only for their session; there is no store, and nothing
 outlives a session but a digest of the key — kept so that a later request can be
 shown to come from the same holder, which means a leaked session id on its own
-is not enough to drive somebody else's desktop.
+is not enough to drive somebody else's desktop. HTTP startup and requests never
+read the operator's credential store, `MANDALA_API_KEY` or `MANDALA_PROFILE`.
+`--profile` is local-only and ignored with `--http`.
 
 That is also why anyone can run their own: point the same container at the same
 API and it works, with no secret to provision.
@@ -841,8 +882,9 @@ naming the fix.
 
 | Variable | Meaning |
 | --- | --- |
-| `MANDALA_API_KEY` | `com_…` from Settings → API keys. Required on stdio; over HTTP each caller sends their own. |
-| `MANDALA_BASE_URL` | Defaults to `https://app.mandala.computer/api/v1`. |
+| `MANDALA_API_KEY` | Optional local API key, taking precedence over saved credentials. Ignored by HTTP; each caller sends their own bearer token. |
+| `MANDALA_PROFILE` | Local saved profile; `--profile` overrides it. Otherwise the file default is selected. Ignored by HTTP. |
+| `MANDALA_BASE_URL` | With a saved profile, must match its stored base. Otherwise defaults to `https://app.mandala.computer/api/v1`. |
 | `MANDALA_COMPUTER_ID` | Bind a computer at startup, so `use_computer` is not needed. **stdio only** — under `--http` it is ignored rather than bound into every caller's session, since it names a machine on the operator's account. |
 | `MANDALA_MODEL_KEY` | An Anthropic key. Enables `run_agent` and `run_agent_chat` when filters permit them, which runs the platform's own loop on that key. **stdio only** — under `--http` each caller sends their own as `X-Model-Key`, and this variable is ignored. |
 | `MANDALA_NO_LIFECYCLE` | `1`, `true`, `yes` or `on` withholds `create_computer`, `clone_computer`, `clone_snapshot`, `delete_computer` and `delete_snapshot` — every tool that makes a computer or destroys one. `0`, `false`, `no`, `off` or unset leaves them registered. Any other value is **refused at startup** rather than read as off: a typo here would otherwise leave those tools in place on a server whose operator believes they are gone. The `--no-lifecycle` flag reads the same vocabulary and refuses the same way, except that it has no spelling for *unset*: `--no-lifecycle=` is refused rather than ignored, so a launcher template whose variable did not expand stops instead of quietly leaving the tools registered. |
@@ -853,7 +895,7 @@ naming the fix.
 
 Every one of these but the model key and the two tool filters has a flag as well, and a flag overrides
 the environment: `--http`, `--port`, `--host`, `--base-url`, `--computer`,
-`--allowed-hosts`, `--allowed-origins`, `--no-lifecycle`, plus `--help` and
+`--allowed-hosts`, `--allowed-origins`, `--no-lifecycle`, local `--profile`, plus `--help` and
 `--version`. `--key` exists for a caller launching several servers under
 different keys, and warns when used, because an argument vector is readable by
 `ps`, lands in shell history and is recorded verbatim by any exec audit —
