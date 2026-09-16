@@ -241,12 +241,20 @@ export function parseCredentials(bytes: Uint8Array): Document {
   return doc as Document;
 }
 
-const sameObject = (a: fs.Stats, b: fs.Stats) => a.dev === b.dev && a.ino === b.ino;
+const sameObject = (a: fs.Stats | fs.BigIntStats, b: fs.Stats | fs.BigIntStats) =>
+  a.dev === b.dev && a.ino === b.ino;
+const sameDirectory = (initial: fs.BigIntStats, current: fs.BigIntStats) =>
+  sameObject(initial, current) &&
+  initial.ctimeNs === current.ctimeNs &&
+  initial.mtimeNs === current.mtimeNs;
 
 /**
  * Opened descriptors are checked against pre/post named directory AND file
- * identities. Node has no portable openat: these checks reject observed
- * substitutions rather than claiming an atomic directory-relative open.
+ * identities and the initial directory's change timestamps. Renaming a
+ * directory away and back preserves dev/ino and can preserve mtime, so ctime
+ * is essential. Bigint stats retain the filesystem's timestamp precision.
+ * Node has no portable openat: these checks reject observed substitutions
+ * rather than claiming an atomic directory-relative open.
  */
 function readStore(): Uint8Array {
   if (
@@ -266,8 +274,9 @@ function readStore(): Uint8Array {
       fail('credential_read_timeout', 'Reading saved credentials timed out.');
   };
   const uid = process.getuid();
-  const checkDir = (st: fs.Stats) => {
-    if (!st.isDirectory() || st.uid !== uid || (st.mode & 0o7777) !== 0o700)
+  const directoryUid = BigInt(uid);
+  const checkDir = (st: fs.BigIntStats) => {
+    if (!st.isDirectory() || st.uid !== directoryUid || (st.mode & 0o7777n) !== 0o700n)
       fail('unsafe_directory', 'The credentials directory must be owned by you with mode 0700.');
   };
   const checkFile = (st: fs.Stats) => {
@@ -286,7 +295,7 @@ function readStore(): Uint8Array {
       fail('missing_credentials', 'Cannot discover your home directory.');
     const directory = path.join(home, '.mandala');
     const filename = path.join(directory, 'credentials.json');
-    const namedDir = fs.lstatSync(directory);
+    const namedDir = fs.lstatSync(directory, { bigint: true });
     checkDir(namedDir);
     dirFd = fs.openSync(
       directory,
@@ -295,14 +304,14 @@ function readStore(): Uint8Array {
         fs.constants.O_NOFOLLOW |
         fs.constants.O_NONBLOCK,
     );
-    const openedDir = fs.fstatSync(dirFd);
+    const openedDir = fs.fstatSync(dirFd, { bigint: true });
     checkDir(openedDir);
-    if (!sameObject(namedDir, openedDir)) fail('unsafe_directory');
+    if (!sameDirectory(namedDir, openedDir)) fail('unsafe_directory');
     const namedFile = fs.lstatSync(filename);
     checkFile(namedFile);
-    const beforeDir = fs.lstatSync(directory);
+    const beforeDir = fs.lstatSync(directory, { bigint: true });
     checkDir(beforeDir);
-    if (!sameObject(openedDir, beforeDir)) fail('unsafe_directory');
+    if (!sameDirectory(namedDir, beforeDir)) fail('unsafe_directory');
     checkTime();
     fileFd = fs.openSync(
       filename,
@@ -333,11 +342,11 @@ function readStore(): Uint8Array {
     const finalNamedFile = fs.lstatSync(filename);
     checkFile(finalNamedFile);
     if (!sameObject(openedFile, finalNamedFile)) fail('unsafe_file');
-    const finalDir = fs.fstatSync(dirFd);
-    const finalNamedDir = fs.lstatSync(directory);
+    const finalDir = fs.fstatSync(dirFd, { bigint: true });
+    const finalNamedDir = fs.lstatSync(directory, { bigint: true });
     checkDir(finalDir);
     checkDir(finalNamedDir);
-    if (!sameObject(openedDir, finalDir) || !sameObject(openedDir, finalNamedDir))
+    if (!sameDirectory(namedDir, finalDir) || !sameDirectory(namedDir, finalNamedDir))
       fail('unsafe_directory');
     checkTime();
     return buffer.subarray(0, size);

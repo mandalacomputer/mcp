@@ -281,6 +281,72 @@ describe('portable credential corpus', () => {
 });
 
 describe('native credential corpus', () => {
+  it('F14-directory-ABA-around-each-file-operation', () => {
+    save();
+    measuredHome();
+    const replacement = path.join(home, '.replacement');
+    const parked = path.join(home, '.original-parked');
+    fs.mkdirSync(replacement, { mode: 0o700 });
+    const replacementDocument = structuredClone(corpus.base_document);
+    replacementDocument.default_profile = 'Work';
+    fs.writeFileSync(
+      path.join(replacement, 'credentials.json'),
+      JSON.stringify(replacementDocument),
+      { mode: 0o600 },
+    );
+    const originalLstat = fs.lstatSync;
+    const originalOpen = fs.openSync;
+    const before = originalLstat(directory, { bigint: true });
+    let substitutions = 0;
+    const aroundReplacement = <T>(operation: () => T): T => {
+      substitutions++;
+      fs.renameSync(directory, parked);
+      fs.renameSync(replacement, directory);
+      try {
+        return operation();
+      } finally {
+        fs.renameSync(directory, replacement);
+        fs.renameSync(parked, directory);
+      }
+    };
+    // Every directory operation sees the original directory. Every named-file
+    // operation temporarily traverses the replacement. Stats and descriptors
+    // are real; only the rename schedule is controlled by these hooks.
+    vi.spyOn(fs, 'lstatSync').mockImplementation(((...args: Parameters<typeof fs.lstatSync>) =>
+      String(args[0]) === filename
+        ? aroundReplacement(() => originalLstat(...args))
+        : originalLstat(...args)) as typeof fs.lstatSync);
+    vi.spyOn(fs, 'openSync').mockImplementation((...args) =>
+      String(args[0]) === filename
+        ? aroundReplacement(() => originalOpen(...args))
+        : originalOpen(...args),
+    );
+    const started = performance.now();
+    let result: ReturnType<typeof resolveCredentials> | undefined;
+    let error: unknown;
+    try {
+      result = resolveCredentials();
+    } catch (caught) {
+      error = caught;
+    }
+    const elapsed = performance.now() - started;
+    const after = originalLstat(directory, { bigint: true });
+    expect(substitutions).toBeGreaterThan(0);
+    expect(after.dev).toBe(before.dev);
+    expect(after.ino).toBe(before.ino);
+    // A rename-and-restore can preserve mtime. The actual ctime change is the
+    // essential discriminator beyond the otherwise matching dev/ino pair.
+    expect(after.mtimeNs).toBe(before.mtimeNs);
+    expect(after.ctimeNs).not.toBe(before.ctimeNs);
+    expect(elapsed).toBeLessThan(
+      corpus.native_file_cases.find((vector) => vector.id === 'F14-swapped-directory')!.expected
+        .completion_deadline_ms,
+    );
+    expect(result).toBeUndefined();
+    expect(error).toBeInstanceOf(CredentialsError);
+    expect(error).toMatchObject({ code: 'unsafe_directory' });
+    expect(String(error)).not.toContain('com_public_fixture_');
+  });
   it('F13-file-ABA-between-validation-and-open', () => {
     save();
     measuredHome();
@@ -341,8 +407,10 @@ describe('native credential corpus', () => {
       } else if (setup === 'grow-file-past-65536-after-fstat') {
         const fstat = fs.fstatSync;
         let grown = false;
-        vi.spyOn(fs, 'fstatSync').mockImplementation(((fd: number) => {
-          const stat = fstat(fd);
+        vi.spyOn(fs, 'fstatSync').mockImplementation(((
+          ...args: Parameters<typeof fs.fstatSync>
+        ) => {
+          const stat = fstat(...args);
           if (stat.isFile() && !grown) {
             grown = true;
             fs.appendFileSync(filename, Buffer.alloc(65_537));
