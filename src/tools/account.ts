@@ -58,6 +58,8 @@ const report = z
       const activeCPU = data.usage.running_or_reserved_vcpu!;
       const activeRAM = data.usage.running_or_reserved_ram_mb!;
       if (active > kept || activeCPU > cpu) return false;
+      // Equal counts mean both CPU sums cover every kept computer.
+      if (active === kept && activeCPU !== cpu) return false;
       if (kept === 0 && (cpu !== 0 || disk !== 0)) return false;
       if (active === 0 && (activeCPU !== 0 || activeRAM !== 0)) return false;
       // Each active computer contributes positive integer MB, but its CPU may be zero.

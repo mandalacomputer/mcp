@@ -172,6 +172,16 @@ describe('complete aggregate consistency', () => {
       remaining: {},
     },
     {
+      name: 'all kept computers active with a smaller positive CPU total',
+      usage: { running_or_reserved_computers: 2, running_or_reserved_vcpu: 2 },
+      remaining: {},
+    },
+    {
+      name: 'all kept computers active with zero CPU but positive configured CPU',
+      usage: { running_or_reserved_computers: 2, running_or_reserved_vcpu: 0 },
+      remaining: {},
+    },
+    {
       name: 'zero active count still has active CPU',
       usage: { running_or_reserved_computers: 0, running_or_reserved_ram_mb: 0 },
       remaining: { running_or_reserved_ram_mb: 32768 },
@@ -183,7 +193,11 @@ describe('complete aggregate consistency', () => {
     },
     {
       name: 'active count exceeds positive integer RAM reservations',
-      usage: { running_or_reserved_computers: 2, running_or_reserved_ram_mb: 1 },
+      usage: {
+        running_or_reserved_computers: 2,
+        running_or_reserved_vcpu: 6,
+        running_or_reserved_ram_mb: 1,
+      },
       remaining: { running_or_reserved_ram_mb: 32767 },
     },
     {
@@ -228,6 +242,16 @@ describe('complete aggregate consistency', () => {
       expect(platform.calls).toHaveLength(1);
     },
   );
+
+  it.each([0, 6])('permits CPU total %i for a proper active subset', async (activeCPU) => {
+    const value = structuredClone(ACCOUNT_QUOTA);
+    value.usage.running_or_reserved_vcpu = activeCPU;
+    respond(value);
+    const result = await (await open()).call('get_account');
+    expect(result.isError).not.toBe(true);
+    expect(data(result)).toEqual(value);
+    expect(platform.calls).toHaveLength(1);
+  });
 
   it('permits configured holdings with no active computers', async () => {
     const value = structuredClone(ACCOUNT_QUOTA);
