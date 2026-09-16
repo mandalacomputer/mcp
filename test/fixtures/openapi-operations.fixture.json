@@ -1,0 +1,620 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Synthetic SDK operation contract fixture — not a downloaded publication",
+    "version": "fixture"
+  },
+  "x-provenance": "Synthetic fixture assembled from the public MCP route inventory. Offline implementation coverage only; never publication evidence.",
+  "servers": [
+    {
+      "url": "https://app.mandala.computer/api/v1"
+    }
+  ],
+  "paths": {
+    "/templates": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "Synthetic successful operation response"
+          }
+        }
+      },
+      "post": {
+        "responses": {
+          "200": {
+            "description": "Synthetic successful operation response"
+          }
+        }
+      }
+    },
+    "/templates/schema": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "Synthetic successful operation response"
+          }
+        }
+      }
+    },
+    "/templates/validate": {
+      "post": {
+        "responses": {
+          "200": {
+            "description": "Synthetic successful operation response"
+          }
+        }
+      }
+    },
+    "/templates/{namespace}/{name}": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "Synthetic successful operation response"
+          }
+        }
+      },
+      "delete": {
+        "responses": {
+          "200": {
+            "description": "Synthetic successful operation response"
+          }
+        }
+      }
+    },
+    "/builds": {
+      "post": {
+        "responses": {
+          "200": {
+            "description": "Synthetic successful operation response"
+          }
+        }
+      },
+      "get": {
+        "responses": {
+          "200": {
+            "description": "Synthetic successful operation response"
+          }
+        }
+      }
+    },
+    "/builds/{id}": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "Synthetic successful operation response"
+          }
+        }
+      }
+    },
+    "/builds/{id}/progress": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "Synthetic successful operation response"
+          }
+        }
+      }
+    },
+    "/builds/{id}/events": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "Synthetic successful operation response"
+          }
+        }
+      }
+    },
+    "/sizes": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "Synthetic successful operation response"
+          }
+        }
+      }
+    },
+    "/computers": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "Synthetic successful operation response"
+          }
+        }
+      },
+      "post": {
+        "responses": {
+          "200": {
+            "description": "Synthetic successful operation response"
+          }
+        }
+      }
+    },
+    "/computers/{id}": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "Synthetic successful operation response"
+          }
+        }
+      },
+      "patch": {
+        "responses": {
+          "200": {
+            "description": "Synthetic successful operation response"
+          }
+        }
+      },
+      "delete": {
+        "responses": {
+          "200": {
+            "description": "Synthetic successful operation response"
+          }
+        }
+      }
+    },
+    "/computers/{id}/start": {
+      "post": {
+        "responses": {
+          "200": {
+            "description": "Synthetic successful operation response"
+          }
+        }
+      }
+    },
+    "/computers/{id}/stop": {
+      "post": {
+        "responses": {
+          "200": {
+            "description": "Synthetic successful operation response"
+          }
+        }
+      }
+    },
+    "/computers/{id}/suspend": {
+      "post": {
+        "responses": {
+          "200": {
+            "description": "Synthetic successful operation response"
+          }
+        }
+      }
+    },
+    "/computers/{id}/restart": {
+      "post": {
+        "responses": {
+          "200": {
+            "description": "Synthetic successful operation response"
+          }
+        }
+      }
+    },
+    "/computers/{id}/clone": {
+      "post": {
+        "responses": {
+          "200": {
+            "description": "Synthetic successful operation response"
+          }
+        }
+      }
+    },
+    "/computers/{id}/move": {
+      "post": {
+        "responses": {
+          "200": {
+            "description": "Synthetic successful operation response"
+          }
+        }
+      }
+    },
+    "/moves": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "Synthetic successful operation response"
+          }
+        }
+      }
+    },
+    "/computers/{id}/screenshot": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "Synthetic successful operation response"
+          }
+        }
+      }
+    },
+    "/computers/{id}/input": {
+      "post": {
+        "responses": {
+          "200": {
+            "description": "Synthetic successful operation response"
+          }
+        }
+      }
+    },
+    "/computers/{id}/exec": {
+      "post": {
+        "responses": {
+          "200": {
+            "description": "Synthetic successful operation response"
+          }
+        }
+      }
+    },
+    "/computers/{id}/exec/{pid}": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "Synthetic successful operation response"
+          }
+        }
+      },
+      "delete": {
+        "responses": {
+          "200": {
+            "description": "Synthetic successful operation response"
+          }
+        }
+      }
+    },
+    "/computers/{id}/executions/{executionId}": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "Synthetic successful operation response"
+          }
+        }
+      }
+    },
+    "/computers/{id}/executions/{executionId}/output": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "Synthetic successful operation response"
+          }
+        }
+      }
+    },
+    "/computers/{id}/executions/{executionId}/retained-output": {
+      "post": {
+        "responses": {
+          "200": {
+            "description": "Synthetic successful operation response"
+          }
+        }
+      }
+    },
+    "/computers/{id}/results/{resultId}": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "Synthetic successful operation response"
+          }
+        }
+      },
+      "delete": {
+        "responses": {
+          "200": {
+            "description": "Synthetic successful operation response"
+          }
+        }
+      }
+    },
+    "/computers/{id}/results/{resultId}/output": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "Synthetic successful operation response"
+          }
+        }
+      }
+    },
+    "/computers/{id}/artifacts": {
+      "post": {
+        "responses": {
+          "200": {
+            "description": "Synthetic successful operation response"
+          }
+        }
+      }
+    },
+    "/computers/{id}/artifacts/{artifactId}": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "Synthetic successful operation response"
+          }
+        }
+      },
+      "delete": {
+        "responses": {
+          "200": {
+            "description": "Synthetic successful operation response"
+          }
+        }
+      }
+    },
+    "/computers/{id}/artifacts/{artifactId}/download": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "Synthetic successful operation response"
+          }
+        }
+      }
+    },
+    "/computers/{id}/activities": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "Synthetic successful operation response"
+          }
+        }
+      }
+    },
+    "/computers/{id}/activities/{activity}": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "Synthetic successful operation response"
+          }
+        }
+      }
+    },
+    "/computers/{id}/activities/{activity}/results": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "Synthetic successful operation response"
+          }
+        }
+      }
+    },
+    "/computers/{id}/signals": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "Synthetic successful operation response"
+          }
+        }
+      }
+    },
+    "/computers/{id}/windows": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "Synthetic successful operation response"
+          }
+        }
+      }
+    },
+    "/computers/{id}/windows/{window}": {
+      "post": {
+        "responses": {
+          "200": {
+            "description": "Synthetic successful operation response"
+          }
+        }
+      }
+    },
+    "/computers/{id}/clipboard": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "Synthetic successful operation response"
+          }
+        }
+      },
+      "put": {
+        "responses": {
+          "200": {
+            "description": "Synthetic successful operation response"
+          }
+        }
+      }
+    },
+    "/computers/{id}/agent": {
+      "post": {
+        "responses": {
+          "200": {
+            "description": "Synthetic successful operation response"
+          }
+        }
+      }
+    },
+    "/chat/completions": {
+      "post": {
+        "responses": {
+          "200": {
+            "description": "Synthetic successful operation response"
+          }
+        }
+      }
+    },
+    "/computers/{id}/files": {
+      "put": {
+        "responses": {
+          "200": {
+            "description": "Synthetic successful operation response"
+          }
+        }
+      },
+      "get": {
+        "responses": {
+          "200": {
+            "description": "Synthetic successful operation response"
+          }
+        }
+      }
+    },
+    "/computers/{id}/files/list": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "Synthetic successful operation response"
+          }
+        }
+      }
+    },
+    "/snapshots": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "Synthetic successful operation response"
+          }
+        }
+      }
+    },
+    "/computers/{id}/snapshots": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "Synthetic successful operation response"
+          }
+        }
+      },
+      "post": {
+        "responses": {
+          "200": {
+            "description": "Synthetic successful operation response"
+          }
+        }
+      }
+    },
+    "/snapshots/{id}/restore": {
+      "post": {
+        "responses": {
+          "200": {
+            "description": "Synthetic successful operation response"
+          }
+        }
+      }
+    },
+    "/snapshots/{id}/clone": {
+      "post": {
+        "responses": {
+          "200": {
+            "description": "Synthetic successful operation response"
+          }
+        }
+      }
+    },
+    "/snapshots/{id}": {
+      "delete": {
+        "responses": {
+          "200": {
+            "description": "Synthetic successful operation response"
+          }
+        }
+      }
+    },
+    "/computers/{id}/schedule": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "Synthetic successful operation response"
+          }
+        }
+      },
+      "put": {
+        "responses": {
+          "200": {
+            "description": "Synthetic successful operation response"
+          }
+        }
+      },
+      "delete": {
+        "responses": {
+          "200": {
+            "description": "Synthetic successful operation response"
+          }
+        }
+      }
+    },
+    "/usage": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "Synthetic successful operation response"
+          }
+        }
+      }
+    },
+    "/retention": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "Synthetic successful operation response"
+          }
+        }
+      }
+    },
+    "/webhooks": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "Synthetic successful operation response"
+          }
+        }
+      },
+      "post": {
+        "responses": {
+          "200": {
+            "description": "Synthetic successful operation response"
+          }
+        }
+      }
+    },
+    "/webhooks/{id}": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "Synthetic successful operation response"
+          }
+        }
+      },
+      "patch": {
+        "responses": {
+          "200": {
+            "description": "Synthetic successful operation response"
+          }
+        }
+      },
+      "delete": {
+        "responses": {
+          "200": {
+            "description": "Synthetic successful operation response"
+          }
+        }
+      }
+    },
+    "/webhooks/{id}/rotate": {
+      "post": {
+        "responses": {
+          "200": {
+            "description": "Synthetic successful operation response"
+          }
+        }
+      }
+    },
+    "/webhooks/{id}/test": {
+      "post": {
+        "responses": {
+          "200": {
+            "description": "Synthetic successful operation response"
+          }
+        }
+      }
+    },
+    "/webhooks/{id}/deliveries": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "Synthetic successful operation response"
+          }
+        }
+      }
+    }
+  }
+}

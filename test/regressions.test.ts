@@ -3487,6 +3487,11 @@ describe('the tools our own prose tells a model to call', () => {
     // that cannot hold the request open past its default timeout has to lower
     // it. A parameter, not a tool.
     'max_steps',
+    // Chat agent.stop terminal value, not a callable tool.
+    'end_turn',
+    // Activity-page history continuation and revision-change checkpoints.
+    'next_cursor',
+    'changes_cursor',
     'snapshot_id',
     'template_id',
     'build_id',
@@ -5087,16 +5092,21 @@ describe('the event tools and what their annotations claim', () => {
           'create_computer',
           'cursor_position',
           'exec_poll',
+          'get_activity',
+          'get_activity_results',
           'get_artifact',
           'get_desktop_url',
           'get_execution',
           'get_result',
+          'list_activities',
+          'list_directory',
           'poll_events',
           'publish_artifact',
           'read_artifact',
           'read_execution_output',
           'read_file',
           'read_result_output',
+          'read_signals',
           'retain_execution_output',
           'use_computer',
           'wait_for_computer',

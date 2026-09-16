@@ -33,9 +33,8 @@ need:
   it is every computer on the account, and a key may instead be scoped to one
   workspace, which is the reason a 404 below is not what it looks like.
 - `MANDALA_MODEL_KEY` — an Anthropic key. Optional; it is what enables
-  `run_agent`. Without it the tool is not registered at all. It is **spent, not
-  stored**: the platform keeps no copy of it and every step `run_agent` takes
-  is a model call billed to that key.
+  `run_agent` and `run_agent_chat`. Without it neither tool is registered. It is **spent, not
+  stored**: the platform keeps no copy, and the model work is billed to that key.
 
 If the server shows as failed, check its startup error. With `MANDALA_API_KEY`
 empty it prints "No API key" and exits before registering anything. For that
@@ -62,19 +61,21 @@ Optional configuration:
   Mixed tools such as `wait_for_computer` and `snapshot_schedule` are also
   withheld. `screenshot`, `read_clipboard` and `list_windows` keep the hint.
 - `MANDALA_TAGS=input,guest` — select a union of lowercase tool tags:
-  `agent`, `artifacts`, `computers`, `events`, `executions`, `files`, `guest`,
-  `input`, `lifecycle`, `results`, `snapshots`, `templates`, `usage`, `webhooks`.
+  `activities`, `agent`, `artifacts`, `computers`, `events`, `executions`, `files`, `guest`,
+  `input`, `lifecycle`, `results`, `signals`, `snapshots`, `templates`, `usage`, `webhooks`.
   Entries are comma-separated, trimmed and deduplicated; empty entries are
   ignored, and empty or unset means unfiltered. Unknown tags, including
   uppercase names, fail at startup and name the valid set. `files` means
-  `read_file`, `write_file`, `wait_for_file_change`; the last also belongs to
+  `list_directory`, `read_file`, `write_file`, `wait_for_file_change`; the last also belongs to
   `events`. `guest` covers execution, windows, clipboard and URL tools;
   `input` includes screenshots and waits. `templates` includes listing and
   builds. See the README's Tool filters table for the full inventory.
 
 Filters intersect: tags cannot restore a tool withheld by read-only,
 `MANDALA_NO_LIFECYCLE`, or a missing model key. A connected server may have
-an empty tool list (`files` plus read-only currently does). Check the actual
+an empty tool list (`agent` plus read-only does). `files` plus read-only exposes
+only `list_directory`. Both agent tools need the caller's model key, and
+lifecycle disabled alone does not withhold them. Check the actual
 tool list before following any workflow below; use only tools that are
 present. If the task requires a withheld tool, explain the limitation instead
 of trying another route to the same action. `use_computer` is not read-only:
@@ -159,8 +160,9 @@ may be due to a filter or the missing model key. Check the configured filters
 before explaining which key mechanism applies; an HTTP user needs their own
 header rather than the operator's environment variable.
 
-- `max_steps` (default 20, max 100) is the spending cap as much as the loop
-  bound — every step is a model call on the user's key. Size it to the task.
+- `max_steps` (default 20, max 100) bounds actions, not time, model calls or
+  spending. A client needs `progressToken` plus `resetTimeoutOnProgress` to
+  keep long calls alive; otherwise choose a smaller value.
 - Read the first line of the answer. `finished` is done. `RAN OUT OF STEPS` is
   a task that is probably not done: look with `screenshot`, then either finish
   the last step yourself or run again with a narrower prompt from where it got
@@ -172,6 +174,48 @@ header rather than the operator's environment variable.
   lists the steps that did run; those are billed. Re-running the same prompt
   pays for them again and is refused the same way, so fix the cause first, and
   when you do resume, resume from what the completed steps already did.
+
+**`run_agent_chat` uses textual OpenAI-shaped messages and JSON-only results.**
+It drives the same BYOK Anthropic loop, not hosted inference or a chat UI.
+The last user message is the task; system messages supply standing instructions.
+Previous user/assistant conversation is not replayed. String text and text-part
+arrays are supported. Optional `model` must name an Anthropic model and is sent
+unchanged. JSON (`stream:false`) preserves `agent.stop`, step count and usage.
+Only an explicit, consistent `end_turn` result establishes completion. Treat
+limits, refusals, malformed responses and conflicting stop fields as incomplete;
+inspect any partial billed work before doing more. It never starts the computer
+or retries by calling another agent endpoint. Its progress counts waiting
+heartbeats, not completed actions.
+
+**Passive metadata tools** preserve the API's scope and health distinctions.
+`list_directory` preserves exact absolute paths and filenames. It contacts the
+guest only when running, without resume or idle extension; rate/capacity
+admission still applies. A partial unordered listing examines at most 512
+entries/128 KiB and has no continuation token. Narrow the path when truncated or
+names were skipped; never automatically rescan. Symlinks are not followed and
+unavailable entries have no inferred type or size. It does not read file content.
+
+`list_activities` returns one history page; opaque `cursor` continues history,
+and `changes:true` requires a cursor to read late updates to older rows. There
+is no limit parameter. Preserve nullable `next_cursor`, `changes_cursor`, gap
+and health fields. Refresh history after a gap. `get_activity` keeps request
+state/revision/scope, optional execution identity and signed exit status.
+Accepted background work is not completed execution. Activity IDs identify
+requests, never idempotency keys. History is retained, selected, best effort.
+`get_activity_results` is passive metadata only: at most eight newest links,
+with availability and association intact. `more` has no cursor; caller-selected
+artifact association proves neither creation nor command success. Never follow
+links implicitly to content, files, captures, downloads or execution polling.
+It belongs to both `activities` and `results`, once in a tag union.
+
+`read_signals` belongs to `signals`, separate from the active `events` socket.
+Omit `since` or send empty for a head-only baseline; optional `limit` is 1–100,
+default 50 at the API. Keep the returned checkpoint even on empty pages because
+filtered rows can advance it. Ephemeral retention and explicit reset gaps do
+not prove no earlier work or task success. Unsupported 501 and unavailable 503
+stay errors, never empty history or new checkpoints. Do not add a watcher,
+retry, guest action or page-draining loop. Read-only filters grant no API role;
+member/owner and workspace authorization is checked again on each request.
 
 **Drive by hand** — `screenshot`, `click`, `type_text`, `press_key`, `scroll`,
 `drag` — when you need to see each frame yourself, when there is no model key,

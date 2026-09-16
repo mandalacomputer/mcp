@@ -97,7 +97,9 @@ entirely.
 
 This is the unfiltered inventory. The filters below can withhold tools from
 both listing and calling; workflows in this README apply only when the needed
-tools are available. This server does not yet implement every API operation.
+tools are available. The offline fixture checks exercised operation coverage;
+verification against the live publication is a separate required CI gate.
+Parameter and response-mode support remains a separate contract.
 
 **Choosing a machine** — `list_templates`, `list_sizes`, `list_computers`, `get_computer`,
 `use_computer`, `wait_for_computer`, `get_desktop_url`
@@ -112,10 +114,12 @@ tools are available. This server does not yet implement every API operation.
 **Inside the guest** — `exec`, `exec_poll`, `exec_kill`, `get_execution`,
 `read_execution_output`, `open_url`,
 `list_windows`, `window_action`, `read_clipboard`, `write_clipboard`,
-`read_file`, `write_file`
+`read_file`, `write_file`, `list_directory`
 
 **Retained versions** — `retain_execution_output`, `get_result`, `read_result_output`,
 `delete_result`, `publish_artifact`, `get_artifact`, `read_artifact`, `delete_artifact`
+
+**Passive metadata** — `list_activities`, `get_activity`, `get_activity_results`, `read_signals`
 
 **Being told rather than asking** — `wait_for_event`, `poll_events`,
 `wait_for_file_change`
@@ -135,9 +139,9 @@ tools are available. This server does not yet implement every API operation.
 `get_webhook`, `update_webhook`, `rotate_webhook_secret`, `test_webhook`,
 `list_webhook_deliveries`, `delete_webhook`
 
-**Delegating** — `run_agent`, registered only when a model key is present:
+**Delegating** — `run_agent`, `run_agent_chat`, registered only when a model key is present:
 `MANDALA_MODEL_KEY` on stdio, or the caller's own `X-Model-Key` header over HTTP.
-It must also survive the configured filters.
+Both must also survive the configured filters.
 
 ### Tool filters
 
@@ -162,22 +166,29 @@ with an error listing all valid tags.
 | `lifecycle` | `create_computer`, `start_computer`, `stop_computer`, `suspend_computer`, `restart_computer`, `update_computer`, `clone_computer`, `delete_computer`, `move_computer`, `list_moves` |
 | `input` | `screenshot`, `click`, `type_text`, `press_key`, `scroll`, `drag`, `move_mouse`, `mouse_button`, `cursor_position`, `wait` |
 | `guest` | `exec`, `exec_poll`, `exec_kill`, `open_url`, `list_windows`, `window_action`, `read_clipboard`, `write_clipboard` |
-| `files` | `read_file`, `write_file`, `wait_for_file_change` |
+| `files` | `list_directory`, `read_file`, `write_file`, `wait_for_file_change` |
 | `executions` | `get_execution`, `read_execution_output` |
-| `results` | `retain_execution_output`, `get_result`, `read_result_output`, `delete_result` |
+| `results` | `get_activity_results`, `retain_execution_output`, `get_result`, `read_result_output`, `delete_result` |
 | `artifacts` | `publish_artifact`, `get_artifact`, `read_artifact`, `delete_artifact` |
 | `snapshots` | All snapshot tools listed above, including `get_retention` |
 | `templates` | `list_templates`, all your-own-template tools and all build tools listed above |
 | `events` | `wait_for_event`, `poll_events`, `wait_for_file_change` |
 | `usage` | `get_usage` |
 | `webhooks` | All webhook tools listed above |
-| `agent` | `run_agent` |
+| `agent` | `run_agent`, `run_agent_chat` |
+| `activities` | `list_activities`, `get_activity`, `get_activity_results` |
+| `signals` | `read_signals` |
 
 The selected tags form a union, then intersect with read-only and the existing
 lifecycle and model-key restrictions. `MANDALA_NO_LIFECYCLE=1` still withholds
 its five tools even when their tags are selected; selecting `agent` cannot
-enable it without a per-session model key. A combination may expose no tools:
-`MANDALA_TAGS=files MANDALA_READ_ONLY=1` currently does exactly that.
+enable either agent tool without a per-session model key. Both agent tools are
+withheld by read-only, but remain available with lifecycle disabled alone.
+`MANDALA_TAGS=files MANDALA_READ_ONLY=1` exposes only `list_directory`.
+An `agent` selection with read-only is a valid empty tool list.
+`activities,results` includes `get_activity_results` once; `signals` is separate
+from the active `events` socket. Filters never grant API privileges: the API
+checks current member/owner and workspace authorization on every request.
 
 `use_computer` is not read-only. When it is withheld, pass `computer_id`
 explicitly, or bind a computer with `MANDALA_COMPUTER_ID` at stdio startup.
@@ -741,7 +752,7 @@ naming the fix.
 | `MANDALA_API_KEY` | `com_…` from Settings → API keys. Required on stdio; over HTTP each caller sends their own. |
 | `MANDALA_BASE_URL` | Defaults to `https://app.mandala.computer/api/v1`. |
 | `MANDALA_COMPUTER_ID` | Bind a computer at startup, so `use_computer` is not needed. **stdio only** — under `--http` it is ignored rather than bound into every caller's session, since it names a machine on the operator's account. |
-| `MANDALA_MODEL_KEY` | An Anthropic key. Enables `run_agent` when filters permit it, which runs the platform's own loop on that key. **stdio only** — under `--http` each caller sends their own as `X-Model-Key`, and this variable is ignored. |
+| `MANDALA_MODEL_KEY` | An Anthropic key. Enables `run_agent` and `run_agent_chat` when filters permit them, which runs the platform's own loop on that key. **stdio only** — under `--http` each caller sends their own as `X-Model-Key`, and this variable is ignored. |
 | `MANDALA_NO_LIFECYCLE` | `1`, `true`, `yes` or `on` withholds `create_computer`, `clone_computer`, `clone_snapshot`, `delete_computer` and `delete_snapshot` — every tool that makes a computer or destroys one. `0`, `false`, `no`, `off` or unset leaves them registered. Any other value is **refused at startup** rather than read as off: a typo here would otherwise leave those tools in place on a server whose operator believes they are gone. The `--no-lifecycle` flag reads the same vocabulary and refuses the same way, except that it has no spelling for *unset*: `--no-lifecycle=` is refused rather than ignored, so a launcher template whose variable did not expand stops instead of quietly leaving the tools registered. |
 | `PORT`, `HOST` | For `--http`. Default `3000`, `127.0.0.1`. |
 | `MANDALA_READ_ONLY` | Keep only tools annotated `readOnlyHint: true`; strict boolean parsing as described under Tool filters. |
@@ -762,17 +773,105 @@ it when a stretch of pixel work would otherwise cost the calling model a
 screenshot per step — ten clicks stop being ten images. It bills your Anthropic
 key, and the platform never stores that key.
 
+### Passive directories, activity history and signals
+
+`list_directory` takes an exact absolute guest `path`. Unicode, spaces and
+punctuation survive query encoding. It requires an already running computer,
+does not resume it or extend its idle timer, and still contacts the guest with
+ordinary rate/capacity admission. The result preserves `path`, `entries` with
+`name`, `type` and optional `size_bytes`, `truncated` and `skipped`. An unavailable
+entry has no inferred type or zero size. Symlinks are not followed, and a final
+symlink directory is refused. No file content is read. A partial listing is an
+unordered subset: at most 512 examined entries/128 KiB, with no continuation
+token. Narrow the path when names are omitted; do not automatically rescan.
+
+`list_activities` returns one newest-first history page with a fixed watermark.
+Pass an opaque `cursor` for continuation, or `changes:true` with a cursor for
+late final updates to older rows. False/absent `changes` is omitted on the wire;
+there is no `limit` argument. Preserve `next_cursor`, `changes_cursor`, `gap`
+and health fields. A gap requires refreshing history. The tools keep no cursor
+cache and never drain pages automatically. `get_activity` takes an `activity_id`
+shaped as `act_` plus 32 lowercase hex digits, a request identity rather than an
+idempotency key. Recorded state, scope, revision, timestamps, execution identity
+and status remain distinct: accepted background work is not finished execution,
+and a dispatched error may have had effects. History is selected, retained,
+best-effort metadata, not all guest work or an agent identity.
+
+`get_activity_results` returns at most eight newest metadata links, preserving
+revision, availability, association, byte/truncation metadata and observations.
+`more:true` has no continuation cursor and does not mean all versions were
+returned. An unavailable item is not an empty available item. Caller-selected
+artifact association does not prove creation or command success. This tool
+never follows a link to content, files, captures, downloads or execution polling.
+
+`read_signals` reads one passive daemon page, independently of the active event
+socket. Omit `since` or send an empty string for a head-only baseline with no
+replay. Optional `limit` is 1–100; omitting it uses the API default 50. Preserve
+the returned `cursor` even when `events` is empty: filtered-out rows may advance
+it. Retention is ephemeral; expired/restarted/migrated cursors can return an
+explicit reset gap. Baselines and gaps do not prove there was no earlier work
+or that a task succeeded. Unsupported (501) and unavailable (503) responses
+remain errors, never empty history or new checkpoints. There is no watcher,
+guest action, retry loop or automatic checkpoint cache in this tool.
+
+### JSON chat with your own Anthropic key
+
+`run_agent_chat` drives the selected computer using the same BYOK Anthropic loop
+as `run_agent`. It accepts a nonempty array of textual OpenAI-shaped `messages`,
+including string content or arrays of `{type:"text",text:"..."}` parts. The
+**last user message** supplies the task; system messages supply standing
+instructions. Earlier user/assistant conversation is not replayed. Optional
+`model` is sent unchanged and must name an Anthropic model. `max_steps` is 1–100,
+default 20. This is computer control, not hosted general-purpose inference or a
+chat UI; it adds no key storage or model billing service.
+
+This tool deliberately sends `stream:false` and uses the JSON response so the
+result preserves the underlying `agent.stop`, step count and token usage.
+Only explicit `end_turn` consistent with the completion's finish reason can
+report success. Limits, refusal, missing or conflicting terminal fields remain
+errors with valid partial results. A failed call may include completed, billed
+work: inspect it before deciding what remains, and do not automatically replay.
+Neither agent tool starts the computer or switches endpoints after a failure.
+
+The caller supplies the model key through `MANDALA_MODEL_KEY` on stdio or their
+own `X-Model-Key` header on HTTP. The account Authorization remains separate;
+HTTP never falls back to the operator's model key. Waiting heartbeats count
+notifications, not completed actions. Long-running clients need a
+`progressToken` plus `resetTimeoutOnProgress`; otherwise choose a smaller
+`max_steps`. That bound is neither a time cap nor a spend cap.
+
 ## Development
 
 ```sh
-npm install
-npm test          # vitest, plus the surface check below
+npm ci
+npx vitest run    # deterministic offline tests, including the synthetic contract
+npm test          # offline tests plus the separate private mirror check
 npm run build
 npm run lint
 ```
 
-CI runs the suite on Node 20, 22, 24 and 26 — the floor `package.json`
-declares and the ceiling a current `npx` will actually use.
+CI runs the offline suite on Node 20, 22, 24 and 26. A separate Node 22
+`published-openapi` job runs on pull requests and main pushes:
+
+```sh
+npx vitest run --config vitest.openapi.config.ts
+```
+
+It anonymously fetches the fixed publication at
+`https://app.mandala.computer/api/docs/openapi.json` once, with a 20-second
+overall deadline and an 8 MiB body ceiling, then exercises the real MCP tools
+and requires request evidence for every published `/api/v1` operation.
+Non-v1 operations are explicitly excluded and reported. The check uses OpenAPI
+server inheritance and literal-path precedence, not the local route allowlist.
+It fails on a blocked fetch, redirect, invalid document or missing operation;
+there is no fixture fallback, credential requirement or skip branch.
+
+The committed OpenAPI fixture is synthetic, assembled from the public MCP route
+inventory, and is never presented as a downloaded publication. Offline green
+proves deterministic implementation coverage only. Live-publication verification
+remains unresolved until the dedicated job succeeds; a blocked or red public
+gate must not be merged or described as universal coverage. Parameters and
+response modes are tested separately, with documented parameter exceptions.
 
 ### Where the platform's rules live
 
@@ -785,10 +884,11 @@ change to the platform's route table, not a wider pass-through here.
 
 The platform allowlists every route `/api/v1` will answer and 404s the rest.
 `test/allowlist.ts` mirrors that table, and the tests assert two things: that
-every call this server can make lands on an allowlisted route, and that the gap
-between the platform's surface and this server's coverage is *exactly* the set
-written down in `UNIMPLEMENTED`. A route added upstream becomes a failing test
-here rather than a feature nobody noticed.
+every successful exercised call lands on an allowlisted route, and that no
+mirrored operation remains unexercised (`UNIMPLEMENTED` is empty). Tool names
+and exercise entries must match in both directions, and every tool must make
+an observed HTTP request during its callback. The independent public gate also
+detects a new published operation when the mirror has not yet been updated.
 
 `npm run check:surface` goes further and diffs the mirror against the platform's
 published surface manifest — a file the platform generates from its own tables

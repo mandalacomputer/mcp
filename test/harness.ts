@@ -9,6 +9,8 @@ export const BASE = 'https://api.test/api/v1';
 export type Recorded = {
   method: string;
   path: string;
+  /** Exact concrete HTTP pathname, including the API base. */
+  pathname?: string;
   body?: unknown;
   query: URLSearchParams;
   /** Lower-cased, because a header name is compared case-insensitively. */
@@ -216,6 +218,90 @@ export const USAGE = {
   reported_through: '2026-08-20',
 };
 
+export const ACTIVITY_ID = 'act_0123456789abcdef0123456789abcdef';
+export const ACTIVITY = {
+  activity_id: ACTIVITY_ID,
+  account_id: 'acc-1',
+  computer_id: 'vm-1',
+  workspace_id: null,
+  channel: 'api',
+  route: 'exec',
+  action: 'exec',
+  state: 'exited',
+  received_at: '2026-09-16T12:00:00Z',
+  observed_at: '2026-09-16T12:00:01Z',
+  dispatched_at: '2026-09-16T12:00:00Z',
+  elapsed_ms: 1000,
+  revision: 3,
+  has_results: true,
+  http_status: 200,
+  exit_code: -1,
+  execution_id: RETAINED_MANIFEST.execution_id,
+};
+export const ACTIVITY_PAGE = {
+  items: [ACTIVITY],
+  next_cursor: null,
+  changes_cursor: 'revision:3',
+  gap: false,
+  health: {
+    recording_started_at: '2026-09-01T00:00:00Z',
+    earliest_retained_at: ACTIVITY.received_at,
+    count_truncated: false,
+    age_truncated: true,
+    capture: 'available',
+    completeness: 'best-effort',
+    gap_at: null,
+    recovered_at: null,
+  },
+};
+export const ACTIVITY_RESULTS = {
+  activity_id: ACTIVITY_ID,
+  revision: 3,
+  more: true,
+  items: [
+    {
+      id: ARTIFACT_ID,
+      kind: 'artifact',
+      association: 'caller_selected_artifact',
+      availability: 'available',
+      captured_at: ARTIFACT_MANIFEST.created_at,
+      expires_at: ARTIFACT_MANIFEST.expires_at,
+      bytes: 3,
+    },
+    {
+      id: RETAINED_ID,
+      kind: 'background-output',
+      association: 'background_execution_output',
+      availability: 'unavailable',
+    },
+  ],
+};
+export const SIGNAL_PAGE = {
+  computer: 'vm-1',
+  from: 'head:0',
+  cursor: 'head:1',
+  events: [],
+  more: false,
+  baseline: true,
+  supported: [
+    'process.exited',
+    'computer.started',
+    'computer.stopped',
+    'computer.suspended',
+    'computer.idle',
+  ],
+  retention: 'ephemeral',
+};
+export const CHAT_COMPLETION = {
+  id: 'chatcmpl-fixture',
+  object: 'chat.completion',
+  created: 1789552800,
+  model: 'mandala-agent',
+  choices: [{ index: 0, message: { role: 'assistant', content: 'Done.' }, finish_reason: 'stop' }],
+  usage: { prompt_tokens: 23, completion_tokens: 7, total_tokens: 30 },
+  agent: { computer_id: 'vm-1', steps: 1, stop: 'end_turn' },
+};
+
 const AGENT_STREAM =
   'event: step\ndata: {"n":1,"tool":"computer","action":"screenshot","detail":"took a screenshot"}\n\n' +
   'event: done\ndata: {"steps":1,"stop":"end_turn","text":"Done.","usage":{}}\n\n';
@@ -272,8 +358,8 @@ export function installFakePlatform(): {
     new Headers(init?.headers ?? {}).forEach((v, k) => {
       headers[k.toLowerCase()] = v;
     });
-    calls.push({ method, path, body, query: url.searchParams, headers });
-    return respond(method, path, headers, state.status, deleted, url.searchParams);
+    calls.push({ method, path, pathname: url.pathname, body, query: url.searchParams, headers });
+    return respond(method, path, headers, state.status, deleted, url.searchParams, body);
   }) as typeof fetch;
 
   return {
@@ -375,10 +461,38 @@ function respond(
   status = 'running',
   deleted: Set<string> = new Set(),
   query: URLSearchParams = new URLSearchParams(),
+  body?: unknown,
 ): Response {
   const json = (v: unknown, status = 200) =>
     new Response(JSON.stringify(v), { status, headers: { 'Content-Type': 'application/json' } });
 
+  const computerID = path.split('/')[2];
+  if (path === '/chat/completions' && method === 'POST')
+    return json({
+      ...CHAT_COMPLETION,
+      agent: {
+        ...CHAT_COMPLETION.agent,
+        computer_id: (body as { computer_id?: string })?.computer_id ?? 'vm-1',
+      },
+    });
+  if (path.endsWith('/files/list') && method === 'GET')
+    return json({
+      path: query.get('path'),
+      entries: [
+        { name: 'résumé final.txt', type: 'file', size_bytes: 12 },
+        { name: 'link', type: 'symlink' },
+      ],
+      truncated: false,
+      skipped: 0,
+    });
+  if (/^\/computers\/[^/]+\/activities$/.test(path) && method === 'GET')
+    return json({ ...ACTIVITY_PAGE, items: [{ ...ACTIVITY, computer_id: computerID }] });
+  if (/^\/computers\/[^/]+\/activities\/act_[a-f0-9]{32}\/results$/.test(path) && method === 'GET')
+    return json({ ...ACTIVITY_RESULTS, activity_id: path.split('/')[4] });
+  if (/^\/computers\/[^/]+\/activities\/act_[a-f0-9]{32}$/.test(path) && method === 'GET')
+    return json({ ...ACTIVITY, computer_id: computerID, activity_id: path.split('/')[4] });
+  if (path.endsWith('/signals') && method === 'GET')
+    return json({ ...SIGNAL_PAGE, computer: computerID, baseline: !query.get('since') });
   if (path.endsWith('/screenshot')) {
     // A one-pixel PNG, so the image content the tool builds is a real image.
     return new Response(Buffer.from(PNG_1PX, 'base64'), {

@@ -2,7 +2,9 @@ import type { ToolAnnotations } from '@modelcontextprotocol/sdk/types.js';
 
 /** Tags describe capabilities, not whether calling a tool is safe. */
 export const TOOL_TAGS = {
-  agent: ['run_agent'],
+  agent: ['run_agent', 'run_agent_chat'],
+  activities: ['list_activities', 'get_activity', 'get_activity_results'],
+  signals: ['read_signals'],
   artifacts: ['publish_artifact', 'get_artifact', 'read_artifact', 'delete_artifact'],
   computers: [
     'list_computers',
@@ -14,7 +16,7 @@ export const TOOL_TAGS = {
   ],
   events: ['wait_for_event', 'poll_events', 'wait_for_file_change'],
   executions: ['get_execution', 'read_execution_output'],
-  files: ['read_file', 'write_file', 'wait_for_file_change'],
+  files: ['list_directory', 'read_file', 'write_file', 'wait_for_file_change'],
   guest: [
     'exec',
     'exec_poll',
@@ -49,7 +51,13 @@ export const TOOL_TAGS = {
     'move_computer',
     'list_moves',
   ],
-  results: ['retain_execution_output', 'get_result', 'read_result_output', 'delete_result'],
+  results: [
+    'get_activity_results',
+    'retain_execution_output',
+    'get_result',
+    'read_result_output',
+    'delete_result',
+  ],
   snapshots: [
     'list_snapshots',
     'snapshot_holdings',
