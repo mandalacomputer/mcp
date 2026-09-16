@@ -4,6 +4,7 @@ import { Readable, Writable } from 'node:stream';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import type { CallToolResult, ListToolsResult } from '@modelcontextprotocol/sdk/types.js';
+import express from 'express';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { filtersFromEnv, main } from '../src/cli.js';
 import * as http from '../src/http.js';
@@ -379,6 +380,31 @@ describe('tool registration filters over MCP', () => {
 });
 
 describe('filter configuration before startup', () => {
+  it.each([
+    { filters: { tags: ['Input'] }, error: /Unknown MANDALA_TAGS tag "Input".*Valid tags/ },
+    { filters: { readOnly: 'false' as unknown as boolean }, error: /readOnly must be a boolean/ },
+  ])(
+    'refuses invalid direct HTTP filters before allocating resources: $filters',
+    async ({ filters, error }) => {
+      // Both resource boundaries are mocked so this also fails safely against
+      // code that defers filter validation until the first MCP initialize.
+      const interval = vi.spyOn(globalThis, 'setInterval').mockReturnValue({
+        unref: vi.fn(),
+      } as unknown as ReturnType<typeof setInterval>);
+      const listen = vi.spyOn(express.application, 'listen').mockImplementation(() => {
+        throw new Error('HTTP listen reached before filter validation');
+      });
+      const log = vi.spyOn(console, 'error').mockImplementation(() => {});
+      await expect(
+        http.runHttp({ port: 0, host: '127.0.0.1', baseUrl: BASE, ...filters }),
+      ).rejects.toThrow(error);
+      expect(interval).not.toHaveBeenCalled();
+      expect(listen).not.toHaveBeenCalled();
+      expect(log).not.toHaveBeenCalled();
+      expect(platform.calls).toEqual([]);
+    },
+  );
+
   it.each(['1', 'true', 'yes', 'on', ' YES '])('accepts read-only on: %j', (raw) => {
     expect(filtersFromEnv(raw, '').readOnly).toBe(true);
   });
