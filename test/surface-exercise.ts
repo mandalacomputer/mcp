@@ -7,6 +7,7 @@ import {
   installFakePlatform,
   RETAINED_ID,
   type Recorded,
+  SSH_PUBLIC_KEY,
 } from './harness.js';
 
 /**
@@ -131,6 +132,13 @@ export const EXERCISE: Record<string, Record<string, unknown>[]> = {
   test_webhook: [{ webhook_id: 'whk-9f3c1a7e5b2d4c80' }],
   list_webhook_deliveries: [{ webhook_id: 'whk-9f3c1a7e5b2d4c80' }],
   delete_webhook: [{ webhook_id: 'whk-9f3c1a7e5b2d4c80', confirm: true }],
+  // SSH: the caller's keys, and one computer's switch. The name is sent on one
+  // of the two adds, because the parameter sweep is what proves it can be.
+  list_ssh_keys: [{}],
+  add_ssh_key: [{ public_key: SSH_PUBLIC_KEY }, { public_key: SSH_PUBLIC_KEY, name: 'laptop' }],
+  remove_ssh_key: [{ key_id: 'sshk-3c9a51d07be2f846', confirm: true }],
+  get_computer_ssh: [{}],
+  set_computer_ssh: [{ enabled: true }],
   wait_for_computer: [{ until: 'guest' }],
   get_desktop_url: [{}],
   // A named size and an explicit shape are alternatives, never both.

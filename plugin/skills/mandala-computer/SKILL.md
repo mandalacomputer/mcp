@@ -62,7 +62,8 @@ Optional configuration:
   withheld. `screenshot`, `read_clipboard` and `list_windows` keep the hint.
 - `MANDALA_TAGS=input,guest` — select a union of lowercase tool tags:
   `activities`, `agent`, `artifacts`, `computers`, `events`, `executions`, `files`, `guest`,
-  `input`, `lifecycle`, `results`, `signals`, `snapshots`, `templates`, `usage`, `webhooks`.
+  `input`, `lifecycle`, `results`, `signals`, `snapshots`, `ssh`, `templates`, `usage`,
+  `webhooks`.
   Entries are comma-separated, trimmed and deduplicated; empty entries are
   ignored, and empty or unset means unfiltered. Unknown tags, including
   uppercase names, fail at startup and name the valid set. `files` means

@@ -127,6 +127,14 @@ export const V1_ROUTES: Route[] = [
   r('POST', 'webhooks/:id/rotate'),
   r('POST', 'webhooks/:id/test'),
   r('GET', 'webhooks/:id/deliveries'),
+
+  // SSH access: the caller's own public keys, which belong to the person rather
+  // than the account, and whether SSH is on for one computer.
+  r('GET', 'ssh-keys'),
+  r('POST', 'ssh-keys'),
+  r('DELETE', 'ssh-keys/:id'),
+  r('GET', 'computers/:id/ssh'),
+  r('PUT', 'computers/:id/ssh'),
 ];
 
 /**
@@ -352,6 +360,13 @@ export const PARAMETERS: ReadonlyMap<string, readonly string[]> = new Map([
   ['POST webhooks/:id/rotate', []],
   ['POST webhooks/:id/test', []],
   ['GET webhooks/:id/deliveries', []],
+
+  // A key is one OpenSSH public key line; `name` is optional.
+  ['GET ssh-keys', []],
+  ['POST ssh-keys', ['body:public_key', 'body:name']],
+  ['DELETE ssh-keys/:id', []],
+  ['GET computers/:id/ssh', []],
+  ['PUT computers/:id/ssh', ['body:enabled']],
 ]);
 
 /**
@@ -422,12 +437,13 @@ export function patternFor(path: string): string {
       const parent = parts[i - 1];
       // `webhooks` joined the list with the platform's own (OPL-4300), for the
       // reason `builds` did: without it `webhooks/:id` was in both tables and
-      // `webhooks/whk-1` was in neither.
+      // `webhooks/whk-1` was in neither. `ssh-keys` joined for the same reason.
       if (
         parent === 'computers' ||
         parent === 'snapshots' ||
         parent === 'builds' ||
-        parent === 'webhooks'
+        parent === 'webhooks' ||
+        parent === 'ssh-keys'
       )
         return ':id';
       if (i === 3 && parts[0] === 'computers' && parts[2] === 'activities') return ':activity';
