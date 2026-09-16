@@ -159,6 +159,135 @@ it('preserves retained usage above zero no-plan ceilings and clamps only remaini
   expect(data(result).remaining.snapshot_storage_bytes).toBe(0);
 });
 
+describe('complete aggregate consistency', () => {
+  const contradictions = [
+    {
+      name: 'active count exceeds kept count',
+      usage: { running_or_reserved_computers: 8 },
+      remaining: {},
+    },
+    {
+      name: 'active CPU exceeds configured CPU',
+      usage: { running_or_reserved_vcpu: 8 },
+      remaining: {},
+    },
+    {
+      name: 'zero active count still has active CPU',
+      usage: { running_or_reserved_computers: 0, running_or_reserved_ram_mb: 0 },
+      remaining: { running_or_reserved_ram_mb: 32768 },
+    },
+    {
+      name: 'zero active count still has reserved RAM',
+      usage: { running_or_reserved_computers: 0, running_or_reserved_vcpu: 0 },
+      remaining: {},
+    },
+    {
+      name: 'active count exceeds positive integer RAM reservations',
+      usage: { running_or_reserved_computers: 2, running_or_reserved_ram_mb: 1 },
+      remaining: { running_or_reserved_ram_mb: 32767 },
+    },
+    {
+      name: 'positive active count has zero reserved RAM',
+      usage: { running_or_reserved_vcpu: 0, running_or_reserved_ram_mb: 0 },
+      remaining: { running_or_reserved_ram_mb: 32768 },
+    },
+    {
+      name: 'no kept computers still has configured CPU',
+      usage: {
+        kept_computers: 0,
+        configured_disk_gb: 0,
+        running_or_reserved_computers: 0,
+        running_or_reserved_vcpu: 0,
+        running_or_reserved_ram_mb: 0,
+      },
+      remaining: { kept_computers: 5, configured_disk_gb: 200, running_or_reserved_ram_mb: 32768 },
+    },
+    {
+      name: 'no kept computers still has configured disk',
+      usage: {
+        kept_computers: 0,
+        configured_vcpu: 0,
+        running_or_reserved_computers: 0,
+        running_or_reserved_vcpu: 0,
+        running_or_reserved_ram_mb: 0,
+      },
+      remaining: { kept_computers: 5, configured_vcpu: 16, running_or_reserved_ram_mb: 32768 },
+    },
+  ];
+  it.each(contradictions)(
+    'refuses $name despite correct remaining subtraction',
+    async ({ usage, remaining }) => {
+      const value = structuredClone(ACCOUNT_QUOTA);
+      Object.assign(value.usage, usage);
+      Object.assign(value.remaining, remaining);
+      respond(value);
+      const result = await (await open()).call('get_account');
+      expect(result.isError).toBe(true);
+      expect(text(result)).toContain('Malformed metadata response');
+      expect(text(result)).not.toMatch(/"remaining"|"usage"/);
+      expect(platform.calls).toHaveLength(1);
+    },
+  );
+
+  it('permits configured holdings with no active computers', async () => {
+    const value = structuredClone(ACCOUNT_QUOTA);
+    Object.assign(value.usage, {
+      running_or_reserved_computers: 0,
+      running_or_reserved_vcpu: 0,
+      running_or_reserved_ram_mb: 0,
+    });
+    value.remaining.running_or_reserved_ram_mb = 32768;
+    respond(value);
+    const result = await (await open()).call('get_account');
+    expect(result.isError).not.toBe(true);
+    expect(data(result)).toEqual(value);
+  });
+
+  it('permits zero CPU and disk quantities with positive integer RAM reservations', async () => {
+    const value = structuredClone(ACCOUNT_QUOTA);
+    Object.assign(value.usage, {
+      configured_vcpu: 0,
+      configured_disk_gb: 0,
+      running_or_reserved_computers: 2,
+      running_or_reserved_vcpu: 0,
+      running_or_reserved_ram_mb: 2,
+    });
+    Object.assign(value.remaining, {
+      configured_vcpu: 16,
+      configured_disk_gb: 200,
+      running_or_reserved_ram_mb: 32766,
+    });
+    respond(value);
+    const result = await (await open()).call('get_account');
+    expect(result.isError).not.toBe(true);
+    expect(data(result)).toEqual(value);
+  });
+
+  it('permits consistent complete aggregates above positive plan ceilings', async () => {
+    const value = structuredClone(ACCOUNT_QUOTA);
+    value.usage = {
+      kept_computers: 8,
+      configured_vcpu: 40,
+      configured_disk_gb: 400,
+      running_or_reserved_computers: 8,
+      running_or_reserved_vcpu: 40,
+      running_or_reserved_ram_mb: 40000,
+      snapshot_storage_bytes: 107374182401,
+    };
+    value.remaining = {
+      kept_computers: 0,
+      configured_vcpu: 0,
+      configured_disk_gb: 0,
+      running_or_reserved_ram_mb: 0,
+      snapshot_storage_bytes: 0,
+    };
+    respond(value);
+    const result = await (await open()).call('get_account');
+    expect(result.isError).not.toBe(true);
+    expect(data(result)).toEqual(value);
+  });
+});
+
 const malformedFields: [string, unknown][] = [
   ['scope', 'workspace'],
   ['advisory', false],

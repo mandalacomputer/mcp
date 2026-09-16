@@ -48,6 +48,21 @@ const report = z
         if (complete !== (value !== null)) return false;
       }
     }
+    if (data.complete.computers) {
+      // Nullability was checked above. These are relationships within one observation,
+      // independent of plan ceilings: a consistent account can still be over quota.
+      const kept = data.usage.kept_computers!;
+      const cpu = data.usage.configured_vcpu!;
+      const disk = data.usage.configured_disk_gb!;
+      const active = data.usage.running_or_reserved_computers!;
+      const activeCPU = data.usage.running_or_reserved_vcpu!;
+      const activeRAM = data.usage.running_or_reserved_ram_mb!;
+      if (active > kept || activeCPU > cpu) return false;
+      if (kept === 0 && (cpu !== 0 || disk !== 0)) return false;
+      if (active === 0 && (activeCPU !== 0 || activeRAM !== 0)) return false;
+      // Each active computer contributes positive integer MB, but its CPU may be zero.
+      if (activeRAM < active) return false;
+    }
     const ceilings = {
       kept_computers: data.limits.max_computers,
       configured_vcpu: data.limits.vcpu_pool,
