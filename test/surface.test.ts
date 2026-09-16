@@ -155,6 +155,7 @@ describe('patternFor', () => {
     expect(patternFor('/computers/vm-1/exec/103457')).toBe('computers/:id/exec/:pid');
     expect(patternFor('/computers/vm-1/windows/0x2600003')).toBe('computers/:id/windows/:window');
     expect(patternFor('/webhooks/whk-9f3c1a7e5b2d4c80/deliveries')).toBe('webhooks/:id/deliveries');
+    expect(patternFor('/ssh-keys/sshk-3c9a51d07be2f846')).toBe('ssh-keys/:id');
     expect(patternFor('/computers/vm-1/activities/act_0123456789abcdef0123456789abcdef')).toBe(
       'computers/:id/activities/:activity',
     );

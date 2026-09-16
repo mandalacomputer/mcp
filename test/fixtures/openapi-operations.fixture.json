@@ -624,6 +624,47 @@
           }
         }
       }
+    },
+    "/ssh-keys": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "Synthetic successful operation response"
+          }
+        }
+      },
+      "post": {
+        "responses": {
+          "200": {
+            "description": "Synthetic successful operation response"
+          }
+        }
+      }
+    },
+    "/ssh-keys/{id}": {
+      "delete": {
+        "responses": {
+          "200": {
+            "description": "Synthetic successful operation response"
+          }
+        }
+      }
+    },
+    "/computers/{id}/ssh": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "Synthetic successful operation response"
+          }
+        }
+      },
+      "put": {
+        "responses": {
+          "200": {
+            "description": "Synthetic successful operation response"
+          }
+        }
+      }
     }
   }
 }

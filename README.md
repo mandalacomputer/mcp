@@ -180,6 +180,12 @@ Parameter and response-mode support remains a separate contract.
 `get_webhook`, `update_webhook`, `rotate_webhook_secret`, `test_webhook`,
 `list_webhook_deliveries`, `delete_webhook`
 
+**SSH access** — `list_ssh_keys`, `add_ssh_key`, `remove_ssh_key`,
+`get_computer_ssh`, `set_computer_ssh`. Keys belong to the person the API key
+was issued to, not to the account, and are accepted by every computer with SSH
+on, on every account where that person is an owner or member. A
+workspace-scoped key can read keys but not add or remove them.
+
 **Delegating** — `run_agent`, `run_agent_chat`, registered only when a model key is present:
 `MANDALA_MODEL_KEY` on stdio, or the caller's own `X-Model-Key` header over HTTP.
 Both must also survive the configured filters.
@@ -217,6 +223,7 @@ with an error listing all valid tags.
 | `events` | `wait_for_event`, `poll_events`, `wait_for_file_change` |
 | `usage` | `get_usage` |
 | `webhooks` | All webhook tools listed above |
+| `ssh` | All SSH tools listed above |
 | `agent` | `run_agent`, `run_agent_chat` |
 | `activities` | `list_activities`, `get_activity`, `get_activity_results` |
 | `signals` | `read_signals` |

@@ -81,6 +81,7 @@ export const TOOL_TAGS = {
     'get_build',
     'watch_build',
   ],
+  ssh: ['list_ssh_keys', 'add_ssh_key', 'remove_ssh_key', 'get_computer_ssh', 'set_computer_ssh'],
   usage: ['get_usage'],
   webhooks: [
     'list_webhooks',

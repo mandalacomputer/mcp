@@ -60,6 +60,15 @@ export const RETENTION = 'retention';
 export const WEBHOOKS = 'webhooks';
 
 /**
+ * The caller's SSH public keys. Scoped to the PERSON the API key belongs to,
+ * not to the account: the same list whichever account the key acts on.
+ */
+export const SSH_KEYS = 'ssh-keys';
+
+/** One SSH key. The id is `sshk-`-shaped. */
+export const sshKey = (id: string) => `${SSH_KEYS}/${segment('key_id', id)}`;
+
+/**
  * An RFC 3339 timestamp WITH a time zone, which is the only kind `GET /usage`
  * takes.
  *

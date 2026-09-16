@@ -149,6 +149,32 @@ const HOLDINGS = { count: 2, size_bytes: 6_100_000_000, fingerprint: 'fp-abc123'
 /** The plan's retention window. Every tier non-zero, so a tool that drops one shows it. */
 export const RETENTION = { daily: 7, weekly: 4, monthly: 12 };
 
+/** One OpenSSH public key line, the shape add_ssh_key sends. */
+export const SSH_PUBLIC_KEY =
+  'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMxlN5MDRT9cXdHi871o7Ty3dKfNLt8mNmjSWtwv6DTw you@laptop';
+
+/** One registered SSH key as the platform lists it: canonical, no comment. */
+export const SSH_KEY = {
+  id: 'sshk-3c9a51d07be2f846',
+  name: 'laptop',
+  public_key: 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMxlN5MDRT9cXdHi871o7Ty3dKfNLt8mNmjSWtwv6DTw',
+  fingerprint: 'SHA256:+GiGZKWHEUZeM+kzujljZNiEU86lD9XvR2QBUw90/r8',
+  key_type: 'ssh-ed25519',
+  created_at: '2026-09-16T12:00:00Z',
+  last_used_at: null,
+};
+
+/** One computer's SSH setting, as a read and a write both answer it. */
+export const SSH_SETTING = {
+  computer: 'vm-1',
+  enabled: true,
+  available: true,
+  pending: false,
+  key_count: 1,
+  keys_pushed: 1,
+  error: null,
+};
+
 /**
  * One webhook subscription as the platform lists it — never with a secret. The
  * health fields are all non-null, so a sentence that reads one shows it.
@@ -666,6 +692,26 @@ function respond(
       );
     if (path.endsWith('/deliveries')) return json([WEBHOOK_DELIVERY]);
     return json(method === 'DELETE' ? { ok: true } : WEBHOOK);
+  }
+  // SSH: the caller's keys (201 on an add, an ack on a remove), and one
+  // computer's setting, which a read and a write both answer in full.
+  if (path === '/ssh-keys')
+    return json(method === 'GET' ? [SSH_KEY] : SSH_KEY, method === 'GET' ? 200 : 201);
+  if (path.startsWith('/ssh-keys/')) return json({ ok: true });
+  // The computer is the one in the path and a write answers what it was sent,
+  // so a tool that ignored either would be caught rather than echoed a fixture.
+  // A PUT that did not send a boolean `enabled` gets an answer no tool may
+  // accept as a setting, so dropping the body fails whichever way it was asked.
+  const ssh = /^\/computers\/([^/]+)\/ssh$/.exec(path);
+  if (ssh) {
+    const sent = (body as { enabled?: unknown } | undefined)?.enabled;
+    if (method === 'PUT' && typeof sent !== 'boolean')
+      return json({ error: 'enabled must be true or false' });
+    return json({
+      ...SSH_SETTING,
+      computer: decodeURIComponent(ssh[1]),
+      enabled: method === 'PUT' ? sent : SSH_SETTING.enabled,
+    });
   }
   if (path === '/moves') return json({ moves: [MOVE_DONE] });
   if (path.endsWith('/move')) return json(MOVE_STARTED, 202);
