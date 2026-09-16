@@ -278,7 +278,7 @@ export const ACTIVITY_RESULTS = {
 };
 export const SIGNAL_PAGE = {
   computer: 'vm-1',
-  from: 'head:0',
+  from: 'head:1',
   cursor: 'head:1',
   events: [],
   more: false,
@@ -492,7 +492,12 @@ function respond(
   if (/^\/computers\/[^/]+\/activities\/act_[a-f0-9]{32}$/.test(path) && method === 'GET')
     return json({ ...ACTIVITY, computer_id: computerID, activity_id: path.split('/')[4] });
   if (path.endsWith('/signals') && method === 'GET')
-    return json({ ...SIGNAL_PAGE, computer: computerID, baseline: !query.get('since') });
+    return json({
+      ...SIGNAL_PAGE,
+      computer: computerID,
+      from: query.get('since') || SIGNAL_PAGE.cursor,
+      baseline: !query.get('since'),
+    });
   if (path.endsWith('/screenshot')) {
     // A one-pixel PNG, so the image content the tool builds is a real image.
     return new Response(Buffer.from(PNG_1PX, 'base64'), {

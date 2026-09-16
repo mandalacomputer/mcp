@@ -101,11 +101,18 @@ export const registerSignals: Registrar = (server, session) => {
             signal: extra.signal,
           }),
         );
+        // Compare opaque checkpoints without parsing or deriving a next cursor.
+        // Baselines and explicit resets describe one head; replay starts at since.
         if (
           data.computer !== id ||
           data.events.some((e) => e.computer !== id) ||
-          (data.gap && data.gap.computer !== id) ||
-          (data.baseline && data.events.length) ||
+          data.baseline !== (since === undefined || since === '') ||
+          (data.baseline && data.gap) ||
+          (data.gap && (data.gap.computer !== id || data.gap.cursor !== data.cursor)) ||
+          ((data.baseline || data.gap) &&
+            (data.events.length || data.more || data.from !== data.cursor)) ||
+          (!data.baseline && !data.gap && data.from !== since) ||
+          (data.more && !data.events.length) ||
           data.events.length > (limit ?? 50)
         )
           throw new Error('Inconsistent signal page; no checkpoint was established.');

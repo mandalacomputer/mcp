@@ -376,52 +376,156 @@ describe('metadata meanings survive projection', () => {
       );
     },
   );
-  it('preserves empty-page cursor advancement and an explicit reset gap', async () => {
-    answer({
-      ...SIGNAL_PAGE,
-      baseline: false,
-      cursor: 'new-checkpoint',
-      gap: {
-        cursor: 'reset-head',
-        at: '2026-09-16T00:00:00Z',
-        type: 'gap',
-        computer: 'vm-1',
-        source: 'daemon',
-        data: { detail: 'cursor reset', oldest_cursor: 'oldest' },
-      },
-    });
+  it.each(['saved:1', 'opaque +/%:九'])(
+    'preserves empty replay advancement from %j',
+    async (since) => {
+      answer({
+        ...SIGNAL_PAGE,
+        baseline: false,
+        from: since,
+        cursor: 'new-checkpoint',
+      });
+      const result = await conn.call('read_signals', { since });
+      expect(result.isError).not.toBe(true);
+      expect(prose(result)).toContain('new-checkpoint');
+      expect(prose(result)).not.toContain('GAP');
+      expect(platform.calls).toHaveLength(1);
+      expect(Object.fromEntries(platform.calls[0].query)).toEqual({ since });
+      expect(events.sockets).toEqual([]);
+    },
+  );
+  const reset = {
+    ...SIGNAL_PAGE,
+    baseline: false,
+    from: 'reset-head',
+    cursor: 'reset-head',
+    gap: {
+      cursor: 'reset-head',
+      at: '2026-09-16T00:00:00Z',
+      type: 'gap',
+      computer: 'vm-1',
+      source: 'daemon',
+      data: { detail: 'cursor reset', oldest_cursor: 'oldest' },
+    },
+  };
+  it('preserves a consistent explicit reset gap', async () => {
+    answer(reset);
     const result = await conn.call('read_signals', { since: 'old-checkpoint' });
     expect(result.isError).not.toBe(true);
-    expect(prose(result)).toContain('new-checkpoint');
+    expect(prose(result)).toContain('reset-head');
     expect(prose(result)).toContain('GAP');
+    expect(prose(result)).not.toContain('Head-only baseline');
+    expect(platform.calls).toHaveLength(1);
+    expect(Object.fromEntries(platform.calls[0].query)).toEqual({ since: 'old-checkpoint' });
+    expect(events.sockets).toEqual([]);
   });
-  it('preserves exact execution identity and lost versus signed exit outcome', async () => {
-    answer({
-      ...SIGNAL_PAGE,
-      baseline: false,
-      events: [
-        {
-          seq: 1,
-          cursor: 'e:1',
-          at: '2026-09-16T00:00:00Z',
-          computer: 'vm-1',
-          source: 'daemon',
-          type: 'process.exited',
-          data: {
-            pid: 17,
-            execution_id: ACTIVITY.execution_id,
-            exit_code: -2,
-            output: 'DO-NOT-ECHO',
+  const idle = {
+    seq: 1,
+    cursor: 'idle:1',
+    at: '2026-09-16T00:00:00Z',
+    computer: 'vm-1',
+    source: 'daemon',
+    type: 'computer.idle',
+    data: { idle_seconds: 3 },
+  };
+  it.each([
+    {
+      name: 'replay starts at an unrelated checkpoint',
+      since: 'saved:1',
+      value: { ...SIGNAL_PAGE, baseline: false, from: 'other:7', cursor: 'other:8' },
+    },
+    { name: 'replay silently becomes a baseline', since: 'saved:1', value: SIGNAL_PAGE },
+    {
+      name: 'missing since does not establish a baseline',
+      since: undefined,
+      value: { ...SIGNAL_PAGE, baseline: false },
+    },
+    {
+      name: 'empty since does not establish a baseline',
+      since: '',
+      value: { ...SIGNAL_PAGE, baseline: false },
+    },
+    {
+      name: 'baseline has two heads',
+      since: '',
+      value: { ...SIGNAL_PAGE, from: 'other:7' },
+    },
+    { name: 'baseline has more pages', since: '', value: { ...SIGNAL_PAGE, more: true } },
+    {
+      name: 'baseline includes replay events',
+      since: '',
+      value: { ...SIGNAL_PAGE, events: [idle] },
+    },
+    { name: 'baseline also claims a gap', since: '', value: { ...reset, baseline: true } },
+    { name: 'reset has a different start', since: 'saved:1', value: { ...reset, from: 'other:7' } },
+    {
+      name: 'reset has a different gap cursor',
+      since: 'saved:1',
+      value: { ...reset, gap: { ...reset.gap, cursor: 'other:8' } },
+    },
+    {
+      name: 'reset has three different checkpoints',
+      since: 'saved:1',
+      value: { ...reset, from: 'other:7', cursor: 'other:8' },
+    },
+    { name: 'reset has more pages', since: 'saved:1', value: { ...reset, more: true } },
+    {
+      name: 'reset includes replay events',
+      since: 'saved:1',
+      value: { ...reset, events: [idle] },
+    },
+    {
+      name: 'empty replay claims more pages',
+      since: 'saved:1',
+      value: { ...SIGNAL_PAGE, baseline: false, from: 'saved:1', more: true },
+    },
+  ])('rejects inconsistent signal checkpoints: $name', async ({ since, value }) => {
+    answer(value);
+    const result = await conn.call('read_signals', since === undefined ? {} : { since });
+    expect(result.isError).toBe(true);
+    expect(prose(result)).toContain('no checkpoint was established');
+    expect(prose(result)).not.toContain('use the returned cursor');
+    expect(prose(result)).not.toContain(value.cursor);
+    expect(platform.calls).toHaveLength(1);
+    expect(Object.fromEntries(platform.calls[0].query)).toEqual(
+      since === undefined ? {} : { since },
+    );
+    expect(events.sockets).toEqual([]);
+  });
+  it.each([false, true])(
+    'preserves execution identity and signed exit outcome with more=%j',
+    async (more) => {
+      answer({
+        ...SIGNAL_PAGE,
+        baseline: false,
+        from: 'page:0',
+        more,
+        events: [
+          {
+            seq: 1,
+            cursor: 'e:1',
+            at: '2026-09-16T00:00:00Z',
+            computer: 'vm-1',
+            source: 'daemon',
+            type: 'process.exited',
+            data: {
+              pid: 17,
+              execution_id: ACTIVITY.execution_id,
+              exit_code: -2,
+              output: 'DO-NOT-ECHO',
+            },
           },
-        },
-      ],
-      cursor: 'page:9',
-    });
-    const result = await conn.call('read_signals', { since: 'page:0' });
-    expect(result.isError).not.toBe(true);
-    expect(prose(result)).toContain('-2');
-    expect(prose(result)).toContain(ACTIVITY.execution_id);
-    expect(prose(result)).toContain('page:9');
-    expect(prose(result)).not.toContain('DO-NOT-ECHO');
-  });
+        ],
+        cursor: 'page:9',
+      });
+      const result = await conn.call('read_signals', { since: 'page:0' });
+      expect(result.isError).not.toBe(true);
+      expect(prose(result)).toContain('-2');
+      expect(prose(result)).toContain(ACTIVITY.execution_id);
+      expect(prose(result)).toContain('page:9');
+      expect(prose(result)).not.toContain('DO-NOT-ECHO');
+      expect(platform.calls).toHaveLength(1);
+      expect(events.sockets).toEqual([]);
+    },
+  );
 });
