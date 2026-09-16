@@ -492,6 +492,128 @@ describe('metadata meanings survive projection', () => {
     );
     expect(events.sockets).toEqual([]);
   });
+  const replayEvents = [
+    { ...idle, seq: 0, cursor: 'visible:z' },
+    { ...idle, seq: 5, cursor: 'visible:a' },
+    { ...idle, seq: 8, cursor: 'visible:m' },
+  ];
+  const replay = {
+    ...SIGNAL_PAGE,
+    baseline: false,
+    from: 'saved:1',
+    cursor: 'filtered:tail',
+    events: replayEvents,
+  };
+  it.each(
+    [
+      {
+        name: 'single event page returns to the start',
+        value: { ...replay, cursor: replay.from, events: [replayEvents[0]] },
+      },
+      { name: 'next cursor returns to the start', value: { ...replay, cursor: replay.from } },
+      {
+        name: 'next cursor returns to the first event',
+        value: { ...replay, cursor: replayEvents[0].cursor },
+      },
+      {
+        name: 'next cursor returns to the middle event',
+        value: { ...replay, cursor: replayEvents[1].cursor },
+      },
+      {
+        name: 'first event reuses the start cursor',
+        value: { ...replay, events: [{ ...replayEvents[0], cursor: replay.from }] },
+      },
+      {
+        name: 'later event reuses the start cursor',
+        value: {
+          ...replay,
+          events: [replayEvents[0], { ...replayEvents[1], cursor: replay.from }],
+        },
+      },
+      {
+        name: 'adjacent events share a cursor',
+        value: {
+          ...replay,
+          events: [replayEvents[0], { ...replayEvents[1], cursor: replayEvents[0].cursor }],
+        },
+      },
+      {
+        name: 'nonadjacent events share a cursor',
+        value: {
+          ...replay,
+          events: [
+            replayEvents[0],
+            replayEvents[1],
+            { ...replayEvents[2], cursor: replayEvents[0].cursor },
+          ],
+        },
+      },
+      {
+        name: 'sequence numbers decrease',
+        value: { ...replay, events: [replayEvents[1], replayEvents[0]] },
+      },
+      {
+        name: 'sequence numbers decrease after an increase',
+        value: { ...replay, events: [replayEvents[0], replayEvents[2], replayEvents[1]] },
+      },
+      {
+        name: 'distinct cursors have equal sequence numbers',
+        value: {
+          ...replay,
+          events: [replayEvents[0], { ...replayEvents[1], seq: replayEvents[0].seq }],
+        },
+      },
+    ].flatMap((scenario) => [false, true].map((more) => ({ ...scenario, more }))),
+  )('rejects inconsistent signal replay progress: $name, more=$more', async ({ value, more }) => {
+    answer({ ...value, more });
+    const result = await conn.call('read_signals', { since: replay.from });
+    expect(result.isError).toBe(true);
+    expect(prose(result)).toContain('no checkpoint was established');
+    expect(prose(result)).not.toContain('use the returned cursor');
+    expect(prose(result)).not.toContain(value.cursor);
+    expect(platform.calls).toHaveLength(1);
+    expect(Object.fromEntries(platform.calls[0].query)).toEqual({ since: replay.from });
+    expect(events.sockets).toEqual([]);
+  });
+  it.each(
+    [
+      { name: 'only visible event', cursor: replayEvents[0].cursor, pageEvents: [replayEvents[0]] },
+      { name: 'last visible event', cursor: replayEvents.at(-1)!.cursor, pageEvents: replayEvents },
+      { name: 'filtered tail', cursor: 'opaque +/%:九', pageEvents: replayEvents },
+    ].flatMap((scenario) => [false, true].map((more) => ({ ...scenario, more }))),
+  )(
+    'preserves valid signal replay progress to $name, more=$more',
+    async ({ cursor, more, pageEvents }) => {
+      const value = { ...replay, cursor, more, events: pageEvents };
+      const limit = pageEvents.length;
+      answer(value);
+      // Retrying the same checkpoint is independent; neither call consumes local state.
+      for (let call = 1; call <= 2; call++) {
+        const result = await conn.call('read_signals', { since: replay.from, limit });
+        expect(result.isError).not.toBe(true);
+        const first = result.content[0];
+        expect(JSON.parse(first.type === 'text' ? first.text.split('\n\n')[1] : '{}')).toEqual(
+          value,
+        );
+        expect(platform.calls).toHaveLength(call);
+        expect(Object.fromEntries(platform.calls.at(-1)!.query)).toEqual({
+          since: replay.from,
+          limit: String(limit),
+        });
+        expect(events.sockets).toEqual([]);
+      }
+    },
+  );
+  it('preserves an empty replay at the current head', async () => {
+    const value = { ...replay, cursor: replay.from, events: [] };
+    answer(value);
+    const result = await conn.call('read_signals', { since: replay.from });
+    expect(result.isError).not.toBe(true);
+    const first = result.content[0];
+    expect(JSON.parse(first.type === 'text' ? first.text.split('\n\n')[1] : '{}')).toEqual(value);
+    expect(platform.calls).toHaveLength(1);
+    expect(events.sockets).toEqual([]);
+  });
   it.each([false, true])(
     'preserves execution identity and signed exit outcome with more=%j',
     async (more) => {

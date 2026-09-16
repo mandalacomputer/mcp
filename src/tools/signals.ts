@@ -103,9 +103,17 @@ export const registerSignals: Registrar = (server, session) => {
         );
         // Compare opaque checkpoints without parsing or deriving a next cursor.
         // Baselines and explicit resets describe one head; replay starts at since.
+        // Events must advance; the next cursor may also pass filtered rows.
+        const checkpoints = new Set([data.from, ...data.events.map((e) => e.cursor)]);
         if (
           data.computer !== id ||
-          data.events.some((e) => e.computer !== id) ||
+          data.events.some(
+            (e, i) => e.computer !== id || (i > 0 && e.seq <= data.events[i - 1].seq),
+          ) ||
+          checkpoints.size !== data.events.length + 1 ||
+          (data.events.length > 0 &&
+            data.cursor !== data.events.at(-1)?.cursor &&
+            checkpoints.has(data.cursor)) ||
           data.baseline !== (since === undefined || since === '') ||
           (data.baseline && data.gap) ||
           (data.gap && (data.gap.computer !== id || data.gap.cursor !== data.cursor)) ||
