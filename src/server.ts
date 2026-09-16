@@ -1,5 +1,13 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import {
+  CallToolRequestSchema,
+  ErrorCode,
+  ListToolsRequestSchema,
+  McpError,
+  type ToolAnnotations,
+} from '@modelcontextprotocol/sdk/types.js';
 import { Session, type SessionConfig } from './session.js';
+import { type ToolFilters, toolFilter } from './tool-filters.js';
 import { registerAgent } from './tools/agent.js';
 import { registerArtifacts } from './tools/artifacts.js';
 import { registerComputers } from './tools/computers.js';
@@ -51,7 +59,16 @@ Things that are true here and are not obvious:
 - A 409 is not one thing, and retrying blindly is how a turn gets burned. Most describe a passing state and clear on their own: a guest still booting, a guest agent busy with another call. Some describe a DECISION about what you asked for — a size the host cannot run, a computer that has to be stopped first — and those answer the same way forever; the message says which, and usually says what to do instead. A 400 never clears.
 - Growing a computer past what its host can run is the refusal worth knowing by name: update_computer says a move is possible, and move_computer is how you take that up. It moves the machine to different hardware and copies its disk, so say what it costs before you call it.`;
 
+const filteredInstructions = `Mandala Computer gives you access to a Linux desktop in the cloud.
+
+This session exposes a filtered set of tools. Use only the tools in its tool list; some desktop workflows may be unavailable. Pass computer_id explicitly on computer-specific calls unless a computer was already bound to this session. A running VM does not imply that its guest desktop is ready.
+
+Read each available tool's description before calling it. Read-only access follows the tool's readOnlyHint annotation: a read that can resume or bill a computer is not read-only. A running computer still costs money, and passive observation does not prevent idle suspension.
+
+Who you are is checked again while a call is in flight. A 401 or 403 means the credential or role stopped being accepted; a 402 means the current plan refuses the work. Do not resend these calls. Inspect any completed work attached before deciding what remains. A 409 may describe either a temporary condition or a decision that will not change on retry; read its message. A 400 never clears.`;
+
 export type ServerConfig = SessionConfig &
+  ToolFilters &
   Partial<ToolOptions> & {
     /** Internal HTTP hook: hold a session active for the real tool callback lifetime. */
     activity?: () => () => void;
@@ -65,21 +82,28 @@ export type ServerConfig = SessionConfig &
  * transport builds exactly one and that is the same thing with n=1.
  */
 export function createServer(cfg: ServerConfig): McpServer {
+  const filter = toolFilter(cfg);
   const session = new Session(cfg);
   const opts: ToolOptions = { lifecycle: cfg.lifecycle ?? true };
 
   const server = new McpServer(
     { name: SERVER_NAME, version: SERVER_VERSION },
-    { capabilities: { logging: {} }, instructions: instructions(opts.lifecycle) },
+    {
+      capabilities: { logging: {}, tools: {} },
+      instructions: filter.filtered ? filteredInstructions : instructions(opts.lifecycle),
+    },
   );
 
   // A cancelled Streamable HTTP response can let transport.handleRequest()
   // settle while the tool callback is still awaiting platform work. Wrap tool
   // registration once so the HTTP session lease follows that real lifetime.
-  // Stdio has no hook and pays no cost beyond this branch.
-  if (cfg.activity) {
-    const register = server.registerTool.bind(server) as (...args: unknown[]) => unknown;
-    server.registerTool = ((...args: unknown[]) => {
+  // Withheld tools never reach the SDK registry or acquire an activity lease.
+  const register = server.registerTool.bind(server) as (...args: unknown[]) => unknown;
+  let registered = false;
+  server.registerTool = ((...args: unknown[]) => {
+    const [name, config] = args as [string, { annotations?: ToolAnnotations }];
+    if (!filter.allows(name, config.annotations)) return;
+    if (cfg.activity) {
       const handlerIndex = args.length - 1;
       const handler = args[handlerIndex] as (...handlerArgs: unknown[]) => unknown;
       args[handlerIndex] = async (...handlerArgs: unknown[]) => {
@@ -90,9 +114,15 @@ export function createServer(cfg: ServerConfig): McpServer {
           release?.();
         }
       };
-      return register(...args);
-    }) as typeof server.registerTool;
-  }
+    }
+    if (!registered) {
+      server.server.removeRequestHandler('tools/list');
+      server.server.removeRequestHandler('tools/call');
+    }
+    const tool = register(...args);
+    registered = true;
+    return tool;
+  }) as typeof server.registerTool;
 
   registerComputers(server, session, opts);
   registerInput(server, session, opts);
@@ -105,6 +135,15 @@ export function createServer(cfg: ServerConfig): McpServer {
   registerEvents(server, session, opts);
   registerWebhooks(server, session, opts);
   registerAgent(server, session, opts);
+
+  // The SDK installs tool handlers on the first registration. An empty
+  // selection still needs a valid tools/list response and must refuse calls.
+  if (!registered) {
+    server.server.setRequestHandler(ListToolsRequestSchema, () => ({ tools: [] }));
+    server.server.setRequestHandler(CallToolRequestSchema, () => {
+      throw new McpError(ErrorCode.InvalidParams, 'No tools are available in this session');
+    });
+  }
 
   // The event sockets outlive every tool call by design (OPL-3926), so nothing
   // in a tool can be the thing that closes them. This is the end of the
