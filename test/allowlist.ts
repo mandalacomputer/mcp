@@ -64,6 +64,10 @@ export const V1_ROUTES: Route[] = [
   r('GET', 'computers/:id/results/:resultId'),
   r('GET', 'computers/:id/results/:resultId/output'),
   r('DELETE', 'computers/:id/results/:resultId'),
+  r('POST', 'computers/:id/artifacts'),
+  r('GET', 'computers/:id/artifacts/:artifactId'),
+  r('GET', 'computers/:id/artifacts/:artifactId/download'),
+  r('DELETE', 'computers/:id/artifacts/:artifactId'),
   r('GET', 'computers/:id/activities'),
   r('GET', 'computers/:id/activities/:activity'),
   r('GET', 'computers/:id/signals'),
@@ -248,6 +252,20 @@ export const PARAMETERS: ReadonlyMap<string, readonly string[]> = new Map([
   ['GET computers/:id/results/:resultId', []],
   ['GET computers/:id/results/:resultId/output', ['query:stream', 'query:offset', 'query:limit']],
   ['DELETE computers/:id/results/:resultId', []],
+  [
+    'POST computers/:id/artifacts',
+    [
+      'body:path',
+      'body:expected_size',
+      'body:expected_sha256',
+      'body:execution_id',
+      'body:max_bytes',
+      'body:retention_seconds',
+    ],
+  ],
+  ['GET computers/:id/artifacts/:artifactId', []],
+  ['GET computers/:id/artifacts/:artifactId/download', []],
+  ['DELETE computers/:id/artifacts/:artifactId', []],
   ['GET computers/:id/windows', ['query:include']],
   [
     'POST computers/:id/windows/:window',
@@ -388,6 +406,11 @@ export const UNIMPLEMENTED = new Set([
   'GET computers/:id/results/:resultId',
   'GET computers/:id/results/:resultId/output',
   'DELETE computers/:id/results/:resultId',
+  // Explicit artifacts are tracked until runtime helpers are available.
+  'POST computers/:id/artifacts',
+  'GET computers/:id/artifacts/:artifactId',
+  'GET computers/:id/artifacts/:artifactId/download',
+  'DELETE computers/:id/artifacts/:artifactId',
   // The OpenAI-compatible door onto the same agent loop the platform already
   // exposes at computers/:id/agent, which run_agent uses. Two ways to reach one
   // engine is a good thing for a caller who already has an OpenAI client
