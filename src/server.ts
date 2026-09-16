@@ -1,11 +1,13 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { Session, type SessionConfig } from './session.js';
 import { registerAgent } from './tools/agent.js';
+import { registerArtifacts } from './tools/artifacts.js';
 import { registerComputers } from './tools/computers.js';
 import { registerEvents } from './tools/events.js';
 import { registerExecutions } from './tools/executions.js';
 import { registerGuest } from './tools/guest.js';
 import { registerInput } from './tools/input.js';
+import { registerResults } from './tools/results.js';
 import { registerSnapshots } from './tools/snapshots.js';
 import { registerTemplates } from './tools/templates.js';
 import type { ToolOptions } from './tools/types.js';
@@ -96,6 +98,8 @@ export function createServer(cfg: ServerConfig): McpServer {
   registerInput(server, session, opts);
   registerGuest(server, session, opts);
   registerExecutions(server, session, opts);
+  registerResults(server, session, opts);
+  registerArtifacts(server, session, opts);
   registerSnapshots(server, session, opts);
   registerTemplates(server, session, opts);
   registerEvents(server, session, opts);

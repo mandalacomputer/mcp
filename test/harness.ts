@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
@@ -14,6 +15,55 @@ export type Recorded = {
   headers: Record<string, string>;
 };
 
+export const RETAINED_ID = 'res_0123456789abcdef0123456789abcdef';
+export const ARTIFACT_ID = 'art_0123456789abcdef0123456789abcdef';
+export const ARTIFACT_BYTES = Buffer.from([0, 128, 255]);
+const retainedPrefix = {
+  bytes: 0,
+  sha256: createHash('sha256').digest('hex'),
+  source_offset: 0,
+  next_source_offset: 0,
+  end_reason: 'observed_eof',
+};
+export const RETAINED_MANIFEST = {
+  version: 1,
+  result_id: RETAINED_ID,
+  kind: 'background-output',
+  state: 'ready',
+  account_id: 'acc-1',
+  computer_id: 'vm-1',
+  workspace_id: null,
+  execution_id: 'exec_0123456789abcdef0123456789abcdef',
+  source: 'volatile_guest_files',
+  capture_started_at: '2026-09-16T12:00:00Z',
+  captured_at: '2026-09-16T12:00:01Z',
+  expires_at: '2026-09-17T12:00:00Z',
+  execution_observation: { status: 'exited', observed_at: '2026-09-16T12:00:00.9Z', exit_code: -1 },
+  stdout: retainedPrefix,
+  stderr: retainedPrefix,
+  diagnostic: {
+    bytes: 0,
+    sha256: retainedPrefix.sha256,
+    source: 'wrapper',
+    diagnostic_truncated: false,
+  },
+};
+export const ARTIFACT_MANIFEST = {
+  artifact_id: ARTIFACT_ID,
+  kind: 'artifact',
+  state: 'ready',
+  computer_id: 'vm-1',
+  workspace_id: null,
+  created_at: '2026-09-16T12:00:01Z',
+  expires_at: '2026-09-17T12:00:00Z',
+  size: ARTIFACT_BYTES.length,
+  sha256: createHash('sha256').update(ARTIFACT_BYTES).digest('hex'),
+  execution_association: {
+    kind: 'caller_selected',
+    execution_id: RETAINED_MANIFEST.execution_id,
+    verified_at: '2026-09-16T12:00:00Z',
+  },
+};
 const COMPUTER = {
   id: 'vm-1',
   name: 'desk',
@@ -350,6 +400,32 @@ function respond(
   // still holding plain `stdout` would let a server that never decodes pass —
   // and against a current daemon that server reads every command as empty.
   const executionId = 'exec_0123456789abcdef0123456789abcdef';
+  if (path.endsWith(`/executions/${executionId}/retained-output`))
+    return json(RETAINED_MANIFEST, 201);
+  if (path.endsWith(`/results/${RETAINED_ID}`))
+    return method === 'DELETE' ? new Response(null, { status: 204 }) : json(RETAINED_MANIFEST);
+  if (path.endsWith(`/results/${RETAINED_ID}/output`)) {
+    const offset = query.get('offset') ?? '0';
+    return new Response(null, {
+      headers: {
+        'Content-Type': 'application/octet-stream',
+        'Content-Length': '0',
+        'X-Result-Offset': offset,
+        'X-Result-Next-Offset': offset,
+        'X-Result-EOF': 'true',
+      },
+    });
+  }
+  if (path.endsWith('/artifacts') && method === 'POST') return json(ARTIFACT_MANIFEST, 201);
+  if (path.endsWith(`/artifacts/${ARTIFACT_ID}`))
+    return method === 'DELETE' ? new Response(null, { status: 204 }) : json(ARTIFACT_MANIFEST);
+  if (path.endsWith(`/artifacts/${ARTIFACT_ID}/download`))
+    return new Response(ARTIFACT_BYTES, {
+      headers: {
+        'Content-Type': 'application/octet-stream',
+        'Content-Length': String(ARTIFACT_BYTES.length),
+      },
+    });
   if (path.endsWith(`/executions/${executionId}/output`))
     return json({
       execution_id: executionId,

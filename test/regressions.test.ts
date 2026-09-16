@@ -3522,6 +3522,11 @@ describe('the tools our own prose tells a model to call', () => {
     'execution_id',
     'stdout_offset',
     'stderr_offset',
+    // Retained metadata identity and explicit artifact nomination/presentation parameters.
+    'result_id',
+    'expected_size',
+    'expected_sha256',
+    'max_bytes',
   ]);
 
   it('names only tools that exist', async () => {
@@ -3533,6 +3538,19 @@ describe('the tools our own prose tells a model to call', () => {
     const { client, call, close } = await connect({ modelKey: 'sk-test' });
     const registered = new Set((await client.listTools()).tools.map((t) => t.name));
     expect(registered.has('run_agent'), 'the keyed server registers run_agent').toBe(true);
+    // These closed non-tool exceptions must still name real registered parameters.
+    const tools = (await client.listTools()).tools;
+    for (const [tool, parameter] of [
+      ['get_result', 'result_id'],
+      ['publish_artifact', 'expected_size'],
+      ['publish_artifact', 'expected_sha256'],
+      ['read_artifact', 'max_bytes'],
+    ]) {
+      expect(
+        tools.find((entry) => entry.name === tool)?.inputSchema.properties,
+        tool,
+      ).toHaveProperty(parameter);
+    }
 
     const prose: { where: string; text: string }[] = [];
     // The server's own instructions, which are prose a model reads BEFORE any
@@ -5042,18 +5060,20 @@ describe('the event tools and what their annotations claim', () => {
     }
   });
 
-  it('claims non-destructive for exactly the tools that read', async () => {
+  it('claims non-destructive for exactly the reviewed read and additive effects', async () => {
     // A CLOSED set rather than a per-name loop, which is the half a hand-listed
     // invariant cannot do: this fails both when a tool stops declaring it and
     // when one starts declaring it that should not.
     //
     // Deliberately not the wider rule "every tool without readOnlyHint must set
-    // destructiveHint". Thirty-one tools here set neither — `click`,
+    // destructiveHint". Several tools here set neither — `click`,
     // `write_file`, `stop_computer` — and for every one of them the default of
     // TRUE is correct, so that rule would demand an annotation on tools whose
     // behaviour is already described. What is worth pinning is the exception:
-    // the tools that do NOT modify, which is a semantic nothing derivable from
-    // the tool list can decide for itself.
+    // the tools that do not destroy existing state. This includes additive
+    // creation and consuming cursor reads; it does not imply readOnlyHint or
+    // idempotentHint. Captures create versions and are not safe to repeat;
+    // retained deletes remain destructive and therefore outside this set.
     const platform = installFakePlatform();
     const { client, close } = await connect();
     try {
@@ -5067,11 +5087,17 @@ describe('the event tools and what their annotations claim', () => {
           'create_computer',
           'cursor_position',
           'exec_poll',
+          'get_artifact',
           'get_desktop_url',
           'get_execution',
+          'get_result',
           'poll_events',
+          'publish_artifact',
+          'read_artifact',
           'read_execution_output',
           'read_file',
+          'read_result_output',
+          'retain_execution_output',
           'use_computer',
           'wait_for_computer',
           'wait_for_event',

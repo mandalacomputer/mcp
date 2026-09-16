@@ -267,7 +267,12 @@ export class Api {
     return url.toString();
   }
 
-  async #fetch(method: string, path: string, opts: RequestOptions = {}): Promise<Response> {
+  async #fetch(
+    method: string,
+    path: string,
+    opts: RequestOptions = {},
+    bounded = false,
+  ): Promise<Response> {
     const headers: Record<string, string> = { ...this.#headers, ...opts.headers };
     // Typed as what we actually build rather than as BodyInit, which @types/node
     // does not put in the global scope.
@@ -285,6 +290,7 @@ export class Api {
     }
 
     const signal = opts.signal ?? this.#signal;
+    if (bounded && signal?.aborted) throw cancellationError(method, path, 'before dispatch');
     const requested = this.#url(path, opts.query);
     const fetchRequest = platformFetch();
 
@@ -306,7 +312,11 @@ export class Api {
         redirect: 'manual',
         dispatcher: PLATFORM_DISPATCHER,
       };
-      resp = await fetchRequest(requested, init);
+      resp = bounded
+        ? await boundedWait(fetchRequest(requested, init), signal, (value) => {
+            void value.body?.cancel().catch(() => {});
+          })
+        : await fetchRequest(requested, init);
     } catch (cause) {
       // Cancellation first, because it is not a connectivity failure and the
       // wrap below cannot tell the difference. An aborted fetch rejects with a
@@ -370,7 +380,8 @@ export class Api {
       // one holds its undici connection open until the GC gets to it — and the
       // whole point of this branch is a misconfigured base URL, which means
       // EVERY request takes it.
-      await resp.body?.cancel().catch(() => {});
+      if (bounded) void resp.body?.cancel().catch(() => {});
+      else await resp.body?.cancel().catch(() => {});
       throw new RedirectError(
         `${method} /${path.replace(/^\/+/, '')} was redirected (HTTP ${resp.status}${
           to ? ` to ${to}` : ', with no Location header'
@@ -383,7 +394,7 @@ export class Api {
         resp.status,
       );
     }
-    if (!resp.ok) throw await this.#error(resp, method, path, signal);
+    if (!resp.ok) throw await this.#error(resp, method, path, signal, bounded);
     return resp;
   }
 
@@ -400,6 +411,7 @@ export class Api {
     method: string,
     path: string,
     signal: AbortSignal | undefined,
+    bounded = false,
   ): Promise<APIError> {
     let body: unknown;
     let message = `HTTP ${resp.status}`;
@@ -407,7 +419,12 @@ export class Api {
     let truncated = false;
     try {
       ({ text, truncated } = await readBody(method, path, signal, () =>
-        readTextAtMost(resp, MAX_ERROR_BODY_BYTES),
+        bounded
+          ? readComplete(resp, 8192, signal).then((bytes) => ({
+              text: new TextDecoder().decode(bytes),
+              truncated: false,
+            }))
+          : readTextAtMost(resp, MAX_ERROR_BODY_BYTES),
       ));
     } catch (cause) {
       // A response whose error body itself is broken still has a useful status.
@@ -503,6 +520,89 @@ export class Api {
       );
     }
     return body;
+  }
+
+  /** Existing exec decoding plus observed status, used only to confirm optional retention. */
+  async jsonWithStatus<T>(
+    method: string,
+    path: string,
+    opts: RequestOptions = {},
+  ): Promise<{ status: number; value: T }> {
+    const resp = await this.#fetch(method, path, opts);
+    const value = await this.#decode<T>(resp, method, path, opts.signal ?? this.#signal);
+    if (value === undefined || value === null) throw new MandalaError('Expected an exec response');
+    return { status: resp.status, value };
+  }
+
+  /** Complete bounded responses for immutable retained protocols; never a successful prefix. */
+  async boundedBytes(
+    method: string,
+    path: string,
+    limit: number,
+    status: number,
+    opts: RequestOptions = {},
+  ): Promise<BoundedBytes> {
+    if (!Number.isSafeInteger(limit) || limit < 0 || limit > 64 * 1024 * 1024)
+      throw new MandalaError('Invalid bounded response limit');
+    const signal = opts.signal ?? this.#signal;
+    const resp = await this.#fetch(
+      method,
+      path,
+      { ...opts, headers: { ...opts.headers, 'Accept-Encoding': 'identity' } },
+      true,
+    );
+    try {
+      if (
+        resp.status !== status ||
+        resp.headers.has('Content-Range') ||
+        !['', 'identity'].includes(resp.headers.get('Content-Encoding') ?? '')
+      )
+        throw new MandalaError('Unexpected retained response protocol');
+      const length = resp.headers.get('Content-Length');
+      if (
+        length !== null &&
+        (!/^(0|[1-9][0-9]*)$/.test(length) ||
+          String(Number(length)) !== length ||
+          !Number.isSafeInteger(Number(length)) ||
+          Number(length) > limit)
+      )
+        throw new MandalaError('Invalid retained response length');
+      const bytes = await readBody(method, path, signal, () => readComplete(resp, limit, signal));
+      if (length !== null && Number(length) !== bytes.length)
+        throw new MandalaError('Incomplete retained response');
+      if (signal?.aborted)
+        throw cancellationError(method, path, 'after reading the platform response');
+      const headers: Record<string, string> = {};
+      for (const name of [
+        'content-type',
+        'content-length',
+        'x-result-offset',
+        'x-result-next-offset',
+        'x-result-eof',
+      ]) {
+        const value = resp.headers.get(name);
+        if (value !== null) headers[name] = value;
+      }
+      return { bytes, headers };
+    } finally {
+      void resp.body?.cancel().catch(() => {});
+    }
+  }
+  async boundedJson(
+    method: string,
+    path: string,
+    limit: number,
+    status: number,
+    opts: RequestOptions = {},
+  ): Promise<unknown> {
+    const response = await this.boundedBytes(method, path, limit, status, opts);
+    if (!/^application\/json(?:\s*;|$)/i.test(response.headers['content-type'] ?? ''))
+      throw new MandalaError('Expected retained JSON metadata');
+    try {
+      return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(response.bytes));
+    } catch {
+      throw new MandalaError('Invalid retained JSON metadata');
+    }
   }
 
   /**
@@ -1359,4 +1459,78 @@ export function filenameFrom(disposition: string | null): string | undefined {
 
   for (const p of params) if (p.name === 'filename' && p.value) return p.value;
   return undefined;
+}
+
+export type BoundedBytes = { bytes: Uint8Array; headers: Record<string, string> };
+/** An abort releases the caller even if a peer ignores cancellation. Late headers are cancelled. */
+function boundedWait<T>(
+  work: Promise<T>,
+  signal?: AbortSignal,
+  late?: (value: T) => void,
+): Promise<T> {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const abort = () => {
+      if (settled) return;
+      settled = true;
+      signal?.removeEventListener('abort', abort);
+      reject(new CancelledError('Retained operation cancelled; commitment may be unknown.'));
+    };
+    signal?.addEventListener('abort', abort, { once: true });
+    if (signal?.aborted) abort();
+    work.then(
+      (value) => {
+        if (settled) {
+          late?.(value);
+          return;
+        }
+        settled = true;
+        signal?.removeEventListener('abort', abort);
+        resolve(value);
+      },
+      (error) => {
+        if (settled) return;
+        settled = true;
+        signal?.removeEventListener('abort', abort);
+        reject(error);
+      },
+    );
+  });
+}
+async function readComplete(
+  resp: Response,
+  limit: number,
+  signal?: AbortSignal,
+): Promise<Uint8Array> {
+  if (signal?.aborted) throw new CancelledError('Retained operation cancelled');
+  if (!resp.body) return new Uint8Array();
+  const reader = resp.body.getReader(),
+    chunks: Uint8Array[] = [];
+  let size = 0;
+  const cancel = () => {
+    void reader.cancel().catch(() => {});
+  };
+  signal?.addEventListener('abort', cancel, { once: true });
+  try {
+    for (;;) {
+      const next = await boundedWait(reader.read(), signal);
+      if (signal?.aborted) throw new CancelledError('Retained operation cancelled');
+      if (next.done) break;
+      if (next.value.byteLength > limit - size)
+        throw new MandalaError('Retained response exceeds limit');
+      chunks.push(next.value.slice());
+      size += next.value.byteLength;
+    }
+    const bytes = new Uint8Array(size);
+    let at = 0;
+    for (const chunk of chunks) {
+      bytes.set(chunk, at);
+      at += chunk.length;
+    }
+    return bytes;
+  } finally {
+    signal?.removeEventListener('abort', cancel);
+    cancel();
+    reader.releaseLock();
+  }
 }

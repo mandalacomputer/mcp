@@ -18,6 +18,8 @@ import {
   text,
 } from '../format.js';
 import * as P from '../paths.js';
+import { retainIntent, synchronousResultId } from '../results.js';
+import { retentionSchema } from './results.js';
 import type { Registrar } from './types.js';
 
 const idArg = {
@@ -197,6 +199,12 @@ export const registerGuest: Registrar = (server, session) => {
       inputSchema: {
         ...idArg,
         command: z.string().describe('A shell command line.'),
+        retain_output: z
+          .union([z.boolean(), retentionSchema])
+          .optional()
+          .describe(
+            'Explicit synchronous output retention only. False/absent preserves default behavior. A valid result_id confirms a retained version; optional failure never replays the command.',
+          ),
         timeout_s: z
           .number()
           .int()
@@ -227,15 +235,26 @@ export const registerGuest: Registrar = (server, session) => {
           ),
       },
     },
-    ({ computer_id, command, timeout_s, desktop, background, cwd, env }, extra) =>
+    ({ computer_id, command, timeout_s, desktop, background, cwd, env, retain_output }, extra) =>
       guarded(async () => {
         const id = session.resolve(computer_id);
+        const retain = retainIntent(retain_output, background);
+        let status: number | undefined;
         let res: Record<string, unknown>;
         try {
-          res = await session.api
-            .with(extra.signal)
-            .json<Record<string, unknown>>('POST', P.computerAction(id, 'exec'), {
-              body: P.execBody({ command, timeout_s, desktop, background, cwd, env }),
+          const api = session.api.with(extra.signal),
+            body = P.execBody({ command, timeout_s, desktop, background, cwd, env, retain_output });
+          if (retain !== undefined) {
+            const observed = await api.jsonWithStatus<Record<string, unknown>>(
+              'POST',
+              P.computerAction(id, 'exec'),
+              { body },
+            );
+            res = observed.value;
+            status = observed.status;
+          } else
+            res = await api.json<Record<string, unknown>>('POST', P.computerAction(id, 'exec'), {
+              body,
             });
         } catch (err) {
           // The one refusal on this route whose next step is a different tool
@@ -281,7 +300,18 @@ export const registerGuest: Registrar = (server, session) => {
           );
         }
         const { body, note } = decodeExec(res, false);
-        return said(`${execSummary(res)}${note}`, body);
+        const retained = retain !== undefined ? synchronousResultId(res, status!) : undefined;
+        const presented =
+          retained && body && typeof body === 'object' && !Array.isArray(body)
+            ? { ...body, result_id: retained }
+            : body;
+        const retentionNote =
+          retain === undefined
+            ? ''
+            : retained
+              ? ' Retained result confirmed; use get_result or read_result_output for a separate explicit read.'
+              : ' No retrievable retained result ID was confirmed. Do not replay the command to recover it.';
+        return said(`${execSummary(res)}${note}${retentionNote}`, presented);
       }),
   );
 
@@ -1127,7 +1157,7 @@ function decodeExec(res: unknown, continued: boolean): { body: unknown; note: st
   for (const [key, value] of Object.entries(source)) {
     // Only the accepted launch can bind stable identity to this command.
     // A reusable PID poll (or kill) cannot reconstruct that association.
-    if (key === 'execution_id') continue;
+    if (key === 'execution_id' || key === 'result_id') continue;
     if (claimed.has(key)) continue;
     const field = EXEC_STREAMS[key];
     if (field === undefined || typeof value !== 'string') {

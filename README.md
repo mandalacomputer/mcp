@@ -110,6 +110,9 @@ entirely.
 `list_windows`, `window_action`, `read_clipboard`, `write_clipboard`,
 `read_file`, `write_file`
 
+**Retained versions** — `retain_execution_output`, `get_result`, `read_result_output`,
+`delete_result`, `publish_artifact`, `get_artifact`, `read_artifact`, `delete_artifact`
+
 **Being told rather than asking** — `wait_for_event`, `poll_events`,
 `wait_for_file_change`
 
@@ -395,6 +398,69 @@ Activities/history. Files are mutable guest data, not retained artifacts;
 handles can vanish on restart, replacement or cleanup, and observed exits
 expire after ten minutes. An unavailable read is an error, not empty output.
 Every new-tool result is bounded to 256 KiB of serialized data.
+
+**Explicit immutable retained versions.** `retain_execution_output` accepts an
+`execution_id` and captures one version of its volatile output with one POST.
+It performs guest I/O, without resuming or replaying the command. Its optional
+`max_bytes_per_stream` defaults to 1 MiB (maximum 4 MiB); `retention_seconds`
+defaults to 86400 (maximum 604800). Diagnostics are separate, up to 64 KiB.
+Each capture creates a version; there is no automatic capture or retry.
+
+`get_result` reads finite metadata by `result_id`. `read_result_output` requires
+`result_id`, `stream` (`stdout`, `stderr` or `diagnostic`) and `offset`, with
+`limit` defaulting to 4096 and capped at 16384 bytes. It reads one independent
+page, with exact `offset`, `next_offset`, `eof` and returned `bytes` count.
+Content is lossless `text` (BOM preserved) or canonical `base64` for binary,
+controls and split UTF-8. EOF means the end of this retained prefix, not task
+completion. A page alone does not verify the full manifest hash.
+`delete_result` deletes that version once; a repeated 404 remains unavailable.
+
+Existing synchronous `exec` accepts `retain_output: true` or a strict object
+with those same two options. False or absence leaves default behavior alone.
+It cannot be combined with `background: true`. A canonical returned `result_id`
+confirms optional retention; no execution ID is fabricated. Missing, malformed
+or unsupported optional metadata leaves the command outcome unchanged and does
+not authorize replay. Retained-prefix truncation and upstream response
+truncation are distinct. Synchronous results have no diagnostic stream; an
+explicit diagnostic read can return 409.
+
+**Nominated file versions.** `publish_artifact` requires an absolute `path`,
+`expected_size` and `expected_sha256` supplied by the caller. For example:
+
+```json
+{"path":"/tmp/empty.txt","expected_size":0,"expected_sha256":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"}
+```
+
+Paths preserve legal Unicode, spaces and Linux backslashes; Windows drive and
+UNC paths are also accepted, subject to the platform's current OS proof.
+Publication performs one nominated guest-file capture, without a client-side
+stat, list, read, hash or exec preflight. `max_bytes` defaults to 8 MiB and is at
+most 64 MiB; expected size must fit. Retention has the bounds above. Optional
+`execution_id` records verified **caller selection**, not proof the execution
+created the file. Every publication creates an independent immutable version.
+
+`get_artifact` reads metadata. `read_artifact` first reads that metadata and,
+only if the complete size fits `max_bytes` (default 4096, maximum 16384), reads
+the entire retained object and verifies its exact length and SHA-256. Over-cap
+objects return metadata with a refusal before any content request; use an SDK
+whole download with an adequate cap. There are no partial artifacts, Range
+requests, local destinations, filenames, image/HTML previews or guest fallbacks.
+Verified content uses the same lossless `text`/`base64` presentation.
+`delete_artifact` deletes only that stored version, not the guest file; repeat
+404s remain truthful failures.
+
+All eight retained tools resolve the computer selection once. Reads are passive
+but require current authorization and scope availability; retained bytes can be
+unavailable when the host cannot verify access, after expiry or deletion, or
+when storage is unavailable. They never wake a guest or substitute live output.
+New operations have one 90-second budget across headers, bodies, and both
+artifact requests. An MCP client can impose an earlier deadline. Cancellation,
+redirects and malformed responses never trigger a retry; a lost publication
+response means commitment is **unconfirmed**, not undone. Each entire serialized
+retained tool result is bounded to 256 KiB. Reads are marked read-only;
+capture/publication create new versions; deletes are destructive with an
+idempotent deletion effect. Activities result detail remains outside this MCP
+runtime.
 
 Past about **two minutes** it does not even come back as a timeout. A proxy in
 front of the platform abandons a request that has produced no response for

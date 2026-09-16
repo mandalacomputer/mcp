@@ -6,7 +6,14 @@ import {
   UNIMPLEMENTED,
   UNIMPLEMENTED_PARAMETERS,
 } from './allowlist.js';
-import { connect, installFakePlatform, type Recorded } from './harness.js';
+import {
+  ARTIFACT_ID,
+  ARTIFACT_MANIFEST,
+  connect,
+  installFakePlatform,
+  RETAINED_ID,
+  type Recorded,
+} from './harness.js';
 
 /**
  * Arguments good enough to make each tool do its request — a list per tool,
@@ -19,6 +26,29 @@ import { connect, installFakePlatform, type Recorded } from './harness.js';
  * is checking.
  */
 const EXERCISE: Record<string, Record<string, unknown>[]> = {
+  retain_execution_output: [
+    {
+      execution_id: 'exec_0123456789abcdef0123456789abcdef',
+      max_bytes_per_stream: 1048576,
+      retention_seconds: 86400,
+    },
+  ],
+  get_result: [{ result_id: RETAINED_ID }],
+  read_result_output: [{ result_id: RETAINED_ID, stream: 'diagnostic', offset: 0, limit: 16 }],
+  delete_result: [{ result_id: RETAINED_ID }],
+  publish_artifact: [
+    {
+      path: '/tmp/nominated',
+      expected_size: 3,
+      expected_sha256: ARTIFACT_MANIFEST.sha256,
+      execution_id: ARTIFACT_MANIFEST.execution_association.execution_id,
+      max_bytes: 8,
+      retention_seconds: 86400,
+    },
+  ],
+  get_artifact: [{ artifact_id: ARTIFACT_ID }],
+  read_artifact: [{ artifact_id: ARTIFACT_ID, max_bytes: 4096 }],
+  delete_artifact: [{ artifact_id: ARTIFACT_ID }],
   list_templates: [{}],
   // The document format, and the store on top of it (OPL-3568,
   // OPL-3789, OPL-3830). Both spellings of the ref tools, because `version` is a
@@ -142,6 +172,7 @@ const EXERCISE: Record<string, Record<string, unknown>[]> = {
   // body, this route is reachable and a variable still has to be written into
   // the command line as `FOO=bar cmd`.
   exec: [
+    { command: 'true', retain_output: true },
     { command: 'true' },
     {
       command: 'sleep 1',
@@ -216,7 +247,7 @@ const routesOf = (calls: Recorded[]) =>
   new Set(calls.map((c) => `${c.method} ${patternFor(c.path)}`));
 
 /** Generic HTTP machinery rather than route parameters. */
-const GENERIC_HEADERS = new Set(['authorization', 'accept', 'content-type']);
+const GENERIC_HEADERS = new Set(['authorization', 'accept', 'content-type', 'accept-encoding']);
 
 /** Preserve the platform table's spelling while matching names case-insensitively. */
 const DOCUMENTED_HEADERS = new Map(
@@ -229,8 +260,8 @@ const DOCUMENTED_HEADERS = new Map(
 function parametersOf(call: Recorded): string[] {
   const sent = [
     ...[...call.query.keys()].map((k) => `query:${k}`),
-    // Enumerate what actually went out, excluding only the three headers every
-    // request needs. Known parameters use the platform table's spelling;
+    // Enumerate what actually went out, excluding transport/auth/content negotiation.
+    // Accept-Encoding requests identity for exact retained byte counts. Known parameters use the platform table's spelling;
     // anything unknown keeps its wire spelling so the comparison rejects it.
     ...Object.keys(call.headers)
       .filter((h) => !GENERIC_HEADERS.has(h.toLowerCase()))
