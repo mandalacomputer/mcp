@@ -5,6 +5,7 @@ import { DEFAULT_BASE_URL } from './api.js';
 import { runHttp } from './http.js';
 import { SERVER_VERSION } from './server.js';
 import { runStdio } from './stdio.js';
+import { parseToolTags, type ToolFilters, VALID_TAGS } from './tool-filters.js';
 
 const USAGE = `mandala-computer-mcp — drive a Mandala Computer desktop over MCP
 
@@ -23,8 +24,14 @@ Environment
                        this is ignored rather than spent on their runs
   MANDALA_NO_LIFECYCLE 1, true, yes or on to withhold create_computer,
                        clone_computer, clone_snapshot, delete_computer and
-                       delete_snapshot. Any other value is refused rather than
-                       read as off, since a typo here would leave them enabled
+                       delete_snapshot. 0, false, no, off or empty means off.
+                       Unknown values are refused at startup.
+  MANDALA_READ_ONLY    same boolean vocabulary; keep only tools annotated with
+                       readOnlyHint: true. Empty or unset means off.
+  MANDALA_TAGS         comma-separated lowercase tags; empty means all tools.
+                       Valid tags: ${VALID_TAGS.join(', ')}.
+                       Tags combine by union, then intersect with read-only,
+                       lifecycle and per-session model-key restrictions.
   PORT, HOST           for --http (default 3000, 127.0.0.1)
   MANDALA_ALLOWED_HOSTS, MANDALA_ALLOWED_ORIGINS
                        comma-separated; which Host and Origin values to answer
@@ -237,6 +244,14 @@ export function lifecycleEnabled(flags: Flags, configured = env('MANDALA_NO_LIFE
   return !disabled;
 }
 
+/** Parse once, before either transport starts; a typo must never open a listener. */
+export function filtersFromEnv(
+  readOnly = env('MANDALA_READ_ONLY'),
+  tags = env('MANDALA_TAGS'),
+): ToolFilters {
+  return { readOnly: envFlag('MANDALA_READ_ONLY', readOnly), tags: parseToolTags(tags) };
+}
+
 /**
  * The port to listen on, or a refusal naming what was wrong with it.
  *
@@ -327,8 +342,8 @@ const list = (v: string | undefined) =>
         .filter(Boolean)
     : undefined;
 
-async function main(): Promise<void> {
-  const flags = parse(process.argv.slice(2));
+export async function main(argv = process.argv.slice(2)): Promise<void> {
+  const flags = parse(argv);
   if (wantsHelp(flags)) {
     console.log(USAGE);
     return;
@@ -345,6 +360,7 @@ async function main(): Promise<void> {
   // from "given as empty". `--base-url=` means the default, not the
   // environment; a flag that is present says what it says.
   const base = {
+    ...filtersFromEnv(),
     baseUrl: (str(flags['base-url'], 'base-url') ?? env('MANDALA_BASE_URL')) || DEFAULT_BASE_URL,
     computerId: str(flags.computer, 'computer') ?? env('MANDALA_COMPUTER_ID'),
     modelKey: env('MANDALA_MODEL_KEY'),

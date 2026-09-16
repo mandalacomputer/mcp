@@ -34,7 +34,7 @@ right answer at all, that it costs money until it is suspended or stopped, that
 which refusals are worth a second try. It is a description of *when and how*,
 not a second client; once the server is installed it stays out of the way.
 `MANDALA_MODEL_KEY`, if exported alongside, is passed through and turns on
-`run_agent`.
+`run_agent` when the configured filters permit it.
 
 Or the server on its own, with the key inline:
 
@@ -95,6 +95,10 @@ entirely.
 
 ## The tools
 
+This is the unfiltered inventory. The filters below can withhold tools from
+both listing and calling; workflows in this README apply only when the needed
+tools are available. This server does not yet implement every API operation.
+
 **Choosing a machine** — `list_templates`, `list_sizes`, `list_computers`, `get_computer`,
 `use_computer`, `wait_for_computer`, `get_desktop_url`
 
@@ -133,6 +137,54 @@ entirely.
 
 **Delegating** — `run_agent`, registered only when a model key is present:
 `MANDALA_MODEL_KEY` on stdio, or the caller's own `X-Model-Key` header over HTTP.
+It must also survive the configured filters.
+
+### Tool filters
+
+Set `MANDALA_READ_ONLY=1` to register only tools whose existing
+`annotations.readOnlyHint` is exactly `true`. It accepts `1`, `true`, `yes`,
+`on` for on and `0`, `false`, `no`, `off`, empty or unset for off, ignoring
+surrounding whitespace and letter case. Any other value fails at startup.
+Safety is not inferred from a tool's name or HTTP method: `read_file` and
+`cursor_position` can wake and bill a computer, so they are withheld. So are
+mixed read/write tools such as `wait_for_computer` and `snapshot_schedule`.
+`screenshot`, `read_clipboard` and `list_windows` retain their read-only hints.
+
+Set `MANDALA_TAGS=input,guest` to select a union of named tool groups. Names
+are **lowercase only**, comma-separated, trimmed and deduplicated. Empty or
+unset means no tag filter; empty comma-separated entries are ignored. An
+unknown nonempty tag fails before stdio connects or HTTP starts listening,
+with an error listing all valid tags.
+
+| Tag | Tools |
+| --- | --- |
+| `computers` | `list_computers`, `get_computer`, `use_computer`, `wait_for_computer`, `get_desktop_url`, `list_sizes` |
+| `lifecycle` | `create_computer`, `start_computer`, `stop_computer`, `suspend_computer`, `restart_computer`, `update_computer`, `clone_computer`, `delete_computer`, `move_computer`, `list_moves` |
+| `input` | `screenshot`, `click`, `type_text`, `press_key`, `scroll`, `drag`, `move_mouse`, `mouse_button`, `cursor_position`, `wait` |
+| `guest` | `exec`, `exec_poll`, `exec_kill`, `open_url`, `list_windows`, `window_action`, `read_clipboard`, `write_clipboard` |
+| `files` | `read_file`, `write_file`, `wait_for_file_change` |
+| `executions` | `get_execution`, `read_execution_output` |
+| `results` | `retain_execution_output`, `get_result`, `read_result_output`, `delete_result` |
+| `artifacts` | `publish_artifact`, `get_artifact`, `read_artifact`, `delete_artifact` |
+| `snapshots` | All snapshot tools listed above, including `get_retention` |
+| `templates` | `list_templates`, all your-own-template tools and all build tools listed above |
+| `events` | `wait_for_event`, `poll_events`, `wait_for_file_change` |
+| `usage` | `get_usage` |
+| `webhooks` | All webhook tools listed above |
+| `agent` | `run_agent` |
+
+The selected tags form a union, then intersect with read-only and the existing
+lifecycle and model-key restrictions. `MANDALA_NO_LIFECYCLE=1` still withholds
+its five tools even when their tags are selected; selecting `agent` cannot
+enable it without a per-session model key. A combination may expose no tools:
+`MANDALA_TAGS=files MANDALA_READ_ONLY=1` currently does exactly that.
+
+`use_computer` is not read-only. When it is withheld, pass `computer_id`
+explicitly, or bind a computer with `MANDALA_COMPUTER_ID` at stdio startup.
+HTTP callers must supply their own computer selection. These variables apply
+to both transports and the plugin forwards them. Embedders can pass
+`readOnly: true` and `tags: ['input', 'guest']` in `ServerConfig`; the server
+does not read the environment itself.
 
 ## Things worth knowing
 
@@ -689,12 +741,14 @@ naming the fix.
 | `MANDALA_API_KEY` | `com_…` from Settings → API keys. Required on stdio; over HTTP each caller sends their own. |
 | `MANDALA_BASE_URL` | Defaults to `https://app.mandala.computer/api/v1`. |
 | `MANDALA_COMPUTER_ID` | Bind a computer at startup, so `use_computer` is not needed. **stdio only** — under `--http` it is ignored rather than bound into every caller's session, since it names a machine on the operator's account. |
-| `MANDALA_MODEL_KEY` | An Anthropic key. Enables `run_agent`, which runs the platform's own loop on that key. **stdio only** — under `--http` each caller sends their own as `X-Model-Key`, and this variable is ignored. |
+| `MANDALA_MODEL_KEY` | An Anthropic key. Enables `run_agent` when filters permit it, which runs the platform's own loop on that key. **stdio only** — under `--http` each caller sends their own as `X-Model-Key`, and this variable is ignored. |
 | `MANDALA_NO_LIFECYCLE` | `1`, `true`, `yes` or `on` withholds `create_computer`, `clone_computer`, `clone_snapshot`, `delete_computer` and `delete_snapshot` — every tool that makes a computer or destroys one. `0`, `false`, `no`, `off` or unset leaves them registered. Any other value is **refused at startup** rather than read as off: a typo here would otherwise leave those tools in place on a server whose operator believes they are gone. The `--no-lifecycle` flag reads the same vocabulary and refuses the same way, except that it has no spelling for *unset*: `--no-lifecycle=` is refused rather than ignored, so a launcher template whose variable did not expand stops instead of quietly leaving the tools registered. |
 | `PORT`, `HOST` | For `--http`. Default `3000`, `127.0.0.1`. |
+| `MANDALA_READ_ONLY` | Keep only tools annotated `readOnlyHint: true`; strict boolean parsing as described under Tool filters. |
+| `MANDALA_TAGS` | Comma-separated lowercase tool tags; see Tool filters for the inventory and intersection rules. |
 | `MANDALA_ALLOWED_HOSTS`, `MANDALA_ALLOWED_ORIGINS` | Comma-separated. Which `Host` and `Origin` values this server answers to. On a loopback bind the host list defaults to the address it was given, so DNS-rebinding protection is on without configuration; set this when serving under a name. |
 
-Every one of these but the model key has a flag as well, and a flag overrides
+Every one of these but the model key and the two tool filters has a flag as well, and a flag overrides
 the environment: `--http`, `--port`, `--host`, `--base-url`, `--computer`,
 `--allowed-hosts`, `--allowed-origins`, `--no-lifecycle`, plus `--help` and
 `--version`. `--key` exists for a caller launching several servers under

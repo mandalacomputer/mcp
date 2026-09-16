@@ -5,8 +5,8 @@ description: Drive a Mandala Computer — a real Linux desktop in the cloud the 
 
 # Driving a Mandala Computer
 
-The `mandala` MCP server carries the whole surface — nearly seventy tools, each
-described well enough to call from its own text. This skill is the part the
+The `mandala` MCP server exposes desktop tools, each described well enough to
+call from its own text. It does not yet implement every API operation. This skill is the part the
 tools cannot say for themselves: when a computer is the right answer, what it
 costs, and which of the tools to reach for so a task does not become a
 screenshot per step.
@@ -37,14 +37,13 @@ need:
   stored**: the platform keeps no copy of it and every step `run_agent` takes
   is a model call billed to that key.
 
-If there are no `mandala` tools at all, or the server shows as failed, the
-key is not exported: with `MANDALA_API_KEY` empty the server prints "No API
-key" to its log and exits before registering anything, so what you see is an
-absent server, not a tool error. Stop and ask the user to export the key in
-the shell Claude Code starts from and restart it — nothing else in this skill
-works until then. Do not try to work around it with `exec` or a browser.
+If the server shows as failed, check its startup error. With `MANDALA_API_KEY`
+empty it prints "No API key" and exits before registering anything. For that
+error, ask the user to export the key in the shell Claude Code starts from and
+restart it. Invalid filter values also prevent startup; correct the named
+setting. Do not try to work around an unavailable server with `exec` or a browser.
 
-Three more variables, none of them needed for a first computer:
+Optional configuration:
 
 - `MANDALA_BASE_URL` — a platform other than the default
   `https://app.mandala.computer/api/v1`: a self-hosted install, or staging.
@@ -53,9 +52,35 @@ Three more variables, none of them needed for a first computer:
 - `MANDALA_NO_LIFECYCLE=1` (or `true`, `yes`, `on`) — withholds every tool that makes a computer or
   destroys one: `create_computer`, `clone_computer`, `clone_snapshot`,
   `delete_computer`, `delete_snapshot`. If you were sent here to create a
-  computer and `create_computer` is not among the tools, this is why, and it
-  is a deliberate setting rather than a fault. Say so and stop; the rest of
-  the surface still drives a computer somebody else made.
+  computer and `create_computer` is absent, this or the filters below may be
+  deliberate. Say that the needed capability is unavailable.
+- `MANDALA_READ_ONLY=1` — register only tools with `readOnlyHint: true`.
+  Like `MANDALA_NO_LIFECYCLE`, accepts `1`, `true`, `yes`, `on` or `0`,
+  `false`, `no`, `off`; whitespace and letter case are ignored. Empty or
+  unset means off; unknown values fail at startup. Reads that can resume and
+  bill a computer, including `read_file` and `cursor_position`, are withheld.
+  Mixed tools such as `wait_for_computer` and `snapshot_schedule` are also
+  withheld. `screenshot`, `read_clipboard` and `list_windows` keep the hint.
+- `MANDALA_TAGS=input,guest` — select a union of lowercase tool tags:
+  `agent`, `artifacts`, `computers`, `events`, `executions`, `files`, `guest`,
+  `input`, `lifecycle`, `results`, `snapshots`, `templates`, `usage`, `webhooks`.
+  Entries are comma-separated, trimmed and deduplicated; empty entries are
+  ignored, and empty or unset means unfiltered. Unknown tags, including
+  uppercase names, fail at startup and name the valid set. `files` means
+  `read_file`, `write_file`, `wait_for_file_change`; the last also belongs to
+  `events`. `guest` covers execution, windows, clipboard and URL tools;
+  `input` includes screenshots and waits. `templates` includes listing and
+  builds. See the README's Tool filters table for the full inventory.
+
+Filters intersect: tags cannot restore a tool withheld by read-only,
+`MANDALA_NO_LIFECYCLE`, or a missing model key. A connected server may have
+an empty tool list (`files` plus read-only currently does). Check the actual
+tool list before following any workflow below; use only tools that are
+present. If the task requires a withheld tool, explain the limitation instead
+of trying another route to the same action. `use_computer` is not read-only:
+pass `computer_id` explicitly when it is absent, or use the stdio startup
+binding. If shutdown tools are withheld, report the computer's state instead
+of attempting the cleanup recipe below.
 
 ### The two ways it gets installed
 
@@ -84,7 +109,7 @@ Over HTTP the server ignores `MANDALA_MODEL_KEY` and `MANDALA_COMPUTER_ID`
 rather than lending the operator's Anthropic key and the operator's machine to
 everyone who connects. A caller who wants `run_agent` there sends their own
 Anthropic key as an `X-Model-Key` header, and `run_agent` is registered for
-that session only if they did.
+that session only if they did and the filters permit it.
 
 ## The shape of a session
 
@@ -130,8 +155,9 @@ application. It needs a running computer, and it needs a model key to exist
 at all: `MANDALA_MODEL_KEY` in the server's environment over stdio, or the
 caller's own `X-Model-Key` header over HTTP, where the server's variable is
 ignored. If every other `mandala` tool is present and `run_agent` is not, that
-is the whole cause — say which of the two applies rather than telling an HTTP
-user to export a variable the server will never read.
+may be due to a filter or the missing model key. Check the configured filters
+before explaining which key mechanism applies; an HTTP user needs their own
+header rather than the operator's environment variable.
 
 - `max_steps` (default 20, max 100) is the spending cap as much as the loop
   bound — every step is a model call on the user's key. Size it to the task.

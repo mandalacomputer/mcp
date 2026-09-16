@@ -8,6 +8,7 @@ import express, { type Request, type Response } from 'express';
 import { Api, MODEL_KEY_HEADER } from './api.js';
 import { MeteredBody } from './http-body.js';
 import { createServer, SERVER_NAME, SERVER_VERSION, type ServerConfig } from './server.js';
+import { toolFilter } from './tool-filters.js';
 
 export type HttpConfig = Omit<ServerConfig, 'apiKey' | 'activity'> & {
   port: number;
@@ -167,6 +168,10 @@ function dnsRebindingRefusal(
  * desktop, which it otherwise would be.
  */
 export async function runHttp(cfg: HttpConfig): Promise<Server> {
+  // Embedders bypass the CLI's environment parser. Reject invalid filters
+  // before allocating HTTP resources, using the same rules as each session.
+  toolFilter(cfg);
+
   // HTTP does not construct an Api until the first initialize, which made a
   // bad MANDALA_BASE_URL look like a working bind and then fail that caller
   // with a generic 500. Validate it before opening the listening socket, using
