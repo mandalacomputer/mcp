@@ -11,6 +11,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
+import ts from 'typescript';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   Api,
@@ -3613,13 +3614,63 @@ describe('the tools our own prose tells a model to call', () => {
   // starts, the variable is ignored, and every symptom surfaces somewhere else.
   const MANDALA_VAR = /\bMANDALA_[A-Z_]+\b/g;
 
-  it('names only environment variables the CLI reads', () => {
-    const cli = readFileSync(new URL('../src/cli.ts', import.meta.url), 'utf8');
-    // What `cli.ts` actually calls `env()` on — not what its own usage text
-    // claims, which is prose and can be wrong in exactly the way this test
-    // exists to catch.
-    const read = new Set([...cli.matchAll(/\benv\('(MANDALA_[A-Z_]+)'\)/g)].map((m) => m[1]));
-    expect(read.size, 'the reader found the env() calls it is parsing').toBeGreaterThan(4);
+  function environmentReads(source: string): Set<string> {
+    const read = new Set<string>();
+    const tree = ts.createSourceFile('settings.ts', source, ts.ScriptTarget.Latest, true);
+    const processEnv = (node: ts.Node) =>
+      ts.isPropertyAccessExpression(node) &&
+      node.name.text === 'env' &&
+      ts.isIdentifier(node.expression) &&
+      node.expression.text === 'process';
+    const record = (name: string) => {
+      if (/^MANDALA_[A-Z_]+$/.test(name)) read.add(name);
+    };
+    const visit = (node: ts.Node) => {
+      if (
+        ts.isCallExpression(node) &&
+        ts.isIdentifier(node.expression) &&
+        node.expression.text === 'env' &&
+        node.arguments.length &&
+        ts.isStringLiteralLike(node.arguments[0])
+      )
+        record(node.arguments[0].text);
+      if (ts.isPropertyAccessExpression(node) && processEnv(node.expression))
+        record(node.name.text);
+      if (
+        ts.isElementAccessExpression(node) &&
+        processEnv(node.expression) &&
+        ts.isStringLiteralLike(node.argumentExpression)
+      )
+        record(node.argumentExpression.text);
+      ts.forEachChild(node, visit);
+    };
+    visit(tree);
+    return read;
+  }
+
+  it('distinguishes environment reads from unknown variables in comments and prose', () => {
+    const read = environmentReads(`
+      env('MANDALA_FILTER');
+      process.env.MANDALA_PROFILE;
+      process.env['MANDALA_API_KEY'];
+      // process.env.MANDALA_UNKNOWN; env('MANDALA_UNKNOWN');
+      const help = "process.env.MANDALA_UNKNOWN env('MANDALA_UNKNOWN')";
+    `);
+    expect([...read].sort()).toEqual(['MANDALA_API_KEY', 'MANDALA_FILTER', 'MANDALA_PROFILE']);
+    const documented = ['MANDALA_PROFILE', 'MANDALA_UNKNOWN'];
+    expect(documented.filter((name) => !read.has(name))).toEqual(['MANDALA_UNKNOWN']);
+  });
+
+  it('names only environment variables the CLI and local resolver read', () => {
+    // Parse actual reads in both startup modules. Usage strings and comments
+    // cannot make an unsupported setting appear implemented.
+    const modules = ['../src/cli.ts', '../src/credentials.ts'];
+    const read = new Set(
+      modules.flatMap((module) => [
+        ...environmentReads(readFileSync(new URL(module, import.meta.url), 'utf8')),
+      ]),
+    );
+    expect(read.size, 'the reader found the startup environment accesses').toBeGreaterThan(4);
     const named = new Set(readFileSync(SKILL, 'utf8').match(MANDALA_VAR) ?? []);
     expect(named.size, 'the skill still documents the environment').toBeGreaterThan(0);
     expect(

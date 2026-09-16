@@ -1,6 +1,8 @@
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
-import { DEFAULT_BASE_URL } from './api.js';
+import { resolveCredentials } from './credentials.js';
 import { createServer, type ServerConfig } from './server.js';
+
+export type StdioConfig = Omit<ServerConfig, 'apiKey'> & { apiKey?: string; profile?: string };
 
 /**
  * The local install: one process, one key, spawned by the MCP client.
@@ -10,8 +12,14 @@ import { createServer, type ServerConfig } from './server.js';
  * here may ever write to stdout: that stream is the protocol, and one stray
  * console.log is a parse error at the other end. Diagnostics go to stderr.
  */
-export async function runStdio(cfg: ServerConfig): Promise<void> {
-  const server = createServer(cfg);
+export async function runStdio(cfg: StdioConfig = {}): Promise<void> {
+  const credentials = resolveCredentials(cfg);
+  const resolved: ServerConfig = {
+    ...cfg,
+    apiKey: credentials.apiKey,
+    baseUrl: credentials.baseUrl,
+  };
+  const server = createServer(resolved);
   const transport = new StdioServerTransport();
   await server.connect(transport);
   // The end of the client, and therefore the end of this process.
@@ -39,7 +47,5 @@ export async function runStdio(cfg: ServerConfig): Promise<void> {
   const shutdown = () => void server.close().catch(() => {});
   process.stdin.once('end', shutdown);
   process.stdin.once('close', shutdown);
-  console.error(
-    `mandala-computer-mcp on stdio → ${new URL(cfg.baseUrl ?? DEFAULT_BASE_URL).origin}`,
-  );
+  console.error(`mandala-computer-mcp on stdio → ${new URL(credentials.baseUrl).origin}`);
 }

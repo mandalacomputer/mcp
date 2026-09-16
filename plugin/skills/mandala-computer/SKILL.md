@@ -24,23 +24,51 @@ nothing. If the task is "run this script", run it here.
 
 ## Setup, once
 
-The plugin starts the server for you, reading its environment from the shell
-Claude Code was started in. Two variables are the whole of what most sessions
-need:
+The plugin starts a local stdio server. The user can sign in once through the
+TypeScript CLI (`mandala-computer` on npm, requiring Node 22 or newer) and use
+the saved credentials. MCP itself supports Node 20.3 or newer with an existing
+saved profile or an environment key:
 
-- `MANDALA_API_KEY` — a `com_…` key from **Settings → API keys** at
-  https://app.mandala.computer. Required. Treat it as a password: at its widest
-  it is every computer on the account, and a key may instead be scoped to one
-  workspace, which is the reason a 404 below is not what it looks like.
-- `MANDALA_MODEL_KEY` — an Anthropic key. Optional; it is what enables
-  `run_agent` and `run_agent_chat`. Without it neither tool is registered. It is **spent, not
-  stored**: the platform keeps no copy, and the model work is billed to that key.
+```sh
+npm install -g mandala-computer
+mandala login
+claude mcp add mandala -- npx -y mandala-computer-mcp
+```
 
-If the server shows as failed, check its startup error. With `MANDALA_API_KEY`
-empty it prints "No API key" and exits before registering anything. For that
-error, ask the user to export the key in the shell Claude Code starts from and
-restart it. Invalid filter values also prevent startup; correct the named
-setting. Do not try to work around an unavailable server with `exec` or a browser.
+The TypeScript CLI alone implements `mandala login`; the Python distribution
+also has a command named `mandala`. Browser approval is a user action. Do not
+use model tools to approve devices, receive device secrets, or write the
+credential file.
+
+Local stdio selects `--profile`, then `MANDALA_PROFILE`, then the default in
+`~/.mandala/credentials.json`. Profile names are case-sensitive. For example,
+`mandala login --profile Work --workspace Research` saves a workspace profile;
+add `--profile Work` after `mandala-computer-mcp` to use it. An explicit API key
+or nonempty `MANDALA_API_KEY` wins over profile selection without accessing the
+store. Whitespace-only environment keys are absent; empty explicit keys fail.
+
+The saved store needs a current-owner real directory with mode `0700` and an
+owned regular `0600` file with exactly one link. Symlinks, hardlinks, malformed
+files and unsafe protection fail at startup. Verified POSIX file protection is
+required; Windows users can use explicit/environment keys. Base overrides must
+match the saved profile's complete canonical API base, including its path and
+port. A session keeps its chosen key/base until restarted.
+
+- `MANDALA_API_KEY` — optional API key from **Settings → API keys** at
+  https://app.mandala.computer. Treat it as a password. It may cover the account
+  or only one workspace, which is why a 404 below is not always what it looks like.
+- `MANDALA_MODEL_KEY` — optional Anthropic key, enabling `run_agent` and
+  `run_agent_chat` when filters permit them. Without it neither is registered.
+  The platform stores no copy and model work is billed to that key. It is
+  separate from the saved Mandala API credentials.
+
+If startup fails, read the local error and ask the user to correct the named
+profile/protection setting, run the TypeScript `mandala login` command, or set
+`MANDALA_API_KEY`. Invalid filters also prevent startup. Do not work around an
+unavailable server with `exec` or a browser. Revoke a device-named API key in
+**Settings → API keys** when it is no longer needed. A revoked key causes an
+ordinary refusal; MCP never logs in, changes profiles, rereads the file, or
+replays the refused action. The user can explicitly log in again and restart.
 
 Optional configuration:
 
@@ -87,10 +115,10 @@ of attempting the cleanup recipe below.
 
 **stdio**, which is what the plugin does, and what any client that can spawn a
 subprocess should do — one server per client, holding the key from its own
-environment:
+saved profile or environment:
 
 ```sh
-claude mcp add mandala -e MANDALA_API_KEY=com_… -- npx -y mandala-computer-mcp
+claude mcp add mandala -- npx -y mandala-computer-mcp
 ```
 
 **HTTP**, for a caller that cannot spawn a subprocess — claude.ai, a phone, a
@@ -106,8 +134,9 @@ claude mcp add --transport http mandala https://mcp.example.com/mcp \
   --header "Authorization: Bearer com_…"
 ```
 
-Over HTTP the server ignores `MANDALA_MODEL_KEY` and `MANDALA_COMPUTER_ID`
-rather than lending the operator's Anthropic key and the operator's machine to
+HTTP never loads the local credential store and ignores `MANDALA_API_KEY`,
+`MANDALA_PROFILE` and `--profile`. Over HTTP it also ignores `MANDALA_MODEL_KEY`
+and `MANDALA_COMPUTER_ID`, rather than lending the operator's Anthropic key and the operator's machine to
 everyone who connects. A caller who wants `run_agent` there sends their own
 Anthropic key as an `X-Model-Key` header, and `run_agent` is registered for
 that session only if they did and the filters permit it.
