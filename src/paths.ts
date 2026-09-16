@@ -134,6 +134,19 @@ export const execHandle = (id: string, pid: number) => {
   return `${computer(id)}/exec/${pid}`;
 };
 
+/** Stable identity is independent of the guest's reusable PID. */
+export const isExecutionId = (id: unknown): id is string =>
+  typeof id === 'string' && id.length === 37 && /^exec_[0-9a-f]{32}$/.test(id);
+
+export const execution = (id: string, executionId: string) => {
+  if (!isExecutionId(executionId))
+    throw new Error('execution_id must be exec_ followed by 32 lowercase hexadecimal digits');
+  return `${computer(id)}/executions/${executionId}`;
+};
+
+export const executionOutput = (id: string, executionId: string) =>
+  `${execution(id, executionId)}/output`;
+
 /** One window on the desktop (OPL-3583). The id is `0x2600003`-shaped. */
 export const window_ = (id: string, windowId: string) =>
   `${computer(id)}/windows/${segment('window_id', windowId)}`;

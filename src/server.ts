@@ -3,6 +3,7 @@ import { Session, type SessionConfig } from './session.js';
 import { registerAgent } from './tools/agent.js';
 import { registerComputers } from './tools/computers.js';
 import { registerEvents } from './tools/events.js';
+import { registerExecutions } from './tools/executions.js';
 import { registerGuest } from './tools/guest.js';
 import { registerInput } from './tools/input.js';
 import { registerSnapshots } from './tools/snapshots.js';
@@ -94,6 +95,7 @@ export function createServer(cfg: ServerConfig): McpServer {
   registerComputers(server, session, opts);
   registerInput(server, session, opts);
   registerGuest(server, session, opts);
+  registerExecutions(server, session, opts);
   registerSnapshots(server, session, opts);
   registerTemplates(server, session, opts);
   registerEvents(server, session, opts);

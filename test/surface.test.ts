@@ -151,6 +151,15 @@ const EXERCISE: Record<string, Record<string, unknown>[]> = {
       env: { NODE_ENV: 'production' },
     },
   ],
+  get_execution: [{ execution_id: 'exec_0123456789abcdef0123456789abcdef' }],
+  read_execution_output: [
+    {
+      execution_id: 'exec_0123456789abcdef0123456789abcdef',
+      stdout_offset: 0,
+      stderr_offset: 0,
+      limit: 1024,
+    },
+  ],
   exec_poll: [{ pid: 4242 }],
   exec_kill: [{ pid: 4242 }],
   open_url: [{ url: 'https://example.com' }],

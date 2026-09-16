@@ -265,9 +265,19 @@ export const registerGuest: Registrar = (server, session) => {
               body,
             );
           }
+          const stable = P.isExecutionId(res.execution_id);
+          const acceptedBody =
+            stable && body && typeof body === 'object' && !Array.isArray(body)
+              ? { ...body, execution_id: res.execution_id }
+              : body;
+          const identityNote = stable
+            ? ' Use get_execution for its last observation and read_execution_output with explicit offsets for independent reads; these never consume the shared PID cursor.'
+            : 'execution_id' in res
+              ? ' The command was accepted, but its stable identity is unavailable because the returned execution_id was malformed. Do not replay the command; the valid PID remains available for legacy inspection, subject to PID reuse.'
+              : '';
           return said(
-            `Started as pid ${res.pid}. Read its output with exec_poll, stop it with exec_kill.${note}`,
-            body,
+            `Started as pid ${res.pid}. Read its output with exec_poll, stop it with exec_kill.${identityNote}${note}`,
+            acceptedBody,
           );
         }
         const { body, note } = decodeExec(res, false);
@@ -1115,6 +1125,9 @@ function decodeExec(res: unknown, continued: boolean): { body: unknown; note: st
   const body: Record<string, unknown> = {};
   const notes: string[] = [];
   for (const [key, value] of Object.entries(source)) {
+    // Only the accepted launch can bind stable identity to this command.
+    // A reusable PID poll (or kill) cannot reconstruct that association.
+    if (key === 'execution_id') continue;
     if (claimed.has(key)) continue;
     const field = EXEC_STREAMS[key];
     if (field === undefined || typeof value !== 'string') {
