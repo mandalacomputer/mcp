@@ -24,9 +24,12 @@ const GROUPS = {
     'screenshot click type_text press_key scroll drag move_mouse mouse_button cursor_position wait',
   guest:
     'exec exec_poll exec_kill open_url list_windows window_action read_clipboard write_clipboard',
-  files: 'read_file write_file wait_for_file_change',
+  files: 'list_directory read_file write_file wait_for_file_change',
+  activities: 'list_activities get_activity get_activity_results',
+  signals: 'read_signals',
   executions: 'get_execution read_execution_output',
-  results: 'retain_execution_output get_result read_result_output delete_result',
+  results:
+    'get_activity_results retain_execution_output get_result read_result_output delete_result',
   artifacts: 'publish_artifact get_artifact read_artifact delete_artifact',
   snapshots:
     'list_snapshots snapshot_holdings create_snapshot restore_snapshot clone_snapshot snapshot_schedule get_retention delete_snapshot',
@@ -36,7 +39,7 @@ const GROUPS = {
   usage: 'get_usage',
   webhooks:
     'list_webhooks create_webhook get_webhook update_webhook rotate_webhook_secret test_webhook list_webhook_deliveries delete_webhook',
-  agent: 'run_agent',
+  agent: 'run_agent run_agent_chat',
 };
 const names = (tools: { name: string }[]) => tools.map((tool) => tool.name).sort();
 const words = (text: string) => text.split(' ').sort();
@@ -88,8 +91,22 @@ describe('filtered transport sessions', () => {
         if (readOnly) expect(visible).toEqual(words('screenshot list_windows read_clipboard'));
         else
           expect(visible).toEqual(
-            words(`${GROUPS.input} ${GROUPS.guest}${modelKey ? ' run_agent' : ''}`),
+            words(`${GROUPS.input} ${GROUPS.guest}${modelKey ? ' run_agent run_agent_chat' : ''}`),
           );
+        const chat = await client.callTool({
+          name: 'run_agent_chat',
+          arguments: {
+            computer_id: 'caller-computer',
+            messages: [{ role: 'user', content: 'task' }],
+          },
+        });
+        expect(chat.isError === true).toBe(readOnly || !modelKey);
+        if (!readOnly && modelKey)
+          expect(platform.calls.at(-1)).toMatchObject({
+            path: '/chat/completions',
+            body: { computer_id: 'caller-computer' },
+            headers: { authorization: `Bearer ${apiKey}`, 'x-model-key': modelKey },
+          });
         expect((await client.callTool({ name: 'screenshot', arguments: {} })).isError).toBe(true);
         const result = await client.callTool({
           name: 'screenshot',
@@ -253,16 +270,14 @@ describe('tool registration filters over MCP', () => {
     expect(platform.calls).toHaveLength(before);
   });
 
-  it('deduplicates tools shared by tags and preserves an empty read-only file selection', async () => {
+  it('deduplicates tools shared by tags and exposes passive directory listing in read-only files', async () => {
     const union = await open({ tags: ['files', 'events'] });
     expect(names((await union.client.listTools()).tools)).toEqual(
-      words('read_file write_file wait_for_file_change wait_for_event poll_events'),
+      words('list_directory read_file write_file wait_for_file_change wait_for_event poll_events'),
     );
     const empty = await open({ tags: ['files'], readOnly: true });
-    expect((await empty.client.listTools()).tools).toEqual([]);
-    await expect(empty.call('read_file', { path: '/tmp/example' })).rejects.toThrow(
-      /No tools are available/,
-    );
+    expect(names((await empty.client.listTools()).tools)).toEqual(['list_directory']);
+    expect((await empty.call('read_file', { path: '/tmp/example' })).isError).toBe(true);
     expect(platform.calls).toEqual([]);
   });
 
@@ -279,13 +294,27 @@ describe('tool registration filters over MCP', () => {
     expect(names((await limited.client.listTools()).tools)).toEqual(
       words(`${GROUPS.lifecycle} ${GROUPS.snapshots}`).filter((name) => !withheld.has(name)),
     );
-    for (const name of [...withheld, 'run_agent'])
+    for (const name of [...withheld, 'run_agent', 'run_agent_chat'])
       expect((await limited.call(name)).isError).toBe(true);
-    const keyed = await open({ tags: ['agent'], modelKey: 'sk-test' });
-    expect(names((await keyed.client.listTools()).tools)).toEqual(['run_agent']);
+    const keyed = await open({ tags: ['agent'], modelKey: 'sk-test', lifecycle: false });
+    expect(names((await keyed.client.listTools()).tools)).toEqual(['run_agent', 'run_agent_chat']);
     const readOnly = await open({ tags: ['agent'], modelKey: 'sk-test', readOnly: true });
     expect((await readOnly.client.listTools()).tools).toEqual([]);
     expect(platform.calls).toEqual([]);
+  });
+
+  it('deduplicates activity/result tags and keeps signals independent from event sockets', async () => {
+    const union = await open({ tags: ['activities', 'results'] });
+    expect(names((await union.client.listTools()).tools)).toEqual(
+      [...new Set(words(`${GROUPS.activities} ${GROUPS.results}`))].sort(),
+    );
+    const events = fakeEvents();
+    const passive = await open({ tags: ['signals'], readOnly: true, webSocket: events.factory });
+    expect(names((await passive.client.listTools()).tools)).toEqual(['read_signals']);
+    expect((await passive.call('read_signals')).isError).not.toBe(true);
+    expect((await passive.call('poll_events')).isError).toBe(true);
+    expect(events.sockets).toHaveLength(0);
+    expect(platform.calls).toHaveLength(1);
   });
 
   it('isolates configuration, account credentials and startup computer bindings', async () => {

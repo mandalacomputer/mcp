@@ -6,242 +6,8 @@ import {
   UNIMPLEMENTED,
   UNIMPLEMENTED_PARAMETERS,
 } from './allowlist.js';
-import {
-  ARTIFACT_ID,
-  ARTIFACT_MANIFEST,
-  connect,
-  installFakePlatform,
-  RETAINED_ID,
-  type Recorded,
-} from './harness.js';
-
-/**
- * Arguments good enough to make each tool do its request — a list per tool,
- * because a few of them reach a different route depending on what they are
- * given. snapshot_schedule is the clearest: no arguments reads the schedule,
- * `set` writes it, `clear` removes it, and those are three HTTP verbs.
- *
- * A tool with no entry here fails the first test rather than being quietly
- * skipped, which is the point: a tool nobody calls is a tool whose route nobody
- * is checking.
- */
-const EXERCISE: Record<string, Record<string, unknown>[]> = {
-  retain_execution_output: [
-    {
-      execution_id: 'exec_0123456789abcdef0123456789abcdef',
-      max_bytes_per_stream: 1048576,
-      retention_seconds: 86400,
-    },
-  ],
-  get_result: [{ result_id: RETAINED_ID }],
-  read_result_output: [{ result_id: RETAINED_ID, stream: 'diagnostic', offset: 0, limit: 16 }],
-  delete_result: [{ result_id: RETAINED_ID }],
-  publish_artifact: [
-    {
-      path: '/tmp/nominated',
-      expected_size: 3,
-      expected_sha256: ARTIFACT_MANIFEST.sha256,
-      execution_id: ARTIFACT_MANIFEST.execution_association.execution_id,
-      max_bytes: 8,
-      retention_seconds: 86400,
-    },
-  ],
-  get_artifact: [{ artifact_id: ARTIFACT_ID }],
-  read_artifact: [{ artifact_id: ARTIFACT_ID, max_bytes: 4096 }],
-  delete_artifact: [{ artifact_id: ARTIFACT_ID }],
-  list_templates: [{}],
-  // The document format, and the store on top of it (OPL-3568,
-  // OPL-3789, OPL-3830). Both spellings of the ref tools, because `version` is a
-  // parameter like any other and a call that never sends one is the gap the
-  // parameter half of this test exists to see.
-  get_template_schema: [{}],
-  check_template: [{ document: 'apiVersion: mandala/v1' }],
-  publish_template: [{ document: 'apiVersion: mandala/v1' }],
-  get_template: [
-    { namespace: 'acc-1', name: 'devbox' },
-    { namespace: 'acc-1', name: 'devbox', version: '1.0.0' },
-  ],
-  retire_template: [
-    { namespace: 'acc-1', name: 'devbox', version: '1.0.0', confirm: true },
-    { namespace: 'acc-1', name: 'devbox', confirm: true },
-  ],
-  // Compiling one (OPL-3791, OPL-3794). `no_reuse` on one of the two,
-  // for the same reason.
-  build_template: [
-    { document: 'apiVersion: mandala/v1' },
-    { document: 'apiVersion: mandala/v1', no_reuse: true },
-  ],
-  // Both spellings, the way list_computers below is exercised: a build listing
-  // fails closed on a degraded fleet like every other fan-out, and OPL-3840 is
-  // what made the way out of it something a client can send.
-  list_builds: [{}, { allow_partial: true }],
-  get_build: [{ build_id: 'bld-1' }],
-  watch_build: [{ build_id: 'bld-1' }],
-  list_sizes: [{}],
-  // The third shape is `state` (OPL-4554): a filter the control plane
-  // reads off the listing, and one no other call would send.
-  list_computers: [{}, { allow_partial: true }, { state: 'deleted' }],
-  get_computer: [{}],
-  use_computer: [{ computer_id: 'vm-1' }],
-  start_computer: [{}],
-  // The force is the whole of OPL-3748: without it this route is reachable and
-  // a guest that will not shut down cleanly still has no second move.
-  stop_computer: [{}, { force: true }],
-  suspend_computer: [{}],
-  restart_computer: [{}],
-  // Two shapes, because a resize needs the computer stopped and a rename does
-  // not, so the platform refuses them together.
-  update_computer: [
-    { name: 'renamed' },
-    { cpu: 4, ram_mb: 4096, disk_gb: 40 },
-    { idle_suspend_min: 30 },
-  ],
-  // All three sizing fields in one call, because the platform reads exactly
-  // these three off a move and the parameter sweep below is what proves it. A
-  // move is the sizing group and never a rename, so there is only one shape.
-  move_computer: [{ ram_mb: 26000, cpu: 2, disk_gb: 40 }],
-  list_moves: [{}],
-  // Both bounds, because a call that names neither cannot show the parameter
-  // sweep that this server can send either.
-  get_usage: [{}, { from: '2026-08-01T00:00:00Z', to: '2026-08-22T00:00:00Z' }],
-  // No arguments to sweep: the window belongs to the account, so there is no id
-  // and nothing to filter by.
-  get_retention: [{}],
-  // The webhooks CRUD (OPL-4306). Every body field on the create and on the
-  // update, because the parameter sweep is what proves this server can send
-  // them; the other five routes are bodyless or take only the id.
-  list_webhooks: [{}],
-  create_webhook: [
-    { url: 'https://ci.example.com/mandala' },
-    {
-      url: 'https://ci.example.com/mandala',
-      description: 'CI',
-      events: ['process.exited'],
-      computers: ['vm-1'],
-      enabled: false,
-    },
-  ],
-  get_webhook: [{ webhook_id: 'whk-9f3c1a7e5b2d4c80' }],
-  update_webhook: [
-    {
-      webhook_id: 'whk-9f3c1a7e5b2d4c80',
-      url: 'https://ci.example.com/mandala2',
-      description: 'CI',
-      events: ['process.exited'],
-      computers: ['vm-1'],
-      enabled: true,
-    },
-  ],
-  rotate_webhook_secret: [{ webhook_id: 'whk-9f3c1a7e5b2d4c80' }],
-  test_webhook: [{ webhook_id: 'whk-9f3c1a7e5b2d4c80' }],
-  list_webhook_deliveries: [{ webhook_id: 'whk-9f3c1a7e5b2d4c80' }],
-  delete_webhook: [{ webhook_id: 'whk-9f3c1a7e5b2d4c80', confirm: true }],
-  wait_for_computer: [{ until: 'guest' }],
-  get_desktop_url: [{}],
-  // A named size and an explicit shape are alternatives, never both.
-  create_computer: [
-    {
-      template: 'base',
-      template_transfer: 'prepare-token',
-      name: 'made',
-      cpu: 2,
-      ram_mb: 2048,
-      disk_gb: 20,
-      resolution: '1280x800',
-    },
-    { size: 'small' },
-  ],
-  clone_computer: [{ name: 'copy' }],
-  delete_computer: [
-    { computer_id: 'vm-2', confirm: true },
-    { computer_id: 'vm-2', confirm: true, delete_snapshots: true, expect: 'fp-abc123' },
-  ],
-
-  screenshot: [{}, { width: 800, fresh: true }],
-  click: [{ x: 10, y: 20 }],
-  type_text: [{ text: 'hi' }],
-  press_key: [{ keys: ['ctrl', 'c'] }],
-  scroll: [{ direction: 'down' }],
-  drag: [{ to_x: 5, to_y: 6, from_x: 1, from_y: 2 }],
-  move_mouse: [{ x: 3, y: 4 }],
-  mouse_button: [{ state: 'down', x: 1, y: 1 }],
-  cursor_position: [{}],
-  wait: [{ seconds: 1 }],
-
-  // The env is the whole of OPL-3746: without an argument that reaches the
-  // body, this route is reachable and a variable still has to be written into
-  // the command line as `FOO=bar cmd`.
-  exec: [
-    { command: 'true', retain_output: true },
-    { command: 'true' },
-    {
-      command: 'sleep 1',
-      background: true,
-      cwd: '/tmp',
-      desktop: true,
-      env: { NODE_ENV: 'production' },
-    },
-  ],
-  get_execution: [{ execution_id: 'exec_0123456789abcdef0123456789abcdef' }],
-  read_execution_output: [
-    {
-      execution_id: 'exec_0123456789abcdef0123456789abcdef',
-      stdout_offset: 0,
-      stderr_offset: 0,
-      limit: 1024,
-    },
-  ],
-  exec_poll: [{ pid: 4242 }],
-  exec_kill: [{ pid: 4242 }],
-  open_url: [{ url: 'https://example.com' }],
-  list_windows: [{}, { include_all: true }],
-  window_action: [
-    { window_id: '0x2600003', action: 'focus' },
-    { window_id: '0x2600003', action: 'move', x: 10, y: 20 },
-    { window_id: '0x2600003', action: 'resize', width: 640, height: 480 },
-  ],
-  // The event stream (OPL-3926). Both land on `GET computers/:id`, which is
-  // where `events_url` lives — the socket itself is not a route on this table
-  // and never can be, for the reason the platform keeps it beside `V1_ROUTES`
-  // rather than on it: the catch-all that serves the table cannot hold one open.
-  // The fixture's opening frame says the desktop is already up, so the wait ends
-  // on a synthesized computer.ready rather than on its timeout.
-  wait_for_event: [{ types: ['computer.ready'], timeout_s: 1 }],
-  poll_events: [{}],
-  // A watch is a connection parameter, so this one reopens the socket before it
-  // can answer — which is a second `GET computers/:id` on the same route, and
-  // nothing new for the mirror. The fixture reports the tree armed in its
-  // opening frame, so the call reaches its wait and times out saying nothing
-  // changed, which is an answer rather than an error.
-  wait_for_file_change: [{ path: '/home/user/project', timeout_s: 1 }],
-  read_clipboard: [{}],
-  write_clipboard: [{ text: 'on the clipboard' }],
-  write_file: [{ path: '/home/user/a.txt', content: 'hello' }],
-  // The offset is the parameter, and it is the whole of OPL-3740: without an
-  // argument that turns into a Range this route is reachable and a file over
-  // 64 MiB still is not.
-  read_file: [{ path: '/home/user/a.txt' }, { path: '/home/user/a.txt', offset: 2 }],
-
-  list_snapshots: [{}, { allow_partial: true, include_unfinished: true }],
-  snapshot_holdings: [{}],
-  // The name is the whole of OPL-3747: without an argument that reaches the
-  // body, this route is reachable and every snapshot it takes is still
-  // anonymous.
-  create_snapshot: [{}, { memory: true, name: 'before-upgrade' }],
-  restore_snapshot: [{ snapshot_id: 'snap-1', confirm: true }],
-  clone_snapshot: [{ snapshot_id: 'snap-1' }, { snapshot_id: 'snap-1', name: 'copy' }],
-  snapshot_schedule: [
-    {},
-    { set: { enabled: true, hour: 4, minute: 30, tz: 'UTC' } },
-    { clear: true },
-  ],
-  delete_snapshot: [{ snapshot_id: 'snap-1', confirm: true }],
-
-  run_agent: [
-    { prompt: 'open firefox' },
-    { prompt: 'open firefox', system: 'be brief', max_steps: 3 },
-  ],
-};
+import { connect, installFakePlatform, type Recorded } from './harness.js';
+import { collectExercises, EXERCISE } from './surface-exercise.js';
 
 const routesOf = (calls: Recorded[]) =>
   new Set(calls.map((c) => `${c.method} ${patternFor(c.path)}`));
@@ -286,15 +52,6 @@ function sentParameters(calls: Recorded[]): Map<string, Set<string>> {
   return byRoute;
 }
 
-/** Every tool, with every argument set, against the fake platform. */
-async function exerciseEverything(
-  call: (n: string, a: Record<string, unknown>) => Promise<unknown>,
-) {
-  for (const [name, argSets] of Object.entries(EXERCISE)) {
-    for (const args of argSets) await call(name, args);
-  }
-}
-
 describe('the surface this server calls', () => {
   let platform: ReturnType<typeof installFakePlatform>;
 
@@ -312,47 +69,22 @@ describe('the surface this server calls', () => {
     expect(names).toEqual(covered);
   });
 
-  it('lands every call on a route the platform allowlists', async () => {
-    const { call, close } = await connect({ modelKey: 'sk-ant-test' });
-    for (const [name, argSets] of Object.entries(EXERCISE)) {
-      for (const args of argSets) {
-        const res = await call(name, args);
-        // A tool that refused did not make its request, and would pass the
-        // allowlist check by having called nothing at all.
-        expect(res.isError, `${name} failed: ${JSON.stringify(res.content)}`).toBeFalsy();
-      }
-    }
-    await close();
-
-    const called = routesOf(platform.calls);
-    expect(called.size).toBeGreaterThan(0);
-    const outside = [...called].filter((r) => !ALLOWED.has(r));
-    expect(outside, 'these routes are not on the platform allowlist and will 404').toEqual([]);
-  });
-
-  it('leaves exactly the pinned part of the platform surface unreached', async () => {
-    const { call, close } = await connect({ modelKey: 'sk-ant-test' });
-    await exerciseEverything(call);
-    await close();
-
-    const called = routesOf(platform.calls);
-    const unreached = [...ALLOWED].filter((r) => !called.has(r)).sort();
-    expect(unreached).toEqual([...UNIMPLEMENTED].sort());
+  it('lands successful exercised calls on mirrored operations with no omissions', async () => {
+    const calls = (await collectExercises()).flatMap((e) => e.requests);
+    const called = routesOf(calls);
+    expect([...called].filter((r) => !ALLOWED.has(r))).toEqual([]);
+    expect([...ALLOWED].filter((r) => !called.has(r))).toEqual([]);
+    expect([...UNIMPLEMENTED]).toEqual([]);
   });
 
   it('sends only parameters the platform documents', async () => {
-    // A field the platform does not read is a field it ignores, silently: the
-    // call succeeds, and the thing the caller asked for does not happen.
-    const { call, close } = await connect({ modelKey: 'sk-ant-test' });
-    await exerciseEverything(call);
-    await close();
-
+    const calls = (await collectExercises()).flatMap((e) => e.requests);
     const outside: string[] = [];
-    for (const [route, sent] of sentParameters(platform.calls)) {
+    for (const [route, sent] of sentParameters(calls)) {
       const known = new Set(PARAMETERS.get(route) ?? []);
       for (const p of sent) if (!known.has(p)) outside.push(`${route}  ${p}`);
     }
-    expect(outside.sort(), 'this server sends parameters the platform ignores').toEqual([]);
+    expect(outside.sort()).toEqual([]);
   });
 
   it('records an undocumented header instead of filtering it out', () => {
@@ -375,11 +107,8 @@ describe('the surface this server calls', () => {
     // The test the route table could not be: `Range` was documented, on a route
     // this server called on every read_file, and unsendable — and every other
     // test in this file passed for the whole time that was true.
-    const { call, close } = await connect({ modelKey: 'sk-ant-test' });
-    await exerciseEverything(call);
-    await close();
-
-    const sent = sentParameters(platform.calls);
+    const calls = (await collectExercises()).flatMap((e) => e.requests);
+    const sent = sentParameters(calls);
     const unsent: string[] = [];
     for (const [route, params] of PARAMETERS) {
       // A route nobody calls sends none of its parameters; its own line in
@@ -415,6 +144,7 @@ describe('the surface this server calls', () => {
     const names = (await client.listTools()).tools.map((t) => t.name);
     await close();
     expect(names).not.toContain('run_agent');
+    expect(names).not.toContain('run_agent_chat');
   });
 });
 
@@ -425,6 +155,12 @@ describe('patternFor', () => {
     expect(patternFor('/computers/vm-1/exec/103457')).toBe('computers/:id/exec/:pid');
     expect(patternFor('/computers/vm-1/windows/0x2600003')).toBe('computers/:id/windows/:window');
     expect(patternFor('/webhooks/whk-9f3c1a7e5b2d4c80/deliveries')).toBe('webhooks/:id/deliveries');
+    expect(patternFor('/computers/vm-1/activities/act_0123456789abcdef0123456789abcdef')).toBe(
+      'computers/:id/activities/:activity',
+    );
+    expect(
+      patternFor('/computers/vm-1/activities/act_0123456789abcdef0123456789abcdef/results'),
+    ).toBe('computers/:id/activities/:activity/results');
     // A computer whose id looks like a route segment is still an id.
     expect(patternFor('/computers/audit')).toBe('computers/:id');
   });

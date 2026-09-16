@@ -882,3 +882,23 @@ export const artifact = (id: string, artifactID: string) => {
 };
 export const artifactDownload = (id: string, artifactID: string) =>
   `${artifact(id, artifactID)}/download`;
+
+/** Passive metadata operations; these helpers perform no readiness requests. */
+export const directory = (id: string) => `${computer(id)}/files/list`;
+export const activities = (id: string) => `${computer(id)}/activities`;
+export const activity = (id: string, activityId: string) => {
+  if (!/^act_[a-f0-9]{32}$/.test(activityId)) throw new Error('Invalid activity_id');
+  return `${activities(id)}/${activityId}`;
+};
+export const activityResults = (id: string, activityId: string) =>
+  `${activity(id, activityId)}/results`;
+export const signals = (id: string) => `${computer(id)}/signals`;
+export const CHAT_COMPLETIONS = 'chat/completions';
+export function chatBody(args: {
+  computer_id: string;
+  messages: unknown[];
+  model?: string;
+  max_steps: number;
+}): Json {
+  return omitUndefined({ ...args, stream: false });
+}

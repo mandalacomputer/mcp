@@ -68,3 +68,21 @@ jobs:
   # secret belongs — one there that reads three SDKs, rather than a key to the
   # platform inside three repos — and where the output belongs, since what it
   # prints is routes and parameters that have not shipped yet.
+
+  published-openapi:
+    # Required external gate: anonymous publication, once per PR/main run.
+    # No private checkout, credentials, redirects, skips or fixture fallback.
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - run: npx vitest run --config vitest.openapi.config.ts

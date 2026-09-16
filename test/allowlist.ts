@@ -402,30 +402,8 @@ export const UNIMPLEMENTED_PARAMETERS: ReadonlySet<string> = new Set([
 export const key = (route: Route) => `${route.method} ${route.pattern}`;
 export const ALLOWED = new Set(V1_ROUTES.map(key));
 
-/**
- * Routes this server cannot yet call or deliberately omits.
- *
- * Pinned rather than left implicit, because "every call lands on an allowlisted
- * route" stays true no matter how few calls there are. Making the gap a set that
- * has to be edited is what turns a route added upstream into a failing test
- * rather than a feature nobody noticed.
- */
-export const UNIMPLEMENTED = new Set([
-  // The OpenAI-compatible door onto the same agent loop the platform already
-  // exposes at computers/:id/agent, which run_agent uses. Two ways to reach one
-  // engine is a good thing for a caller who already has an OpenAI client
-  // pointed somewhere; it is nothing at all to an MCP client, which has neither
-  // a base URL to redirect nor a reason to prefer the vocabulary.
-  'POST chat/completions',
-  // GAP. The server has file-transfer tools, but no directory-listing tool yet.
-  'GET computers/:id/files/list',
-  // Retained API history has no MCP convenience tools yet.
-  'GET computers/:id/activities',
-  'GET computers/:id/activities/:activity',
-  'GET computers/:id/activities/:activity/results',
-  // Passive platform signals have no client convenience method yet.
-  'GET computers/:id/signals',
-]);
+/** Every mirrored operation must be exercised; parameter exceptions stay separate. */
+export const UNIMPLEMENTED = new Set<string>();
 
 /**
  * Reduce a concrete path to its route pattern, exactly as `patternFor` in the
@@ -450,6 +428,7 @@ export function patternFor(path: string): string {
         parent === 'webhooks'
       )
         return ':id';
+      if (i === 3 && parts[0] === 'computers' && parts[2] === 'activities') return ':activity';
       if (i === 3 && parts[0] === 'computers' && parts[2] === 'windows') return ':window';
       if (i === 3 && parts[0] === 'computers' && parts[2] === 'exec') return ':pid';
       if (i === 3 && parts[0] === 'computers' && parts[2] === 'executions') return ':executionId';

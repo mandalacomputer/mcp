@@ -8,14 +8,18 @@ import {
 } from '@modelcontextprotocol/sdk/types.js';
 import { Session, type SessionConfig } from './session.js';
 import { type ToolFilters, toolFilter } from './tool-filters.js';
+import { registerActivities } from './tools/activities.js';
 import { registerAgent } from './tools/agent.js';
 import { registerArtifacts } from './tools/artifacts.js';
+import { registerChat } from './tools/chat.js';
 import { registerComputers } from './tools/computers.js';
+import { registerDirectory } from './tools/directory.js';
 import { registerEvents } from './tools/events.js';
 import { registerExecutions } from './tools/executions.js';
 import { registerGuest } from './tools/guest.js';
 import { registerInput } from './tools/input.js';
 import { registerResults } from './tools/results.js';
+import { registerSignals } from './tools/signals.js';
 import { registerSnapshots } from './tools/snapshots.js';
 import { registerTemplates } from './tools/templates.js';
 import type { ToolOptions } from './tools/types.js';
@@ -135,6 +139,10 @@ export function createServer(cfg: ServerConfig): McpServer {
   registerEvents(server, session, opts);
   registerWebhooks(server, session, opts);
   registerAgent(server, session, opts);
+  registerDirectory(server, session, opts);
+  registerActivities(server, session, opts);
+  registerSignals(server, session, opts);
+  registerChat(server, session, opts);
 
   // The SDK installs tool handlers on the first registration. An empty
   // selection still needs a valid tools/list response and must refuse calls.
