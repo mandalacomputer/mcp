@@ -60,6 +60,8 @@ export const V1_ROUTES: Route[] = [
   r('DELETE', 'computers/:id/exec/:pid'),
   r('GET', 'computers/:id/executions/:executionId'),
   r('GET', 'computers/:id/executions/:executionId/output'),
+  r('GET', 'computers/:id/activities'),
+  r('GET', 'computers/:id/activities/:activity'),
   r('GET', 'computers/:id/windows'),
   r('POST', 'computers/:id/windows/:window'),
   // The desktop's clipboard (OPL-3743, OPL-3768). Session-only for its
@@ -227,6 +229,8 @@ export const PARAMETERS: ReadonlyMap<string, readonly string[]> = new Map([
   ['GET computers/:id/exec/:pid', []],
   ['DELETE computers/:id/exec/:pid', []],
   ['GET computers/:id/executions/:executionId', []],
+  ['GET computers/:id/activities', ['query:cursor', 'query:changes']],
+  ['GET computers/:id/activities/:activity', []],
   [
     'GET computers/:id/executions/:executionId/output',
     ['query:stdout_offset', 'query:stderr_offset', 'query:limit'],
@@ -377,6 +381,9 @@ export const UNIMPLEMENTED = new Set([
   // Stable execution reads have no client convenience methods yet.
   'GET computers/:id/executions/:executionId',
   'GET computers/:id/executions/:executionId/output',
+  // Retained API history has no MCP convenience tools yet.
+  'GET computers/:id/activities',
+  'GET computers/:id/activities/:activity',
 ]);
 
 /**
