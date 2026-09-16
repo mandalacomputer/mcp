@@ -16,6 +16,7 @@ import {
   refused,
   said,
   unwrapComputer,
+  withErrorMetadata,
   withoutCredentials,
 } from '../format.js';
 import * as P from '../paths.js';
@@ -1499,15 +1500,24 @@ export const registerComputers: Registrar = (server, session, opts) => {
                   : !originalSupportsContinuation
                     ? 'The original create must include a nonblank template and omit size to continue with this token. Inspect the original request and preparation details; do not automatically wait or retry.'
                     : 'The response does not supply a known continuation state, usable token, and valid delay. Inspect the preparation details; do not automatically wait or retry.';
-            return refused(
-              `${typeof body.error === 'string' ? body.error : 'The template image is not available for this create.'} No computer has been created. ${advice} The token is not a create idempotency key. Never automatically replay after a lost or ambiguous response.`,
-              {
-                code: body.code,
-                template_transfer: body.template_transfer,
-                preparation,
-                retry_after_ms: error.retryAfterMs,
-              },
+            const refusal = withErrorMetadata(
+              refused(
+                `${typeof body.error === 'string' ? body.error : 'The template image is not available for this create.'} No computer has been created. ${advice} The token is not a create idempotency key. Never automatically replay after a lost or ambiguous response.`,
+              ),
+              error,
             );
+            return {
+              ...refusal,
+              content: [
+                ...refusal.content,
+                ...said('Template preparation:', {
+                  code: body.code,
+                  template_transfer: body.template_transfer,
+                  preparation,
+                  retry_after_ms: error.retryAfterMs,
+                }).content,
+              ],
+            };
           }
           throw error;
         }

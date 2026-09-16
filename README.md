@@ -657,6 +657,66 @@ about storage instead.
 guest agent answers 409. The platform's own error messages come through
 unedited, because they are written to be acted on.
 
+HTTP failures preserve their actual response status. An unsupported method on a
+known path is `MethodNotAllowedError` (405), with the received `Allow` value when
+available. A missing computer, snapshot, route or guest file remains
+`NotFoundError` (404); other guest failures keep their own status and message.
+Neither response causes an automatic retry or method switch.
+
+Embedders can inspect optional diagnostics on every `APIError`:
+
+```ts
+import { Api, APIError, MethodNotAllowedError } from 'mandala-computer-mcp';
+
+const api = new Api(process.env.MANDALA_API_KEY!);
+try {
+  await api.json('GET', 'account');
+} catch (error) {
+  if (error instanceof APIError) {
+    console.error({ status: error.status, requestId: error.requestId,
+      reason: error.reason, allow: error.allow,
+      wwwAuthenticate: error.wwwAuthenticate });
+    if (error instanceof MethodNotAllowedError) {
+      // Inspect error.allow before correcting the request method.
+    }
+  }
+}
+```
+
+`requestId` uses a nonblank `X-Request-ID` header first, then the top-level
+`request_id` body field. It is an opaque diagnostic, never an idempotency key.
+The raw body remains available on `error.body`, including any differing body ID
+and nested chat accounting. `allow` and `wwwAuthenticate` come only from received
+headers. HEAD failures can carry these fields with no body. Older servers,
+intermediaries and connection failures may supply none of them. Existing
+constructor arguments retain their meanings; an optional trailing
+`APIErrorMetadata` object adds these three fields.
+
+MCP error results include supplied `reason`, `request_id`, `allow`,
+`www_authenticate` and `retry_after_ms` as labelled JSON metadata. Diagnostic
+strings are limited to 128, 256, 512 and 512 characters respectively; an
+oversized field is omitted with a notice, so a shortened Allow is never
+presented as complete. Tool-specific warnings about partial work, retained
+publication, execution reads and explicit template continuation still apply.
+Serialized JSON object or array prefixes are not displayed as error prose.
+Valid scalar error messages retain their wording; embedders still have the
+original `APIError.message` and `APIError.body` for diagnostics. Native agent
+error frames retain their supplied numeric status even without a reason or
+request ID, independently of the successful HTTP stream carrying them.
+
+For a 401, `missing` means a platform credential was not supplied; `invalid`
+means the supplied platform credential was not accepted; `revoked` means its
+authority no longer holds. Unknown reasons stay visible. An unclassified 401
+alone does not identify whether the account key or model key was refused,
+including a nested chat failure. A 403 remains a permission or authority
+refusal. Inspect recorded work before another run; no key fallback, login or
+automatic replay is performed. Nested error reasons and in-band stream errors
+do not grant permission to replay a partly completed run.
+
+For desktop events, use the exact returned `events_url`, including its desktop
+capability, in a WebSocket client. A REST Bearer key alone is not sufficient;
+the HTTP events response provides JSON guidance rather than another login flow.
+
 **Desktop links are credentials.** `get_desktop_url` returns the watch-only URL
 by default — the platform drops input on that socket, so it is safe to hand to
 somebody. `control: true` returns the full-control one, which is root-equivalent

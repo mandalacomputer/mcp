@@ -1,11 +1,13 @@
 import { Agent, type Dispatcher, Headers as UndiciHeaders, fetch as undiciFetch } from 'undici';
 import {
   type APIError,
+  type APIErrorMetadata,
   CancelledError,
   ConnectivityError,
   ConnectivityInterruptedError,
   errorForStatus,
   MandalaError,
+  platformSaid,
   RangeNotSatisfiableError,
   RedirectError,
 } from './errors.js';
@@ -14,6 +16,14 @@ export const DEFAULT_BASE_URL = 'https://app.mandala.computer/api/v1';
 
 /** Anthropic's own key, forwarded for the one route that runs a model. */
 export const MODEL_KEY_HEADER = 'X-Model-Key';
+
+function responseMetadata(resp: Response): APIErrorMetadata {
+  return {
+    requestId: resp.headers.get('x-request-id') ?? undefined,
+    allow: resp.headers.get('allow') ?? undefined,
+    wwwAuthenticate: resp.headers.get('www-authenticate') ?? undefined,
+  };
+}
 
 export type RequestOptions = {
   query?: Record<string, string | number | boolean | undefined>;
@@ -392,6 +402,9 @@ export class Api {
               : 'the configured API root did not identify the resource directly'
           }. Retrying this unchanged gets the same answer.`,
         resp.status,
+        undefined,
+        undefined,
+        responseMetadata(resp),
       );
     }
     if (!resp.ok) throw await this.#error(resp, method, path, signal, bounded);
@@ -439,9 +452,7 @@ export class Api {
         // entire body arrived.
         if (truncated) throw new SyntaxError('truncated response body');
         body = JSON.parse(text);
-        const err = (body as { error?: unknown })?.error;
-        if (typeof err === 'string' && err) message = err;
-        else message = text.slice(0, 500);
+        message = platformSaid(body) ?? text.slice(0, 500);
       } catch {
         message = text.slice(0, 500);
         // The bounded page prefix, not the 500-character message. errorForStatus replaces
@@ -460,9 +471,16 @@ export class Api {
     // Content-Range describes the file length, independently of Retry-After.
     if (resp.status === 416) {
       const total = parseContentRange(resp.headers.get('content-range'))?.total;
-      return new RangeNotSatisfiableError(message, resp.status, body, total, delay);
+      return new RangeNotSatisfiableError(
+        message,
+        resp.status,
+        body,
+        total,
+        delay,
+        responseMetadata(resp),
+      );
     }
-    return errorForStatus(resp.status, message, body, delay);
+    return errorForStatus(resp.status, message, body, delay, responseMetadata(resp));
   }
 
   /**

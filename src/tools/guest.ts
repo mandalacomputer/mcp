@@ -8,6 +8,7 @@ import {
   RangeNotSatisfiableError,
 } from '../errors.js';
 import {
+  apiErrorMessage,
   guarded,
   image,
   isInlineImage,
@@ -16,6 +17,7 @@ import {
   refused,
   said,
   text,
+  withErrorMetadata,
 } from '../format.js';
 import * as P from '../paths.js';
 import { retainIntent, synchronousResultId } from '../results.js';
@@ -98,7 +100,7 @@ const BACKGROUND_SLOTS_FULL = /already has (\d+) background commands? running/i;
 
 function backgroundSlotsFull(err: unknown): number | undefined {
   if (!(err instanceof ConflictError) || err.reason !== undefined) return undefined;
-  const held = Number(BACKGROUND_SLOTS_FULL.exec(err.message)?.[1]);
+  const held = Number(BACKGROUND_SLOTS_FULL.exec(apiErrorMessage(err))?.[1]);
   return Number.isSafeInteger(held) && held > 0 ? held : undefined;
 }
 
@@ -121,14 +123,17 @@ function backgroundSlotsFull(err: unknown): number | undefined {
  * and a guess.
  */
 const backgroundFull = (err: ConflictError, held: number) =>
-  refused(
-    `${err.message}\n\nA slot is held for as long as its command runs, and all ${held} are held now. ` +
-      `Nothing on this side frees one: a command that has already finished is not counted, so there is ` +
-      `nothing to reap, and a poll reads output rather than releasing anything. If any of the ${held} are ` +
-      `servers, they do not exit on their own and another exec with background: true gets this same answer ` +
-      `for as long as they run. The way out is to stop one you no longer need — exec_kill on a pid an ` +
-      `earlier exec returned, with exec_poll to see which are still running. If they are builds or installs ` +
-      `rather than servers, one of them finishes by itself and its slot comes back a moment later.`,
+  withErrorMetadata(
+    refused(
+      `${apiErrorMessage(err)}\n\nA slot is held for as long as its command runs, and all ${held} are held now. ` +
+        `Nothing on this side frees one: a command that has already finished is not counted, so there is ` +
+        `nothing to reap, and a poll reads output rather than releasing anything. If any of the ${held} are ` +
+        `servers, they do not exit on their own and another exec with background: true gets this same answer ` +
+        `for as long as they run. The way out is to stop one you no longer need — exec_kill on a pid an ` +
+        `earlier exec returned, with exec_poll to see which are still running. If they are builds or installs ` +
+        `rather than servers, one of them finishes by itself and its slot comes back a moment later.`,
+    ),
+    err,
   );
 
 /**
@@ -174,18 +179,21 @@ const windowOutcomeMayBeUnknown = (err: GatewayTimeoutError) => {
 
 const windowOutcomeUnknown = (err: GatewayTimeoutError, action: string, windowId: string) => {
   const named = platformSaid(err.body);
-  return refused(
-    `${named ? `${named}\n\n` : ''}The ${action} on ${windowId} did not report a result before the ` +
-      `deadline (HTTP ${err.status}). That is not a refusal and it is not a report that nothing ` +
-      `happened: the guest may have taken the action and lost the race to say so, so the outcome is ` +
-      `UNKNOWN and the ${action} may already have been applied. Do not send this call again to find ` +
-      `out — call list_windows, which says what the desktop is actually like now. ` +
-      (action === 'close'
-        ? `A close least of all: there is no undo for a window that was holding unsaved work, and a ` +
-          `window id is not reserved forever — the X server can hand the same id to something else — ` +
-          `so a second close is not safely a no-op on a window that has already gone.`
-        : `A repeated ${action} is untidy rather than destructive, but it still answers with a guess ` +
-          `where a read answers with the window.`),
+  return withErrorMetadata(
+    refused(
+      `${named ? `${named}\n\n` : ''}The ${action} on ${windowId} did not report a result before the ` +
+        `deadline (HTTP ${err.status}). That is not a refusal and it is not a report that nothing ` +
+        `happened: the guest may have taken the action and lost the race to say so, so the outcome is ` +
+        `UNKNOWN and the ${action} may already have been applied. Do not send this call again to find ` +
+        `out — call list_windows, which says what the desktop is actually like now. ` +
+        (action === 'close'
+          ? `A close least of all: there is no undo for a window that was holding unsaved work, and a ` +
+            `window id is not reserved forever — the X server can hand the same id to something else — ` +
+            `so a second close is not safely a no-op on a window that has already gone.`
+          : `A repeated ${action} is untidy rather than destructive, but it still answers with a guess ` +
+            `where a read answers with the window.`),
+    ),
+    err,
   );
 };
 
@@ -662,7 +670,8 @@ export const registerGuest: Registrar = (server, session) => {
               isInlineImage(contentType) ? MAX_INLINE_IMAGE_BYTES : MAX_INLINE_BYTES,
           );
         } catch (err) {
-          if (err instanceof RangeNotSatisfiableError) return pastEnd(path, offset, err.size);
+          if (err instanceof RangeNotSatisfiableError)
+            return withErrorMetadata(pastEnd(path, offset, err.size), err);
           throw err;
         }
 

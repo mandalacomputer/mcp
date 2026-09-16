@@ -1,7 +1,7 @@
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import type { BoundedBytes } from './api.js';
 import { APIError, CancelledError } from './errors.js';
-import { refused } from './format.js';
+import { refused, withErrorMetadata } from './format.js';
 export const RETAINED_OPERATION_MS = 90000;
 export const PRESENTATION_DEFAULT = 4096,
   PRESENTATION_MAX = 16384,
@@ -277,8 +277,11 @@ export async function retainedCall(
     if (signal.aborted || error instanceof CancelledError)
       return refused(`Retained operation cancelled.${suffix}`);
     if (error instanceof APIError)
-      return refused(
-        `Retained operation failed (HTTP ${error.status}). Current authorization, availability or server support could not be confirmed.${suffix}`,
+      return withErrorMetadata(
+        refused(
+          `Retained operation failed (HTTP ${error.status}). Current authorization, availability or server support could not be confirmed.${suffix}`,
+        ),
+        error,
       );
     return refused(`Retained operation could not be completed or validated.${suffix}`);
   } finally {

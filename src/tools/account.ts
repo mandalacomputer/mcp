@@ -105,6 +105,7 @@ export const registerAccount: Registrar = (server, session) => {
               error.status,
               error.body,
               error.retryAfterMs,
+              error,
             );
           }
           // JSON decoding failures can carry raw response text. Never print that text here.

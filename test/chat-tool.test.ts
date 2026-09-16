@@ -193,6 +193,113 @@ describe('BYOK JSON chat request and response contract', () => {
 });
 
 describe('flat and nested chat failures', () => {
+  it.each([{}, [], 12, null, ' '])(
+    'does not expose discarded response fields through a malformed nested message: %j',
+    async (message) => {
+      answer(
+        { error: { message, request: { Authorization: 'DO-NOT-ECHO' } }, secret: 'DO-NOT-ECHO' },
+        401,
+      );
+      const result = await connection.call('run_agent_chat', task);
+      expect(result.isError).toBe(true);
+      expect(text(result)).not.toContain('DO-NOT-ECHO');
+      expect(text(result)).not.toContain('Authorization');
+      expect(text(result)).toContain('without a usable error message');
+    },
+  );
+  it.each([
+    { reason: 'missing', phrase: 'was not supplied' },
+    { reason: 'invalid', phrase: 'was not accepted' },
+    { reason: 'revoked', phrase: 'authority was revoked' },
+    { reason: undefined, phrase: 'account key or model key' },
+    { reason: 'future-reason', phrase: 'account key or model key' },
+  ])(
+    'preserves nested 401 classification and outer correlation: $reason',
+    async ({ reason, phrase }) => {
+      answer(
+        {
+          error: {
+            message: 'Run credential refused',
+            code: 503,
+            reason,
+            request_id: 'provider-id',
+            usage: CHAT_COMPLETION.usage,
+            steps: [{ n: 1, detail: 'clicked once' }],
+          },
+          request_id: 'body-id',
+        },
+        401,
+        {
+          'X-Request-ID': 'header-id',
+          ...(reason === 'revoked' ? { 'WWW-Authenticate': 'Bearer error="invalid_token"' } : {}),
+        },
+      );
+      const result = await connection.call('run_agent_chat', task);
+      expect(result.isError).toBe(true);
+      expect(text(result)).toContain(phrase);
+      expect(text(result)).toContain('header-id');
+      expect(text(result)).not.toContain('body-id');
+      expect(text(result)).not.toContain('provider-id');
+      expect(text(result)).toContain('clicked once');
+      expect(text(result)).not.toContain('worth sending again');
+      if (reason === 'revoked') expect(text(result)).toContain('invalid_token');
+      else expect(text(result)).not.toContain('www_authenticate');
+      expect(platform.calls).toHaveLength(1);
+    },
+  );
+  it('keeps top-level classification ahead of a contradictory nested reason', async () => {
+    answer({ reason: 'invalid', error: { message: 'refused', reason: 'revoked' } }, 401);
+    const result = await connection.call('run_agent_chat', task);
+    expect(text(result)).toContain('was not accepted');
+    expect(text(result)).not.toContain('revoked');
+  });
+  it('redacts echoed keys in every new diagnostic field after composing the result', async () => {
+    answer({ error: { message: 'refused', reason: MODEL }, request_id: ACCOUNT }, 401, {
+      Allow: MODEL,
+      'WWW-Authenticate': ACCOUNT,
+    });
+    const result = await connection.call('run_agent_chat', task);
+    expect(text(result)).not.toContain(MODEL);
+    expect(text(result)).not.toContain(ACCOUNT);
+    expect(text(result)).toContain('[redacted]');
+  });
+  it('does not repeat oversized diagnostic strings in chat metadata', async () => {
+    answer(
+      { error: { message: 'refused', reason: 'r'.repeat(129) }, request_id: 'i'.repeat(257) },
+      401,
+      { Allow: 'a'.repeat(513), 'WWW-Authenticate': 'w'.repeat(513) },
+    );
+    const result = await connection.call('run_agent_chat', task);
+    expect(text(result)).toContain('metadata was omitted');
+    for (const marker of ['r'.repeat(129), 'i'.repeat(257), 'a'.repeat(513), 'w'.repeat(513)])
+      expect(text(result)).not.toContain(marker);
+  });
+  it('bounds valid native accounting and keeps the incomplete-work warning', async () => {
+    answer(
+      {
+        error: {
+          message: 'Run failed',
+          usage: CHAT_COMPLETION.usage,
+          agent: {
+            computer_id: 'vm-1',
+            usage: {
+              input_tokens: 1,
+              output_tokens: 1,
+              cache_read_tokens: 0,
+              cache_write_tokens: 0,
+            },
+            steps: [{ n: 1, detail: 'x'.repeat(5000) }],
+          },
+        },
+      },
+      401,
+    );
+    const result = await connection.call('run_agent_chat', task);
+    expect(text(result)).toContain('oversized and omitted');
+    expect(text(result)).toContain('incomplete');
+    expect(text(result)).not.toContain('x'.repeat(5000));
+    expect(text(result).length).toBeLessThan(6000);
+  });
   it.each([401, 403, 402, 429, 503])(
     'preserves actual HTTP %i despite conflicting nested code and retained billed work',
     async (status) => {

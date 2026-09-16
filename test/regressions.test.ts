@@ -6205,7 +6205,7 @@ describe('a refusal that is about the caller rather than the computer', () => {
   const shown = (status: number, message: string, body?: unknown) =>
     said(failed(errorForStatus(status, message, body)));
 
-  it('tells a model to re-authenticate rather than to send the mutation again', () => {
+  it('keeps an unclassified authentication refusal neutral and forbids mutation replay', () => {
     // Authentication and role are checked again while a call is in flight, so
     // one of these can land after part of the work is done. A model reads the
     // sentence and nothing else, and a bare "unauthorized (HTTP 401)" reads like
@@ -6213,7 +6213,7 @@ describe('a refusal that is about the caller rather than the computer', () => {
     // the instinct is to send the call again, and for a create, a start, a move
     // or a write that is how the same work happens twice.
     const unauthorized = shown(401, 'unauthorized');
-    expect(unauthorized).toMatch(/stopped being accepted/);
+    expect(unauthorized).toMatch(/account key or model key/);
     expect(unauthorized).toMatch(/partway through a call/);
     expect(unauthorized).toMatch(/check what already took effect/);
     // Not a word telling it to try again, which is what the 409 vocabulary says
@@ -6342,10 +6342,10 @@ describe('an agent run stopped part way through', () => {
       const { call, close } = await connect({ modelKey: 'sk-test' });
       const res = await call('run_agent', { prompt: 'finish the task' });
       expect(res.isError).toBe(true);
-      expect(said(res)).toMatch(/no longer accepted \(HTTP 401\)/);
-      expect(said(res)).toMatch(/not by anything wrong with the computer/);
+      expect(said(res)).toMatch(/HTTP 401/);
+      expect(said(res)).toMatch(/account key or model key/);
       expect(said(res)).toMatch(/Do NOT call run_agent again with the same prompt/);
-      expect(said(res)).toMatch(/until the credential is fixed/);
+      expect(said(res)).toMatch(/check what already took effect/);
       // And what it did get through, because that is what the next decision is
       // made from — and it is billed.
       expect(said(res)).toMatch(/1\. screenshot/);
