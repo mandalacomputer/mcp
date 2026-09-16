@@ -169,6 +169,51 @@ describe('the SSH tools over answers they cannot trust', () => {
     expect(text).not.toContain('can log in');
   });
 
+  it('reads an answer that has no error field at all', async () => {
+    const { error: _omitted, ...older } = SSH_SETTING;
+    expect(older).not.toHaveProperty('error');
+    const res = await over(older, 200, 'get_computer_ssh', { computer_id: 'vm-1' });
+    expect(res.isError).toBeFalsy();
+    expect(textOf(res)).toMatch(/^SSH is ON for vm-1\. 1 key/);
+  });
+
+  it('reads an empty or blank error as no refusal', async () => {
+    for (const error of ['', '   ']) {
+      const res = await over({ ...SSH_SETTING, error }, 200, 'get_computer_ssh', {
+        computer_id: 'vm-1',
+      });
+      expect(res.isError).toBeFalsy();
+      expect(textOf(res)).not.toContain('REFUSED');
+      expect(textOf(res)).toMatch(/^SSH is ON for vm-1\. 1 key/);
+    }
+  });
+
+  it('keeps a refusal on a switch, with the requested value answered back', async () => {
+    const error = 'The hypervisor refused this setting (status 400).';
+    const res = await over({ ...SSH_SETTING, enabled: true, error }, 200, 'set_computer_ssh', {
+      computer_id: 'vm-1',
+      enabled: true,
+    });
+    expect(res.isError).toBe(true);
+    expect(textOf(res)).toMatch(
+      /^SSH is ON for vm-1, but its hypervisor REFUSED this setting, so the computer does not have it: The hypervisor refused this setting \(status 400\)\.\n/,
+    );
+  });
+
+  it('keeps a refusal on a switch, with the opposite value answered back', async () => {
+    const error = 'The hypervisor refused this setting (status 413).';
+    const res = await over({ ...SSH_SETTING, enabled: false, error }, 200, 'set_computer_ssh', {
+      computer_id: 'vm-1',
+      enabled: true,
+    });
+    expect(res.isError).toBe(true);
+    const text = textOf(res);
+    expect(text).toMatch(
+      /^SSH is off for vm-1, but its hypervisor REFUSED this setting, so the computer does not have it: The hypervisor refused this setting \(status 413\)\. The platform also answered that SSH is off, not on as asked\.\n/,
+    );
+    expect(text).not.toContain('Nothing here assumes which is true');
+  });
+
   it('refuses a setting it cannot read, or one that contradicts the request', async () => {
     for (const body of [
       {},

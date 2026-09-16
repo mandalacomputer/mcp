@@ -60,9 +60,12 @@ function settingOf(body: unknown): Setting | undefined {
   if (typeof key_count !== 'number' || !Number.isSafeInteger(key_count) || key_count < 0)
     return undefined;
   // Optional, so an answer from before the field existed still reads; anything
-  // other than a string or null is not an answer this can describe.
-  const error = body.error ?? null;
-  if (error !== null && typeof error !== 'string') return undefined;
+  // other than a string or null is not an answer this can describe. An empty or
+  // blank string says nothing, and is read as no refusal rather than rendered
+  // as one with no reason.
+  const raw = body.error ?? null;
+  if (raw !== null && typeof raw !== 'string') return undefined;
+  const error = raw?.trim() ? raw.trim() : null;
   return { computer, enabled, available, pending, key_count, error };
 }
 
@@ -198,7 +201,7 @@ export const registerSSH: Registrar = (server, session) => {
     {
       title: 'Read whether SSH is on for a computer',
       description:
-        'Whether SSH is switched on for a computer, whether that computer can run SSH at all (one made from an older template image cannot), how many keys can log in, and whether its hypervisor has the current setting yet. Any role may read it.',
+        'Whether SSH is switched on for a computer, whether that computer can run SSH at all (one made from an older template image cannot), how many keys can log in, whether its hypervisor has the current setting yet, and whether that hypervisor refused the setting (it is not sent again until a key or the setting changes). Any role may read it.',
       inputSchema: idArg,
       annotations: { readOnlyHint: true },
     },
@@ -243,6 +246,18 @@ export const registerSSH: Registrar = (server, session) => {
             `PUT /computers/${id}/ssh answered with ${shapeOf(body)}, not an SSH setting. THE CHANGE MAY HAVE BEEN MADE — get_computer_ssh says whether it was.`,
             body,
           );
+        }
+        // A refusal from the computer's hypervisor is the answer whatever
+        // `enabled` says: the platform stores the requested value before it
+        // tells the host, so `enabled` normally matches the request even when
+        // the host would not take it. Either way the setting did not reach the
+        // computer, and the reason is kept rather than replaced by a mismatch.
+        if (setting.error) {
+          const mismatch =
+            setting.enabled !== enabled
+              ? ` The platform also answered that SSH is ${setting.enabled ? 'on' : 'off'}, not ${enabled ? 'on' : 'off'} as asked.`
+              : '';
+          return refused(`${settingLine(setting)}${mismatch}`, body);
         }
         if (setting.enabled !== enabled) {
           return refused(

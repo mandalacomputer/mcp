@@ -700,13 +700,17 @@ function respond(
   if (path.startsWith('/ssh-keys/')) return json({ ok: true });
   // The computer is the one in the path and a write answers what it was sent,
   // so a tool that ignored either would be caught rather than echoed a fixture.
+  // A PUT that did not send a boolean `enabled` gets an answer no tool may
+  // accept as a setting, so dropping the body fails whichever way it was asked.
   const ssh = /^\/computers\/([^/]+)\/ssh$/.exec(path);
   if (ssh) {
     const sent = (body as { enabled?: unknown } | undefined)?.enabled;
+    if (method === 'PUT' && typeof sent !== 'boolean')
+      return json({ error: 'enabled must be true or false' });
     return json({
       ...SSH_SETTING,
       computer: decodeURIComponent(ssh[1]),
-      enabled: method === 'PUT' && typeof sent === 'boolean' ? sent : SSH_SETTING.enabled,
+      enabled: method === 'PUT' ? sent : SSH_SETTING.enabled,
     });
   }
   if (path === '/moves') return json({ moves: [MOVE_DONE] });
