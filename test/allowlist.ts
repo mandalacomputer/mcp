@@ -60,6 +60,10 @@ export const V1_ROUTES: Route[] = [
   r('DELETE', 'computers/:id/exec/:pid'),
   r('GET', 'computers/:id/executions/:executionId'),
   r('GET', 'computers/:id/executions/:executionId/output'),
+  r('POST', 'computers/:id/executions/:executionId/retained-output'),
+  r('GET', 'computers/:id/results/:resultId'),
+  r('GET', 'computers/:id/results/:resultId/output'),
+  r('DELETE', 'computers/:id/results/:resultId'),
   r('GET', 'computers/:id/activities'),
   r('GET', 'computers/:id/activities/:activity'),
   r('GET', 'computers/:id/signals'),
@@ -237,6 +241,13 @@ export const PARAMETERS: ReadonlyMap<string, readonly string[]> = new Map([
     'GET computers/:id/executions/:executionId/output',
     ['query:stdout_offset', 'query:stderr_offset', 'query:limit'],
   ],
+  [
+    'POST computers/:id/executions/:executionId/retained-output',
+    ['body:max_bytes_per_stream', 'body:retention_seconds'],
+  ],
+  ['GET computers/:id/results/:resultId', []],
+  ['GET computers/:id/results/:resultId/output', ['query:stream', 'query:offset', 'query:limit']],
+  ['DELETE computers/:id/results/:resultId', []],
   ['GET computers/:id/windows', ['query:include']],
   [
     'POST computers/:id/windows/:window',
@@ -372,6 +383,11 @@ export const ALLOWED = new Set(V1_ROUTES.map(key));
  * rather than a feature nobody noticed.
  */
 export const UNIMPLEMENTED = new Set([
+  // Explicit retained output is tracked here until MCP tools are available.
+  'POST computers/:id/executions/:executionId/retained-output',
+  'GET computers/:id/results/:resultId',
+  'GET computers/:id/results/:resultId/output',
+  'DELETE computers/:id/results/:resultId',
   // The OpenAI-compatible door onto the same agent loop the platform already
   // exposes at computers/:id/agent, which run_agent uses. Two ways to reach one
   // engine is a good thing for a caller who already has an OpenAI client
