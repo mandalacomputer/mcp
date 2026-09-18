@@ -203,6 +203,7 @@ export const PARAMETERS: ReadonlyMap<string, readonly string[]> = new Map([
       'body:disk_gb',
       'body:resolution',
       'body:start',
+      'body:secrets',
     ],
   ],
   ['GET computers/:id', []],
@@ -392,6 +393,10 @@ export const PARAMETERS: ReadonlyMap<string, readonly string[]> = new Map([
  * would say nothing that route's own line does not.
  */
 export const UNIMPLEMENTED_PARAMETERS: ReadonlySet<string> = new Set([
+  // NOT YET AVAILABLE on the platform: a create that binds secrets is refused
+  // with 400 until delivery into computers ships. Documented ahead of that;
+  // the tool gains a typed argument with that release.
+  'POST computers  body:secrets',
   // GAP. File transfers cannot yet opt out of waking a suspended computer.
   'GET computers/:id/files  query:no_wake',
   'PUT computers/:id/files  query:no_wake',
