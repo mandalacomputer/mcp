@@ -144,7 +144,8 @@ export const EXERCISE: Record<string, Record<string, unknown>[]> = {
   get_computer_secrets: [{}],
   set_computer_secrets: [
     { secrets: [{ secret_id: 'csec-0123456789abcdef', env: 'OPENAI_API_KEY' }] },
-    { secrets: [], version: 3 },
+    { secrets: [{ secret_id: 'csec-0123456789abcde0', file: 'kubeconfig' }], version: 3 },
+    { secrets: [], version: 4 },
   ],
   wait_for_computer: [{ until: 'guest' }],
   get_desktop_url: [{}],
@@ -160,6 +161,14 @@ export const EXERCISE: Record<string, Record<string, unknown>[]> = {
       resolution: '1280x800',
     },
     { size: 'small' },
+    // Secrets bound at create, one as a variable and one as a file.
+    {
+      template: 'base',
+      secrets: [
+        { secret_id: 'csec-0123456789abcdef', env: 'API_TOKEN' },
+        { secret_id: 'csec-0123456789abcde0', file: 'kubeconfig' },
+      ],
+    },
   ],
   clone_computer: [{ name: 'copy' }],
   delete_computer: [

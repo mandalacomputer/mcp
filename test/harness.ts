@@ -175,13 +175,21 @@ export const SSH_SETTING = {
   error: null,
 };
 
-/** One computer's secret bindings, as a read answers them: ids only, never a value. */
+/**
+ * One computer's secret bindings, as a read answers them: ids only, never a
+ * value. One as a variable and one as a file.
+ */
 export const SECRET_BINDINGS = {
   secrets: [
     {
       secret_id: 'csec-0123456789abcdef',
       revision_id: 'csr-0123456789abcdef01234567',
       env: 'OPENAI_API_KEY',
+    },
+    {
+      secret_id: 'csec-0123456789abcde0',
+      revision_id: 'csr-0123456789abcdef01234568',
+      file: 'kubeconfig',
     },
   ],
   version: 3,
@@ -733,11 +741,14 @@ function respond(
     const sent = (body as { secrets?: unknown } | undefined)?.secrets;
     if (!Array.isArray(sent)) return json({ error: '`secrets` is required' });
     return json({
-      secrets: sent.map((b: { secret_id: string; env: string; revision_id?: string }) => ({
-        secret_id: b.secret_id,
-        env: b.env,
-        revision_id: b.revision_id ?? 'csr-latest000000000000000000',
-      })),
+      secrets: sent.map(
+        (b: { secret_id: string; env?: string; file?: string; revision_id?: string }) => ({
+          secret_id: b.secret_id,
+          ...(b.env === undefined ? {} : { env: b.env }),
+          ...(b.file === undefined ? {} : { file: b.file }),
+          revision_id: b.revision_id ?? 'csr-latest000000000000000000',
+        }),
+      ),
       version: SECRET_BINDINGS.version + 1,
     });
   }

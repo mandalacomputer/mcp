@@ -266,6 +266,8 @@ export function createBody(args: {
   disk_gb?: number;
   resolution?: string;
   start?: boolean;
+  /** Already in the wire spelling, and checked by the tool's schema. */
+  secrets?: { secret_id: string; env?: string; file?: string }[];
 }): Json {
   if (args.template_transfer !== undefined) {
     if (typeof args.template_transfer !== 'string' || !args.template_transfer.trim()) {

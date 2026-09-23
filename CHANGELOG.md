@@ -34,6 +34,23 @@ are wording changes, and they are behaviour changes in the way that matters.
   computer's first binding needs it stopped (409 while running or suspended,
   since a restart does not deliver it); start it afterwards. Both are under a
   new `secrets` tag.
+- **Secret bindings as files, and at create.** `create_computer` takes
+  `secrets`, binding secrets from the account when the computer is made; with
+  none, no `secrets` key is sent. A binding, there and in
+  `set_computer_secrets`, names exactly one of `env` (an environment variable)
+  or `file` (published as `/run/mandala-secrets/user/files/<file>`), and
+  `get_computer_secrets` shows a file binding by its full path. At most 32
+  secrets and 8 files per computer, none twice, and names in the platform's
+  spelling: a list the platform would refuse is refused before it is sent, and
+  names the entry at fault. Both tools now say that every start and restart
+  delivers each secret's latest value, and that a secret bound as a file is
+  rewritten on a running computer within seconds of its value being replaced.
+  Ids must not be empty or carry spaces around them. An answer with a binding
+  that is missing its id or revision, names both or neither of `env` and
+  `file`, or spells either in a way the platform would not accept, is refused
+  whole rather than shown one short; so is one without a whole-number
+  `version`.
+
 ## [0.4.0] — 2026-09-14
 
 ### Changed
