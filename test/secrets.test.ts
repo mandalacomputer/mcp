@@ -398,7 +398,15 @@ describe('binding secrets at create', () => {
 
   it('refuses before sending what the platform would refuse', async () => {
     const { call, close } = await connect();
-    for (const [name, secrets] of BAD_LISTS) {
+    for (const [name, secrets] of [
+      ...BAD_LISTS,
+      // A create has no revision to keep: refused, not dropped.
+      [
+        'a revision on a create',
+        [{ secret_id: 'csec-0123456789abcdef', env: 'X', revision_id: 'csr-1' }],
+      ],
+      ['an unknown key', [{ secret_id: 'csec-0123456789abcdef', env: 'X', revision: 'csr-1' }]],
+    ] as [string, unknown[]][]) {
       await refusedBeforeSending(
         platform,
         call,

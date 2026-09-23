@@ -50,7 +50,10 @@ type BindingArg = { secret_id: string; env?: string; file?: string };
  * a rebind may send; a create has nothing to keep and takes none.
  */
 export function secretBindingsSchema(revision: boolean) {
-  const entry = z.object({
+  // Strict: a key this tool does not take is refused, not dropped. A create
+  // that carried a `revision_id` would otherwise validate, bind the latest, and
+  // leave the caller believing it had chosen a revision.
+  const entry = z.strictObject({
     secret_id: idString('secret_id').describe('The secret to bind — `csec-` and sixteen hex.'),
     env: z
       .string()
@@ -71,7 +74,7 @@ export function secretBindingsSchema(revision: boolean) {
           revision_id: idString('revision_id')
             .optional()
             .describe(
-              'Omit to bind the latest revision. Name one only to keep the revision the computer is bound to now.',
+              'Omit to record the latest revision. Name the one the computer holds now to keep it: a revision is what the computer last received, not a pin, and every start or restart delivers the latest value regardless.',
             ),
         }
       : {}),
@@ -217,7 +220,7 @@ export const registerSecrets: Registrar = (server, session) => {
     'set_computer_secrets',
     {
       title: "Replace a computer's secret bindings",
-      description: `Replace the WHOLE list of secrets a computer is bound to — not a merge: any binding left out is removed, and \`secrets: []\` removes every binding. Each entry names a secret id and exactly one of \`env\` (the environment variable it is delivered under) or \`file\` (delivered as ${FILES_DIR}/<file>) — at most ${SECRET_BINDINGS_MAX} secrets, ${SECRET_FILES_MAX} of them as files, none twice and no variable or file name twice — and is pinned at that secret's LATEST revision unless it names \`revision_id\`, which must be the revision the computer is bound to now (to keep that pin; any other revision is refused). Only ids, revisions and names are sent and answered — values are NEVER shown or set here. ${TIMING} ${LIVE_FILES} Binding a computer that has NO secrets yet requires it to be STOPPED: that first binding is refused with 409 while the computer is running or suspended, because a computer started without secrets cannot receive them until it starts again, and a restart does not do that. Start it afterwards to deliver them. Send \`version\` from get_computer_secrets to change only the list you read: if it changed since, this is refused with 409 and nothing changes. Also 409 while a delivery to the computer is in progress. After a change that drops a secret or moves one to another revision, a running computer cannot be suspended or memory-snapshotted until it restarts. Owners and members only; Linux computers only, and binding one for the first time needs a template whose image can receive secrets.`,
+      description: `Replace the WHOLE list of secrets a computer is bound to — not a merge: any binding left out is removed, and \`secrets: []\` removes every binding. Each entry names a secret id and exactly one of \`env\` (the environment variable it is delivered under) or \`file\` (delivered as ${FILES_DIR}/<file>) — at most ${SECRET_BINDINGS_MAX} secrets, ${SECRET_FILES_MAX} of them as files, none twice and no variable or file name twice — and is recorded at that secret's latest revision unless it names \`revision_id\`, which must be the revision the computer holds now (any other revision is refused). A binding's revision is what the computer last received, never a pin: naming it only says this change keeps the value the running computer already has, so the change does not stop it being suspended. Only ids, revisions and names are sent and answered — values are NEVER shown or set here. ${TIMING} ${LIVE_FILES} Binding a computer that has NO secrets yet requires it to be STOPPED: that first binding is refused with 409 while the computer is running or suspended, because a computer started without secrets cannot receive them until it starts again, and a restart does not do that. Start it afterwards to deliver them. Send \`version\` from get_computer_secrets to change only the list you read: if it changed since, this is refused with 409 and nothing changes. Also 409 while a delivery to the computer is in progress. After a change that drops a secret or moves one to another revision, a running computer cannot be suspended or memory-snapshotted until it restarts. Owners and members only; Linux computers only, and binding one for the first time needs a template whose image can receive secrets.`,
       inputSchema: {
         ...idArg,
         secrets: secretBindingsSchema(true).describe(
