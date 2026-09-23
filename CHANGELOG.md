@@ -12,7 +12,7 @@ about a refusal is what the model reads and reasons from. Several entries below
 are wording changes, and they are behaviour changes in the way that matters.
 
 
-## [Unreleased]
+## [0.5.0] — 2026-09-23
 
 ### Added
 
@@ -50,6 +50,83 @@ are wording changes, and they are behaviour changes in the way that matters.
   `file`, or spells either in a way the platform would not accept, is refused
   whole rather than shown one short; so is one without a whole-number
   `version`.
+- **Stable handles for background commands.** A background `exec` now returns
+  the platform's stable `execution_id` when it has one, alongside the PID, which
+  still works for `exec_poll` and `exec_kill`. `get_execution` reads what was
+  last observed of that execution — running, exited or lost — without touching
+  the guest, and `read_execution_output` reads stdout and stderr at independent
+  byte offsets without moving the shared PID cursors or resuming the computer.
+  A command accepted with a malformed id says so and tells the model not to run
+  it again.
+- **Retained results and artifacts.** Volatile guest output can now be kept.
+  `retain_execution_output` captures an immutable copy of a background
+  command's output, and a synchronous `exec` takes an optional `retain_output`
+  (default behaviour is unchanged). `get_result`, `read_result_output` and
+  `delete_result` read, page through and delete those versions.
+  `publish_artifact` captures a file the caller names, with its expected size
+  and SHA-256; `get_artifact`, `read_artifact` and `delete_artifact` read and
+  delete it. `read_artifact` returns content only when the whole artifact fits
+  (4 KiB by default, 16 KiB at most) and verifies its size and hash; a larger
+  one comes back as metadata alone. None of them resumes a computer or replays
+  a command.
+- **Passive reads that do not wake a computer.** `list_directory` lists a
+  directory on a computer that is already running. `list_activities`,
+  `get_activity` and `get_activity_results` read the account's retained API
+  activity history, newest first. `read_signals` reads the platform's finite
+  facts about a computer without resuming it or opening the event socket.
+- **`run_agent_chat`.** The same computer agent as `run_agent`, driven with
+  OpenAI-shaped text messages and returning JSON: the last user message is the
+  task and system messages are standing instructions. Like `run_agent`, it
+  needs a model key for the session.
+- **`get_account`.** The account's plan ceilings, what it is using and what is
+  left. It is advisory: headroom for indexed snapshots does not reserve
+  capacity, and a total the platform could not count is shown as unknown rather
+  than as zero.
+- **SSH keys and per-computer SSH.** `list_ssh_keys`, `add_ssh_key` and
+  `remove_ssh_key` (which asks for confirmation) manage keys, which belong to
+  the person the API key was issued to rather than to the account;
+  `set_computer_ssh` switches SSH on or off for one computer, reachable only
+  through the platform's jump host and accepting the keys of every owner and
+  member, with no restart either way; `get_computer_ssh` reads that setting and
+  whether the computer can run SSH at all. `add_ssh_key` refuses a private key
+  without sending it. All five are under a new `ssh` tag.
+- **Tool filters.** `MANDALA_READ_ONLY=1` registers only the tools annotated
+  read-only, and `MANDALA_TAGS` (comma-separated, lowercase) registers only the
+  named groups. An invalid setting fails at startup, before any transport opens,
+  and the instructions a filtered session receives describe only the tools it
+  has. The Claude Code plugin forwards both. The tag inventory is in the README.
+- **Saved credential profiles.** A local stdio session with no API key can use
+  the profile saved by `mandala login`: `--profile`, then `MANDALA_PROFILE`,
+  then the saved default. An explicit or environment key still wins. The
+  session keeps that identity until it is restarted and never falls back to
+  another. HTTP mode ignores profiles and uses each caller's bearer token. The
+  plugin forwards `MANDALA_PROFILE`.
+
+### Changed
+
+- **Errors keep the platform's diagnostics.** A tool's error result now carries
+  the `reason`, `request_id`, `allow`, `www_authenticate` and `retry_after_ms`
+  the platform sent, as labelled and length-bounded metadata, and a 401 says
+  whether the platform credential was missing, invalid or revoked rather than
+  leaving a model to guess which key was refused. An error nested in a chat
+  run keeps its real status and the work already recorded.
+- **For embedders:** an unsupported method now raises the exported
+  `MethodNotAllowedError` (405), and every `APIError` carries optional
+  `requestId`, `allow` and `wwwAuthenticate`. Existing constructor arguments
+  keep their meaning.
+
+### Internal
+
+No effect on the tool surface.
+
+- The surface mirror tracked each platform route as it landed — file browser,
+  execution results, activity history, signals, retained output, artifacts and
+  the `secrets`, `memory` and `inherit_secrets` parameters — pinned as not yet
+  implemented until the tool that uses it arrived.
+- A new CI job fetches the platform's published OpenAPI anonymously and requires
+  a tool for every v1 operation, so a route this server does not cover now fails
+  a build rather than going unnoticed.
+
 
 ## [0.4.0] — 2026-09-14
 
@@ -118,4 +195,5 @@ No effect on the tool surface, listed because it is most of the window.
 - Several parser fixes landed before that scanner was retired, each ported to
   and from the TypeScript SDK's byte-identical copy.
 
+[0.5.0]: https://github.com/mandalacomputer/mcp/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/mandalacomputer/mcp/compare/v0.3.0...v0.4.0
