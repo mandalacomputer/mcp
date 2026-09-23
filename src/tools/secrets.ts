@@ -57,8 +57,8 @@ function bindingsOf(body: unknown): Bindings | undefined {
 /** One binding in a line: the name the guest sees, then what it is bound to. */
 const bindingLine = (b: Binding): string => `${b.env} = ${b.secret_id} @ ${b.revision_id}`;
 
+/** The bindings, one per line. Callers say "none" themselves for an empty list. */
 function listing(b: Bindings): string {
-  if (!b.secrets.length) return 'none';
   return `\n${b.secrets.map(bindingLine).join('\n')}`;
 }
 

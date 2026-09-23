@@ -46,10 +46,14 @@ describe('the secret-binding tools', () => {
     });
     expect(first.isError).toBeFalsy();
     await call('set_computer_secrets', { computer_id: 'vm-7', secrets: [], version: 3 });
+    // 0 is what a never-bound computer reads back, and it is a condition, not
+    // an absence: sent, so the change lands only on a list still never bound.
+    await call('set_computer_secrets', { computer_id: 'vm-7', secrets: [fresh], version: 0 });
     const puts = platform.calls.filter((c) => c.method === 'PUT');
     expect(puts.map((c) => [c.path, c.body])).toEqual([
       ['/computers/vm-7/secrets', { secrets: [keep, fresh] }],
       ['/computers/vm-7/secrets', { secrets: [], version: 3 }],
+      ['/computers/vm-7/secrets', { secrets: [fresh], version: 0 }],
     ]);
     expect(puts[0].body).not.toHaveProperty('version');
     await close();
