@@ -139,6 +139,13 @@ export const EXERCISE: Record<string, Record<string, unknown>[]> = {
   remove_ssh_key: [{ key_id: 'sshk-3c9a51d07be2f846', confirm: true }],
   get_computer_ssh: [{}],
   set_computer_ssh: [{ enabled: true }, { enabled: false }],
+  // Secret bindings. `version` is sent on one of the two sets, because the
+  // parameter sweep is what proves it can be.
+  get_computer_secrets: [{}],
+  set_computer_secrets: [
+    { secrets: [{ secret_id: 'csec-0123456789abcdef', env: 'OPENAI_API_KEY' }] },
+    { secrets: [], version: 3 },
+  ],
   wait_for_computer: [{ until: 'guest' }],
   get_desktop_url: [{}],
   // A named size and an explicit shape are alternatives, never both.

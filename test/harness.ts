@@ -175,6 +175,18 @@ export const SSH_SETTING = {
   error: null,
 };
 
+/** One computer's secret bindings, as a read answers them: ids only, never a value. */
+export const SECRET_BINDINGS = {
+  secrets: [
+    {
+      secret_id: 'csec-0123456789abcdef',
+      revision_id: 'csr-0123456789abcdef01234567',
+      env: 'OPENAI_API_KEY',
+    },
+  ],
+  version: 3,
+};
+
 /**
  * One webhook subscription as the platform lists it — never with a secret. The
  * health fields are all non-null, so a sentence that reads one shows it.
@@ -711,6 +723,22 @@ function respond(
       ...SSH_SETTING,
       computer: decodeURIComponent(ssh[1]),
       enabled: method === 'PUT' ? sent : SSH_SETTING.enabled,
+    });
+  }
+  // Secret bindings. A write answers what it was sent, pinned at a revision
+  // (the one it named, or a fixed "latest"), one version on from the read; a
+  // PUT without a `secrets` list gets an answer no tool may read as bindings.
+  if (/^\/computers\/[^/]+\/secrets$/.test(path)) {
+    if (method !== 'PUT') return json(SECRET_BINDINGS);
+    const sent = (body as { secrets?: unknown } | undefined)?.secrets;
+    if (!Array.isArray(sent)) return json({ error: '`secrets` is required' });
+    return json({
+      secrets: sent.map((b: { secret_id: string; env: string; revision_id?: string }) => ({
+        secret_id: b.secret_id,
+        env: b.env,
+        revision_id: b.revision_id ?? 'csr-latest000000000000000000',
+      })),
+      version: SECRET_BINDINGS.version + 1,
     });
   }
   if (path === '/moves') return json({ moves: [MOVE_DONE] });

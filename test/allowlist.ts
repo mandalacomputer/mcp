@@ -135,6 +135,10 @@ export const V1_ROUTES: Route[] = [
   r('DELETE', 'ssh-keys/:id'),
   r('GET', 'computers/:id/ssh'),
   r('PUT', 'computers/:id/ssh'),
+
+  // A computer's secret bindings: ids, revisions and env names, never a value.
+  r('GET', 'computers/:id/secrets'),
+  r('PUT', 'computers/:id/secrets'),
 ];
 
 /**
@@ -368,6 +372,11 @@ export const PARAMETERS: ReadonlyMap<string, readonly string[]> = new Map([
   ['DELETE ssh-keys/:id', []],
   ['GET computers/:id/ssh', []],
   ['PUT computers/:id/ssh', ['body:enabled']],
+
+  // The PUT replaces the whole list; `version` is optional and makes it
+  // conditional on the list a read answered.
+  ['GET computers/:id/secrets', []],
+  ['PUT computers/:id/secrets', ['body:secrets', 'body:version']],
 ]);
 
 /**

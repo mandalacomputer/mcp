@@ -3488,6 +3488,9 @@ describe('the tools our own prose tells a model to call', () => {
     // that cannot hold the request open past its default timeout has to lower
     // it. A parameter, not a tool.
     'max_steps',
+    // set_computer_secrets names it: an entry keeps its current pin only by
+    // naming it. A field of one entry in `secrets`, not a tool.
+    'revision_id',
     // Chat agent.stop terminal value, not a callable tool.
     'end_turn',
     // Activity-page history continuation and revision-change checkpoints.
