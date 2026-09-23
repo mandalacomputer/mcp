@@ -783,24 +783,40 @@ export const registerSnapshots: Registrar = (server, session, opts) => {
     {
       title: 'Fork a snapshot into a new computer',
       description:
-        'Build a new computer from a snapshot, leaving the original untouched. This is the fork half of snapshot-and-fork, and the only thing that works on an orphaned snapshot.',
+        "Build a new computer from a snapshot, leaving the original untouched. This is the fork half of snapshot-and-fork, and the only thing that works on an orphaned snapshot. A MEMORY snapshot is resumed: the copy comes up running the captured session, sharing its source's network identity, so it cannot run on the same host while its source is running. Pass memory: false to build it from the disk alone instead, as a fresh boot with its own identity. A memory snapshot of a computer that held SECRETS is resumed only with inherit_secrets: true, and then the copy HOLDS THE SAME CREDENTIALS as the computer it came from; without it the clone is built from the disk and this tool says so.",
       inputSchema: {
         snapshot_id: z.string(),
         name: z.string().optional().describe('A name for the new computer.'),
+        memory: z
+          .boolean()
+          .optional()
+          .describe(
+            'Memory snapshots only. false builds the new computer from the disk alone and boots it fresh; omitted or true resumes the captured session.',
+          ),
+        inherit_secrets: z
+          .boolean()
+          .optional()
+          .describe(
+            'Consent to resuming a memory snapshot of a computer that held secrets. The new computer holds the same credentials, bound to the same secrets. Only set this when that is what the user asked for.',
+          ),
         select: z
           .boolean()
           .default(true)
           .describe("Make the new computer this session's selected one."),
       },
     },
-    ({ snapshot_id, name, select }, extra) =>
+    ({ snapshot_id, name, select, memory, inherit_secrets }, extra) =>
       guarded(async () => {
+        // Each option only when set, so an ordinary clone sends what it always
+        // did; consent is sent only when given, since its absence is the default.
+        const body: Record<string, unknown> = {};
+        if (name !== undefined) body.name = name;
+        if (memory !== undefined) body.memory = memory;
+        if (inherit_secrets === true) body.inherit_secrets = true;
         const c = unwrapComputer(
           await session.api
             .with(extra.signal)
-            .json('POST', P.snapshotAction(snapshot_id, 'clone'), {
-              body: name === undefined ? {} : { name },
-            }),
+            .json('POST', P.snapshotAction(snapshot_id, 'clone'), { body }),
         );
         if (!c.id) {
           return refused(
@@ -809,8 +825,26 @@ export const registerSnapshots: Registrar = (server, session, opts) => {
           );
         }
         if (select && c.id) session.bind(c.id, c.resolution);
+        // The platform built it from the disk when the session could not come
+        // across (platform OPL-4964). Said first and in words, because a model
+        // that asked for a live fork and got a fresh boot would otherwise go on
+        // as if the session — its open windows, its running programs — were
+        // there.
+        const raw = c as Record<string, unknown>;
+        if (raw.memory_dropped === true) {
+          const why =
+            raw.memory_dropped_reason === 'bindings unrecorded'
+              ? "it was taken before copies could be given its computer's secrets"
+              : raw.memory_dropped_reason === 'secrets'
+                ? 'its computer held secrets and inherit_secrets was not set'
+                : 'the platform did not resume it';
+          return said(
+            `Built ${describe(c)} from ${snapshot_id}'s DISK, booting fresh — its saved session was NOT resumed, because ${why}. No secrets are bound to it${select && c.id ? '. It is selected' : ''}.`,
+            withoutCredentials(c),
+          );
+        }
         return said(
-          `Forked ${snapshot_id} into ${describe(c)}${select && c.id ? ', and selected it' : ''}.`,
+          `${memory === false ? 'Built' : 'Forked'} ${snapshot_id} into ${describe(c)}${memory === false ? ' from its disk' : ''}${select && c.id ? ', and selected it' : ''}.`,
           withoutCredentials(c),
         );
       }),
