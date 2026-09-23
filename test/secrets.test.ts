@@ -181,6 +181,9 @@ describe('the secret-binding tools', () => {
       ['an empty revision', [{ secret_id: A, env: 'X', revision_id: '' }]],
       ['a blank revision', [{ secret_id: A, env: 'X', revision_id: ' ' }]],
       ['a padded revision', [{ secret_id: A, env: 'X', revision_id: 'csr-x ' }]],
+      // A misspelt key is refused, not dropped: dropped, it would record the
+      // latest revision while the caller believed it had kept one.
+      ['an unknown key', [{ secret_id: A, env: 'X', revision: 'csr-x' }]],
     ] as [string, unknown[]][]) {
       await refusedBeforeSending(platform, call, 'set_computer_secrets', { secrets }, name);
     }
