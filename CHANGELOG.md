@@ -11,6 +11,20 @@ Note that in an MCP server the error text *is* the interface: what a tool says
 about a refusal is what the model reads and reasons from. Several entries below
 are wording changes, and they are behaviour changes in the way that matters.
 
+
+## [Unreleased]
+
+### Added
+
+- **`clone_snapshot` takes `memory` and `inherit_secrets`.** `memory: false`
+  builds a memory snapshot's clone from its disk alone, as a fresh boot with its
+  own network identity. `inherit_secrets: true` consents to resuming a memory
+  snapshot of a computer that held secrets, and the tool's description says in
+  so many words that the copy then holds the same credentials.
+- **`clone_snapshot` says when the session was not resumed.** When the platform
+  built the copy from the disk instead (`memory_dropped`), the reply leads with
+  that and the reason, rather than reporting a fork the model would go on to
+  treat as a live session.
 ## [0.4.0] — 2026-09-14
 
 ### Changed

@@ -3533,6 +3533,9 @@ describe('the tools our own prose tells a model to call', () => {
     'expected_size',
     'expected_sha256',
     'max_bytes',
+    // clone_snapshot's consent to resuming a memory snapshot of a computer
+    // that held secrets (OPL-4965). A parameter, named in its own description.
+    'inherit_secrets',
   ]);
 
   it('names only tools that exist', async () => {
@@ -3551,6 +3554,7 @@ describe('the tools our own prose tells a model to call', () => {
       ['publish_artifact', 'expected_size'],
       ['publish_artifact', 'expected_sha256'],
       ['read_artifact', 'max_bytes'],
+      ['clone_snapshot', 'inherit_secrets'],
     ]) {
       expect(
         tools.find((entry) => entry.name === tool)?.inputSchema.properties,

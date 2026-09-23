@@ -232,7 +232,11 @@ export const EXERCISE: Record<string, Record<string, unknown>[]> = {
   // anonymous.
   create_snapshot: [{}, { memory: true, name: 'before-upgrade' }],
   restore_snapshot: [{ snapshot_id: 'snap-1', confirm: true }],
-  clone_snapshot: [{ snapshot_id: 'snap-1' }, { snapshot_id: 'snap-1', name: 'copy' }],
+  clone_snapshot: [
+    { snapshot_id: 'snap-1' },
+    { snapshot_id: 'snap-1', name: 'copy' },
+    { snapshot_id: 'snap-1', memory: false, inherit_secrets: true },
+  ],
   snapshot_schedule: [
     {},
     { set: { enabled: true, hour: 4, minute: 30, tz: 'UTC' } },
