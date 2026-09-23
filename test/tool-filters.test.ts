@@ -38,6 +38,7 @@ const GROUPS = {
     'list_templates get_template_schema check_template publish_template get_template retire_template build_template list_builds get_build watch_build',
   events: 'wait_for_event poll_events wait_for_file_change',
   usage: 'get_usage',
+  secrets: 'get_computer_secrets set_computer_secrets',
   ssh: 'list_ssh_keys add_ssh_key remove_ssh_key get_computer_ssh set_computer_ssh',
   webhooks:
     'list_webhooks create_webhook get_webhook update_webhook rotate_webhook_secret test_webhook list_webhook_deliveries delete_webhook',

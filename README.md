@@ -186,6 +186,13 @@ was issued to, not to the account, and are accepted by every computer with SSH
 on, on every account where that person is an owner or member. A
 workspace-scoped key can read keys but not add or remove them.
 
+**Secret bindings** — `get_computer_secrets`, `set_computer_secrets`. Which of
+the account's secrets a computer receives, at which revision, under which
+environment variable name. Values never cross these tools. A set replaces the
+whole list (`[]` removes every binding) and reaches the guest at the computer's
+next start or restart; send the `version` a read answered to have it refused
+with 409 if the list changed since.
+
 **Delegating** — `run_agent`, `run_agent_chat`, registered only when a model key is present:
 `MANDALA_MODEL_KEY` on stdio, or the caller's own `X-Model-Key` header over HTTP.
 Both must also survive the configured filters.
@@ -224,6 +231,7 @@ with an error listing all valid tags.
 | `usage` | `get_usage` |
 | `webhooks` | All webhook tools listed above |
 | `ssh` | All SSH tools listed above |
+| `secrets` | `get_computer_secrets`, `set_computer_secrets` |
 | `agent` | `run_agent`, `run_agent_chat` |
 | `activities` | `list_activities`, `get_activity`, `get_activity_results` |
 | `signals` | `read_signals` |
