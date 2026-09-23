@@ -330,7 +330,7 @@ export const PARAMETERS: ReadonlyMap<string, readonly string[]> = new Map([
   ['GET computers/:id/snapshots', []],
   ['POST computers/:id/snapshots', ['body:name', 'body:memory']],
   ['POST snapshots/:id/restore', []],
-  ['POST snapshots/:id/clone', ['body:name']],
+  ['POST snapshots/:id/clone', ['body:name', 'body:memory']],
   ['DELETE snapshots/:id', []],
   ['GET computers/:id/schedule', []],
   ['PUT computers/:id/schedule', ['body:enabled', 'body:hour', 'body:minute', 'body:tz']],
@@ -393,6 +393,10 @@ export const PARAMETERS: ReadonlyMap<string, readonly string[]> = new Map([
  * would say nothing that route's own line does not.
  */
 export const UNIMPLEMENTED_PARAMETERS: ReadonlySet<string> = new Set([
+  // OPL-4964: `memory: false` builds a memory snapshot's clone from its disk
+  // alone. Listed to stay in step with the surface; the tool gains a typed argument
+  // with OPL-4965, alongside reading `memory_dropped` off the response.
+  'POST snapshots/:id/clone  body:memory',
   // NOT YET AVAILABLE on the platform: a create that binds secrets is refused
   // with 400 until delivery into computers ships. Documented ahead of that;
   // the tool gains a typed argument with that release.
