@@ -83,6 +83,11 @@ describe('the secret-binding tools', () => {
     expect(set?.description).toContain('`secrets: []` removes every binding');
     expect(set?.description).toContain('NEXT START OR RESTART');
     expect(set?.description).toContain('409');
+    expect(set?.description).toContain(
+      'Binding a computer that has NO secrets yet requires it to be STOPPED',
+    );
+    expect(set?.description).toContain('running or suspended');
+    expect(set?.description).toContain('Start it afterwards to deliver them');
     expect(set?.description).toContain('NEVER shown');
     expect(set?.annotations?.readOnlyHint).not.toBe(true);
     expect(set?.annotations?.destructiveHint).toBe(true);

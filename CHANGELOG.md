@@ -30,8 +30,10 @@ are wording changes, and they are behaviour changes in the way that matters.
   name; no value ever crosses either tool. A set replaces the whole list (`[]`
   removes every binding), and its reply says the change reaches the guest at the
   computer's next start or restart, not before. Sending the `version` a read
-  answered makes the change refuse with 409 if the list moved in between. Both
-  are under a new `secrets` tag.
+  answered makes the change refuse with 409 if the list moved in between. A
+  computer's first binding needs it stopped (409 while running or suspended,
+  since a restart does not deliver it); start it afterwards. Both are under a
+  new `secrets` tag.
 ## [0.4.0] — 2026-09-14
 
 ### Changed
