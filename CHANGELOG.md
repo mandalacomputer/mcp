@@ -106,10 +106,11 @@ are wording changes, and they are behaviour changes in the way that matters.
 
 - **Errors keep the platform's diagnostics.** A tool's error result now carries
   the `reason`, `request_id`, `allow`, `www_authenticate` and `retry_after_ms`
-  the platform sent, as labelled and length-bounded metadata, and a 401 says
-  whether the platform credential was missing, invalid or revoked rather than
-  leaving a model to guess which key was refused. An error nested in a chat
-  run keeps its real status and the work already recorded.
+  the platform sent, as labelled and length-bounded metadata. A 401 the
+  platform classified says whether the credential was missing, invalid or
+  revoked; one it did not is no longer presented as telling the account key
+  from the model key. An error nested in a chat run keeps its real status and
+  the work already recorded.
 - **For embedders:** an unsupported method now raises the exported
   `MethodNotAllowedError` (405), and every `APIError` carries optional
   `requestId`, `allow` and `wwwAuthenticate`. Existing constructor arguments
@@ -124,8 +125,8 @@ No effect on the tool surface.
   the `secrets`, `memory` and `inherit_secrets` parameters — pinned as not yet
   implemented until the tool that uses it arrived.
 - A new CI job fetches the platform's published OpenAPI anonymously and requires
-  a tool for every v1 operation, so a route this server does not cover now fails
-  a build rather than going unnoticed.
+  evidence that every v1 operation is covered, so a route this server does not
+  cover now fails a build rather than going unnoticed.
 
 
 ## [0.4.0] — 2026-09-14
