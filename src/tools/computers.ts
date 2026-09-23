@@ -21,6 +21,7 @@ import {
 } from '../format.js';
 import * as P from '../paths.js';
 import { heartbeat, POLL_MS, pollDelay, sleep } from '../poll.js';
+import { FILES_DIR, secretBindingsSchema } from './secrets.js';
 import type { Registrar } from './types.js';
 
 const idArg = {
@@ -1451,6 +1452,11 @@ export const registerComputers: Registrar = (server, session, opts) => {
             'WIDTHxHEIGHT or WIDTHxHEIGHTxDEPTH, 640x480 to 3840x2160, even numbers. Create-time only — the display is a QEMU property and there is no route that changes it later. Defaults to 1280x800x24.',
           ),
         start: z.boolean().optional().describe('Boot it immediately. True by default.'),
+        secrets: secretBindingsSchema(false)
+          .optional()
+          .describe(
+            `Secrets from the account to deliver into the desktop session each time the computer starts, each as an environment variable (\`env\`) or as a file under ${FILES_DIR} (\`file\`). Only ids and names are sent — never a value. Linux only, and only on a template whose image can receive them. get_computer_secrets and set_computer_secrets read and change them later.`,
+          ),
       },
       annotations: { destructiveHint: false, openWorldHint: true },
     },

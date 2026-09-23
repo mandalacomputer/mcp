@@ -186,12 +186,14 @@ was issued to, not to the account, and are accepted by every computer with SSH
 on, on every account where that person is an owner or member. A
 workspace-scoped key can read keys but not add or remove them.
 
-**Secret bindings** — `get_computer_secrets`, `set_computer_secrets`. Which of
-the account's secrets a computer receives, at which revision, under which
-environment variable name. Values never cross these tools. A set replaces the
-whole list (`[]` removes every binding) and reaches the guest at the computer's
-next start or restart; send the `version` a read answered to have it refused
-with 409 if the list changed since.
+**Secret bindings** — `get_computer_secrets`, `set_computer_secrets`, and
+`create_computer`'s `secrets`. Which of the account's secrets a computer
+receives, at which revision, and where: as an environment variable (`env`) or as
+a file under `/run/mandala-secrets/user/files` (`file`). Values never cross these
+tools. A set replaces the whole list (`[]` removes every binding) and reaches the
+guest at the computer's next start or restart; send the `version` a read
+answered to have it refused with 409 if the list changed since. A secret bound
+as a file is also rewritten on a running computer when its value is replaced.
 
 **Delegating** — `run_agent`, `run_agent_chat`, registered only when a model key is present:
 `MANDALA_MODEL_KEY` on stdio, or the caller's own `X-Model-Key` header over HTTP.
