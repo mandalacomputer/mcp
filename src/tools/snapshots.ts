@@ -404,7 +404,7 @@ export const registerSnapshots: Registrar = (server, session, opts) => {
           .boolean()
           .default(false)
           .describe(
-            'Include the running session. A memory snapshot is a saved machine, so it only loads back into the shape it came off: resize the computer afterwards and the restore is refused, because the vCPU count and the memory size are part of the state rather than decoration around it. Clone it instead in that case, which restores the disk and boots fresh.',
+            'Include the running session. A memory snapshot is a saved machine, so it only loads back into the shape it came off: resize the computer afterwards and the restore is refused, because the vCPU count and the memory size are part of the state rather than decoration around it. Clone it with memory: false instead in that case, which restores the disk and boots fresh.',
           ),
         wait: z
           .boolean()
@@ -813,11 +813,10 @@ export const registerSnapshots: Registrar = (server, session, opts) => {
         if (name !== undefined) body.name = name;
         if (memory !== undefined) body.memory = memory;
         if (inherit_secrets === true) body.inherit_secrets = true;
-        const c = unwrapComputer(
-          await session.api
-            .with(extra.signal)
-            .json('POST', P.snapshotAction(snapshot_id, 'clone'), { body }),
-        );
+        const answer = await session.api
+          .with(extra.signal)
+          .json('POST', P.snapshotAction(snapshot_id, 'clone'), { body });
+        const c = unwrapComputer(answer);
         if (!c.id) {
           return refused(
             `The platform accepted the clone of ${snapshot_id} but sent no computer id back, so the copy cannot be identified. It may exist and be billable — list_computers will say. The selected computer is unchanged.`,
@@ -830,7 +829,16 @@ export const registerSnapshots: Registrar = (server, session, opts) => {
         // that asked for a live fork and got a fresh boot would otherwise go on
         // as if the session — its open windows, its running programs — were
         // there.
-        const raw = c as Record<string, unknown>;
+        //
+        // Read off the ANSWER as well as the computer: the platform sends the
+        // two fields beside the computer's own, flat, and unwrapComputer keeps
+        // only start_error from an envelope — so a future envelope carrying
+        // them would otherwise report a live fork for a fresh boot.
+        const outer = (answer && typeof answer === 'object' ? answer : {}) as Record<
+          string,
+          unknown
+        >;
+        const raw = { ...(c as Record<string, unknown>), ...outer };
         if (raw.memory_dropped === true) {
           const why =
             raw.memory_dropped_reason === 'bindings unrecorded'

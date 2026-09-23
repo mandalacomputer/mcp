@@ -78,4 +78,17 @@ describe('clone_snapshot and a memory snapshot', () => {
     expect(kept).not.toContain('NOT resumed');
     expect(kept).toContain('Forked snap-1');
   });
+
+  it('reads the drop beside an envelope too, and says the copy is selected when it is', async () => {
+    const { call, close } = await connect();
+    answer = {
+      computer: { id: 'vm-9', name: 'copy', status: 'building' },
+      memory_dropped: true,
+      memory_dropped_reason: 'secrets',
+    };
+    const wrapped = textOf(await call('clone_snapshot', { snapshot_id: 'snap-1' }));
+    await close();
+    expect(wrapped).toContain('NOT resumed');
+    expect(wrapped).toContain('It is selected');
+  });
 });
