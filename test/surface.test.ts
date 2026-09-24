@@ -73,8 +73,10 @@ describe('the surface this server calls', () => {
     const calls = (await collectExercises()).flatMap((e) => e.requests);
     const called = routesOf(calls);
     expect([...called].filter((r) => !ALLOWED.has(r))).toEqual([]);
-    expect([...ALLOWED].filter((r) => !called.has(r))).toEqual([]);
-    expect([...UNIMPLEMENTED]).toEqual([]);
+    expect([...ALLOWED].filter((r) => !called.has(r) && !UNIMPLEMENTED.has(r))).toEqual([]);
+    // An unimplemented operation is a mirrored one nobody calls, and stops being
+    // listed the moment a tool reaches it.
+    expect([...UNIMPLEMENTED].filter((r) => !ALLOWED.has(r) || called.has(r))).toEqual([]);
   });
 
   it('sends only parameters the platform documents', async () => {
