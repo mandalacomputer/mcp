@@ -96,9 +96,13 @@ it('lets no exemption cover a trailing-slash twin, and fails one the publication
   };
   const ops = parseOperations(root);
   expect(ops.operations.map((op) => op.path).sort()).toEqual(['/api/v1', '/api/v1/']);
-  // Exempting the slash twin (`GET ` + `/`) leaves the bare root a gap.
-  expect(() => compareCoverage(ops, observed, { unsent: ['GET '] })).toThrow(
-    'Missing published operations:\nGET /api/v1',
+  // No exemption can name the root or a slash twin: both stay gaps.
+  for (const spelling of ['GET ', 'GET /', 'GET secrets/', 'GET /secrets'])
+    expect(() => compareCoverage(ops, observed, { unsent: [spelling] })).toThrow(
+      'Invalid unsent operation',
+    );
+  expect(() => compareCoverage(ops, observed)).toThrow(
+    'Missing published operations:\nGET /api/v1\nGET /api/v1/',
   );
   const dropped = structuredClone(fixture);
   dropped.paths['/secrets'] = { get: operation() };

@@ -119,8 +119,8 @@ function routeShape(method, path) {
   // `/secrets/` is a different operation from `/secrets` and must not borrow
   // its exemption.
   // Nor is the leading one dropped from a published path: `/api/v1` and
-  // `/api/v1/` stay `` and `/`. The mirror's spelling has no leading slash,
-  // so it gains one to meet the published form.
+  // `/api/v1/` stay `` and `/`. The mirror's spelling (never empty, never
+  // slash-edged; compareCoverage refuses those) gains one to meet it.
   const bare = path.startsWith('/') ? path.replace(/^\/api\/v1(?=\/|$)/, '') : `/${path}`;
   const shape = bare
     .split('/')
@@ -141,7 +141,11 @@ export function compareCoverage(contract, evidence, { unsent = [] } = {}) {
   const pending = new Set(
     [...unsent].map((entry) => {
       const [method, pattern] = String(entry).split(' ');
-      if (!method || pattern === undefined) throw new Error('Invalid unsent operation');
+      // The mirror spells a route without a leading or trailing slash and never
+      // names the API root, so an exemption cannot reach the root or a slash
+      // twin: those stay gaps a tool must cover.
+      if (!method || !pattern || pattern.startsWith('/') || pattern.endsWith('/'))
+        throw new Error('Invalid unsent operation');
       return routeShape(method, pattern);
     }),
   );
