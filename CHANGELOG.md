@@ -12,6 +12,21 @@ about a refusal is what the model reads and reasons from. Several entries below
 are wording changes, and they are behaviour changes in the way that matters.
 
 
+## [Unreleased]
+
+### Added
+
+- **Hosted OAuth mode for `--http`.** With
+  `MANDALA_MCP_RESOURCE_METADATA_URL` set, every `/mcp` request without a
+  bearer, and every one whose token the platform refuses, is a `401` with
+  `WWW-Authenticate: Bearer resource_metadata="…", scope="mcp:tools"`, so MCP
+  clients authorize and refresh on their own. A different bearer on an existing
+  session is answered `404` (initialize again) rather than rebound.
+  `MANDALA_MCP_SERVICE_SECRET` is sent as `X-Mandala-MCP-Service` on every
+  platform request; a client's own header of that name is never forwarded.
+  Without either variable nothing changes.
+
+
 ## [0.5.0] — 2026-09-23
 
 ### Added

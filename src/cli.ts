@@ -41,6 +41,21 @@ Environment
                        comma-separated; which Host and Origin values to answer
                        to. A loopback bind defaults to the address it was given,
                        so rebinding protection is on without configuration
+  MANDALA_MCP_RESOURCE_METADATA_URL
+                       --http only. The OAuth protected-resource metadata URL
+                       (RFC 9728) this server is published under, e.g.
+                       https://app.mandala.computer/.well-known/oauth-protected-resource/mcp
+                       Set, every /mcp request without a bearer, and every one
+                       whose token the platform refuses, is a 401 with
+                       WWW-Authenticate: Bearer resource_metadata="…", scope="mcp:tools"
+                       so MCP clients authorize and refresh by themselves.
+                       Unset, callers bring an API key as before.
+  MANDALA_MCP_SERVICE_SECRET
+                       --http only. Sent as X-Mandala-MCP-Service on every
+                       platform request, and only to MANDALA_BASE_URL; the
+                       platform takes OAuth access tokens only with it. Never
+                       logged. A client's own header of that name is never
+                       forwarded.
 
 Flags override the environment.`;
 
@@ -382,6 +397,8 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
       allowedOrigins: list(
         str(flags['allowed-origins'], 'allowed-origins') ?? env('MANDALA_ALLOWED_ORIGINS'),
       ),
+      resourceMetadataUrl: env('MANDALA_MCP_RESOURCE_METADATA_URL'),
+      serviceSecret: env('MANDALA_MCP_SERVICE_SECRET'),
     });
     return;
   }

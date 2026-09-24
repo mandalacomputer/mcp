@@ -17,6 +17,17 @@ export const DEFAULT_BASE_URL = 'https://app.mandala.computer/api/v1';
 /** Anthropic's own key, forwarded for the one route that runs a model. */
 export const MODEL_KEY_HEADER = 'X-Model-Key';
 
+/**
+ * Proof, to the platform, that a request comes through the hosted MCP service
+ * (OPL-4982). The platform takes an OAuth access token only alongside it, so a
+ * token cannot be replayed at the API directly by the app it was issued to.
+ *
+ * Only this server's own value is ever sent. A header of this name arriving
+ * from anywhere else — a caller, or a per-call header set — is dropped in
+ * `#fetch`, so a client cannot supply the secret or learn anything by trying.
+ */
+export const SERVICE_HEADER = 'X-Mandala-MCP-Service';
+
 function responseMetadata(resp: Response): APIErrorMetadata {
   return {
     requestId: resp.headers.get('x-request-id') ?? undefined,
@@ -102,6 +113,11 @@ const MAX_SSE_BUFFER = 8 * 1024 * 1024;
 const MAX_JSON_BODY_BYTES = 48 * 1024 * 1024;
 const MAX_ERROR_BODY_BYTES = 1024 * 1024;
 
+/** Whether a `WWW-Authenticate` value challenges for a Bearer credential. */
+function bearerChallenged(value: string | null): boolean {
+  return value !== null && /^\s*bearer(?:\s|,|$)/i.test(value);
+}
+
 /**
  * The longest foreground guest exec waits 600 seconds before it answers.
  * Node's bundled fetch gives response headers 300 seconds by default, so the
@@ -177,6 +193,29 @@ export type SSEEvent = { event: string; data: unknown };
  * result goes into a model's context and from there into transcripts, and an
  * API key is every computer on the account, forever.
  */
+/**
+ * What an embedding transport adds to every request one client makes.
+ *
+ * Both halves exist for the hosted install (OPL-4982), where this server stands
+ * between an OAuth client and the platform: the platform takes an access token
+ * only from a caller that also proves it is this service, and a refused token
+ * has to reach the MCP client as an HTTP 401 rather than as a tool error.
+ */
+export type ApiOptions = {
+  /**
+   * Sent as {@link SERVICE_HEADER} with every request to the configured base
+   * URL, and nowhere else. Never logged and never put on an error, like the
+   * key itself.
+   */
+  serviceSecret?: string;
+  /**
+   * Called when the platform refuses THE BEARER: a 401 carrying a `Bearer`
+   * challenge. A 401 without one is a model provider refusing a model key,
+   * which says nothing about this client's credential, and is not reported.
+   */
+  onBearerRefused?: () => void;
+};
+
 export class Api {
   readonly baseUrl: string;
   /** The same thing parsed, so a path is joined onto the path and nothing else. */
@@ -185,8 +224,14 @@ export class Api {
   readonly #headers: Record<string, string>;
   /** Applied to every request that does not carry one of its own. See `with`. */
   readonly #signal?: AbortSignal;
+  readonly #options: ApiOptions;
 
-  constructor(apiKey: string, baseUrl: string = DEFAULT_BASE_URL, signal?: AbortSignal) {
+  constructor(
+    apiKey: string,
+    baseUrl: string = DEFAULT_BASE_URL,
+    signal?: AbortSignal,
+    options: ApiOptions = {},
+  ) {
     if (!apiKey) {
       throw new MandalaError(
         'No API key. Set MANDALA_API_KEY (create one at Settings → API keys), ' +
@@ -232,6 +277,7 @@ export class Api {
     this.baseUrl = baseUrl.replace(/\/+$/, '');
     this.#apiKey = apiKey;
     this.#signal = signal;
+    this.#options = options;
     this.#headers = {
       Authorization: `Bearer ${apiKey}`,
       Accept: 'application/json',
@@ -252,7 +298,7 @@ export class Api {
    */
   with(signal: AbortSignal | undefined): Api {
     if (!signal || signal === this.#signal) return this;
-    return new Api(this.#apiKey, this.baseUrl, signal);
+    return new Api(this.#apiKey, this.baseUrl, signal, this.#options);
   }
 
   #url(path: string, query?: RequestOptions['query']): string {
@@ -283,7 +329,13 @@ export class Api {
     opts: RequestOptions = {},
     bounded = false,
   ): Promise<Response> {
-    const headers: Record<string, string> = { ...this.#headers, ...opts.headers };
+    const headers: Record<string, string> = { ...this.#headers };
+    for (const [name, value] of Object.entries(opts.headers ?? {})) {
+      // Case-insensitively: a record keyed `x-mandala-mcp-service` beside the
+      // canonical spelling would be sent as both, joined into one value.
+      if (name.toLowerCase() !== SERVICE_HEADER.toLowerCase()) headers[name] = value;
+    }
+    if (this.#options.serviceSecret) headers[SERVICE_HEADER] = this.#options.serviceSecret;
     // Typed as what we actually build rather than as BodyInit, which @types/node
     // does not put in the global scope.
     let body: string | Uint8Array | undefined;
@@ -407,7 +459,14 @@ export class Api {
         responseMetadata(resp),
       );
     }
-    if (!resp.ok) throw await this.#error(resp, method, path, signal, bounded);
+    if (!resp.ok) {
+      // Reported before the body is read, so a transport holding its answer
+      // for this can refuse the HTTP request while the tool is still unwinding.
+      if (resp.status === 401 && bearerChallenged(resp.headers.get('www-authenticate'))) {
+        this.#options.onBearerRefused?.();
+      }
+      throw await this.#error(resp, method, path, signal, bounded);
+    }
     return resp;
   }
 

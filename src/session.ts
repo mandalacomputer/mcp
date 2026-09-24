@@ -1,4 +1,4 @@
-import { Api, DEFAULT_BASE_URL } from './api.js';
+import { Api, type ApiOptions, DEFAULT_BASE_URL } from './api.js';
 import { MandalaError } from './errors.js';
 import { EventHub, type EventSocketFactory } from './events.js';
 
@@ -23,6 +23,11 @@ export type SessionConfig = {
    * in for by replacing the global.
    */
   webSocket?: EventSocketFactory;
+  /**
+   * What the hosted transport adds to this session's platform requests: the
+   * service header, and the hook that hears a refused bearer. See ApiOptions.
+   */
+  platform?: ApiOptions;
 };
 
 /**
@@ -55,7 +60,7 @@ export class Session {
   static readonly #MAX_SELECTION_VERSIONS = 256;
 
   constructor(cfg: SessionConfig) {
-    this.api = new Api(cfg.apiKey, cfg.baseUrl ?? DEFAULT_BASE_URL);
+    this.api = new Api(cfg.apiKey, cfg.baseUrl ?? DEFAULT_BASE_URL, undefined, cfg.platform);
     this.events = new EventHub(this.api, cfg.webSocket);
     this.modelKey = cfg.modelKey;
     this.#current = id(cfg.computerId);

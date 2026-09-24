@@ -3,7 +3,13 @@
  * spawning it — a host application that already knows who the user is can build
  * a server on their key without going through the CLI.
  */
-export { Api, DEFAULT_BASE_URL, MODEL_KEY_HEADER } from './api.js';
+export {
+  Api,
+  type ApiOptions,
+  DEFAULT_BASE_URL,
+  MODEL_KEY_HEADER,
+  SERVICE_HEADER,
+} from './api.js';
 export {
   APIError,
   type APIErrorMetadata,
@@ -30,7 +36,7 @@ export {
   reasonKind,
   UnavailableError,
 } from './errors.js';
-export { type HttpConfig, runHttp } from './http.js';
+export { bearerChallenge, type HttpConfig, runHttp } from './http.js';
 export { createServer, SERVER_NAME, SERVER_VERSION, type ServerConfig } from './server.js';
 export { Session, type SessionConfig } from './session.js';
 export { runStdio, type StdioConfig } from './stdio.js';

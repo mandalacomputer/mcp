@@ -22,6 +22,20 @@ export type HttpConfig = Omit<ServerConfig, 'apiKey' | 'activity'> & {
   maxSessions?: number;
   /** How many requests may retain a parsed body above 256 KiB at once. */
   maxLargeBodyParses?: number;
+  /**
+   * The OAuth protected-resource metadata URL (RFC 9728) of this server, for
+   * the hosted install (OPL-4982). Setting it turns on the OAuth answers: a
+   * request with no bearer, or whose bearer the platform refused, is a 401
+   * carrying {@link bearerChallenge}, which is how an MCP client discovers
+   * where to authorize and knows to refresh. Unset, nothing changes.
+   */
+  resourceMetadataUrl?: string;
+  /**
+   * The platform's shared secret for this service, sent as
+   * `X-Mandala-MCP-Service` on every platform request a session makes. Needed
+   * for the platform to take an OAuth access token at all. Never logged.
+   */
+  serviceSecret?: string;
 };
 
 type Live = {
@@ -31,7 +45,76 @@ type Live = {
   lastSeen: number;
   /** Requests currently being served on this session. */
   active: number;
+  /**
+   * The platform has refused this session's bearer (hosted mode only). Every
+   * later request carrying it is answered with the challenge before anything is
+   * dispatched: the token is expired or revoked and only the client can mend it.
+   */
+  refused: boolean;
 };
+
+/**
+ * One POST's answer, while it may still become a 401 (hosted mode only).
+ *
+ * `refuse` is called when the platform refuses the bearer during this request.
+ * It answers 401 if nothing has been sent yet, and is a no-op afterwards.
+ */
+type HeldAnswer = { refuse: () => void };
+
+/** The OAuth scope the hosted resource asks for. */
+export const MCP_SCOPE = 'mcp:tools';
+
+/**
+ * The `WWW-Authenticate` value of every OAuth refusal this server makes.
+ *
+ * The same header whether no bearer was sent or the platform refused one: RFC
+ * 9728 §5.1 has a client find the authorization server through
+ * `resource_metadata`, and the MCP authorization spec has it refresh or
+ * re-authorize on any 401 that carries it.
+ */
+export function bearerChallenge(resourceMetadataUrl: string): string {
+  return `Bearer resource_metadata="${resourceMetadataUrl}", scope="${MCP_SCOPE}"`;
+}
+
+/**
+ * The metadata URL, or a refusal naming the setting.
+ *
+ * It goes inside a quoted-string in a response header, so a quote, a backslash
+ * or a control character would change what the header says — refused rather
+ * than escaped, since no real URL needs one.
+ */
+function checkedMetadataUrl(raw: string): string {
+  let parsed: URL;
+  try {
+    parsed = new URL(raw);
+  } catch {
+    throw new Error(
+      'MANDALA_MCP_RESOURCE_METADATA_URL is not a URL. Set it to the absolute https URL of ' +
+        'this resource’s OAuth metadata, e.g. https://app.mandala.computer/.well-known/oauth-protected-resource/mcp',
+    );
+  }
+  if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
+    throw new Error('MANDALA_MCP_RESOURCE_METADATA_URL must be an http(s) URL.');
+  }
+  // biome-ignore lint/suspicious/noControlCharactersInRegex: refusing them is the point.
+  if (/["\\\u0000-\u001f\u007f\s]/.test(raw)) {
+    throw new Error(
+      'MANDALA_MCP_RESOURCE_METADATA_URL contains a quote, backslash, space or control character.',
+    );
+  }
+  return raw;
+}
+
+/** Visible ASCII only: anything else cannot be a header value, and says so here. */
+function checkedServiceSecret(raw: string): string {
+  if (!/^[\x21-\x7e]+$/.test(raw)) {
+    // The value is deliberately not echoed.
+    throw new Error(
+      'MANDALA_MCP_SERVICE_SECRET must be printable ASCII with no spaces; it is sent as a header.',
+    );
+  }
+  return raw;
+}
 
 type LargeBodyLease = {
   /** Add an owner and return its idempotent release callback. */
@@ -177,6 +260,24 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
   // with a generic 500. Validate it before opening the listening socket, using
   // the same constructor and therefore the same rules as every real session.
   new Api('startup-validation-only', cfg.baseUrl);
+
+  // The hosted install's two settings, checked before the bind for the same
+  // reason. `challenge` being set IS hosted mode: every OAuth-specific answer
+  // below is gated on it, so a server started without the metadata URL behaves
+  // exactly as it did before OPL-4982.
+  const metadataUrl =
+    cfg.resourceMetadataUrl !== undefined ? checkedMetadataUrl(cfg.resourceMetadataUrl) : undefined;
+  const serviceSecret =
+    cfg.serviceSecret !== undefined ? checkedServiceSecret(cfg.serviceSecret) : undefined;
+  const challenge = metadataUrl ? bearerChallenge(metadataUrl) : undefined;
+  /** The POST being answered, so a refused bearer can turn it into a 401. */
+  const heldAnswer = new AsyncLocalStorage<HeldAnswer | undefined>();
+
+  /** A 401 an OAuth client acts on: authorize, or refresh and try again. */
+  const challenged = (res: Response, message: string, id: RpcId = null) => {
+    if (challenge) res.set('WWW-Authenticate', challenge);
+    unauthorized(res, message, id);
+  };
 
   const app = express();
 
@@ -595,6 +696,15 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
     const sessionId = req.header('mcp-session-id');
     const key = bearer(req);
 
+    // Hosted: EVERY request needs a bearer, initialize and tools/list included.
+    // Orgo answers those two anonymously; refusing them is simpler, costs a
+    // client nothing (it authorizes on the first 401 whichever request that
+    // is), and means no McpServer is ever built for a caller with no credential.
+    if (challenge && !key) {
+      releaseLargeBody(res);
+      return challenged(res, NO_TOKEN, rpcId(req));
+    }
+
     if (sessionId) {
       try {
         const live = sessions.get(sessionId);
@@ -603,11 +713,30 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
         // session id travels in a plain header and is the sort of thing that ends
         // up in a proxy log; on its own it must not be a credential.
         if (!key || !sameKey(live.keyDigest, key)) {
+          // Hosted: a different bearer is most often the SAME client after a
+          // token refresh, and nothing this server can see proves that — an
+          // access token is opaque, and the refresh token never comes here. So
+          // the session is not rebound, which would hand its bound computer,
+          // buffered events and retained results to whoever holds any valid
+          // credential and the session id. It is answered as unknown instead,
+          // which is the MCP spec's signal to initialize a new session; the new
+          // bearer gets a new session, and this one is left to the idle sweep
+          // (closing it here would let anyone with the id end it).
+          if (challenge) {
+            return notFound(res, 'Unknown session. Initialize a new one.', rpcId(req));
+          }
           return unauthorized(res, 'This session belongs to a different API key.', rpcId(req));
         }
+        if (challenge && live.refused) return challenged(res, TOKEN_REFUSED, rpcId(req));
         const lease = res.locals.largeBodyLease as LargeBodyLease | undefined;
-        return await requestBodyLease.run(lease, () =>
-          serving(live, () => live.transport.handleRequest(req, res, req.body)),
+        const id = rpcId(req);
+        const held = challenge
+          ? holdAnswer(res, () => challenged(res, TOKEN_REFUSED, id))
+          : undefined;
+        return await heldAnswer.run(held, () =>
+          requestBodyLease.run(lease, () =>
+            serving(live, () => live.transport.handleRequest(req, res, req.body)),
+          ),
         );
       } finally {
         // A verified session is the only request allowed through the large
@@ -691,6 +820,7 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
             // Initialize is already in flight when the session first becomes
             // visible to the sweeper. Count it until handleRequest settles.
             active: 1,
+            refused: false,
           };
           sessions.set(id, live);
           let held = true;
@@ -735,6 +865,20 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
         // every call until they run use_computer 404s, and the id of a machine
         // that is not theirs is named back to them by way of explanation.
         computerId: undefined,
+        platform: {
+          serviceSecret,
+          // Hosted only. Marks the session, so the NEXT request on this bearer
+          // is refused before dispatch, and turns the request in flight into a
+          // 401 if nothing of its answer has been sent yet.
+          onBearerRefused: challenge
+            ? () => {
+                const id = t.sessionId;
+                const live = id ? sessions.get(id) : undefined;
+                if (live) live.refused = true;
+                heldAnswer.getStore()?.refuse();
+              }
+            : undefined,
+        },
       });
       mcp = server;
       await server.connect(t);
@@ -768,12 +912,18 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
   // the POST does.
   const bySession = async (req: Request, res: Response) => {
     const sessionId = req.header('mcp-session-id');
+    const key = bearer(req);
+    if (challenge && !key) return challenged(res, NO_TOKEN);
     const live = sessionId ? sessions.get(sessionId) : undefined;
     if (!live) return notFound(res, 'Unknown session.');
-    const key = bearer(req);
     if (!key || !sameKey(live.keyDigest, key)) {
+      // As on POST: hosted answers a different bearer as an unknown session.
+      if (challenge) return notFound(res, 'Unknown session.');
       return unauthorized(res, 'This session belongs to a different API key.');
     }
+    // The stream is refused on a token the platform has already refused; a
+    // DELETE is still honoured, since the digest shows it is the holder.
+    if (challenge && live.refused && req.method === 'GET') return challenged(res, TOKEN_REFUSED);
     // The DELETE is a request and is held for; the GET is the notification
     // stream and is only noted. See `serving`.
     if (req.method === 'GET') {
@@ -850,8 +1000,16 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
       const bound = typeof addr === 'object' && addr ? addr.port : cfg.port;
       boundPort = bound;
       console.error(
-        `mandala-computer-mcp on http://${cfg.host}:${bound}/mcp — callers authenticate with their own Mandala API key`,
+        metadataUrl
+          ? `mandala-computer-mcp on http://${cfg.host}:${bound}/mcp — OAuth: callers without a bearer are sent to ${metadataUrl}`
+          : `mandala-computer-mcp on http://${cfg.host}:${bound}/mcp — callers authenticate with their own Mandala API key`,
       );
+      // Said, never shown: whether the secret is set is the useful fact.
+      if (metadataUrl && !serviceSecret) {
+        console.error(
+          '  MANDALA_MCP_SERVICE_SECRET is not set — the platform accepts OAuth access tokens only with it, so every tool call will be refused',
+        );
+      }
       // Said once, at the only moment anybody is reading. A bind that is not
       // loopback cannot have its legitimate Host values guessed, so the check
       // is off and the operator is the only one who can turn it on — and an
@@ -918,6 +1076,89 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
     }) as typeof http.close;
     http.on('close', teardown);
   });
+}
+
+const NO_TOKEN =
+  'Authorization required. Authorize this client with Mandala (OAuth), or send a Mandala API key: Authorization: Bearer …';
+const TOKEN_REFUSED =
+  'The platform no longer accepts this access token. Refresh it, or authorize again.';
+
+/**
+ * Hold a response's status line until its first byte of body (hosted mode).
+ *
+ * A Streamable HTTP POST answers 200 and opens its event stream the moment the
+ * request is dispatched, long before a tool reaches the platform — so a token
+ * the platform refuses could only ever come back as a tool error inside a 200,
+ * which no MCP client treats as "refresh your token". Deferring `writeHead`
+ * and `flushHeaders` until the first write lets that refusal become the 401
+ * the client acts on instead: the platform's 401 is reported before the tool
+ * has produced anything, so the first write finds the answer already refused.
+ *
+ * The first byte of anything — a result, a progress notification, the SDK's
+ * keep-alive comment — commits the stream, and a refusal after that stays a
+ * tool error. The session is marked either way, so the next request carrying
+ * the refused bearer gets the 401 before it is dispatched.
+ */
+function holdAnswer(res: Response, answer401: () => void): HeldAnswer {
+  type Writer = (...args: unknown[]) => unknown;
+  const target = res as unknown as Record<string, Writer>;
+  const names = ['writeHead', 'flushHeaders', 'write', 'end'] as const;
+  const own = Object.fromEntries(names.map((n) => [n, target[n]])) as Record<
+    (typeof names)[number],
+    Writer
+  >;
+  const deferred: Array<() => void> = [];
+  let state: 'holding' | 'released' | 'refused' = 'holding';
+
+  const restore = () => {
+    for (const n of names) target[n] = own[n];
+  };
+  const release = () => {
+    if (state !== 'holding') return;
+    state = 'released';
+    restore();
+    for (const replay of deferred.splice(0)) replay();
+  };
+  const refuse = () => {
+    if (state !== 'holding') return;
+    state = 'refused';
+    restore();
+    if (!res.headersSent && !res.writableEnded && !res.destroyed) answer401();
+    // Whatever the transport still writes belongs to the answer that was
+    // replaced, and writing after end would raise an unhandled 'error'.
+    target.writeHead = () => res;
+    target.flushHeaders = () => undefined;
+    target.write = (...args: unknown[]) => {
+      const cb = args.find((a) => typeof a === 'function') as (() => void) | undefined;
+      cb?.();
+      return true;
+    };
+    target.end = (...args: unknown[]) => {
+      const cb = args.find((a) => typeof a === 'function') as (() => void) | undefined;
+      cb?.();
+      return res;
+    };
+  };
+
+  target.writeHead = (...args: unknown[]) => {
+    if (state !== 'holding') return target.writeHead.apply(res, args);
+    deferred.push(() => own.writeHead.apply(res, args));
+    return res;
+  };
+  target.flushHeaders = (...args: unknown[]) => {
+    if (state !== 'holding') return target.flushHeaders.apply(res, args);
+    deferred.push(() => own.flushHeaders.apply(res, args));
+    return undefined;
+  };
+  target.write = (...args: unknown[]) => {
+    release();
+    return target.write.apply(res, args);
+  };
+  target.end = (...args: unknown[]) => {
+    release();
+    return target.end.apply(res, args);
+  };
+  return { refuse };
 }
 
 /**
