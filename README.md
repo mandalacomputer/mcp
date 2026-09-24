@@ -931,8 +931,9 @@ address.
   cannot fill the session pool. A `401` is the challenge above; any other
   answer is `503` and nothing is remembered. Refused initializes are budgeted
   per source address, 20 a minute. Past that, a token already accepted still
-  passes and a new one is still checked, but one at a time per address; the
-  rest get `429`. A POST
+  passes and a new one is still checked, but only one every 5 s per address;
+  the rest get `429` with `Retry-After`. The budget comes back when its minute
+  is up. A POST
   carrying a request is checked again before it is dispatched, with an
   acceptance cached for 60 s under the token's digest, so an expired or
   revoked token is a clean `401` before any stream opens.

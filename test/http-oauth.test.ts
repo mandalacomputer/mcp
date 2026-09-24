@@ -548,6 +548,7 @@ describe('hosted: checking a bearer before it gets anything', () => {
       resourceMetadataUrl: METADATA,
       serviceSecret: SECRET,
       maxFailedInitializes: 2,
+      exhaustedProbeIntervalMs: 100,
     });
     try {
       const c = client(url);
@@ -561,7 +562,9 @@ describe('hosted: checking a bearer before it gets anything', () => {
       const before = probes();
       await c.open('mcpat_good');
       expect(probes()).toBe(before);
-      // New to this server, from the same spent address: still probed, and in.
+      // New to this server, from the same spent address: still probed, and in,
+      // once the address's probe interval has passed.
+      await new Promise((r) => setTimeout(r, 150));
       platform.state.onlyAccept = 'mcpat_new';
       expect(await c.open('mcpat_new')).toBeTruthy();
     } finally {
@@ -569,7 +572,7 @@ describe('hosted: checking a bearer before it gets anything', () => {
     }
   });
 
-  it('lets a spent address probe one new bearer at a time, 429s the rest unasked, and passes an accepted one', async () => {
+  it('lets a spent address probe one new bearer per interval, 429s the rest unasked, and passes an accepted one', async () => {
     platform = platformWithRefusals();
     platform.state.onlyAccept = 'mcpat_good';
     const { server, url } = await start({
@@ -597,9 +600,56 @@ describe('hosted: checking a bearer before it gets anything', () => {
       expect([a.status, b.status].sort()).toEqual([401, 429]);
       expect(good.status).toBe(200);
       const limited = a.status === 429 ? a : b;
-      expect(limited.headers.get('retry-after')).toBe('1');
+      // The default 5 s interval, rounded up to whole seconds.
+      expect(limited.headers.get('retry-after')).toBe('5');
       await Promise.all([a.text(), b.text(), good.text()]);
       expect(probes()).toBe(before + 1);
+    } finally {
+      await stop(server);
+    }
+  });
+
+  it('lets a spent address have one new bearer checked per interval, however many it sends', async () => {
+    platform = platformWithRefusals();
+    platform.state.onlyAccept = 'mcpat_good';
+    const { server, url } = await start({
+      resourceMetadataUrl: METADATA,
+      serviceSecret: SECRET,
+      maxFailedInitializes: 1,
+      exhaustedProbeIntervalMs: 300,
+    });
+    const pause = (ms: number) => new Promise((r) => setTimeout(r, ms));
+    try {
+      const c = client(url);
+      const spend = await c.send(INIT, { Authorization: 'Bearer mcpat_spend' });
+      expect(spend.status).toBe(401);
+      await spend.text();
+
+      // Ten in a row within one interval: exactly one reaches the platform.
+      let before = probes();
+      const statuses: number[] = [];
+      for (let i = 0; i < 10; i++) {
+        const res = await c.send(INIT, { Authorization: `Bearer mcpat_invented${i}` });
+        statuses.push(res.status);
+        if (res.status === 429) expect(Number(res.headers.get('retry-after'))).toBeGreaterThan(0);
+        await res.text();
+      }
+      expect(probes()).toBe(before + 1);
+      expect(statuses[0]).toBe(401);
+      expect(statuses.slice(1).every((st) => st === 429)).toBe(true);
+
+      // The interval passes: one more is checked.
+      await pause(350);
+      before = probes();
+      const later = await c.send(INIT, { Authorization: 'Bearer mcpat_invented10' });
+      expect(later.status).toBe(401);
+      await later.text();
+      expect(probes()).toBe(before + 1);
+
+      // And at the next interval a valid new bearer gets in.
+      await pause(350);
+      platform.state.onlyAccept = 'mcpat_new';
+      expect(await c.open('mcpat_new')).toBeTruthy();
     } finally {
       await stop(server);
     }

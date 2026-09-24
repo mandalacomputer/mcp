@@ -48,6 +48,11 @@ export type HttpConfig = Omit<ServerConfig, 'apiKey' | 'activity'> & {
    * is answered 429 without asking the platform. Default 20.
    */
   maxFailedInitializes?: number;
+  /**
+   * Hosted mode: once a source has spent that budget, how often it may still
+   * have one new bearer checked, in ms. Default 5 s.
+   */
+  exhaustedProbeIntervalMs?: number;
   /** The SDK's SSE keep-alive interval, in ms. For tests; default 15 s. */
   sseKeepAliveMs?: number;
 };
@@ -356,9 +361,10 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
   // from the session cap so a flood of invented tokens is turned away before
   // it asks the platform anything, rather than by starving the pool.
   const maxFailed = cfg.maxFailedInitializes ?? DEFAULT_MAX_FAILED_INITIALIZES;
-  const failures = new Map<string, { count: number; resetAt: number }>();
-  /** Probes in flight per source whose budget is spent. At most one each. */
-  const exhaustedProbes = new Map<string, number>();
+  // `lastProbeAt` lives on the window's entry, so the window's reset restores
+  // the normal budget and forgets the spent-address clock in one step.
+  const failures = new Map<string, { count: number; resetAt: number; lastProbeAt?: number }>();
+  const exhaustedInterval = cfg.exhaustedProbeIntervalMs ?? DEFAULT_EXHAUSTED_PROBE_INTERVAL_MS;
   const sourceOf = (req: Request) => req.ip ?? req.socket.remoteAddress ?? 'unknown';
   const overFailureBudget = (req: Request): number | undefined => {
     const entry = failures.get(sourceOf(req));
@@ -900,32 +906,29 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
       // A spent budget does not close the address. Many clients can share one
       // (a NAT, an office), and one bad neighbour must not lock out the rest:
       // a bearer the platform already accepted passes outright, and a new one
-      // still gets a probe — but only one at a time per spent address, so a
-      // flood from it reaches the platform serially while the process-wide
-      // cap on probes bounds the total.
-      const source = sourceOf(req);
+      // still gets a probe — but at most one per interval per spent address,
+      // taken when it starts, so the address costs the platform one probe per
+      // interval however hard it pushes, and a valid client there waits at
+      // most one interval. The process-wide cap on probes bounds the total.
       const spent = !isAccepted(key) && overFailureBudget(req) !== undefined;
-      if (spent && (exhaustedProbes.get(source) ?? 0) >= 1) {
-        res.set('Retry-After', '1');
-        return rpcError(
-          res,
-          429,
-          -32002,
-          'Too many refused initializes from this address. Retry shortly with a valid token.',
-          rpcId(req),
-        );
-      }
-      if (spent) exhaustedProbes.set(source, (exhaustedProbes.get(source) ?? 0) + 1);
-      let verdict: 'ok' | 'refused' | 'unknown';
-      try {
-        verdict = await checkBearer(key);
-      } finally {
-        if (spent) {
-          const n = (exhaustedProbes.get(source) ?? 1) - 1;
-          if (n <= 0) exhaustedProbes.delete(source);
-          else exhaustedProbes.set(source, n);
+      if (spent) {
+        const entry = failures.get(sourceOf(req));
+        const now = Date.now();
+        const wait =
+          entry?.lastProbeAt !== undefined ? entry.lastProbeAt + exhaustedInterval - now : 0;
+        if (wait > 0) {
+          res.set('Retry-After', String(Math.max(1, Math.ceil(wait / 1000))));
+          return rpcError(
+            res,
+            429,
+            -32002,
+            'Too many refused initializes from this address. Retry later with a valid token.',
+            rpcId(req),
+          );
         }
+        if (entry) entry.lastProbeAt = now;
       }
+      const verdict = await checkBearer(key);
       if (verdict === 'refused') {
         noteFailure(req);
         return challenged(res, TOKEN_REFUSED, rpcId(req));
@@ -1252,6 +1255,7 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
 
 const DEFAULT_BEARER_CHECK_TTL_MS = 60_000;
 const DEFAULT_MAX_FAILED_INITIALIZES = 20;
+const DEFAULT_EXHAUSTED_PROBE_INTERVAL_MS = 5_000;
 const FAILURE_WINDOW_MS = 60_000;
 const BEARER_CHECK_TIMEOUT_MS = 10_000;
 /** How many bearers this server will be asking the platform about at once. */
