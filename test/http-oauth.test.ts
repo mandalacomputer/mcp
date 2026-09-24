@@ -671,6 +671,9 @@ describe('hosted: checking a bearer before it gets anything', () => {
       Authorization: `Bearer ${token}`,
       'X-Forwarded-For': ip,
     });
+    // Released in `finally` too, before the server stops: a failed assertion
+    // with the gate shut would leave 32 requests held and stall the suite.
+    let release = () => {};
     try {
       const c = client(url);
       const spend = await c.send(INIT, from('10.9.0.1', 'mcpat_spend'));
@@ -680,7 +683,6 @@ describe('hosted: checking a bearer before it gets anything', () => {
       // Fill the process-wide cap from other addresses: every probe is held
       // at the platform until all 32 have arrived and the turned-away request
       // has been answered, so the cap is full by construction, not by timing.
-      let release!: () => void;
       platform.state.probeGate = new Promise<void>((r) => {
         release = r;
       });
@@ -688,7 +690,11 @@ describe('hosted: checking a bearer before it gets anything', () => {
       const fill = Array.from({ length: 32 }, (_, i) =>
         c.send(INIT, from(`10.9.1.${i + 1}`, `mcpat_fill${i}`)),
       );
-      while (probes() < base + 32) await new Promise((r) => setTimeout(r, 5));
+      const deadline = Date.now() + 5000;
+      while (probes() < base + 32) {
+        if (Date.now() > deadline) throw new Error(`only ${probes() - base} of 32 probes arrived`);
+        await new Promise((r) => setTimeout(r, 5));
+      }
       const before = probes();
       const turned = await c.send(INIT, from('10.9.0.1', 'mcpat_invented'));
       expect(turned.status).toBe(503);
@@ -704,6 +710,8 @@ describe('hosted: checking a bearer before it gets anything', () => {
       expect(res.status).toBe(200);
       await res.text();
     } finally {
+      platform.state.probeGate = undefined;
+      release();
       await stop(server);
     }
   });
