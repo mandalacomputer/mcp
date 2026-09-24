@@ -80,6 +80,23 @@ it('reports a published operation listed as not yet sent, and fails every other 
   );
 });
 
+it('lets no exemption cover a trailing-slash twin, and fails one the publication lacks', async () => {
+  const observed = operationEvidence(await collectExercises());
+  const twin = structuredClone(fixture);
+  twin.paths['/secrets'] = { get: operation() };
+  twin.paths['/secrets/'] = { get: operation() };
+  expect(() =>
+    compareCoverage(parseOperations(twin), observed, { unsent: ['GET secrets'] }),
+  ).toThrow('GET /api/v1/secrets/');
+  const dropped = structuredClone(fixture);
+  dropped.paths['/secrets'] = { get: operation() };
+  expect(() =>
+    compareCoverage(parseOperations(dropped), observed, {
+      unsent: ['GET secrets', 'PUT secrets/:id'],
+    }),
+  ).toThrow('Not-yet-sent operations absent from the publication:\nPUT secrets/{}');
+});
+
 it('requires exact registered/exercise inventory in both directions', () => {
   expect(() => checkInventory(['one', 'two'], { one: [{}] })).toThrow('missing tools [two]');
   expect(() => checkInventory(['one'], { one: [{}], two: [{}] })).toThrow(

@@ -115,7 +115,10 @@ export function parseOperations(document) {
  * a published operation's `/api/v1/secrets/{id}` or the mirror's `secrets/:id`.
  */
 function routeShape(method, path) {
-  const bare = path.replace(/^\/api\/v1(?=\/|$)/, '').replace(/^\/+|\/+$/g, '');
+  // A trailing slash is kept: requests are matched segment by segment, so
+  // `/secrets/` is a different operation from `/secrets` and must not borrow
+  // its exemption.
+  const bare = path.replace(/^\/api\/v1(?=\/|$)/, '').replace(/^\/+/, '');
   const shape = bare
     .split('/')
     .map((seg) => (/^\{[^}]+\}$/.test(seg) || /^:[^/]+$/.test(seg) ? '{}' : seg))
@@ -177,6 +180,13 @@ export function compareCoverage(contract, evidence, { unsent = [] } = {}) {
   }
   if (zero.length) throw new Error(`Zero request coverage for tools: ${zero.sort().join(', ')}`);
   if (!requests) throw new Error('No tool request evidence');
+  // An exemption must name something the publication has. One that matches
+  // nothing is drift — a published operation renamed or dropped — and passing
+  // it silently would read as coverage resolved.
+  const published = new Set(contract.operations.map((op) => routeShape(op.method, op.path)));
+  const stale = [...pending].filter((shape) => !published.has(shape)).sort();
+  if (stale.length)
+    throw new Error(`Not-yet-sent operations absent from the publication:\n${stale.join('\n')}`);
   const uncovered = contract.operations.filter((op) => !seen.has(op.key));
   const notYetSent = uncovered
     .filter((op) => pending.has(routeShape(op.method, op.path)))
