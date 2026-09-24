@@ -88,13 +88,25 @@ it('lets no exemption cover a trailing-slash twin, and fails one the publication
   expect(() =>
     compareCoverage(parseOperations(twin), observed, { unsent: ['GET secrets'] }),
   ).toThrow('GET /api/v1/secrets/');
+  // The bare root and its slash twin, published from an origin-level server.
+  const root = {
+    ...structuredClone(fixture),
+    servers: [{ url: 'https://app.mandala.computer' }],
+    paths: { '/api/v1': { get: operation() }, '/api/v1/': { get: operation() } },
+  };
+  const ops = parseOperations(root);
+  expect(ops.operations.map((op) => op.path).sort()).toEqual(['/api/v1', '/api/v1/']);
+  // Exempting the slash twin (`GET ` + `/`) leaves the bare root a gap.
+  expect(() => compareCoverage(ops, observed, { unsent: ['GET '] })).toThrow(
+    'Missing published operations:\nGET /api/v1',
+  );
   const dropped = structuredClone(fixture);
   dropped.paths['/secrets'] = { get: operation() };
   expect(() =>
     compareCoverage(parseOperations(dropped), observed, {
       unsent: ['GET secrets', 'PUT secrets/:id'],
     }),
-  ).toThrow('Not-yet-sent operations absent from the publication:\nPUT secrets/{}');
+  ).toThrow('Not-yet-sent operations absent from the publication:\nPUT /secrets/{}');
 });
 
 it('requires exact registered/exercise inventory in both directions', () => {

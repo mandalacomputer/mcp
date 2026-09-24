@@ -118,7 +118,10 @@ function routeShape(method, path) {
   // A trailing slash is kept: requests are matched segment by segment, so
   // `/secrets/` is a different operation from `/secrets` and must not borrow
   // its exemption.
-  const bare = path.replace(/^\/api\/v1(?=\/|$)/, '').replace(/^\/+/, '');
+  // Nor is the leading one dropped from a published path: `/api/v1` and
+  // `/api/v1/` stay `` and `/`. The mirror's spelling has no leading slash,
+  // so it gains one to meet the published form.
+  const bare = path.startsWith('/') ? path.replace(/^\/api\/v1(?=\/|$)/, '') : `/${path}`;
   const shape = bare
     .split('/')
     .map((seg) => (/^\{[^}]+\}$/.test(seg) || /^:[^/]+$/.test(seg) ? '{}' : seg))
