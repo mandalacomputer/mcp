@@ -453,6 +453,14 @@ describe('files', () => {
   it.each([
     ['empty', () => new Response('', { status: 409 })],
     ['not JSON', () => new Response('<html>conflict</html>', { status: 409 })],
+    ['JSON with no reason', () => Response.json({ error: 'conflict' }, { status: 409 })],
+    ['JSON with a numeric reason', () => Response.json({ reason: 5 }, { status: 409 })],
+    ['JSON with a blank reason', () => Response.json({ reason: ' ' }, { status: 409 })],
+    ['empty JSON object', () => Response.json({}, { status: 409 })],
+    [
+      'JSON whose error text claims existence',
+      () => Response.json({ error: 'a file already exists at that path' }, { status: 409 }),
+    ],
   ])('does not call a create-only 409 with an %s body worth resending', async (_kind, answer) => {
     const real = globalThis.fetch;
     globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
@@ -468,9 +476,11 @@ describe('files', () => {
       });
       await close();
       expect(res.isError).toBe(true);
-      expect(textOf(res)).toContain('the reason could not be read');
-      expect(textOf(res)).toContain('do not send the same call again');
+      expect(textOf(res)).toContain('refused as a conflict, reason unknown');
+      expect(textOf(res)).toContain('Do not send the same call again');
       expect(textOf(res)).toContain('This attempt wrote nothing');
+      expect(textOf(res)).not.toContain('already exists');
+      expect(textOf(res)).not.toContain('Something is already at');
     } finally {
       globalThis.fetch = real;
     }

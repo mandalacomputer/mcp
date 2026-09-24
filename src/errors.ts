@@ -361,9 +361,67 @@ export class MoveRequiredError extends ConflictError {
  * nature — it clears only when the caller decides, never by waiting — so
  * {@link isTransient} says no to it. A subclass, so `instanceof ConflictError`
  * written before this existed still catches it.
+ *
+ * {@link APIError.reason} is `exists` when the platform's body said so. It is
+ * `undefined` when a create-only upload's 409 carried no usable reason — a body
+ * interrupted, empty, not the platform's JSON, or JSON without a non-blank
+ * string `reason`. {@link Api} raises that refusal as this class too (see
+ * {@link createOnlyRefusal}), with a message saying it was a conflict whose
+ * reason is unknown; it does NOT say the path exists. Test `reason === 'exists'`,
+ * not the class, before telling anyone the path is taken.
  */
 export class FileExistsError extends ConflictError {
   override name = 'FileExistsError';
+}
+
+/**
+ * A create-only upload's 409, never left looking like a passing conflict.
+ *
+ * Applied by {@link Api} to every `PUT computers/:id/files` sent with
+ * `overwrite=false`, so an embedder's {@link isTransient} and this server's
+ * tools give one answer. The platform's taken path is 409 `exists`, which
+ * {@link errorForStatus} already maps to {@link FileExistsError}. A 409 without
+ * a usable word — the body lost, empty, a proxy's page, or JSON whose `reason`
+ * is missing, not a string, or blank — would otherwise be a bare
+ * {@link ConflictError} that {@link isTransient} calls worth sending again: a
+ * retry of a refusal that does not clear, and one that could create the file
+ * later if the path were cleared in between. So it is final here, with a
+ * neutral message: not the body's own text, which could say "already exists"
+ * without the `exists` reason. The body stays on the error for diagnostics. A
+ * 409 that DID carry a string reason keeps the platform's classification,
+ * whatever the word.
+ */
+export function createOnlyRefusal(err: APIError): APIError {
+  if (!(err instanceof ConflictError) || err instanceof FileExistsError) return err;
+  if (typeof err.reason === 'string' && err.reason.trim() !== '') return err;
+  const refusal = new FileExistsError(
+    'a create-only upload was refused as a conflict, reason unknown: the 409 carried no ' +
+      'reason that could be read, so whether the path is taken was not said; treat it as ' +
+      'final rather than sending the same write again',
+    err.status,
+    err.body,
+    err.retryAfterMs,
+    { requestId: err.requestId, allow: err.allow, wwwAuthenticate: err.wwwAuthenticate },
+  );
+  // The constructor reads the body again, and would keep a blank word. Unknown
+  // is `undefined` here, as documented on FileExistsError.
+  (refusal as { reason?: string }).reason = undefined;
+  return refusal;
+}
+
+/**
+ * Whether this request is a create-only upload: `PUT computers/:id/files` with
+ * `overwrite=false`. The only request {@link createOnlyRefusal} applies to.
+ */
+export function isCreateOnlyUpload(
+  method: string,
+  path: string,
+  query: Record<string, string | number | boolean | undefined> | undefined,
+): boolean {
+  if (method.toUpperCase() !== 'PUT') return false;
+  if (!/^\/?computers\/[^/]+\/files$/.test(path)) return false;
+  const overwrite = query?.overwrite;
+  return overwrite === false || overwrite === 'false';
 }
 
 /**

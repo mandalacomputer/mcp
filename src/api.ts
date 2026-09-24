@@ -5,7 +5,9 @@ import {
   CancelledError,
   ConnectivityError,
   ConnectivityInterruptedError,
+  createOnlyRefusal,
   errorForStatus,
+  isCreateOnlyUpload,
   MandalaError,
   platformSaid,
   RangeNotSatisfiableError,
@@ -407,7 +409,12 @@ export class Api {
         responseMetadata(resp),
       );
     }
-    if (!resp.ok) throw await this.#error(resp, method, path, signal, bounded);
+    if (!resp.ok) {
+      const err = await this.#error(resp, method, path, signal, bounded);
+      // A create-only upload's 409 with no usable reason is final, decided here
+      // rather than in the tool so an embedder's isTransient agrees (OPL-4994).
+      throw isCreateOnlyUpload(method, path, opts.query) ? createOnlyRefusal(err) : err;
+    }
     return resp;
   }
 

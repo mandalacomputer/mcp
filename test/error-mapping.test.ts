@@ -411,6 +411,56 @@ describe('a create-only upload onto a taken path (OPL-4994)', () => {
     );
   });
 
+  it.each([
+    ['empty', () => new Response('', { status: 409 })],
+    ['not JSON', () => new Response('<html>conflict</html>', { status: 409 })],
+    ['JSON with no reason', () => Response.json({ error: 'conflict' }, { status: 409 })],
+    ['JSON with a numeric reason', () => Response.json({ reason: 5 }, { status: 409 })],
+    ['JSON with a blank reason', () => Response.json({ reason: '  ' }, { status: 409 })],
+    ['empty JSON object', () => Response.json({}, { status: 409 })],
+    [
+      'JSON whose error text claims existence',
+      () => Response.json({ error: 'a file already exists at that path' }, { status: 409 }),
+    ],
+  ])(
+    'the exported Api makes a create-only 409 with an %s body final (Codex review)',
+    async (_kind, answer) => {
+      globalThis.fetch = async () => answer();
+      const error = await api()
+        .json('PUT', 'computers/vm-1/files', {
+          query: { path: '/tmp/a', overwrite: 'false' },
+          raw: new Uint8Array([1]),
+        })
+        .catch((error: unknown) => error);
+      expect(error).toBeInstanceOf(FileExistsError);
+      expect(error).toMatchObject({ status: 409 });
+      expect((error as APIError).reason).toBeUndefined();
+      expect((error as Error).message).toContain('refused as a conflict, reason unknown');
+      expect((error as Error).message).not.toContain('already exists');
+      expect(isTransient(error)).toBe(false);
+      expect(publicApi.isTransient(error)).toBe(false);
+    },
+  );
+
+  it('leaves a reasonless 409 on an ordinary upload, and a create-only word, as they were', async () => {
+    globalThis.fetch = async () => Response.json({ error: 'conflict' }, { status: 409 });
+    const plain = await api()
+      .json('PUT', 'computers/vm-1/files', { query: { path: '/tmp/a' }, raw: new Uint8Array([1]) })
+      .catch((error: unknown) => error);
+    expect(plain).toBeInstanceOf(ConflictError);
+    expect(plain).not.toBeInstanceOf(FileExistsError);
+    globalThis.fetch = async () =>
+      Response.json({ error: 'busy', reason: 'contention' }, { status: 409 });
+    const worded = await api()
+      .json('PUT', 'computers/vm-1/files', {
+        query: { path: '/tmp/a', overwrite: 'false' },
+        raw: new Uint8Array([1]),
+      })
+      .catch((error: unknown) => error);
+    expect(worded).not.toBeInstanceOf(FileExistsError);
+    expect(worded).toMatchObject({ reason: 'contention' });
+  });
+
   it('leaves another word on the same status an ordinary ConflictError', () => {
     for (const reason of ['unsupported', 'some-future-word']) {
       const error = errorForStatus(409, 'refused', { error: 'refused', reason });
