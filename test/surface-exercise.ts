@@ -235,7 +235,11 @@ export const EXERCISE: Record<string, Record<string, unknown>[]> = {
   wait_for_file_change: [{ path: '/home/user/project', timeout_s: 1 }],
   read_clipboard: [{}],
   write_clipboard: [{ text: 'on the clipboard' }],
-  write_file: [{ path: '/home/user/a.txt', content: 'hello' }],
+  write_file: [
+    { path: '/home/user/a.txt', content: 'hello' },
+    // Create-only, which is what sends query:overwrite (OPL-4994).
+    { path: '/home/user/b.txt', content: 'hello', overwrite: false },
+  ],
   // The offset is the parameter, and it is the whole of OPL-3740: without an
   // argument that turns into a Range this route is reachable and a file over
   // 64 MiB still is not.
