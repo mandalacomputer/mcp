@@ -690,7 +690,9 @@ describe('hosted: checking a bearer before it gets anything', () => {
       const fill = Array.from({ length: 32 }, (_, i) =>
         c.send(INIT, from(`10.9.1.${i + 1}`, `mcpat_fill${i}`)),
       );
-      const deadline = Date.now() + 5000;
+      // Well inside the test's own timeout below, so the error and the gate's
+      // release happen before vitest gives up on the test.
+      const deadline = Date.now() + 2000;
       while (probes() < base + 32) {
         if (Date.now() > deadline) throw new Error(`only ${probes() - base} of 32 probes arrived`);
         await new Promise((r) => setTimeout(r, 5));
@@ -714,7 +716,7 @@ describe('hosted: checking a bearer before it gets anything', () => {
       release();
       await stop(server);
     }
-  });
+  }, 15_000);
 
   it('refuses a request on a token revoked since it was last checked, before dispatch', async () => {
     platform = platformWithRefusals();
