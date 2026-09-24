@@ -61,20 +61,20 @@ it('covers the explicitly synthetic offline fixture with successful actual MCP t
 it('reports a published operation listed as not yet sent, and fails every other gap', async () => {
   const observed = operationEvidence(await collectExercises());
   const changed = structuredClone(fixture);
-  changed.paths['/secrets'] = { get: operation(), post: operation() };
-  changed.paths['/secrets/{id}'] = { get: operation(), delete: operation() };
-  const unsent = ['GET secrets', 'POST secrets', 'GET secrets/:id', 'DELETE secrets/:id'];
+  changed.paths['/drafts'] = { get: operation(), post: operation() };
+  changed.paths['/drafts/{id}'] = { get: operation(), delete: operation() };
+  const unsent = ['GET drafts', 'POST drafts', 'GET drafts/:id', 'DELETE drafts/:id'];
   const summary = compareCoverage(parseOperations(changed), observed, { unsent });
   expect(summary.unsent).toEqual([
-    'DELETE /api/v1/secrets/{id}',
-    'GET /api/v1/secrets',
-    'GET /api/v1/secrets/{id}',
-    'POST /api/v1/secrets',
+    'DELETE /api/v1/drafts/{id}',
+    'GET /api/v1/drafts',
+    'GET /api/v1/drafts/{id}',
+    'POST /api/v1/drafts',
   ]);
   // Only what is listed: a route beside it is still a failure.
   expect(() =>
     compareCoverage(parseOperations(changed), observed, { unsent: unsent.slice(1) }),
-  ).toThrow('GET /api/v1/secrets');
+  ).toThrow('GET /api/v1/drafts');
   expect(() => compareCoverage(parseOperations(changed), observed)).toThrow(
     'Missing published operations',
   );
@@ -83,11 +83,11 @@ it('reports a published operation listed as not yet sent, and fails every other 
 it('lets no exemption cover a trailing-slash twin, and fails one the publication lacks', async () => {
   const observed = operationEvidence(await collectExercises());
   const twin = structuredClone(fixture);
-  twin.paths['/secrets'] = { get: operation() };
-  twin.paths['/secrets/'] = { get: operation() };
+  twin.paths['/drafts'] = { get: operation() };
+  twin.paths['/drafts/'] = { get: operation() };
   expect(() =>
-    compareCoverage(parseOperations(twin), observed, { unsent: ['GET secrets'] }),
-  ).toThrow('GET /api/v1/secrets/');
+    compareCoverage(parseOperations(twin), observed, { unsent: ['GET drafts'] }),
+  ).toThrow('GET /api/v1/drafts/');
   // The bare root and its slash twin, published from an origin-level server.
   const root = {
     ...structuredClone(fixture),
@@ -97,7 +97,7 @@ it('lets no exemption cover a trailing-slash twin, and fails one the publication
   const ops = parseOperations(root);
   expect(ops.operations.map((op) => op.path).sort()).toEqual(['/api/v1', '/api/v1/']);
   // No exemption can name the root or a slash twin: both stay gaps.
-  for (const spelling of ['GET ', 'GET /', 'GET secrets/', 'GET /secrets'])
+  for (const spelling of ['GET ', 'GET /', 'GET drafts/', 'GET /drafts'])
     expect(() => compareCoverage(ops, observed, { unsent: [spelling] })).toThrow(
       'Invalid unsent operation',
     );
@@ -105,12 +105,12 @@ it('lets no exemption cover a trailing-slash twin, and fails one the publication
     'Missing published operations:\nGET /api/v1\nGET /api/v1/',
   );
   const dropped = structuredClone(fixture);
-  dropped.paths['/secrets'] = { get: operation() };
+  dropped.paths['/drafts'] = { get: operation() };
   expect(() =>
     compareCoverage(parseOperations(dropped), observed, {
-      unsent: ['GET secrets', 'PUT secrets/:id'],
+      unsent: ['GET drafts', 'PUT drafts/:id'],
     }),
-  ).toThrow('Not-yet-sent operations absent from the publication:\nPUT /secrets/{}');
+  ).toThrow('Not-yet-sent operations absent from the publication:\nPUT /drafts/{}');
 });
 
 it('requires exact registered/exercise inventory in both directions', () => {

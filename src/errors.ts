@@ -22,6 +22,13 @@ export interface APIErrorMetadata {
   requestId?: string;
   allow?: string;
   wwwAuthenticate?: string;
+  /**
+   * The HTTP method of the request that was refused, when known. Read by
+   * {@link isTransient} for one status: a `503` answered to a change may or may
+   * not have been acted on, so only a request that is safe to repeat is
+   * transient on it.
+   */
+  method?: string;
 }
 
 const nonblank = (value: unknown): string | undefined =>
@@ -51,6 +58,8 @@ export class APIError extends MandalaError {
   readonly allow?: string;
   /** The received WWW-Authenticate header, when supplied. */
   readonly wwwAuthenticate?: string;
+  /** The method of the refused request, upper case, when known. */
+  readonly method?: string;
   constructor(
     message: string,
     readonly status: number,
@@ -65,6 +74,7 @@ export class APIError extends MandalaError {
       nonblank(metadata?.requestId) ?? (record(body) ? nonblank(body.request_id) : undefined);
     this.allow = nonblank(metadata?.allow);
     this.wwwAuthenticate = nonblank(metadata?.wwwAuthenticate);
+    this.method = nonblank(metadata?.method)?.toUpperCase();
   }
 }
 
@@ -163,7 +173,10 @@ export function reasonAdvice(reason: string | undefined): string | undefined {
     case 'contention':
       return 'something was in flight; the same call works once it finishes, so this one is worth sending again';
     case 'starting':
-      return 'the guest agent is still inside its boot window, so this is worth sending again in a moment';
+      // The boot window is bounded (OPL-5025): two minutes from a start, a
+      // restart, or a reboot inside the guest. An agent still silent after it
+      // is answered 502 instead, which is not this word and not this advice.
+      return 'the guest agent has not answered yet and the computer is still inside its boot window (about two minutes after a start, a restart or a reboot inside the guest), so this is worth sending again in a moment. A guest agent still silent after that window is answered 502 instead, which waiting alone does not fix';
     case 'unavailable':
       // Softened from "does NOT clear by waiting", which was false of exactly
       // the case OPL-4631 is about and is the sentence a model actually sees:
@@ -422,7 +435,12 @@ export function createOnlyRefusal(err: APIError): APIError {
     err.status,
     err.body,
     err.retryAfterMs,
-    { requestId: err.requestId, allow: err.allow, wwwAuthenticate: err.wwwAuthenticate },
+    {
+      requestId: err.requestId,
+      allow: err.allow,
+      wwwAuthenticate: err.wwwAuthenticate,
+      method: err.method,
+    },
   );
   // The constructor reads the body again, and would keep a blank word. Unknown
   // is `undefined`, as documented on CreateOnlyConflictError.
@@ -518,9 +536,44 @@ export class RateLimitError extends APIError {
   }
 }
 
-/** 503 — a hypervisor could not be reached, so an inventory would be short. */
+/**
+ * 503 — something the request depends on (a hypervisor, a store, a host's
+ * capacity) could not answer or take it right now.
+ *
+ * A READ answered 503 can be asked again shortly. A CHANGE answered 503 may or
+ * may not have happened: the platform answers a failure after the request was
+ * sent the same way, with or without a warning in the message. So
+ * {@link isTransient} calls a 503 worth repeating only for a request that is
+ * safe to repeat — see {@link REPEATABLE_METHODS} — and a create, a command or
+ * any other POST or PATCH has its current state read before it is sent again.
+ */
 export class UnavailableError extends APIError {
   override name = 'UnavailableError';
+}
+
+/**
+ * The methods whose request can be sent twice with the effect of once.
+ *
+ * GET, HEAD and OPTIONS change nothing; PUT and DELETE name the end state, so a
+ * repeat of one that landed arrives at the same place (or at a `404` or a stale
+ * revision's `409`, which say so rather than doing it twice). POST and PATCH are
+ * not on the list: a create, a command, a clone or a snapshot repeated after a
+ * lost answer is a second one.
+ */
+const REPEATABLE_METHODS: ReadonlySet<string> = new Set([
+  'GET',
+  'HEAD',
+  'OPTIONS',
+  'PUT',
+  'DELETE',
+]);
+
+/**
+ * Whether a `503` leaves the request's outcome unknown: it was a change, or its
+ * method was not recorded.
+ */
+export function outcomeUnknownOn503(err: unknown): boolean {
+  return err instanceof UnavailableError && !(err.method && REPEATABLE_METHODS.has(err.method));
 }
 
 /**
@@ -1031,7 +1084,9 @@ export function errorForStatus(
  * - {@link ConflictError} — something is in flight that this cannot run
  *   alongside, minus the one that is a decision
  * - {@link RateLimitError} — a cadence, and the response usually says how long
- * - {@link UnavailableError} — a hypervisor briefly out of reach
+ * - {@link UnavailableError} — something briefly out of reach, for a request
+ *   that is safe to repeat (GET, HEAD, OPTIONS, PUT, DELETE). A POST or PATCH
+ *   answered 503 may have happened, so it is not transient
  * - {@link ConnectivityError} — the request never left
  *
  * That last line is now literally true, and it was not always. The class used
@@ -1123,10 +1178,14 @@ export function isTransient(err: unknown): boolean {
     if (kind === 'clears' && record(err.body) && typeof err.body.reason === 'string') return true;
     if (kind === 'permanent') return false;
   }
+  // A 503 is a passing moment for a read and an unknown outcome for a change
+  // (OPL-5026): the platform answers a failure after the request was sent the
+  // same way. A POST or PATCH, or a request whose method was not recorded, is
+  // not replayed blind — its state is read first.
+  if (err instanceof UnavailableError) return !outcomeUnknownOn503(err);
   return (
     err instanceof ConflictError ||
     err instanceof RateLimitError ||
-    err instanceof UnavailableError ||
     err instanceof ConnectivityError
   );
 }

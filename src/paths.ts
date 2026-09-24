@@ -69,6 +69,19 @@ export const SSH_KEYS = 'ssh-keys';
 export const sshKey = (id: string) => `${SSH_KEYS}/${segment('key_id', id)}`;
 
 /**
+ * The account's secret store (OPL-4984). Account-scoped, or one workspace's
+ * with `workspace_id`; never a value in any answer.
+ */
+export const SECRETS = 'secrets';
+
+/** One secret. The id is `csec-`-shaped. */
+export const secret = (id: string) => `${SECRETS}/${segment('secret_id', id)}`;
+
+/** The `workspace_id` query a secret-store read or delete takes, when one is named. */
+export const secretScopeQuery = (workspaceId?: string): Record<string, string> =>
+  workspaceId === undefined ? {} : { workspace_id: workspaceId };
+
+/**
  * An RFC 3339 timestamp WITH a time zone, which is the only kind `GET /usage`
  * takes.
  *
@@ -635,8 +648,7 @@ export type WindowAction = (typeof WINDOW_ACTIONS)[number];
  * frame where it likes and applications snap to their own grid, so a move that
  * arrived with half a coordinate does not come back looking wrong — it comes
  * back looking like the window manager's usual approximation. A `resize` with
- * neither dimension is the same shape of failure, one the platform would have
- * to guess its way out of.
+ * only one dimension is the same shape of failure, and the platform refuses it.
  */
 export function windowBody(args: {
   action: WindowAction;
@@ -648,12 +660,14 @@ export function windowBody(args: {
   if (args.action === 'move' && (args.x === undefined || args.y === undefined)) {
     throw new Error('move needs both x and y — half a coordinate is not a place');
   }
-  if (args.action === 'resize' && args.width === undefined && args.height === undefined) {
-    throw new Error('resize needs width, height, or both');
+  // Both, as the platform requires (OPL-5025 documents one without the other
+  // as a 400): a resize is a size, and half of one is not.
+  if (args.action === 'resize' && (args.width === undefined || args.height === undefined)) {
+    throw new Error('resize needs both width and height — half a size is not a size');
   }
   if (args.action === 'move') return { action: args.action, x: args.x, y: args.y };
   if (args.action === 'resize') {
-    return omitUndefined({ action: args.action, width: args.width, height: args.height });
+    return { action: args.action, width: args.width, height: args.height };
   }
   return { action: args.action };
 }

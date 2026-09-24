@@ -89,6 +89,16 @@ const cachedFrameOffered = (err: ConflictError): CallToolResult => {
   );
 };
 
+/** The longest text one `type` takes, in characters. */
+export const TYPE_TEXT_MAX_CHARS = 400;
+
+/** The platform's words for how a `type` went, as the clause each means. */
+const TYPE_MECHANISMS = {
+  physical: 'as US-layout key presses',
+  unicode: 'by GTK Unicode composition',
+  mixed: 'in order, ASCII as key presses and the rest by GTK Unicode composition',
+} as const;
+
 export const registerInput: Registrar = (server, session) => {
   const post = (
     computerId: string | undefined,
@@ -120,7 +130,7 @@ export const registerInput: Registrar = (server, session) => {
           .boolean()
           .default(true)
           .describe(
-            'Skip the platform\'s frame cache, which serves any capture under 1.5s old. True by default: after a click, a cached frame can predate the action entirely, and a model reading it concludes the click missed and clicks again. A capture needs a computer that is awake, so on a suspended one this is refused rather than answered — pass false to ask for the last saved frame instead, which is refused in turn when there is no saved frame to serve. A saved frame answers "what was on the screen" and cannot answer "did my click land".',
+            'Skip the platform\'s frame cache, which serves any capture under 1.5s old — up to 30s old while the computer is busy with another operation. True by default: after a click, a cached frame can predate the action entirely, and a model reading it concludes the click missed and clicks again. A capture needs a computer that is awake, so on a suspended one this is refused rather than answered — pass false to ask for the last saved frame instead, which is refused in turn when there is no saved frame to serve. A saved frame answers "what was on the screen" and cannot answer "did my click land".',
           ),
       },
       annotations: { readOnlyHint: true },
@@ -238,12 +248,23 @@ export const registerInput: Registrar = (server, session) => {
     {
       title: 'Type text',
       description:
-        'Type a string into whatever has keyboard focus. This is literal text — for Enter, Tab, or a shortcut, use press_key.',
-      inputSchema: { ...idArg, text: z.string().describe('The characters to type.') },
+        'Type a string into whatever has keyboard focus: literal text, 1 to 400 characters. For Enter, Tab or a shortcut, use press_key. Plain ASCII is typed as US-layout key events, about 12 ms a character, so 400 characters take about five seconds. Text containing any other character — accents, CJK, emoji — is typed WHOLE and in order by one guest helper: its ASCII as the same key presses and the rest by GTK Unicode composition. That works in Chromium (GTK3) and Xfce Terminal on a Linux X11 desktop; Firefox, GTK4 apps, native Wayland apps and Windows are unsupported for non-ASCII text, and such text is checked and refused before any key is pressed. Tab and newline are sent as keys and CRLF as one Return; a bare CR and other control characters are refused. The answer says which way it was typed. It confirms the keys were sent, not that the application accepted them: check with a screenshot before relying on it.',
+      inputSchema: {
+        ...idArg,
+        text: z
+          .string()
+          .min(1, 'text must not be empty')
+          .refine((t) => [...t].length <= TYPE_TEXT_MAX_CHARS, {
+            message: `text must be at most ${TYPE_TEXT_MAX_CHARS} characters; type longer text in pieces, or write it to a file`,
+          })
+          .describe(
+            `The characters to type, at most ${TYPE_TEXT_MAX_CHARS}. Longer text goes in several calls, or through write_file or write_clipboard.`,
+          ),
+      },
     },
     ({ computer_id, text }, extra) =>
       guarded(async () => {
-        await post(computer_id, P.typeBody(text), extra.signal);
+        const answer = await post(computer_id, P.typeBody(text), extra.signal);
         // Code points, not `.length`. A string's length is its UTF-16 code
         // units, so an emoji is two and "Typed 2 character(s)" is a number this
         // server made up about a single keystroke's worth of text — a number a
@@ -252,7 +273,20 @@ export const registerInput: Registrar = (server, session) => {
         // `hasUnpairedSurrogate` works in code points and `clipboardBody`
         // accounts in bytes.
         const typed = [...text].length;
-        return said(`Typed ${typed} character(s).`);
+        // How it was typed (OPL-4996), when the platform said so in a word this
+        // version knows. An unknown word, or none, says nothing rather than
+        // being guessed at.
+        const mechanism =
+          answer && typeof answer === 'object'
+            ? (answer as { mechanism?: unknown }).mechanism
+            : undefined;
+        const how =
+          typeof mechanism === 'string' && Object.hasOwn(TYPE_MECHANISMS, mechanism)
+            ? ` ${TYPE_MECHANISMS[mechanism as keyof typeof TYPE_MECHANISMS]}`
+            : '';
+        return said(
+          `Typed ${typed} character(s)${how}. That confirms the keys were sent, not that the application accepted the text: check with a screenshot before relying on it.`,
+        );
       }),
   );
 

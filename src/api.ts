@@ -13,6 +13,8 @@ import {
   RangeNotSatisfiableError,
   RedirectError,
 } from './errors.js';
+import * as P from './paths.js';
+import { malformedSecretAnswer, type SecretStore, secretListOf, secretOf } from './secret-store.js';
 
 export const DEFAULT_BASE_URL = 'https://app.mandala.computer/api/v1';
 
@@ -535,16 +537,15 @@ export class Api {
     // Content-Range describes the file length, independently of Retry-After.
     if (resp.status === 416) {
       const total = parseContentRange(resp.headers.get('content-range'))?.total;
-      return new RangeNotSatisfiableError(
-        message,
-        resp.status,
-        body,
-        total,
-        delay,
-        responseMetadata(resp),
-      );
+      return new RangeNotSatisfiableError(message, resp.status, body, total, delay, {
+        ...responseMetadata(resp),
+        method,
+      });
     }
-    return errorForStatus(resp.status, message, body, delay, responseMetadata(resp));
+    return errorForStatus(resp.status, message, body, delay, {
+      ...responseMetadata(resp),
+      method,
+    });
   }
 
   /**
@@ -820,6 +821,71 @@ export class Api {
           : bytes.length,
       unrangeable: (resp.headers.get('accept-ranges') ?? '').trim().toLowerCase() === 'none',
       window,
+    };
+  }
+
+  // --- the account's secret store (OPL-4984) ------------------------------
+
+  /**
+   * The account's secret store, `GET|POST secrets` and `GET|PUT|DELETE
+   * secrets/:id`, as five typed calls.
+   *
+   * Typed, and decoded strictly, because a value goes IN here and the caller
+   * must be able to rely on nothing coming back: every answer is reduced to the
+   * documented fields before it is returned, so no answer can hand a value on.
+   * A malformed answer is a {@link MandalaError}; for a change it says the
+   * change may have been made. Bound to this client, so
+   * `api.with(signal).secrets` carries the signal.
+   */
+  get secrets(): SecretStore {
+    return {
+      list: async (opts = {}) => {
+        const body = await this.json<unknown>('GET', P.SECRETS, {
+          query: P.secretScopeQuery(opts.workspaceId),
+        });
+        const list = secretListOf(body);
+        if (!list) throw malformedSecretAnswer('GET /secrets', body, false);
+        return list;
+      },
+      create: async (args) => {
+        const body = await this.json<unknown>('POST', P.SECRETS, {
+          body: {
+            name: args.name,
+            value: args.value,
+            ...(args.workspaceId === undefined ? {} : { workspace_id: args.workspaceId }),
+          },
+        });
+        const secret = secretOf(body);
+        if (!secret) throw malformedSecretAnswer('POST /secrets', body, true);
+        return secret;
+      },
+      get: async (id, opts = {}) => {
+        const path = P.secret(id);
+        const body = await this.json<unknown>('GET', path, {
+          query: P.secretScopeQuery(opts.workspaceId),
+        });
+        const secret = secretOf(body);
+        if (!secret) throw malformedSecretAnswer(`GET /${path}`, body, false);
+        return secret;
+      },
+      replace: async (id, args) => {
+        const path = P.secret(id);
+        const body = await this.json<unknown>('PUT', path, {
+          body: {
+            value: args.value,
+            revision_id: args.revisionId,
+            ...(args.workspaceId === undefined ? {} : { workspace_id: args.workspaceId }),
+          },
+        });
+        const secret = secretOf(body);
+        if (!secret) throw malformedSecretAnswer(`PUT /${path}`, body, true);
+        return secret;
+      },
+      delete: async (id, args) => {
+        await this.send('DELETE', P.secret(id), {
+          query: { revision_id: args.revisionId, ...P.secretScopeQuery(args.workspaceId) },
+        });
+      },
     };
   }
 

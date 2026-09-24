@@ -62,6 +62,39 @@ const MAX_INLINE_BYTES = 256 * 1024;
  */
 const MAX_WINDOW_BYTES = MAX_INLINE_IMAGE_BYTES;
 
+/**
+ * `no_wake` on a file transfer (OPL-5026): refuse rather than resume a
+ * computer that is not running. Sent as the one value the platform takes.
+ */
+const noWakeArg = z
+  .boolean()
+  .default(false)
+  .describe(
+    'true: do not resume a computer that is not running — refuse instead (409), so nothing is resumed and nothing is charged for a resume. Use it to look at a suspended computer’s files only if it is already awake. false (the default) resumes a suspended computer to answer, which is charged.',
+  );
+
+/**
+ * A 409 on a transfer sent with `no_wake`, read as the refusal it most likely is.
+ *
+ * The platform refuses a computer that is not running with a 409 that has, so
+ * far, carried no `reason` — a change under way gives it `unavailable`. Either
+ * way it means the same thing here, so both are answered alike; any other word
+ * is left to the ordinary refusal, which says what it means.
+ */
+function noWakeRefusal(err: unknown, id: string, what: string): CallToolResult | undefined {
+  if (!(err instanceof ConflictError)) return undefined;
+  if (err instanceof FileExistsError) return undefined;
+  if (err.reason !== undefined && err.reason !== 'unavailable') return undefined;
+  return withErrorMetadata(
+    refused(
+      `${apiErrorMessage(err)} (HTTP ${err.status})\n\n${id} was not resumed, because no_wake was set: ` +
+        `most likely it is not running, and ${what}. start_computer wakes it (a resume is charged), ` +
+        'or call again without no_wake to let this resume it.',
+    ),
+    err,
+  );
+}
+
 const absolutePath = (what: string) =>
   z
     .string()
@@ -228,7 +261,7 @@ export const registerGuest: Registrar = (server, session) => {
           .boolean()
           .default(false)
           .describe(
-            'Run inside the logged-in desktop session instead of as root with no display. Required for anything with a window: the guest agent has no DISPLAY, so a GUI app started without this cannot draw. Linux only.',
+            'Run inside the logged-in desktop session instead of as root with no display. Required for anything with a window: the guest agent has no DISPLAY, so a GUI app started without this cannot draw. Also the way to reach secrets bound to this computer as environment variables (set_computer_secrets): they live in the desktop session, and on an image that supports it a value replaced while the computer runs is seen by new desktop-session commands within seconds. Whether a plain root exec sees bound secrets depends on the platform version, so a command that needs one should use this. Linux only.',
           ),
         background: z
           .boolean()
@@ -236,7 +269,11 @@ export const registerGuest: Registrar = (server, session) => {
           .describe(
             'Return a handle immediately instead of waiting. Use for builds, installs, test suites and servers, then read output with exec_poll. To learn that it finished, wait_for_event with types ["process.exited"] and the pid this returns — the computer reports the exit, so waiting for it costs one call rather than an exec_poll loop. Strictly better than backgrounding with "&", which throws away the exit code and the output. A computer runs at most sixteen of these at once, and past that this is refused with a 409 saying how many are already running rather than queued. A slot is held until its command exits, which for a server is never, so the way out of that refusal is exec_kill on a pid an earlier exec returned — not another attempt.',
           ),
-        cwd: absolutePath('cwd').optional(),
+        cwd: absolutePath('cwd')
+          .optional()
+          .describe(
+            'Absolute path to run in. If it does not exist the command does not run, and exit_code is 127.',
+          ),
         env: z
           .record(z.string(), z.string())
           .optional()
@@ -462,15 +499,39 @@ export const registerGuest: Registrar = (server, session) => {
     {
       title: 'Act on a window',
       description:
-        'Focus, raise, minimize, maximize, unmaximize, close, move or resize one window. The reply is the window afterwards, not an acknowledgement — the window manager places the frame and applications snap to their own grid, so a move to 300,200 routinely lands at 305,229. Believe the response, not the request. Prefer focus over raise: raising without focusing gives a window that is visibly in front and silently not receiving keystrokes. A 504 is neither a refusal nor a report that nothing happened unless its structured response explicitly says the request was not dispatched: an absent or ambiguous explanation leaves the action possibly already applied. An uncertain outcome is not permission to repeat it — the next call is list_windows, which says what the desktop is now, not this one again. Least of all for close, which cannot be undone.',
+        'Focus, raise, minimize, maximize, unmaximize, close, move or resize one window. The reply is the window afterwards, not an acknowledgement — the window manager places the frame and applications snap to their own grid, so a move to 300,200 routinely lands at 305,229. Believe the response, not the request. On a Wayland desktop a tiled window cannot be moved or resized — float it first — and an action the compositor refuses is a 400. Prefer focus over raise: raising without focusing gives a window that is visibly in front and silently not receiving keystrokes. A 504 is neither a refusal nor a report that nothing happened unless its structured response explicitly says the request was not dispatched: an absent or ambiguous explanation leaves the action possibly already applied. An uncertain outcome is not permission to repeat it — the next call is list_windows, which says what the desktop is now, not this one again. Least of all for close, which cannot be undone.',
       inputSchema: {
         ...idArg,
         window_id: z.string().describe('From list_windows, e.g. "0x2600003".'),
         action: z.enum(P.WINDOW_ACTIONS),
-        x: z.number().int().optional().describe('For move.'),
-        y: z.number().int().optional().describe('For move.'),
-        width: z.number().int().optional().describe('For resize.'),
-        height: z.number().int().optional().describe('For resize.'),
+        x: z
+          .number()
+          .int()
+          .min(-32768)
+          .max(32767)
+          .optional()
+          .describe('Required for move, with y: -32768 to 32767.'),
+        y: z
+          .number()
+          .int()
+          .min(-32768)
+          .max(32767)
+          .optional()
+          .describe('Required for move, with x: -32768 to 32767.'),
+        width: z
+          .number()
+          .int()
+          .min(1)
+          .max(32767)
+          .optional()
+          .describe('Required for resize, with height: 1 to 32767.'),
+        height: z
+          .number()
+          .int()
+          .min(1)
+          .max(32767)
+          .optional()
+          .describe('Required for resize, with width: 1 to 32767.'),
       },
     },
     ({ computer_id, window_id, action, x, y, width, height }, extra) =>
@@ -554,7 +615,7 @@ export const registerGuest: Registrar = (server, session) => {
     {
       title: 'Put a file into the guest',
       description:
-        'Write a file inside the computer. Paths must be absolute — the guest agent inherits whatever working directory it was started in, so a relative path resolves somewhere you did not name. By default a file already at the path is replaced. Pass overwrite: false to create the file only if nothing is there: a path that is taken is refused and that attempt writes nothing — retrying does not change that. If an earlier attempt\u2019s outcome was unknown (its answer was lost), the file there may be the one it wrote: read it and compare before picking another path or writing again without overwrite: false to replace it. overwrite: false is for Linux computers; a Windows computer refuses it.',
+        'Write a file inside the computer. Paths must be absolute — the guest agent inherits whatever working directory it was started in, so a relative path resolves somewhere you did not name. By default a file already at the path is replaced. Pass overwrite: false to create the file only if nothing is there: a path that is taken is refused and that attempt writes nothing — retrying does not change that. Incomplete contents are never published at the path, but a failure while publishing or answering can leave the COMPLETE file there: after any error, read the path before retrying or overwriting, since what is there may be your own upload. A refusal saying this computer\u2019s host cannot do a create-only write, and a 503 on one, mean nothing was sent — but neither means the path is free. overwrite: false is for Linux computers; a Windows computer refuses it. A suspended computer is resumed to take the write, which is charged, unless no_wake is set.',
       inputSchema: {
         ...idArg,
         path: absolutePath('path').describe(
@@ -571,9 +632,10 @@ export const registerGuest: Registrar = (server, session) => {
           .describe(
             'true (the default) replaces a file already at the path. false creates the file only if nothing is there, and refuses without writing anything when the path is taken.',
           ),
+        no_wake: noWakeArg,
       },
     },
-    ({ computer_id, path, content, encoding, overwrite }, extra) =>
+    ({ computer_id, path, content, encoding, overwrite, no_wake }, extra) =>
       guarded(async () => {
         const id = session.resolve(computer_id);
         // Node's base64 decoder is lenient: it drops characters outside the
@@ -617,9 +679,20 @@ export const registerGuest: Registrar = (server, session) => {
             // `overwrite` is sent only to ask for create-only (OPL-4994). Absent
             // means replace on every platform version, so the default request
             // is the one this tool always sent.
-            { query: overwrite ? { path } : { path, overwrite: 'false' }, raw: bytes },
+            {
+              query: {
+                path,
+                ...(overwrite ? {} : { overwrite: 'false' }),
+                ...(no_wake ? { no_wake: '1' } : {}),
+              },
+              raw: bytes,
+            },
           );
         } catch (err) {
+          if (no_wake && !(err instanceof CreateOnlyConflictError)) {
+            const asleep = noWakeRefusal(err, id, `nothing was written to ${path}`);
+            if (asleep) return asleep;
+          }
           // Only THIS attempt is known to have written nothing. A create-only
           // write whose earlier attempt lost its answer may have written the
           // file itself, and the retry then meets its own file here — so the
@@ -650,7 +723,11 @@ export const registerGuest: Registrar = (server, session) => {
                 `${err.message} (HTTP ${err.status})\n\nThis create-only write to ${path} was refused ` +
                   'as a conflict, reason unknown, and whether this attempt wrote anything is ' +
                   'unconfirmed. Do not send the same call again: it was not said to clear by waiting. ' +
-                  'Read the path to see what is there before choosing another path or overwriting.',
+                  'Read the path to see what is there before choosing another path or overwriting.' +
+                  (no_wake
+                    ? ' With no_wake set, this is also how a computer that is not running is refused: ' +
+                      'if it is suspended or stopped, nothing was written.'
+                    : ''),
               ),
               err,
             );
@@ -666,7 +743,7 @@ export const registerGuest: Registrar = (server, session) => {
     {
       title: 'Get a file out of the guest',
       description:
-        'Read a file from inside the computer. Text comes back as text and images come back as images; anything else comes back base64. A large file comes back a window at a time rather than filling the conversation: `offset` says where the window starts, and the note under a truncated read gives the exact offset to pass next. There is no size a file can be that makes it unreadable this way — a 2 GB log is pages, not a refusal — but a file you want whole is still better pushed out of the guest than carried through a conversation, and the note says how. This reaches the guest agent to do it, so a suspended computer is resumed to answer and that resume is charged — it can even come back 402. read_clipboard, by contrast, refuses a suspended computer rather than starting it.',
+        'Read a file from inside the computer. Text comes back as text and images come back as images; anything else comes back base64. A large file comes back a window at a time rather than filling the conversation: `offset` says where the window starts, and the note under a truncated read gives the exact offset to pass next. There is no size a file can be that makes it unreadable this way — a 2 GB log is pages, not a refusal — but a file you want whole is still better pushed out of the guest than carried through a conversation, and the note says how. This reaches the guest agent to do it, so a suspended computer is resumed to answer and that resume is charged — it can even come back 402 — unless no_wake is set, which refuses instead. read_clipboard, by contrast, refuses a suspended computer rather than starting it.',
       inputSchema: {
         ...idArg,
         path: absolutePath('path'),
@@ -679,6 +756,7 @@ export const registerGuest: Registrar = (server, session) => {
           .describe(
             'Byte offset to start at. 0 is the beginning of the file. Each call returns a window from here, and the truncation note names the offset of the byte after the last one it returned — pass that to read on. Never assume a window covers what you asked for: read the offset out of the note rather than adding a fixed number.',
           ),
+        no_wake: noWakeArg,
       },
       // Not readOnlyHint, for the reason cursor_position is not: the platform
       // marks `GET computers/:id/files` as spending, because reaching the guest
@@ -692,7 +770,7 @@ export const registerGuest: Registrar = (server, session) => {
       // idempotentHint would refuse to retry a plain file read.
       annotations: { destructiveHint: false, idempotentHint: true },
     },
-    ({ computer_id, path, offset }, extra) =>
+    ({ computer_id, path, offset, no_wake }, extra) =>
       guarded(async () => {
         const id = session.resolve(computer_id);
         let file: Bytes;
@@ -701,7 +779,7 @@ export const registerGuest: Registrar = (server, session) => {
             'GET',
             P.computerAction(id, 'files'),
             {
-              query: { path },
+              query: { path, ...(no_wake ? { no_wake: '1' } : {}) },
               // The window this tool asks the platform for, which is not the
               // same as the window it will return. It is the larger of the two
               // caps below — the most this tool could ever hand back — because
@@ -724,6 +802,10 @@ export const registerGuest: Registrar = (server, session) => {
         } catch (err) {
           if (err instanceof RangeNotSatisfiableError)
             return withErrorMetadata(pastEnd(path, offset, err.size), err);
+          if (no_wake) {
+            const asleep = noWakeRefusal(err, id, `nothing was read from ${path}`);
+            if (asleep) return asleep;
+          }
           throw err;
         }
 

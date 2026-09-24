@@ -1,7 +1,7 @@
 {
   "openapi": "3.1.0",
   "info": {
-    "title": "Synthetic SDK operation contract fixture — not a downloaded publication",
+    "title": "Synthetic SDK operation contract fixture \u2014 not a downloaded publication",
     "version": "fixture"
   },
   "x-provenance": "Synthetic fixture assembled from the public MCP route inventory. Offline implementation coverage only; never publication evidence.",
@@ -675,6 +675,45 @@
         }
       },
       "put": {
+        "responses": {
+          "200": {
+            "description": "Synthetic successful operation response"
+          }
+        }
+      }
+    },
+    "/secrets": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "Synthetic successful operation response"
+          }
+        }
+      },
+      "post": {
+        "responses": {
+          "200": {
+            "description": "Synthetic successful operation response"
+          }
+        }
+      }
+    },
+    "/secrets/{id}": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "Synthetic successful operation response"
+          }
+        }
+      },
+      "put": {
+        "responses": {
+          "200": {
+            "description": "Synthetic successful operation response"
+          }
+        }
+      },
+      "delete": {
         "responses": {
           "200": {
             "description": "Synthetic successful operation response"

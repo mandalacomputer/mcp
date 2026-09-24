@@ -81,7 +81,15 @@ export const TOOL_TAGS = {
     'get_build',
     'watch_build',
   ],
-  secrets: ['get_computer_secrets', 'set_computer_secrets'],
+  secrets: [
+    'get_computer_secrets',
+    'set_computer_secrets',
+    'list_secrets',
+    'get_secret',
+    'create_secret',
+    'replace_secret',
+    'delete_secret',
+  ],
   ssh: ['list_ssh_keys', 'add_ssh_key', 'remove_ssh_key', 'get_computer_ssh', 'set_computer_ssh'],
   usage: ['get_usage'],
   webhooks: [

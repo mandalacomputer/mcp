@@ -50,6 +50,65 @@ are wording changes, and they are behaviour changes in the way that matters.
   unknown. `isTransient` calls it permanent, and it claims nothing about the
   path.
 
+- **The account's secret store: `list_secrets`, `get_secret`,
+  `create_secret`, `replace_secret` and `delete_secret`** (OPL-4984, OPL-5026).
+  A value is a tool argument and goes one way: no answer repeats it, a refusal
+  that quotes it has it withheld, and the decoded answers carry only the
+  documented fields. `replace_secret` and `delete_secret` need the current
+  `revision_id`, and `delete_secret` needs `confirm: true` and says that a
+  computer still bound to the secret cannot start again. For embedders,
+  `api.secrets` offers `list`, `create`, `get`, `replace` and `delete`, decoded
+  strictly, with `Secret`, `SecretList`, `SecretLimits` and `SecretStore`
+  exported as types. Every documented operation is now called by a tool.
+- **`read_file` and `write_file` take `no_wake`.** With `no_wake: true` a
+  computer that is not running is refused (409) rather than resumed, so nothing
+  is charged for a resume. The refusal is read the same way whether it carries
+  no `reason` or `reason: "unavailable"`.
+- **`type_text` reports how the text was typed** (`mechanism`: key presses,
+  Unicode composition, or both in order) and says that sending is not the
+  application accepting it. Empty text and more than 400 characters are
+  refused before anything is sent.
+- **`APIError.method`**: the method of the refused request, set by the `Api`.
+
+### Changed
+
+- **`isTransient` is false for a `503` answered to a POST or PATCH**, or to a
+  request whose method is unknown. The platform documents that a change
+  answered `503` may or may not have happened. It is still true for GET, HEAD,
+  OPTIONS, PUT and DELETE. A tool refused with `503` now says which case it is,
+  and for a change it says to read the current state before sending it again.
+  This outranks a `reason` word.
+- **`window_action` resize needs both `width` and `height`**, as the platform
+  requires. `x`/`y` are bounded to -32768..32767 and `width`/`height` to
+  1..32767.
+- **`update_computer`'s `idle_suspend_min` is capped at 10080** (a week), as
+  documented.
+- **Tool descriptions brought in line with the corrected API docs**
+  (OPL-5025):
+  - Env secret live apply reaches new shells and `exec` with `desktop: true`.
+    It is worded to hold after the platform also gives plain `exec` the bound
+    environment (app OPL-5028).
+  - A resumed guest's clock is resynced within seconds.
+  - `start_computer`, `suspend_computer`, `restart_computer` and
+    `stop_computer` state their conditions for computers that hold secrets.
+  - `clone_computer`: the source must be stopped or suspended, and the copy
+    lands stopped with no secrets.
+  - `write_file` says a failure can leave the complete file at the path.
+  - `list_templates` and `create_computer` say a template you published is
+    named by its `ref`, and `create_computer` gives the resolution depths.
+  - `restore_available` is explained on the snapshot tools.
+  - `exec` says a missing `cwd` exits 127.
+  - `window_action` covers Wayland tiling.
+  - `list_webhook_deliveries` calls `last_error` an open set, with the
+    retention measured from when a delivery was queued.
+  - The `starting` refusal names its two-minute window and the `502` after it.
+- **`get_computer` and the listings say when a computer's secrets are
+  pending** (`secrets_pending: true`), when that is unknown (`null`), and why a
+  delivery failed (`secrets_error`).
+- **`clone_snapshot` names the `capture unrecorded` reason** for a memory
+  snapshot built from its disk, and shows a reason it does not know rather than
+  a generic sentence.
+
 ## [0.5.0] — 2026-09-23
 
 ### Added

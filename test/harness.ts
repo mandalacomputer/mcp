@@ -196,6 +196,32 @@ export const SECRET_BINDINGS = {
 };
 
 /**
+ * One secret in the account's store, as every store route answers it: no
+ * value, ever (OPL-4984).
+ */
+export const SECRET = {
+  id: 'csec-0123456789abcdef',
+  name: 'OPENAI_API_KEY',
+  workspace_id: null,
+  revision_id: 'csr-0123456789abcdef01234567',
+  created_at: '2026-09-20T10:00:00Z',
+  updated_at: '2026-09-21T10:00:00Z',
+  last_used_at: null,
+};
+
+/** A scope's listing: the secrets, whether binding is on, and the limits. */
+export const SECRET_LIST = {
+  secrets: [SECRET],
+  delivery: true,
+  limits: {
+    name_max_chars: 60,
+    value_max_bytes: 4096,
+    active_per_account: 100,
+    created_per_account: 1000,
+  },
+};
+
+/**
  * One webhook subscription as the platform lists it — never with a secret. The
  * health fields are all non-null, so a sentence that reads one shows it.
  */
@@ -732,6 +758,37 @@ function respond(
       computer: decodeURIComponent(ssh[1]),
       enabled: method === 'PUT' ? sent : SSH_SETTING.enabled,
     });
+  }
+  // The account's secret store. A create answers the name it was sent and a
+  // replace a moved revision; neither ever carries the value it was sent, and a
+  // workspace named on the request is the workspace answered.
+  if (path === '/secrets' || /^\/secrets\/[^/]+$/.test(path)) {
+    const sent = (body ?? {}) as { name?: unknown; workspace_id?: unknown };
+    const workspace =
+      (typeof sent.workspace_id === 'string' ? sent.workspace_id : null) ??
+      query.get('workspace_id');
+    const id = path === '/secrets' ? SECRET.id : decodeURIComponent(path.slice('/secrets/'.length));
+    if (path === '/secrets' && method === 'GET')
+      return json({ ...SECRET_LIST, secrets: [{ ...SECRET, workspace_id: workspace }] });
+    if (path === '/secrets')
+      return json(
+        {
+          ...SECRET,
+          name: typeof sent.name === 'string' ? sent.name : SECRET.name,
+          workspace_id: workspace,
+        },
+        201,
+      );
+    if (method === 'DELETE') return json({ ok: true });
+    if (method === 'PUT')
+      return json({
+        ...SECRET,
+        id,
+        workspace_id: workspace,
+        revision_id: 'csr-0123456789abcdef01234599',
+        updated_at: '2026-09-24T10:00:00Z',
+      });
+    return json({ ...SECRET, id, workspace_id: workspace });
   }
   // Secret bindings. A write answers what it was sent, pinned at a revision
   // (the one it named, or a fixed "latest"), one version on from the read; a

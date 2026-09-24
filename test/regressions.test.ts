@@ -389,7 +389,8 @@ describe('window actions', () => {
     // manager places the frame where it likes, so the result of that does not
     // look like an error — it looks like the usual approximation.
     expect(() => windowBody({ action: 'move', x: 5 })).toThrow(/both x and y/);
-    expect(() => windowBody({ action: 'resize' })).toThrow(/width, height/);
+    expect(() => windowBody({ action: 'resize' })).toThrow(/both width and height/);
+    expect(() => windowBody({ action: 'resize', width: 7 })).toThrow(/both width and height/);
   });
 
   it('leaves the actions that take no geometry alone', () => {
@@ -410,9 +411,10 @@ describe('window actions', () => {
       x: 5,
       y: 6,
     });
-    expect(windowBody({ action: 'resize', x: 5, y: 6, width: 7 })).toEqual({
+    expect(windowBody({ action: 'resize', x: 5, y: 6, width: 7, height: 8 })).toEqual({
       action: 'resize',
       width: 7,
+      height: 8,
     });
   });
 });
@@ -1774,8 +1776,23 @@ describe('a file too large to put in a conversation', () => {
 });
 
 describe('wait failures that are worth another poll', () => {
-  it.each([409, 429, 503])('retries HTTP %s for anyone', (status) => {
+  it.each([409, 429])('retries HTTP %s for anyone', (status) => {
     expect(isTransient(errorForStatus(status, `HTTP ${status}`))).toBe(true);
+  });
+
+  it('retries HTTP 503 only for a request that is safe to repeat', () => {
+    // A change answered 503 may or may not have happened (OPL-5025 docs), so
+    // the exported predicate says yes only where a repeat cannot do it twice.
+    // The poll predicate still rides every one of them out: it replays reads.
+    for (const method of ['GET', 'HEAD', 'OPTIONS', 'PUT', 'DELETE', 'get']) {
+      const err = errorForStatus(503, 'HTTP 503', undefined, undefined, { method });
+      expect(isTransient(err), method).toBe(true);
+    }
+    for (const method of ['POST', 'PATCH', undefined]) {
+      const err = errorForStatus(503, 'HTTP 503', undefined, undefined, { method });
+      expect(isTransient(err), String(method)).toBe(false);
+      expect(isTransientForPoll(err)).toBe(true);
+    }
   });
 
   it.each([502, 504, 520, 521, 522, 523])(
@@ -2699,9 +2716,16 @@ describe('an edge that never reached the platform is not reported as a bare stat
     // What survives is answered by TYPE, with no status numbers at all — the
     // same four classes the TypeScript and Python SDKs now name, so one
     // question has one answer in three clients.
-    for (const status of [409, 429, 503]) {
+    for (const status of [409, 429]) {
       expect(isTransient(errorForStatus(status, `HTTP ${status}`))).toBe(true);
     }
+    // 503 is on the list only for a request that is safe to repeat (OPL-5026).
+    expect(
+      isTransient(errorForStatus(503, 'HTTP 503', undefined, undefined, { method: 'GET' })),
+    ).toBe(true);
+    expect(
+      isTransient(errorForStatus(503, 'HTTP 503', undefined, undefined, { method: 'POST' })),
+    ).toBe(false);
     expect(isTransient(new ConnectivityError('fetch failed'))).toBe(true);
   });
 
@@ -2739,7 +2763,16 @@ describe('the public error surface', () => {
     // thrown away by everyone but the poll loops.
     expect(isTransient(new ConflictError('the guest agent is not answering yet', 409))).toBe(true);
     expect(isTransient(new RateLimitError('slow down', 429))).toBe(true);
-    expect(isTransient(new UnavailableError('a hypervisor is out of reach', 503))).toBe(true);
+    // A 503 is transient for a request that is safe to repeat; a change, or a
+    // request whose method is unknown, may have happened (OPL-5026).
+    expect(
+      isTransient(
+        new UnavailableError('a hypervisor is out of reach', 503, undefined, undefined, {
+          method: 'GET',
+        }),
+      ),
+    ).toBe(true);
+    expect(isTransient(new UnavailableError('a hypervisor is out of reach', 503))).toBe(false);
     expect(isTransient(new ConnectivityError('fetch failed'))).toBe(true);
     expect(PublicRateLimitError).toBe(RateLimitError);
     expect(new RateLimitError('slow down', 429, undefined, 30_000).retryAfterMs).toBe(30_000);
@@ -3539,6 +3572,13 @@ describe('the tools our own prose tells a model to call', () => {
     // clone_snapshot's consent to resuming a memory snapshot of a computer
     // that held secrets (OPL-4965). A parameter, named in its own description.
     'inherit_secrets',
+    // A file transfer's opt-out of resuming a computer (OPL-5026). A parameter.
+    'no_wake',
+    // Response fields named in prose (OPL-5026): whether a snapshot can be
+    // restored where its computer now lives, and whether a computer is still
+    // missing a change to its secrets.
+    'restore_available',
+    'secrets_pending',
   ]);
 
   it('names only tools that exist', async () => {
@@ -5148,6 +5188,8 @@ describe('the event tools and what their annotations claim', () => {
       expect(nonDestructive).toEqual(
         [
           'create_computer',
+          // Stores a new secret; replaces nothing (a taken name is a 409).
+          'create_secret',
           'cursor_position',
           'exec_poll',
           'get_account',

@@ -232,7 +232,7 @@ export const registerSnapshots: Registrar = (server, session, opts) => {
     {
       title: 'List snapshots',
       description:
-        'Every snapshot on this account. `orphaned` means its computer is gone: such a snapshot can still be cloned into a new computer, but cannot be restored, because a restore puts the disk back on a source that no longer exists. Read `state` ON EVERY ROW before acting, rather than on the newest one — this is one answer per hypervisor concatenated in a fixed host order that has nothing to do with time, so a capture running on one host routinely appears after finished snapshots from another. A row reading `capturing` is not a snapshot yet: the copy is still being taken and restore, clone and delete all fail on it. It carries the id the finished snapshot will keep, so this is also the route to poll after create_snapshot: the row stops reading `capturing` in place rather than being replaced under another id, and a row that vanishes without ever leaving `capturing` is a capture that failed. `pending` is the point at which it can be acted on, and `durable` means it has reached backup storage as well.',
+        'Every snapshot on this account. `orphaned` means its computer is gone: such a snapshot can still be cloned into a new computer, but cannot be restored, because a restore puts the disk back on a source that no longer exists. `restore_available: false` means the only usable copy is on a host its computer has since left: restore_snapshot will not work on it, though it can still be cloned. Read `state` ON EVERY ROW before acting, rather than on the newest one — this is one answer per hypervisor concatenated in a fixed host order that has nothing to do with time, so a capture running on one host routinely appears after finished snapshots from another. A row reading `capturing` is not a snapshot yet: the copy is still being taken and restore, clone and delete all fail on it. It carries the id the finished snapshot will keep, so this is also the route to poll after create_snapshot: the row stops reading `capturing` in place rather than being replaced under another id, and a row that vanishes without ever leaving `capturing` is a capture that failed. `pending` is the point at which it can be acted on, and `durable` means it has reached backup storage as well.',
       inputSchema: {
         computer_id: z
           .string()
@@ -662,7 +662,7 @@ export const registerSnapshots: Registrar = (server, session, opts) => {
     'restore_snapshot',
     {
       title: 'Restore a snapshot',
-      description: `Put a snapshot back onto the computer it came from, discarding everything on that disk since. Refused on an orphaned snapshot${opts.lifecycle ? ' — clone_snapshot is what works there' : ', and this server cannot fork one either: it was started with the lifecycle tools withheld'}. It leaves the computer RUNNING whatever state it was in: restoring a stopped one boots it, which is a start like any other and is charged. A disk snapshot comes back to a fresh boot, a memory one to the captured session, and either way a suspended session the computer was holding is discarded with the disk it was saved against.`,
+      description: `Put a snapshot back onto the computer it came from, discarding everything on that disk since. Check \`restore_available\` in list_snapshots first: where it is false, the snapshot's usable copy is on a host its computer has left, and a restore is refused${opts.lifecycle ? ' while clone_snapshot still works' : ''}. Refused on an orphaned snapshot${opts.lifecycle ? ' — clone_snapshot is what works there' : ', and this server cannot fork one either: it was started with the lifecycle tools withheld'}. It leaves the computer RUNNING whatever state it was in: restoring a stopped one boots it, which is a start like any other and is charged. A disk snapshot comes back to a fresh boot, a memory one to the captured session, and either way a suspended session the computer was holding is discarded with the disk it was saved against.`,
       inputSchema: {
         snapshot_id: z.string(),
         confirm: z
@@ -845,7 +845,13 @@ export const registerSnapshots: Registrar = (server, session, opts) => {
               ? "it was taken before copies could be given its computer's secrets"
               : raw.memory_dropped_reason === 'secrets'
                 ? 'its computer held secrets and inherit_secrets was not set'
-                : 'the platform did not resume it';
+                : raw.memory_dropped_reason === 'capture unrecorded'
+                  ? 'it was taken before the platform recorded which capture each snapshot is'
+                  : typeof raw.memory_dropped_reason === 'string' &&
+                      raw.memory_dropped_reason.trim() !== ''
+                    ? // An open set: a word this version does not know is shown as sent.
+                      `the platform did not resume it (reason given: "${raw.memory_dropped_reason.trim().slice(0, 200)}")`
+                    : 'the platform did not resume it';
           return said(
             `Built ${describe(c)} from ${snapshot_id}'s DISK, booting fresh — its saved session was NOT resumed, because ${why}. No secrets are bound to it${select && c.id ? '. It is selected' : ''}.`,
             withoutCredentials(c),

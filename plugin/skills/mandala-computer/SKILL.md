@@ -272,8 +272,24 @@ or for one or two actions. The rules there:
 - Text into a field: `write_clipboard` then `press_key` with
   `keys: ["ctrl","v"]` — two names, not the string `"ctrl+v"`. Key names are X
   keysyms: `"Return"`, not `"Enter"`.
+- `type_text` takes at most 400 characters and types ASCII at about 12 ms a
+  character. Text with accents, CJK or emoji types only in Chromium and Xfce
+  Terminal on X11; elsewhere use the clipboard. Either way, a screenshot is
+  what says the text landed.
 - Screenshots deliberately do not count as activity. A loop that only watches
   can see its own machine suspend under it; input, `exec` and files do count.
+
+## Credentials: the secret store
+
+A credential the guest needs goes in the account's secret store, not into a
+command line, a file you write, or a message. `create_secret` stores a value,
+and no tool shows it again. `set_computer_secrets` binds it to a computer as an
+environment variable or a file, and the computer gets it at its next start or
+restart. A command that needs a bound variable runs with `exec` and
+`desktop: true`. `replace_secret` rotates a value: a running computer gets a
+file binding at once, and new desktop shells get an env binding on images that
+support it. `delete_secret` stops a computer that is still bound to it from
+starting, so remove the binding first. Never repeat a value back to the user.
 
 ## Keeping the work: snapshots and clones
 
@@ -347,11 +363,18 @@ says what to do. The judgement it cannot make for you:
   retry), a size the host cannot run, a computer that has to be stopped first.
   Those answer the same way forever. When the sentence says "does NOT clear by
   waiting", believe it.
+- **A 409 `starting` is the boot window**: about two minutes after a start, a
+  restart or a reboot inside the guest. It clears; send the call again in a
+  moment. A guest agent still silent after that window answers 502 instead.
 - **502, 504 and a dropped connection mean the outcome is unknown, not that
   the request never left.** Never replay a *create* on one of those — the
   computer may exist and be billable. `list_computers` first, and bind what
   you find. A read, a `wait_for_computer`, a `screenshot` can simply be sent
   again.
+- **A 503 on a change is the same: it may or may not have happened.** A read
+  answered 503 can be sent again shortly. A create, a command, a clone or a
+  snapshot answered 503 is read back first — the sentence says so — because
+  repeating it blind can do it twice.
 - **A refused resize with an offer** ("another host could run it") does not
   clear by retrying. `move_computer` takes the offer up; it copies the disk,
   so say what that costs before calling it.
