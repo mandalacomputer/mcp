@@ -41,7 +41,13 @@ function platformWithRefusals() {
   const platform = installFakePlatform();
   const fake = globalThis.fetch;
   const refused = new Set<string>();
-  const state: { providerRefuses: boolean; onlyAccept?: string } = { providerRefuses: false };
+  const state: {
+    providerRefuses: boolean;
+    onlyAccept?: string;
+    /** What `GET ssh-keys`, the bearer probe, answers instead of its list. */
+    probeStatus?: number;
+    probeDelayMs?: number;
+  } = { providerRefuses: false };
   /** Tokens refused on `GET account` only, after a delay in ms. */
   const slowRefusals = new Map<string, number>();
   /** Headers of every request that reached the platform, lower-cased. */
@@ -55,6 +61,15 @@ function platformWithRefusals() {
     });
     seen.push(headers);
     const token = (headers.authorization ?? '').replace(/^Bearer /, '');
+    if (url.pathname.endsWith('/ssh-keys') && state.probeDelayMs) {
+      await new Promise((r) => setTimeout(r, state.probeDelayMs));
+    }
+    if (url.pathname.endsWith('/ssh-keys') && state.probeStatus !== undefined) {
+      return new Response(JSON.stringify({ error: 'refused' }), {
+        status: state.probeStatus,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
     const slow = slowRefusals.get(token);
     if (slow !== undefined && url.pathname.endsWith('/account')) {
       await new Promise((r) => setTimeout(r, slow));
@@ -501,7 +516,32 @@ describe('hosted: checking a bearer before it gets anything', () => {
     }
   });
 
-  it('turns a source away with 429, without asking the platform, once it has used its budget', async () => {
+  const probes = () => platform.seen.length;
+
+  for (const status of [403, 404]) {
+    it(`admits nobody on a ${status} from the probe, and caches nothing`, async () => {
+      platform = platformWithRefusals();
+      platform.state.probeStatus = status;
+      const { server, url } = await start({ resourceMetadataUrl: METADATA, serviceSecret: SECRET });
+      try {
+        const c = client(url);
+        for (let i = 0; i < 2; i++) {
+          const before = probes();
+          const res = await c.send(INIT, { Authorization: 'Bearer mcpat_alice' });
+          expect(res.status).toBe(503);
+          expect(res.headers.get('mcp-session-id')).toBeNull();
+          await res.text();
+          // Asked again each time: an unconfirmed answer is never cached.
+          expect(probes()).toBe(before + 1);
+        }
+        expect(await sessions(url)).toBe(0);
+      } finally {
+        await stop(server);
+      }
+    });
+  }
+
+  it('still initializes a valid client from an address whose budget is spent', async () => {
     platform = platformWithRefusals();
     platform.state.onlyAccept = 'mcpat_good';
     const { server, url } = await start({
@@ -511,17 +551,55 @@ describe('hosted: checking a bearer before it gets anything', () => {
     });
     try {
       const c = client(url);
-      for (let i = 0; i < 2; i++) {
+      await c.open('mcpat_good');
+      for (let i = 0; i < 3; i++) {
         const res = await c.send(INIT, { Authorization: `Bearer mcpat_invented${i}` });
         expect(res.status).toBe(401);
         await res.text();
       }
-      platform.seen.length = 0;
-      const res = await c.send(INIT, { Authorization: 'Bearer mcpat_invented2' });
-      expect(res.status).toBe(429);
-      expect(Number(res.headers.get('retry-after'))).toBeGreaterThan(0);
-      await res.text();
-      expect(platform.seen).toHaveLength(0);
+      // Already accepted: passes the spent budget without a probe.
+      const before = probes();
+      await c.open('mcpat_good');
+      expect(probes()).toBe(before);
+      // New to this server, from the same spent address: still probed, and in.
+      platform.state.onlyAccept = 'mcpat_new';
+      expect(await c.open('mcpat_new')).toBeTruthy();
+    } finally {
+      await stop(server);
+    }
+  });
+
+  it('lets a spent address probe one new bearer at a time, 429s the rest unasked, and passes an accepted one', async () => {
+    platform = platformWithRefusals();
+    platform.state.onlyAccept = 'mcpat_good';
+    const { server, url } = await start({
+      resourceMetadataUrl: METADATA,
+      serviceSecret: SECRET,
+      maxFailedInitializes: 1,
+    });
+    try {
+      const c = client(url);
+      await c.open('mcpat_good');
+      const first = await c.send(INIT, { Authorization: 'Bearer mcpat_invented0' });
+      expect(first.status).toBe(401);
+      await first.text();
+      platform.state.probeDelayMs = 100;
+      const before = probes();
+      const [a, b, good] = await Promise.all([
+        c.send(INIT, { Authorization: 'Bearer mcpat_invented1' }),
+        c.send(INIT, { Authorization: 'Bearer mcpat_invented2' }),
+        // Arrives while the address's one probe is in flight, and passes on
+        // the platform's earlier acceptance.
+        new Promise<void>((r) => setTimeout(r, 30)).then(() =>
+          c.send(INIT, { Authorization: 'Bearer mcpat_good' }),
+        ),
+      ]);
+      expect([a.status, b.status].sort()).toEqual([401, 429]);
+      expect(good.status).toBe(200);
+      const limited = a.status === 429 ? a : b;
+      expect(limited.headers.get('retry-after')).toBe('1');
+      await Promise.all([a.text(), b.text(), good.text()]);
+      expect(probes()).toBe(before + 1);
     } finally {
       await stop(server);
     }

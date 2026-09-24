@@ -301,34 +301,46 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
   const accepted = new Map<string, number>();
   let checksInFlight = 0;
 
+  /** Whether the platform accepted this bearer within the cache window. */
+  const isAccepted = (key: string): boolean => {
+    const until = accepted.get(digest(key).toString('hex'));
+    return until !== undefined && until > Date.now();
+  };
+
   /**
-   * `ok`: the platform knows this credential (any answer but a 401, a 429 or a
-   * 5xx — a 403 is a known credential without the role). `refused`: a 401.
-   * `unknown`: the platform could not say, or this server is already asking
-   * about as many bearers as it will at once.
+   * `ok`: the probe answered 2xx, and only that — the one answer that says the
+   * platform authenticated this credential AND let it act. `refused`: a 401.
+   * `unknown`: anything else — a 403 (a suspended account or a lost
+   * membership), a 404 (the route moved), a 429, a 5xx, a timeout, or this
+   * server already asking about as many bearers as it will at once. Only `ok`
+   * is cached.
    */
   const checkBearer = async (key: string): Promise<'ok' | 'refused' | 'unknown'> => {
     const id = digest(key).toString('hex');
-    const now = Date.now();
-    const until = accepted.get(id);
-    if (until !== undefined && until > now) return 'ok';
+    if (isAccepted(key)) return 'ok';
     if (checksInFlight >= MAX_BEARER_CHECKS_IN_FLIGHT) return 'unknown';
     checksInFlight++;
     try {
       const api = new Api(key, cfg.baseUrl, AbortSignal.timeout(BEARER_CHECK_TIMEOUT_MS), {
         serviceSecret,
       });
-      // The cheapest authenticated read there is: the account's SSH keys, a
-      // short list the control plane answers without asking any host. It
-      // takes no parameters, so none are sent.
+      // `GET ssh-keys`, chosen because it is the cheapest read that every
+      // valid credential is answered 2xx on. The platform's route table
+      // gives it the lowest role there is (viewer), a workspace-scoped key is
+      // refused only the key WRITES, and the handler lists the caller's own
+      // keys from the control plane without asking any host — so no role a
+      // grant can carry, and no host being down, turns it into a refusal.
+      // `account` is the alternative and costs two fleet inventories. The one
+      // valid credential it does not admit is a suspended account's (403),
+      // which is answered as unconfirmed. It takes no parameters, so none are
+      // sent.
       await api.json('GET', SSH_KEYS);
     } catch (err) {
-      if (!(err instanceof APIError)) return 'unknown';
-      if (err.status === 401) return 'refused';
-      if (err.status === 429 || err.status >= 500) return 'unknown';
+      return err instanceof APIError && err.status === 401 ? 'refused' : 'unknown';
     } finally {
       checksInFlight--;
     }
+    const now = Date.now();
     if (accepted.size >= MAX_ACCEPTED_BEARERS) {
       for (const [k, t] of accepted) if (t <= now) accepted.delete(k);
       // Still full: drop the oldest, which Map iteration yields first.
@@ -345,6 +357,8 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
   // it asks the platform anything, rather than by starving the pool.
   const maxFailed = cfg.maxFailedInitializes ?? DEFAULT_MAX_FAILED_INITIALIZES;
   const failures = new Map<string, { count: number; resetAt: number }>();
+  /** Probes in flight per source whose budget is spent. At most one each. */
+  const exhaustedProbes = new Map<string, number>();
   const sourceOf = (req: Request) => req.ip ?? req.socket.remoteAddress ?? 'unknown';
   const overFailureBudget = (req: Request): number | undefined => {
     const entry = failures.get(sourceOf(req));
@@ -883,18 +897,35 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
     // Hosted: no session for a bearer the platform does not accept. Before the
     // cap and the reservation, so a refused bearer never holds a slot.
     if (challenge) {
-      const retryAfter = overFailureBudget(req);
-      if (retryAfter !== undefined) {
-        res.set('Retry-After', String(retryAfter));
+      // A spent budget does not close the address. Many clients can share one
+      // (a NAT, an office), and one bad neighbour must not lock out the rest:
+      // a bearer the platform already accepted passes outright, and a new one
+      // still gets a probe — but only one at a time per spent address, so a
+      // flood from it reaches the platform serially while the process-wide
+      // cap on probes bounds the total.
+      const source = sourceOf(req);
+      const spent = !isAccepted(key) && overFailureBudget(req) !== undefined;
+      if (spent && (exhaustedProbes.get(source) ?? 0) >= 1) {
+        res.set('Retry-After', '1');
         return rpcError(
           res,
           429,
           -32002,
-          'Too many refused initializes from this address. Retry later with a valid token.',
+          'Too many refused initializes from this address. Retry shortly with a valid token.',
           rpcId(req),
         );
       }
-      const verdict = await checkBearer(key);
+      if (spent) exhaustedProbes.set(source, (exhaustedProbes.get(source) ?? 0) + 1);
+      let verdict: 'ok' | 'refused' | 'unknown';
+      try {
+        verdict = await checkBearer(key);
+      } finally {
+        if (spent) {
+          const n = (exhaustedProbes.get(source) ?? 1) - 1;
+          if (n <= 0) exhaustedProbes.delete(source);
+          else exhaustedProbes.set(source, n);
+        }
+      }
       if (verdict === 'refused') {
         noteFailure(req);
         return challenged(res, TOKEN_REFUSED, rpcId(req));

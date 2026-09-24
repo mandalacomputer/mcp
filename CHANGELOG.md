@@ -23,8 +23,9 @@ are wording changes, and they are behaviour changes in the way that matters.
   clients authorize and refresh on their own. A different bearer on an existing
   session is answered `404` (initialize again) rather than rebound. A bearer
   is checked with the platform before an initialize creates a session and
-  before a request is dispatched (cached 60 s), and refused initializes are
-  budgeted per source.
+  before a request is dispatched (only a `2xx` counts, cached 60 s), and
+  refused initializes are budgeted per source without locking out a valid
+  client behind the same address.
   `MANDALA_MCP_SERVICE_SECRET` is sent as `X-Mandala-MCP-Service` on every
   platform request; a client's own header of that name is never forwarded.
   Without either variable nothing changes.
