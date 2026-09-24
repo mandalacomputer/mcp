@@ -12,6 +12,7 @@ export {
   ConflictError,
   ConnectivityError,
   ConnectivityInterruptedError,
+  FileExistsError,
   GatewayTimeoutError,
   isTransient,
   MandalaError,

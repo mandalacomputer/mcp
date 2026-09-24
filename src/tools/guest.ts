@@ -3,6 +3,7 @@ import { z } from 'zod';
 import type { Bytes } from '../api.js';
 import {
   ConflictError,
+  FileExistsError,
   GatewayTimeoutError,
   platformSaid,
   RangeNotSatisfiableError,
@@ -552,7 +553,7 @@ export const registerGuest: Registrar = (server, session) => {
     {
       title: 'Put a file into the guest',
       description:
-        'Write a file inside the computer. Paths must be absolute — the guest agent inherits whatever working directory it was started in, so a relative path resolves somewhere you did not name.',
+        'Write a file inside the computer. Paths must be absolute — the guest agent inherits whatever working directory it was started in, so a relative path resolves somewhere you did not name. By default a file already at the path is replaced. Pass overwrite: false to create the file only if nothing is there: a path that is taken is refused, nothing is written, and the file already there is untouched — retrying does not change that; pick another path, or write again without overwrite: false to replace it on purpose. overwrite: false is for Linux computers; a Windows computer refuses it.',
       inputSchema: {
         ...idArg,
         path: absolutePath('path').describe(
@@ -563,9 +564,15 @@ export const registerGuest: Registrar = (server, session) => {
           .enum(['utf8', 'base64'])
           .default('utf8')
           .describe('base64 for anything that is not text.'),
+        overwrite: z
+          .boolean()
+          .default(true)
+          .describe(
+            'true (the default) replaces a file already at the path. false creates the file only if nothing is there, and refuses without writing anything when the path is taken.',
+          ),
       },
     },
-    ({ computer_id, path, content, encoding }, extra) =>
+    ({ computer_id, path, content, encoding, overwrite }, extra) =>
       guarded(async () => {
         const id = session.resolve(computer_id);
         // Node's base64 decoder is lenient: it drops characters outside the
@@ -595,16 +602,36 @@ export const registerGuest: Registrar = (server, session) => {
         const bytes = new Uint8Array(
           Buffer.from(content, encoding === 'base64' ? 'base64' : 'utf8'),
         );
-        const res = await session.api.with(extra.signal).json<{ path?: string; bytes?: number }>(
-          'PUT',
-          P.computerAction(id, 'files'),
-          // The path is a query parameter, and the URL builder encodes it. Doing
-          // that matters more than it looks: `+` decodes to a space and `&`
-          // ends the parameter, so an unencoded path with punctuation in it
-          // writes a DIFFERENT file and nothing reports that, because the
-          // platform never sees what was meant.
-          { query: { path }, raw: bytes },
-        );
+        let res: { path?: string; bytes?: number };
+        try {
+          res = await session.api.with(extra.signal).json<{ path?: string; bytes?: number }>(
+            'PUT',
+            P.computerAction(id, 'files'),
+            // The path is a query parameter, and the URL builder encodes it. Doing
+            // that matters more than it looks: `+` decodes to a space and `&`
+            // ends the parameter, so an unencoded path with punctuation in it
+            // writes a DIFFERENT file and nothing reports that, because the
+            // platform never sees what was meant.
+            //
+            // `overwrite` is sent only to ask for create-only (OPL-4994). Absent
+            // means replace on every platform version, so the default request
+            // is the one this tool always sent.
+            { query: overwrite ? { path } : { path, overwrite: 'false' }, raw: bytes },
+          );
+        } catch (err) {
+          if (err instanceof FileExistsError) {
+            return withErrorMetadata(
+              refused(
+                `${apiErrorMessage(err)}\n\nSomething is already at ${path}, and nothing was written: ` +
+                  'the file there is untouched. This does not clear by waiting, so do not send the same ' +
+                  'call again. Choose another path, or call write_file again with overwrite: true (or ' +
+                  'without overwrite) to replace it on purpose.',
+              ),
+              err,
+            );
+          }
+          throw err;
+        }
         return said(`Wrote ${res.bytes ?? bytes.length} bytes to ${res.path ?? path}.`, res);
       }),
   );

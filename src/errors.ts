@@ -90,7 +90,21 @@ const REASON_CLEARS: ReadonlySet<string> = new Set(['contention', 'starting']);
  * nothing changes today. What changes is that a future status for this refusal
  * cannot quietly make it look replayable.
  */
-const REASON_PERMANENT: ReadonlySet<string> = new Set(['unavailable', 'unsupported', 'revoked']);
+/**
+ * `exists` is a create-only upload (`write_file` with `overwrite: false`)
+ * refused because something is already at the path (platform OPL-4994). Nothing
+ * was written, and the same request answers the same way until whatever is there
+ * is moved or the caller agrees to replace it — so it is permanent, and has to be
+ * said: without it this would be an ordinary {@link ConflictError}, which
+ * {@link isTransient} calls worth sending again. {@link FileExistsError} is the
+ * class it arrives as.
+ */
+const REASON_PERMANENT: ReadonlySet<string> = new Set([
+  'unavailable',
+  'unsupported',
+  'revoked',
+  'exists',
+]);
 
 /** Whether waiting can change a classified refusal's answer. */
 export type ReasonKind = 'clears' | 'permanent';
@@ -161,6 +175,8 @@ export function reasonAdvice(reason: string | undefined): string | undefined {
       return 'the computer is not running; if nothing is starting it this will not clear on its own and start_computer is the fix, and if a start is already under way wait_for_computer says so without starting a second one';
     case 'unsupported':
       return 'this computer cannot do it at all, so do not retry it — the answer is the same forever';
+    case 'exists':
+      return 'something is already at that path and nothing was written — it is untouched. This does not clear by waiting: choose another path, or send the write again without overwrite: false to replace it on purpose';
     case 'revoked':
       // Reached only on a status statusAdvice has no sentence for, because the
       // formatter asks that one first and the platform sends this word on 401 and
@@ -329,6 +345,21 @@ export class MoveRequiredError extends ConflictError {
   ) {
     super(message, status, body, retryAfterMs, metadata);
   }
+}
+
+/**
+ * The 409 a create-only upload gets when the path is already taken.
+ *
+ * `PUT /computers/{id}/files?overwrite=false` creates the file only if nothing
+ * is at `path`. When something is, the answer is 409 with `reason: "exists"` and
+ * NOTHING was written. Its own class for the reason {@link MoveRequiredError}
+ * has one: it is a {@link ConflictError} by status and the opposite of one by
+ * nature — it clears only when the caller decides, never by waiting — so
+ * {@link isTransient} says no to it. A subclass, so `instanceof ConflictError`
+ * written before this existed still catches it.
+ */
+export class FileExistsError extends ConflictError {
+  override name = 'FileExistsError';
 }
 
 /**
@@ -843,6 +874,10 @@ export function errorForStatus(
     const offer = moveOffer(body);
     if (offer)
       return new MoveRequiredError(message, status, body, offer.possible, retryAfterMs, metadata);
+    // The create-only upload whose path was taken, told apart by the platform's
+    // word rather than by its sentence.
+    if (refusalReason(body) === 'exists')
+      return new FileExistsError(message, status, body, retryAfterMs, metadata);
   }
   if (status === 416) {
     return new RangeNotSatisfiableError(message, status, body, undefined, retryAfterMs, metadata);

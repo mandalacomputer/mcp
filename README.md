@@ -155,6 +155,10 @@ Parameter and response-mode support remains a separate contract.
 `list_windows`, `window_action`, `read_clipboard`, `write_clipboard`,
 `read_file`, `write_file`, `list_directory`
 
+`write_file` replaces a file already at the path. With `overwrite: false` it
+creates the file only if nothing is there, and a path that is taken is refused
+with nothing written (Linux computers only).
+
 **Retained versions** — `retain_execution_output`, `get_result`, `read_result_output`,
 `delete_result`, `publish_artifact`, `get_artifact`, `read_artifact`, `delete_artifact`
 

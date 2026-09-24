@@ -360,6 +360,58 @@ describe('files', () => {
     expect(put?.query.get('path')).toBe('/home/user/Q3 profit & loss.txt');
   });
 
+  it('offers overwrite in the write_file schema, defaulting to replace (OPL-4994)', async () => {
+    const { client, close } = await connect();
+    const tool = (await client.listTools()).tools.find((t) => t.name === 'write_file');
+    await close();
+    expect(tool?.inputSchema.properties?.overwrite).toMatchObject({
+      type: 'boolean',
+      default: true,
+    });
+    expect(tool?.inputSchema.required ?? []).not.toContain('overwrite');
+    expect(tool?.description).toContain('overwrite: false');
+  });
+
+  it('sends overwrite=false only for a create-only write', async () => {
+    const { call, close } = await connect();
+    await call('write_file', { path: '/home/user/a.txt', content: 'x' });
+    await call('write_file', { path: '/home/user/a.txt', content: 'x', overwrite: true });
+    await call('write_file', { path: '/home/user/a.txt', content: 'x', overwrite: false });
+    await close();
+    const puts = platform.calls.filter((c) => c.method === 'PUT');
+    expect(puts.map((c) => c.query.get('overwrite'))).toEqual([null, null, 'false']);
+    expect(puts.every((c) => c.query.get('path') === '/home/user/a.txt')).toBe(true);
+  });
+
+  it('says plainly that a create-only path is taken, and not to send it again', async () => {
+    const real = globalThis.fetch;
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      if (String(input).includes('/files') && init?.method === 'PUT') {
+        return Response.json(
+          { error: 'a file already exists at /home/user/a.txt', reason: 'exists' },
+          { status: 409 },
+        );
+      }
+      return real(input as never, init);
+    }) as typeof fetch;
+    try {
+      const { call, close } = await connect();
+      const res = await call('write_file', {
+        path: '/home/user/a.txt',
+        content: 'x',
+        overwrite: false,
+      });
+      await close();
+      expect(res.isError).toBe(true);
+      expect(textOf(res)).toContain('a file already exists at /home/user/a.txt');
+      expect(textOf(res)).toContain('nothing was written');
+      expect(textOf(res)).toContain('do not send the same call again');
+      expect(textOf(res)).toContain('overwrite: true');
+    } finally {
+      globalThis.fetch = real;
+    }
+  });
+
   it('refuses malformed base64 instead of writing a silently corrupt file', async () => {
     const { call, close } = await connect();
     const res = await call('write_file', {

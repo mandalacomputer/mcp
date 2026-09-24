@@ -12,6 +12,19 @@ about a refusal is what the model reads and reasons from. Several entries below
 are wording changes, and they are behaviour changes in the way that matters.
 
 
+## [Unreleased]
+
+### Added
+
+- **`write_file` takes `overwrite`.** It defaults to `true`, which replaces a
+  file already at the path as before and sends nothing new. `overwrite: false`
+  creates the file only if nothing is there; a path that is taken is refused,
+  and the reply says nothing was written, that retrying does not change it, and
+  that `overwrite: true` replaces the file on purpose. Linux computers only.
+- **`FileExistsError`**, exported for embedders: the 409 whose `reason` is
+  `"exists"`, a `ConflictError` that `isTransient` calls permanent.
+  `reasonKind("exists")` is `"permanent"`.
+
 ## [0.5.0] — 2026-09-23
 
 ### Added
