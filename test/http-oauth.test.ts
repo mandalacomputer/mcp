@@ -655,6 +655,49 @@ describe('hosted: checking a bearer before it gets anything', () => {
     }
   });
 
+  it('does not spend a spent address’s interval on a request the full probe cap turned away', async () => {
+    platform = platformWithRefusals();
+    platform.state.onlyAccept = 'mcpat_good';
+    const { server, url } = await start({
+      resourceMetadataUrl: METADATA,
+      serviceSecret: SECRET,
+      maxFailedInitializes: 1,
+      maxSessions: 64,
+    });
+    const from = (ip: string, token: string) => ({
+      Authorization: `Bearer ${token}`,
+      'X-Forwarded-For': ip,
+    });
+    try {
+      const c = client(url);
+      const spend = await c.send(INIT, from('10.9.0.1', 'mcpat_spend'));
+      expect(spend.status).toBe(401);
+      await spend.text();
+
+      // Fill the process-wide cap from other addresses, with slow probes.
+      platform.state.probeDelayMs = 300;
+      const fill = Array.from({ length: 32 }, (_, i) =>
+        c.send(INIT, from(`10.9.1.${i + 1}`, `mcpat_fill${i}`)),
+      );
+      await new Promise((r) => setTimeout(r, 50));
+      const before = probes();
+      const turned = await c.send(INIT, from('10.9.0.1', 'mcpat_invented'));
+      expect(turned.status).toBe(503);
+      await turned.text();
+      expect(probes()).toBe(before);
+      for (const res of await Promise.all(fill)) await res.text();
+
+      // A slot is free: the spent address is probed at once, not told to wait.
+      platform.state.probeDelayMs = 0;
+      platform.state.onlyAccept = 'mcpat_new';
+      const res = await c.send(INIT, from('10.9.0.1', 'mcpat_new'));
+      expect(res.status).toBe(200);
+      await res.text();
+    } finally {
+      await stop(server);
+    }
+  });
+
   it('refuses a request on a token revoked since it was last checked, before dispatch', async () => {
     platform = platformWithRefusals();
     const { server, url } = await start({

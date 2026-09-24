@@ -320,11 +320,18 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
    * server already asking about as many bearers as it will at once. Only `ok`
    * is cached.
    */
-  const checkBearer = async (key: string): Promise<'ok' | 'refused' | 'unknown'> => {
+  // `onStart` runs only when a probe really starts — never for a cached answer
+  // or a full cap — and synchronously, before the first await, so a caller's
+  // bookkeeping and its check against it cannot interleave with another's.
+  const checkBearer = async (
+    key: string,
+    onStart?: () => void,
+  ): Promise<'ok' | 'refused' | 'unknown'> => {
     const id = digest(key).toString('hex');
     if (isAccepted(key)) return 'ok';
     if (checksInFlight >= MAX_BEARER_CHECKS_IN_FLIGHT) return 'unknown';
     checksInFlight++;
+    onStart?.();
     try {
       const api = new Api(key, cfg.baseUrl, AbortSignal.timeout(BEARER_CHECK_TIMEOUT_MS), {
         serviceSecret,
@@ -907,15 +914,14 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
       // (a NAT, an office), and one bad neighbour must not lock out the rest:
       // a bearer the platform already accepted passes outright, and a new one
       // still gets a probe — but at most one per interval per spent address,
-      // taken when it starts, so the address costs the platform one probe per
+      // taken when the probe starts, so the address costs the platform one probe per
       // interval however hard it pushes, and a valid client there waits at
       // most one interval. The process-wide cap on probes bounds the total.
       const spent = !isAccepted(key) && overFailureBudget(req) !== undefined;
       if (spent) {
         const entry = failures.get(sourceOf(req));
-        const now = Date.now();
         const wait =
-          entry?.lastProbeAt !== undefined ? entry.lastProbeAt + exhaustedInterval - now : 0;
+          entry?.lastProbeAt !== undefined ? entry.lastProbeAt + exhaustedInterval - Date.now() : 0;
         if (wait > 0) {
           res.set('Retry-After', String(Math.max(1, Math.ceil(wait / 1000))));
           return rpcError(
@@ -926,9 +932,19 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
             rpcId(req),
           );
         }
-        if (entry) entry.lastProbeAt = now;
       }
-      const verdict = await checkBearer(key);
+      // The interval is spent only by a probe that starts: a request turned
+      // away because the process-wide cap is full reached nobody, and must not
+      // make the next client at this address wait out an interval for it.
+      const verdict = await checkBearer(
+        key,
+        spent
+          ? () => {
+              const entry = failures.get(sourceOf(req));
+              if (entry) entry.lastProbeAt = Date.now();
+            }
+          : undefined,
+      );
       if (verdict === 'refused') {
         noteFailure(req);
         return challenged(res, TOKEN_REFUSED, rpcId(req));
