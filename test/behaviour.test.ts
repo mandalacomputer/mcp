@@ -360,6 +360,134 @@ describe('files', () => {
     expect(put?.query.get('path')).toBe('/home/user/Q3 profit & loss.txt');
   });
 
+  it('offers overwrite in the write_file schema, defaulting to replace (OPL-4994)', async () => {
+    const { client, close } = await connect();
+    const tool = (await client.listTools()).tools.find((t) => t.name === 'write_file');
+    await close();
+    expect(tool?.inputSchema.properties?.overwrite).toMatchObject({
+      type: 'boolean',
+      default: true,
+    });
+    expect(tool?.inputSchema.required ?? []).not.toContain('overwrite');
+    expect(tool?.description).toContain('overwrite: false');
+  });
+
+  it('sends overwrite=false only for a create-only write', async () => {
+    const { call, close } = await connect();
+    await call('write_file', { path: '/home/user/a.txt', content: 'x' });
+    await call('write_file', { path: '/home/user/a.txt', content: 'x', overwrite: true });
+    await call('write_file', { path: '/home/user/a.txt', content: 'x', overwrite: false });
+    await close();
+    const puts = platform.calls.filter((c) => c.method === 'PUT');
+    expect(puts.map((c) => c.query.get('overwrite'))).toEqual([null, null, 'false']);
+    expect(puts.every((c) => c.query.get('path') === '/home/user/a.txt')).toBe(true);
+  });
+
+  it('says plainly that a create-only path is taken, and not to send it again', async () => {
+    const real = globalThis.fetch;
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      if (String(input).includes('/files') && init?.method === 'PUT') {
+        return Response.json(
+          { error: 'a file already exists at /home/user/a.txt', reason: 'exists' },
+          { status: 409 },
+        );
+      }
+      return real(input as never, init);
+    }) as typeof fetch;
+    try {
+      const { call, close } = await connect();
+      const res = await call('write_file', {
+        path: '/home/user/a.txt',
+        content: 'x',
+        overwrite: false,
+      });
+      await close();
+      expect(res.isError).toBe(true);
+      expect(textOf(res)).toContain('a file already exists at /home/user/a.txt');
+      expect(textOf(res)).toContain('this attempt wrote nothing');
+      expect(textOf(res)).toContain('do not send the same call again');
+      expect(textOf(res)).toContain('overwrite: true');
+    } finally {
+      globalThis.fetch = real;
+    }
+  });
+
+  it('does not tell a retry after a lost answer that nothing of its own landed', async () => {
+    // Codex review: the first create-only write lands and its answer is lost, so
+    // the retry meets 409 exists on the caller's OWN file. Saying "nothing was
+    // written, use another path or overwrite" would send the model away from a
+    // file it already wrote, or have it replace it blind.
+    let puts = 0;
+    const real = globalThis.fetch;
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      if (String(input).includes('/files') && init?.method === 'PUT') {
+        puts += 1;
+        if (puts === 1) throw new TypeError('fetch failed', { cause: new Error('socket hang up') });
+        return Response.json(
+          { error: 'a file already exists at /home/user/a.txt', reason: 'exists' },
+          { status: 409 },
+        );
+      }
+      return real(input as never, init);
+    }) as typeof fetch;
+    try {
+      const { call, close } = await connect();
+      const args = { path: '/home/user/a.txt', content: 'x', overwrite: false };
+      expect((await call('write_file', args)).isError).toBe(true);
+      const retry = await call('write_file', args);
+      await close();
+      expect(puts).toBe(2);
+      expect(retry.isError).toBe(true);
+      const said = textOf(retry);
+      expect(said).not.toContain('nothing was written');
+      expect(said).toContain('this attempt wrote nothing');
+      expect(said).toContain(
+        'If an earlier attempt\u2019s outcome was unknown, the file may be yours: read it and compare ' +
+          'before choosing another path or overwriting.',
+      );
+    } finally {
+      globalThis.fetch = real;
+    }
+  });
+
+  it.each([
+    ['empty', () => new Response('', { status: 409 })],
+    ['not JSON', () => new Response('<html>conflict</html>', { status: 409 })],
+    ['JSON with no reason', () => Response.json({ error: 'conflict' }, { status: 409 })],
+    ['JSON with a numeric reason', () => Response.json({ reason: 5 }, { status: 409 })],
+    ['JSON with a blank reason', () => Response.json({ reason: ' ' }, { status: 409 })],
+    ['empty JSON object', () => Response.json({}, { status: 409 })],
+    [
+      'JSON whose error text claims existence',
+      () => Response.json({ error: 'a file already exists at that path' }, { status: 409 }),
+    ],
+  ])('does not call a create-only 409 with an %s body worth resending', async (_kind, answer) => {
+    const real = globalThis.fetch;
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      if (String(input).includes('/files') && init?.method === 'PUT') return answer();
+      return real(input as never, init);
+    }) as typeof fetch;
+    try {
+      const { call, close } = await connect();
+      const res = await call('write_file', {
+        path: '/home/user/a.txt',
+        content: 'x',
+        overwrite: false,
+      });
+      await close();
+      expect(res.isError).toBe(true);
+      expect(textOf(res)).toContain('refused as a conflict, reason unknown');
+      expect(textOf(res)).toContain('Do not send the same call again');
+      // Not even for JSON: without the platform's word the write may have landed.
+      expect(textOf(res)).not.toContain('wrote nothing');
+      expect(textOf(res)).toContain('whether this attempt wrote anything is unconfirmed');
+      expect(textOf(res)).not.toContain('already exists');
+      expect(textOf(res)).not.toContain('Something is already at');
+    } finally {
+      globalThis.fetch = real;
+    }
+  });
+
   it('refuses malformed base64 instead of writing a silently corrupt file', async () => {
     const { call, close } = await connect();
     const res = await call('write_file', {

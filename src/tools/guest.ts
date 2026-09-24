@@ -3,6 +3,8 @@ import { z } from 'zod';
 import type { Bytes } from '../api.js';
 import {
   ConflictError,
+  CreateOnlyConflictError,
+  FileExistsError,
   GatewayTimeoutError,
   platformSaid,
   RangeNotSatisfiableError,
@@ -552,7 +554,7 @@ export const registerGuest: Registrar = (server, session) => {
     {
       title: 'Put a file into the guest',
       description:
-        'Write a file inside the computer. Paths must be absolute — the guest agent inherits whatever working directory it was started in, so a relative path resolves somewhere you did not name.',
+        'Write a file inside the computer. Paths must be absolute — the guest agent inherits whatever working directory it was started in, so a relative path resolves somewhere you did not name. By default a file already at the path is replaced. Pass overwrite: false to create the file only if nothing is there: a path that is taken is refused and that attempt writes nothing — retrying does not change that. If an earlier attempt\u2019s outcome was unknown (its answer was lost), the file there may be the one it wrote: read it and compare before picking another path or writing again without overwrite: false to replace it. overwrite: false is for Linux computers; a Windows computer refuses it.',
       inputSchema: {
         ...idArg,
         path: absolutePath('path').describe(
@@ -563,9 +565,15 @@ export const registerGuest: Registrar = (server, session) => {
           .enum(['utf8', 'base64'])
           .default('utf8')
           .describe('base64 for anything that is not text.'),
+        overwrite: z
+          .boolean()
+          .default(true)
+          .describe(
+            'true (the default) replaces a file already at the path. false creates the file only if nothing is there, and refuses without writing anything when the path is taken.',
+          ),
       },
     },
-    ({ computer_id, path, content, encoding }, extra) =>
+    ({ computer_id, path, content, encoding, overwrite }, extra) =>
       guarded(async () => {
         const id = session.resolve(computer_id);
         // Node's base64 decoder is lenient: it drops characters outside the
@@ -595,16 +603,60 @@ export const registerGuest: Registrar = (server, session) => {
         const bytes = new Uint8Array(
           Buffer.from(content, encoding === 'base64' ? 'base64' : 'utf8'),
         );
-        const res = await session.api.with(extra.signal).json<{ path?: string; bytes?: number }>(
-          'PUT',
-          P.computerAction(id, 'files'),
-          // The path is a query parameter, and the URL builder encodes it. Doing
-          // that matters more than it looks: `+` decodes to a space and `&`
-          // ends the parameter, so an unencoded path with punctuation in it
-          // writes a DIFFERENT file and nothing reports that, because the
-          // platform never sees what was meant.
-          { query: { path }, raw: bytes },
-        );
+        let res: { path?: string; bytes?: number };
+        try {
+          res = await session.api.with(extra.signal).json<{ path?: string; bytes?: number }>(
+            'PUT',
+            P.computerAction(id, 'files'),
+            // The path is a query parameter, and the URL builder encodes it. Doing
+            // that matters more than it looks: `+` decodes to a space and `&`
+            // ends the parameter, so an unencoded path with punctuation in it
+            // writes a DIFFERENT file and nothing reports that, because the
+            // platform never sees what was meant.
+            //
+            // `overwrite` is sent only to ask for create-only (OPL-4994). Absent
+            // means replace on every platform version, so the default request
+            // is the one this tool always sent.
+            { query: overwrite ? { path } : { path, overwrite: 'false' }, raw: bytes },
+          );
+        } catch (err) {
+          // Only THIS attempt is known to have written nothing. A create-only
+          // write whose earlier attempt lost its answer may have written the
+          // file itself, and the retry then meets its own file here — so the
+          // sentence must not tell a model to go elsewhere or overwrite blind.
+          if (err instanceof FileExistsError) {
+            return withErrorMetadata(
+              refused(
+                `${apiErrorMessage(err)}\n\nSomething is already at ${path}, and this attempt wrote ` +
+                  'nothing: the file there is untouched by it. This does not clear by waiting, so do not ' +
+                  'send the same call again. If an earlier attempt\u2019s outcome was unknown, the file may ' +
+                  'be yours: read it and compare before choosing another path or overwriting. To replace ' +
+                  'it on purpose, call write_file again with overwrite: true (or without overwrite).',
+              ),
+              err,
+            );
+          }
+          // A create-only 409 with no usable reason — the body lost, empty, not
+          // the platform's JSON, or JSON without a string `reason`. The Api
+          // raises it as CreateOnlyConflictError so no caller resends it; the
+          // words here claim nothing about the path, nor that this attempt
+          // wrote nothing \u2014 without the platform's word, the 409 may come from
+          // a hop that had already forwarded the write. Not apiErrorMessage:
+          // the body's own text could say "already exists" without the
+          // platform's `exists` reason.
+          if (err instanceof CreateOnlyConflictError) {
+            return withErrorMetadata(
+              refused(
+                `${err.message} (HTTP ${err.status})\n\nThis create-only write to ${path} was refused ` +
+                  'as a conflict, reason unknown, and whether this attempt wrote anything is ' +
+                  'unconfirmed. Do not send the same call again: it was not said to clear by waiting. ' +
+                  'Read the path to see what is there before choosing another path or overwriting.',
+              ),
+              err,
+            );
+          }
+          throw err;
+        }
         return said(`Wrote ${res.bytes ?? bytes.length} bytes to ${res.path ?? path}.`, res);
       }),
   );
