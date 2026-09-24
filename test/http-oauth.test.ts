@@ -47,6 +47,8 @@ function platformWithRefusals() {
     /** What `GET ssh-keys`, the bearer probe, answers instead of its list. */
     probeStatus?: number;
     probeDelayMs?: number;
+    /** When set, every probe waits on this before answering. */
+    probeGate?: Promise<void>;
   } = { providerRefuses: false };
   /** Tokens refused on `GET account` only, after a delay in ms. */
   const slowRefusals = new Map<string, number>();
@@ -61,6 +63,7 @@ function platformWithRefusals() {
     });
     seen.push(headers);
     const token = (headers.authorization ?? '').replace(/^Bearer /, '');
+    if (url.pathname.endsWith('/ssh-keys') && state.probeGate) await state.probeGate;
     if (url.pathname.endsWith('/ssh-keys') && state.probeDelayMs) {
       await new Promise((r) => setTimeout(r, state.probeDelayMs));
     }
@@ -674,21 +677,28 @@ describe('hosted: checking a bearer before it gets anything', () => {
       expect(spend.status).toBe(401);
       await spend.text();
 
-      // Fill the process-wide cap from other addresses, with slow probes.
-      platform.state.probeDelayMs = 300;
+      // Fill the process-wide cap from other addresses: every probe is held
+      // at the platform until all 32 have arrived and the turned-away request
+      // has been answered, so the cap is full by construction, not by timing.
+      let release!: () => void;
+      platform.state.probeGate = new Promise<void>((r) => {
+        release = r;
+      });
+      const base = probes();
       const fill = Array.from({ length: 32 }, (_, i) =>
         c.send(INIT, from(`10.9.1.${i + 1}`, `mcpat_fill${i}`)),
       );
-      await new Promise((r) => setTimeout(r, 50));
+      while (probes() < base + 32) await new Promise((r) => setTimeout(r, 5));
       const before = probes();
       const turned = await c.send(INIT, from('10.9.0.1', 'mcpat_invented'));
       expect(turned.status).toBe(503);
       await turned.text();
       expect(probes()).toBe(before);
+      platform.state.probeGate = undefined;
+      release();
       for (const res of await Promise.all(fill)) await res.text();
 
       // A slot is free: the spent address is probed at once, not told to wait.
-      platform.state.probeDelayMs = 0;
       platform.state.onlyAccept = 'mcpat_new';
       const res = await c.send(INIT, from('10.9.0.1', 'mcpat_new'));
       expect(res.status).toBe(200);
