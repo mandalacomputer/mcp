@@ -6,7 +6,14 @@ export function parseOperations(document: unknown): Contract;
 export function compareCoverage(
   contract: Contract,
   evidence: Evidence,
-): { operations: number; requests: number; tools: number; excluded: string[] };
+  options?: { unsent?: Iterable<string> },
+): {
+  operations: number;
+  requests: number;
+  tools: number;
+  excluded: string[];
+  unsent: string[];
+};
 export class PublicationError extends Error {
   classification: string;
   status?: number;
