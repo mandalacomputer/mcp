@@ -323,7 +323,7 @@ export const PARAMETERS: ReadonlyMap<string, readonly string[]> = new Map([
   ],
 
   // The upload's body is the file, raw — there are no named fields to mirror.
-  ['PUT computers/:id/files', ['query:path', 'query:no_wake']],
+  ['PUT computers/:id/files', ['query:path', 'query:no_wake', 'query:overwrite']],
   // And the download's answer is the file. `Range` is the one header a caller
   // sends that reaches the daemon, and read_file's whole ability to page
   // through a file larger than one request moves is this line.
@@ -405,6 +405,10 @@ export const UNIMPLEMENTED_PARAMETERS: ReadonlySet<string> = new Set([
   // GAP. File transfers cannot yet opt out of waking a suspended computer.
   'GET computers/:id/files  query:no_wake',
   'PUT computers/:id/files  query:no_wake',
+  // OPL-4994: `overwrite=false` makes an upload create-only, refused with 409
+  // `exists` rather than replacing a file already at the path.
+  // Listed to stay in step with the surface; not yet sent.
+  'PUT computers/:id/files  query:overwrite',
   // DECISION. start_computer requests a boot or resume. With resume_only=true,
   // a stopped computer without a saved session returns 200 without starting.
   // Keep that successful no-op out of the tool so a model cannot mistake the
