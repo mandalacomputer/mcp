@@ -3,6 +3,7 @@ import { z } from 'zod';
 import type { Bytes } from '../api.js';
 import {
   ConflictError,
+  CreateOnlyConflictError,
   FileExistsError,
   GatewayTimeoutError,
   platformSaid,
@@ -623,7 +624,7 @@ export const registerGuest: Registrar = (server, session) => {
           // write whose earlier attempt lost its answer may have written the
           // file itself, and the retry then meets its own file here — so the
           // sentence must not tell a model to go elsewhere or overwrite blind.
-          if (err instanceof FileExistsError && err.reason === 'exists') {
+          if (err instanceof FileExistsError) {
             return withErrorMetadata(
               refused(
                 `${apiErrorMessage(err)}\n\nSomething is already at ${path}, and this attempt wrote ` +
@@ -637,18 +638,19 @@ export const registerGuest: Registrar = (server, session) => {
           }
           // A create-only 409 with no usable reason — the body lost, empty, not
           // the platform's JSON, or JSON without a string `reason`. The Api
-          // raises it as FileExistsError with `reason` undefined so no caller
-          // resends it; the words here claim nothing about the path. Not
-          // apiErrorMessage: the body's own text could say "already exists"
-          // without the platform's `exists` reason.
-          if (err instanceof FileExistsError) {
+          // raises it as CreateOnlyConflictError so no caller resends it; the
+          // words here claim nothing about the path, nor that this attempt
+          // wrote nothing \u2014 without the platform's word, the 409 may come from
+          // a hop that had already forwarded the write. Not apiErrorMessage:
+          // the body's own text could say "already exists" without the
+          // platform's `exists` reason.
+          if (err instanceof CreateOnlyConflictError) {
             return withErrorMetadata(
               refused(
                 `${err.message} (HTTP ${err.status})\n\nThis create-only write to ${path} was refused ` +
-                  'as a conflict, reason unknown. Do not send the same call again: it was not said to ' +
-                  'clear by waiting. This attempt wrote nothing. If an earlier attempt\u2019s outcome was ' +
-                  'unknown, the file may be yours: read it and compare before choosing another path or ' +
-                  'overwriting.',
+                  'as a conflict, reason unknown, and whether this attempt wrote anything is ' +
+                  'unconfirmed. Do not send the same call again: it was not said to clear by waiting. ' +
+                  'Read the path to see what is there before choosing another path or overwriting.',
               ),
               err,
             );

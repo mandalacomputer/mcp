@@ -7,6 +7,7 @@ import {
   errorForStatus,
   FileExistsError,
   isTransient,
+  isTransientForPoll,
   MoveRequiredError,
   RangeNotSatisfiableError,
   RateLimitError,
@@ -432,13 +433,16 @@ describe('a create-only upload onto a taken path (OPL-4994)', () => {
           raw: new Uint8Array([1]),
         })
         .catch((error: unknown) => error);
-      expect(error).toBeInstanceOf(FileExistsError);
-      expect(error).toMatchObject({ status: 409 });
+      expect(error).toBeInstanceOf(publicApi.CreateOnlyConflictError);
+      expect(error).toBeInstanceOf(ConflictError);
+      expect(error).not.toBeInstanceOf(FileExistsError);
+      expect(error).toMatchObject({ name: 'CreateOnlyConflictError', status: 409 });
       expect((error as APIError).reason).toBeUndefined();
       expect((error as Error).message).toContain('refused as a conflict, reason unknown');
       expect((error as Error).message).not.toContain('already exists');
       expect(isTransient(error)).toBe(false);
       expect(publicApi.isTransient(error)).toBe(false);
+      expect(isTransientForPoll(error)).toBe(false);
     },
   );
 

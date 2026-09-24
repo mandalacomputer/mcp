@@ -478,7 +478,9 @@ describe('files', () => {
       expect(res.isError).toBe(true);
       expect(textOf(res)).toContain('refused as a conflict, reason unknown');
       expect(textOf(res)).toContain('Do not send the same call again');
-      expect(textOf(res)).toContain('This attempt wrote nothing');
+      // Not even for JSON: without the platform's word the write may have landed.
+      expect(textOf(res)).not.toContain('wrote nothing');
+      expect(textOf(res)).toContain('whether this attempt wrote anything is unconfirmed');
       expect(textOf(res)).not.toContain('already exists');
       expect(textOf(res)).not.toContain('Something is already at');
     } finally {

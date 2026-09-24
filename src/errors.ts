@@ -362,16 +362,36 @@ export class MoveRequiredError extends ConflictError {
  * {@link isTransient} says no to it. A subclass, so `instanceof ConflictError`
  * written before this existed still catches it.
  *
- * {@link APIError.reason} is `exists` when the platform's body said so. It is
- * `undefined` when a create-only upload's 409 carried no usable reason — a body
- * interrupted, empty, not the platform's JSON, or JSON without a non-blank
- * string `reason`. {@link Api} raises that refusal as this class too (see
- * {@link createOnlyRefusal}), with a message saying it was a conflict whose
- * reason is unknown; it does NOT say the path exists. Test `reason === 'exists'`,
- * not the class, before telling anyone the path is taken.
+ * Raised only for the platform's explicit `reason: "exists"`, so the class is
+ * the claim: something is at the path. A create-only 409 whose reason could
+ * not be read is {@link CreateOnlyConflictError} instead, which claims nothing
+ * about the path.
  */
 export class FileExistsError extends ConflictError {
   override name = 'FileExistsError';
+}
+
+/**
+ * A create-only upload refused with 409 whose reason could not be read.
+ *
+ * `PUT /computers/{id}/files?overwrite=false` is answered 409 `exists`
+ * ({@link FileExistsError}) or 409 `unsupported` when it is refused. A 409 can
+ * also arrive with no usable reason: the body interrupted, empty, a proxy's
+ * page instead of the platform's JSON, or JSON whose `reason` is missing, not a
+ * string, or blank. {@link Api} raises that refusal as this class (see
+ * {@link createOnlyRefusal}), with {@link APIError.reason} `undefined` and a
+ * message saying the reason is unknown. It does NOT say the path is taken, and
+ * it does not say whether the write landed.
+ *
+ * Final, not transient: {@link isTransient} says no to it. Sending the same
+ * create-only write again repeats a refusal that was not said to clear, and a
+ * delayed retry after the path is cleared could create the file when no one
+ * expected it. Read the path to find out what is there before deciding. The
+ * raw body stays on {@link APIError.body} for diagnostics. A subclass of
+ * {@link ConflictError}, so `instanceof ConflictError` still catches it.
+ */
+export class CreateOnlyConflictError extends ConflictError {
+  override name = 'CreateOnlyConflictError';
 }
 
 /**
@@ -385,16 +405,17 @@ export class FileExistsError extends ConflictError {
  * is missing, not a string, or blank — would otherwise be a bare
  * {@link ConflictError} that {@link isTransient} calls worth sending again: a
  * retry of a refusal that does not clear, and one that could create the file
- * later if the path were cleared in between. So it is final here, with a
- * neutral message: not the body's own text, which could say "already exists"
- * without the `exists` reason. The body stays on the error for diagnostics. A
- * 409 that DID carry a string reason keeps the platform's classification,
- * whatever the word.
+ * later if the path were cleared in between. So it is a
+ * {@link CreateOnlyConflictError} here, final, with a neutral message: not the
+ * body's own text, which could say "already exists" without the `exists`
+ * reason. The body stays on the error for diagnostics. A 409 that DID carry a
+ * string reason keeps the platform's classification, whatever the word.
  */
 export function createOnlyRefusal(err: APIError): APIError {
   if (!(err instanceof ConflictError) || err instanceof FileExistsError) return err;
+  if (err instanceof CreateOnlyConflictError) return err;
   if (typeof err.reason === 'string' && err.reason.trim() !== '') return err;
-  const refusal = new FileExistsError(
+  const refusal = new CreateOnlyConflictError(
     'a create-only upload was refused as a conflict, reason unknown: the 409 carried no ' +
       'reason that could be read, so whether the path is taken was not said; treat it as ' +
       'final rather than sending the same write again',
@@ -404,7 +425,7 @@ export function createOnlyRefusal(err: APIError): APIError {
     { requestId: err.requestId, allow: err.allow, wwwAuthenticate: err.wwwAuthenticate },
   );
   // The constructor reads the body again, and would keep a blank word. Unknown
-  // is `undefined` here, as documented on FileExistsError.
+  // is `undefined`, as documented on CreateOnlyConflictError.
   (refusal as { reason?: string }).reason = undefined;
   return refusal;
 }
@@ -1079,7 +1100,12 @@ export function isTransient(err: unknown): boolean {
   // First, because it is a subclass of the very branch below that would say yes
   // (OPL-3775). An embedder wrapping a resize in `if (isTransient(err)) retry()`
   // is the caller this line is for.
-  if (err instanceof MoveRequiredError || err instanceof FileExistsError) return false;
+  if (
+    err instanceof MoveRequiredError ||
+    err instanceof FileExistsError ||
+    err instanceof CreateOnlyConflictError
+  )
+    return false;
   // A lost RESPONSE is not a request that never left, and only one of the two
   // is safe to replay blind. Same shape as the line above and the same reason:
   // a subclass of a branch below that would otherwise say yes (OPL-3855).
@@ -1213,7 +1239,12 @@ export function isTransient(err: unknown): boolean {
  */
 export function isTransientForPoll(err: unknown): boolean {
   if (!(err instanceof APIError) && !(err instanceof ConnectivityError)) return false;
-  if (err instanceof MoveRequiredError || err instanceof FileExistsError) return false;
+  if (
+    err instanceof MoveRequiredError ||
+    err instanceof FileExistsError ||
+    err instanceof CreateOnlyConflictError
+  )
+    return false;
   if (err instanceof OriginTLSError) return false;
   if (err instanceof APIError) {
     if (err.status === 524) return false;

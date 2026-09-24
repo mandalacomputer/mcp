@@ -25,14 +25,16 @@ are wording changes, and they are behaviour changes in the way that matters.
   `overwrite: true` replaces the file on purpose. A create-only 409 with no usable
   reason (a body that could not be read, or JSON without a string `reason`) is
   refused as a conflict with the reason unknown, never as one worth sending
-  again, and without claiming the path is taken. Linux computers only.
+  again, without claiming the path is taken, and with the attempt's outcome
+  reported as unconfirmed. Linux computers only.
 - **`FileExistsError`**, exported for embedders: the 409 whose `reason` is
   `"exists"`, a `ConflictError` that `isTransient` calls permanent.
-  `reasonKind("exists")` is `"permanent"`. The exported `Api` also raises a
-  create-only upload's 409 with no usable reason as `FileExistsError`, with
-  `reason` undefined and a message saying the reason is unknown, so
-  `isTransient` is false for it too; test `reason === "exists"` before saying
-  the path is taken.
+  `reasonKind("exists")` is `"permanent"`. Raised only for that explicit word.
+- **`CreateOnlyConflictError`**, exported for embedders: the exported `Api`
+  raises a create-only upload's 409 with no usable reason as this
+  `ConflictError`, with `reason` undefined and a message saying the reason is
+  unknown. `isTransient` calls it permanent, and it claims nothing about the
+  path.
 
 ## [0.5.0] — 2026-09-23
 

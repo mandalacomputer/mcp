@@ -158,7 +158,10 @@ Parameter and response-mode support remains a separate contract.
 `write_file` replaces a file already at the path. With `overwrite: false` it
 creates the file only if nothing is there, and a path that is taken is refused
 without that attempt writing anything (Linux computers only). If an earlier
-attempt's outcome was unknown, the file may be the one it wrote.
+attempt's outcome was unknown, the file may be the one it wrote. For
+embedders, the `Api` raises that refusal as `FileExistsError`, and a
+create-only 409 whose reason could not be read as `CreateOnlyConflictError`,
+which says nothing about the path; `isTransient` is false for both.
 
 **Retained versions** — `retain_execution_output`, `get_result`, `read_result_output`,
 `delete_result`, `publish_artifact`, `get_artifact`, `read_artifact`, `delete_artifact`
