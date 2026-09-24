@@ -176,7 +176,10 @@ export function reasonAdvice(reason: string | undefined): string | undefined {
     case 'unsupported':
       return 'this computer cannot do it at all, so do not retry it — the answer is the same forever';
     case 'exists':
-      return 'something is already at that path and nothing was written — it is untouched. This does not clear by waiting: choose another path, or send the write again without overwrite: false to replace it on purpose';
+      // Only THIS attempt is known to have written nothing: a create-only
+      // write whose earlier attempt lost its answer may have written the file
+      // itself, and the retry meets that file here.
+      return 'something is already at that path and this attempt wrote nothing. This does not clear by waiting. If an earlier attempt\u2019s outcome was unknown, the file may be yours: read it and compare before choosing another path or overwriting (without overwrite: false, a write replaces it)';
     case 'revoked':
       // Reached only on a status statusAdvice has no sentence for, because the
       // formatter asks that one first and the platform sends this word on 401 and
@@ -352,7 +355,8 @@ export class MoveRequiredError extends ConflictError {
  *
  * `PUT /computers/{id}/files?overwrite=false` creates the file only if nothing
  * is at `path`. When something is, the answer is 409 with `reason: "exists"` and
- * NOTHING was written. Its own class for the reason {@link MoveRequiredError}
+ * THIS request wrote nothing — an earlier attempt whose answer was lost may have
+ * written the file itself. Its own class for the reason {@link MoveRequiredError}
  * has one: it is a {@link ConflictError} by status and the opposite of one by
  * nature — it clears only when the caller decides, never by waiting — so
  * {@link isTransient} says no to it. A subclass, so `instanceof ConflictError`
@@ -1017,7 +1021,7 @@ export function isTransient(err: unknown): boolean {
   // First, because it is a subclass of the very branch below that would say yes
   // (OPL-3775). An embedder wrapping a resize in `if (isTransient(err)) retry()`
   // is the caller this line is for.
-  if (err instanceof MoveRequiredError) return false;
+  if (err instanceof MoveRequiredError || err instanceof FileExistsError) return false;
   // A lost RESPONSE is not a request that never left, and only one of the two
   // is safe to replay blind. Same shape as the line above and the same reason:
   // a subclass of a branch below that would otherwise say yes (OPL-3855).
@@ -1151,7 +1155,7 @@ export function isTransient(err: unknown): boolean {
  */
 export function isTransientForPoll(err: unknown): boolean {
   if (!(err instanceof APIError) && !(err instanceof ConnectivityError)) return false;
-  if (err instanceof MoveRequiredError) return false;
+  if (err instanceof MoveRequiredError || err instanceof FileExistsError) return false;
   if (err instanceof OriginTLSError) return false;
   if (err instanceof APIError) {
     if (err.status === 524) return false;

@@ -19,8 +19,12 @@ are wording changes, and they are behaviour changes in the way that matters.
 - **`write_file` takes `overwrite`.** It defaults to `true`, which replaces a
   file already at the path as before and sends nothing new. `overwrite: false`
   creates the file only if nothing is there; a path that is taken is refused,
-  and the reply says nothing was written, that retrying does not change it, and
-  that `overwrite: true` replaces the file on purpose. Linux computers only.
+  and the reply says that attempt wrote nothing, that retrying does not change
+  it, that if an earlier attempt's outcome was unknown the file may be yours (read
+  it and compare before choosing another path or overwriting), and that
+  `overwrite: true` replaces the file on purpose. A create-only 409 whose body
+  could not be read gets the same kind of reply rather than reading as a
+  conflict worth sending again. Linux computers only.
 - **`FileExistsError`**, exported for embedders: the 409 whose `reason` is
   `"exists"`, a `ConflictError` that `isTransient` calls permanent.
   `reasonKind("exists")` is `"permanent"`.

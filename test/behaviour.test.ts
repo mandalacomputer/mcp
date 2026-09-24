@@ -404,9 +404,73 @@ describe('files', () => {
       await close();
       expect(res.isError).toBe(true);
       expect(textOf(res)).toContain('a file already exists at /home/user/a.txt');
-      expect(textOf(res)).toContain('nothing was written');
+      expect(textOf(res)).toContain('this attempt wrote nothing');
       expect(textOf(res)).toContain('do not send the same call again');
       expect(textOf(res)).toContain('overwrite: true');
+    } finally {
+      globalThis.fetch = real;
+    }
+  });
+
+  it('does not tell a retry after a lost answer that nothing of its own landed', async () => {
+    // Codex review: the first create-only write lands and its answer is lost, so
+    // the retry meets 409 exists on the caller's OWN file. Saying "nothing was
+    // written, use another path or overwrite" would send the model away from a
+    // file it already wrote, or have it replace it blind.
+    let puts = 0;
+    const real = globalThis.fetch;
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      if (String(input).includes('/files') && init?.method === 'PUT') {
+        puts += 1;
+        if (puts === 1) throw new TypeError('fetch failed', { cause: new Error('socket hang up') });
+        return Response.json(
+          { error: 'a file already exists at /home/user/a.txt', reason: 'exists' },
+          { status: 409 },
+        );
+      }
+      return real(input as never, init);
+    }) as typeof fetch;
+    try {
+      const { call, close } = await connect();
+      const args = { path: '/home/user/a.txt', content: 'x', overwrite: false };
+      expect((await call('write_file', args)).isError).toBe(true);
+      const retry = await call('write_file', args);
+      await close();
+      expect(puts).toBe(2);
+      expect(retry.isError).toBe(true);
+      const said = textOf(retry);
+      expect(said).not.toContain('nothing was written');
+      expect(said).toContain('this attempt wrote nothing');
+      expect(said).toContain(
+        'If an earlier attempt\u2019s outcome was unknown, the file may be yours: read it and compare ' +
+          'before choosing another path or overwriting.',
+      );
+    } finally {
+      globalThis.fetch = real;
+    }
+  });
+
+  it.each([
+    ['empty', () => new Response('', { status: 409 })],
+    ['not JSON', () => new Response('<html>conflict</html>', { status: 409 })],
+  ])('does not call a create-only 409 with an %s body worth resending', async (_kind, answer) => {
+    const real = globalThis.fetch;
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      if (String(input).includes('/files') && init?.method === 'PUT') return answer();
+      return real(input as never, init);
+    }) as typeof fetch;
+    try {
+      const { call, close } = await connect();
+      const res = await call('write_file', {
+        path: '/home/user/a.txt',
+        content: 'x',
+        overwrite: false,
+      });
+      await close();
+      expect(res.isError).toBe(true);
+      expect(textOf(res)).toContain('the reason could not be read');
+      expect(textOf(res)).toContain('do not send the same call again');
+      expect(textOf(res)).toContain('This attempt wrote nothing');
     } finally {
       globalThis.fetch = real;
     }

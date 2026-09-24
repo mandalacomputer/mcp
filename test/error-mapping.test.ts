@@ -405,7 +405,10 @@ describe('a create-only upload onto a taken path (OPL-4994)', () => {
 
   it('classifies the word as permanent and says nothing was written', () => {
     expect(reasonKind('exists')).toBe('permanent');
-    expect(reasonAdvice('exists')).toContain('nothing was written');
+    expect(reasonAdvice('exists')).toContain('this attempt wrote nothing');
+    expect(reasonAdvice('exists')).toContain(
+      'If an earlier attempt\u2019s outcome was unknown, the file may be yours',
+    );
   });
 
   it('leaves another word on the same status an ordinary ConflictError', () => {

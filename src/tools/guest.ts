@@ -553,7 +553,7 @@ export const registerGuest: Registrar = (server, session) => {
     {
       title: 'Put a file into the guest',
       description:
-        'Write a file inside the computer. Paths must be absolute — the guest agent inherits whatever working directory it was started in, so a relative path resolves somewhere you did not name. By default a file already at the path is replaced. Pass overwrite: false to create the file only if nothing is there: a path that is taken is refused, nothing is written, and the file already there is untouched — retrying does not change that; pick another path, or write again without overwrite: false to replace it on purpose. overwrite: false is for Linux computers; a Windows computer refuses it.',
+        'Write a file inside the computer. Paths must be absolute — the guest agent inherits whatever working directory it was started in, so a relative path resolves somewhere you did not name. By default a file already at the path is replaced. Pass overwrite: false to create the file only if nothing is there: a path that is taken is refused and that attempt writes nothing — retrying does not change that. If an earlier attempt\u2019s outcome was unknown (its answer was lost), the file there may be the one it wrote: read it and compare before picking another path or writing again without overwrite: false to replace it. overwrite: false is for Linux computers; a Windows computer refuses it.',
       inputSchema: {
         ...idArg,
         path: absolutePath('path').describe(
@@ -619,13 +619,39 @@ export const registerGuest: Registrar = (server, session) => {
             { query: overwrite ? { path } : { path, overwrite: 'false' }, raw: bytes },
           );
         } catch (err) {
+          // Only THIS attempt is known to have written nothing. A create-only
+          // write whose earlier attempt lost its answer may have written the
+          // file itself, and the retry then meets its own file here — so the
+          // sentence must not tell a model to go elsewhere or overwrite blind.
           if (err instanceof FileExistsError) {
             return withErrorMetadata(
               refused(
-                `${apiErrorMessage(err)}\n\nSomething is already at ${path}, and nothing was written: ` +
-                  'the file there is untouched. This does not clear by waiting, so do not send the same ' +
-                  'call again. Choose another path, or call write_file again with overwrite: true (or ' +
-                  'without overwrite) to replace it on purpose.',
+                `${apiErrorMessage(err)}\n\nSomething is already at ${path}, and this attempt wrote ` +
+                  'nothing: the file there is untouched by it. This does not clear by waiting, so do not ' +
+                  'send the same call again. If an earlier attempt\u2019s outcome was unknown, the file may ' +
+                  'be yours: read it and compare before choosing another path or overwriting. To replace ' +
+                  'it on purpose, call write_file again with overwrite: true (or without overwrite).',
+              ),
+              err,
+            );
+          }
+          // The same refusal with its body lost — interrupted, empty, or not the
+          // platform's JSON — carries no reason, and would otherwise read as a
+          // conflict worth sending again. On this route a 409 is `exists` or
+          // `unsupported`, and neither clears by waiting.
+          if (
+            !overwrite &&
+            err instanceof ConflictError &&
+            (err.body === null || typeof err.body !== 'object' || Array.isArray(err.body))
+          ) {
+            return withErrorMetadata(
+              refused(
+                `${apiErrorMessage(err)} (HTTP ${err.status})\n\nThis create-only write was refused, and ` +
+                  'the reason could not be read. On this route that means something is already at ' +
+                  `${path} or this computer\u2019s host cannot do create-only yet; neither clears by ` +
+                  'waiting, so do not send the same call again. This attempt wrote nothing. If an earlier ' +
+                  'attempt\u2019s outcome was unknown, the file may be yours: read it and compare before ' +
+                  'choosing another path or overwriting.',
               ),
               err,
             );
