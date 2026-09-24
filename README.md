@@ -903,6 +903,66 @@ not list it, and every request is refused with a 403. Set
 is in force, so a `403` on a deployment that worked before has a line above it
 naming the fix.
 
+### Hosted, with OAuth
+
+The endpoint at `https://app.mandala.computer/mcp` is this server run with
+`--http` behind the platform's own proxy, with the platform as its OAuth 2.1
+authorization server. Nobody pastes a key:
+
+```sh
+claude mcp add --transport http mandala https://app.mandala.computer/mcp
+```
+
+Two variables make an HTTP server behave that way, and without them nothing
+changes — self-hosters keep bringing API keys:
+
+```sh
+MANDALA_MCP_RESOURCE_METADATA_URL=https://app.mandala.computer/.well-known/oauth-protected-resource/mcp \
+MANDALA_MCP_SERVICE_SECRET=… \
+MANDALA_ALLOWED_HOSTS=app.mandala.computer \
+  npx mandala-computer-mcp --http --host 127.0.0.1 --port 3000
+```
+
+In this mode `X-Forwarded-For` is believed from a loopback peer only, so the
+proxy in front must be on the same machine and must set it to the real client
+address.
+
+- **Every `/mcp` request needs a bearer**, initialize and `tools/list`
+  included. One without is answered `401` with exactly
+  `WWW-Authenticate: Bearer resource_metadata="<that URL>", scope="mcp:tools"`,
+  which is how a client finds where to authorize. `/healthz` stays open.
+- **The bearer is passed through unchanged** — an `mcpat_…` access token, or an
+  API key, which the platform still accepts.
+- **A bearer is checked with the platform before it gets anything.** An
+  initialize makes no session until the platform accepts its token — a `2xx`
+  from `GET ssh-keys`, which every valid credential gets — so invented tokens
+  cannot fill the session pool. A `401` is the challenge above; any other
+  answer is `503` and nothing is remembered. Refused initializes are budgeted
+  per source address, 20 a minute. Past that, a token already accepted still
+  passes and a new one is still checked, but only one every 5 s per address;
+  the rest get `429` with `Retry-After`. The budget comes back when its minute
+  is up. A POST
+  carrying a request is checked again before it is dispatched, with an
+  acceptance cached for 60 s under the token's digest, so an expired or
+  revoked token is a clean `401` before any stream opens.
+- **A token the platform refuses during a call comes back as that same
+  `401`**, not as a tool error, so the client refreshes or authorizes again —
+  the answer is held until its first byte for this. The one case that cannot
+  work: a token that dies mid-call AFTER the stream has committed (the SDK's
+  15 s keep-alive, a progress notification or a partial result). That call
+  ends as a tool error, the session remembers the refusal, and the next
+  request on that token gets the `401` without reaching the platform.
+- **A refreshed token starts a new session.** A session is bound to the digest
+  of the bearer that opened it, and a different bearer on it is answered
+  `404 Unknown session`, the MCP spec's signal to initialize again. An access
+  token says nothing this server can check about which grant it came from, so
+  rebinding would let any valid credential that learned a session id take over
+  its bound computer, buffered events and retained results.
+- `X-Mandala-MCP-Service` carries `MANDALA_MCP_SERVICE_SECRET` on every
+  platform request, only ever to `MANDALA_BASE_URL`, so a token cannot be
+  replayed at the API directly by the app it was issued to. A client's own
+  header of that name is never forwarded.
+
 ### Configuration
 
 | Variable | Meaning |
@@ -917,8 +977,10 @@ naming the fix.
 | `MANDALA_READ_ONLY` | Keep only tools annotated `readOnlyHint: true`; strict boolean parsing as described under Tool filters. |
 | `MANDALA_TAGS` | Comma-separated lowercase tool tags; see Tool filters for the inventory and intersection rules. |
 | `MANDALA_ALLOWED_HOSTS`, `MANDALA_ALLOWED_ORIGINS` | Comma-separated. Which `Host` and `Origin` values this server answers to. On a loopback bind the host list defaults to the address it was given, so DNS-rebinding protection is on without configuration; set this when serving under a name. |
+| `MANDALA_MCP_RESOURCE_METADATA_URL` | `--http` only. The OAuth protected-resource metadata URL this server is published under. Set, it answers OAuth clients as described under Hosted, with OAuth; unset, callers bring an API key. |
+| `MANDALA_MCP_SERVICE_SECRET` | `--http` only. Sent as `X-Mandala-MCP-Service` on every platform request, to `MANDALA_BASE_URL` only. Never logged. |
 
-Every one of these but the model key and the two tool filters has a flag as well, and a flag overrides
+Every one of these but the model key, the two tool filters and the two OAuth settings has a flag as well, and a flag overrides
 the environment: `--http`, `--port`, `--host`, `--base-url`, `--computer`,
 `--allowed-hosts`, `--allowed-origins`, `--no-lifecycle`, local `--profile`, plus `--help` and
 `--version`. `--key` exists for a caller launching several servers under

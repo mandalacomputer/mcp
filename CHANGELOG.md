@@ -16,6 +16,20 @@ are wording changes, and they are behaviour changes in the way that matters.
 
 ### Added
 
+- **Hosted OAuth mode for `--http`.** With
+  `MANDALA_MCP_RESOURCE_METADATA_URL` set, every `/mcp` request without a
+  bearer, and every one whose token the platform refuses, is a `401` with
+  `WWW-Authenticate: Bearer resource_metadata="…", scope="mcp:tools"`, so MCP
+  clients authorize and refresh on their own. A different bearer on an existing
+  session is answered `404` (initialize again) rather than rebound. A bearer
+  is checked with the platform before an initialize creates a session and
+  before a request is dispatched (only a `2xx` counts, cached 60 s), and
+  refused initializes are budgeted per source without locking out a valid
+  client behind the same address.
+  `MANDALA_MCP_SERVICE_SECRET` is sent as `X-Mandala-MCP-Service` on every
+  platform request; a client's own header of that name is never forwarded.
+  Without either variable nothing changes.
+
 - **`write_file` takes `overwrite`.** It defaults to `true`, which replaces a
   file already at the path as before and sends nothing new. `overwrite: false`
   creates the file only if nothing is there; a path that is taken is refused,
