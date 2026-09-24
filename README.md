@@ -915,17 +915,31 @@ MANDALA_ALLOWED_HOSTS=app.mandala.computer \
   npx mandala-computer-mcp --http --host 127.0.0.1 --port 3000
 ```
 
+In this mode `X-Forwarded-For` is believed from a loopback peer only, so the
+proxy in front must be on the same machine and must set it to the real client
+address.
+
 - **Every `/mcp` request needs a bearer**, initialize and `tools/list`
   included. One without is answered `401` with exactly
   `WWW-Authenticate: Bearer resource_metadata="<that URL>", scope="mcp:tools"`,
   which is how a client finds where to authorize. `/healthz` stays open.
 - **The bearer is passed through unchanged** — an `mcpat_…` access token, or an
   API key, which the platform still accepts.
-- **A token the platform refuses comes back as that same `401`**, not as a tool
-  error, so the client refreshes or authorizes again. The answer to a request
-  is held until its first byte for this; a refusal that arrives after a
-  result has started streaming stays a tool error for that one call, and the
-  session's next request on the refused token gets the `401` before it runs.
+- **A bearer is checked with the platform before it gets anything.** An
+  initialize makes no session until the platform accepts its token (one cheap
+  authenticated read), so invented tokens cannot fill the session pool; a
+  refused one is the `401` above. Refused initializes are also budgeted per
+  source address — 20 a minute, then `429` without asking the platform. A POST
+  carrying a request is checked again before it is dispatched, with an
+  acceptance cached for 60 s under the token's digest, so an expired or
+  revoked token is a clean `401` before any stream opens.
+- **A token the platform refuses during a call comes back as that same
+  `401`**, not as a tool error, so the client refreshes or authorizes again —
+  the answer is held until its first byte for this. The one case that cannot
+  work: a token that dies mid-call AFTER the stream has committed (the SDK's
+  15 s keep-alive, a progress notification or a partial result). That call
+  ends as a tool error, the session remembers the refusal, and the next
+  request on that token gets the `401` without reaching the platform.
 - **A refreshed token starts a new session.** A session is bound to the digest
   of the bearer that opened it, and a different bearer on it is answered
   `404 Unknown session`, the MCP spec's signal to initialize again. An access

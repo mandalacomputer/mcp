@@ -41,7 +41,9 @@ function platformWithRefusals() {
   const platform = installFakePlatform();
   const fake = globalThis.fetch;
   const refused = new Set<string>();
-  const state = { providerRefuses: false };
+  const state: { providerRefuses: boolean; onlyAccept?: string } = { providerRefuses: false };
+  /** Tokens refused on `GET account` only, after a delay in ms. */
+  const slowRefusals = new Map<string, number>();
   /** Headers of every request that reached the platform, lower-cased. */
   const seen: Array<Record<string, string>> = [];
   globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
@@ -53,7 +55,12 @@ function platformWithRefusals() {
     });
     seen.push(headers);
     const token = (headers.authorization ?? '').replace(/^Bearer /, '');
-    if (refused.has(token)) {
+    const slow = slowRefusals.get(token);
+    if (slow !== undefined && url.pathname.endsWith('/account')) {
+      await new Promise((r) => setTimeout(r, slow));
+      refused.add(token);
+    }
+    if (refused.has(token) || (state.onlyAccept !== undefined && token !== state.onlyAccept)) {
       return new Response(
         JSON.stringify({ error: 'invalid or expired access token', reason: 'invalid' }),
         {
@@ -76,6 +83,7 @@ function platformWithRefusals() {
   return {
     refused,
     state,
+    slowRefusals,
     seen,
     restore: () => {
       globalThis.fetch = fake;
@@ -84,7 +92,7 @@ function platformWithRefusals() {
   };
 }
 
-async function start(extra: { resourceMetadataUrl?: string; serviceSecret?: string }) {
+async function start(extra: Partial<Parameters<typeof runHttp>[0]>) {
   const server = await runHttp({ port: 0, host: '127.0.0.1', baseUrl: BASE, ...extra });
   const { port } = server.address() as AddressInfo;
   return { server, url: `http://127.0.0.1:${port}/mcp` };
@@ -455,5 +463,133 @@ describe('the Api client and the service header', () => {
     const api = new Api('com_key', BASE, undefined, { serviceSecret: SECRET });
     await api.with(new AbortController().signal).json('GET', 'account');
     expect(platform.seen[0]['x-mandala-mcp-service']).toBe(SECRET);
+  });
+});
+
+describe('hosted: checking a bearer before it gets anything', () => {
+  let platform: ReturnType<typeof platformWithRefusals>;
+  afterEach(() => platform.restore());
+
+  const sessions = async (url: string) =>
+    ((await (await fetch(url.replace(/\/mcp$/, '/healthz'))).json()) as { sessions: number })
+      .sessions;
+
+  it('creates no session for invented bearers, however many, and still serves a real one', async () => {
+    platform = platformWithRefusals();
+    platform.state.onlyAccept = 'mcpat_good';
+    const { server, url } = await start({
+      resourceMetadataUrl: METADATA,
+      serviceSecret: SECRET,
+      maxSessions: 3,
+      maxFailedInitializes: 100,
+    });
+    try {
+      const c = client(url);
+      for (let i = 0; i < 6; i++) {
+        const res = await c.send(INIT, { Authorization: `Bearer mcpat_invented${i}` });
+        expect(res.status).toBe(401);
+        expect(res.headers.get('www-authenticate')).toBe(CHALLENGE);
+        expect(res.headers.get('mcp-session-id')).toBeNull();
+        await res.text();
+      }
+      expect(await sessions(url)).toBe(0);
+      const session = await c.open('mcpat_good');
+      expect(session).toBeTruthy();
+      expect(await sessions(url)).toBe(1);
+    } finally {
+      await stop(server);
+    }
+  });
+
+  it('turns a source away with 429, without asking the platform, once it has used its budget', async () => {
+    platform = platformWithRefusals();
+    platform.state.onlyAccept = 'mcpat_good';
+    const { server, url } = await start({
+      resourceMetadataUrl: METADATA,
+      serviceSecret: SECRET,
+      maxFailedInitializes: 2,
+    });
+    try {
+      const c = client(url);
+      for (let i = 0; i < 2; i++) {
+        const res = await c.send(INIT, { Authorization: `Bearer mcpat_invented${i}` });
+        expect(res.status).toBe(401);
+        await res.text();
+      }
+      platform.seen.length = 0;
+      const res = await c.send(INIT, { Authorization: 'Bearer mcpat_invented2' });
+      expect(res.status).toBe(429);
+      expect(Number(res.headers.get('retry-after'))).toBeGreaterThan(0);
+      await res.text();
+      expect(platform.seen).toHaveLength(0);
+    } finally {
+      await stop(server);
+    }
+  });
+
+  it('refuses a request on a token revoked since it was last checked, before dispatch', async () => {
+    platform = platformWithRefusals();
+    const { server, url } = await start({
+      resourceMetadataUrl: METADATA,
+      serviceSecret: SECRET,
+      bearerCheckTtlMs: 0,
+    });
+    try {
+      const c = client(url);
+      const session = await c.open('mcpat_alice');
+      platform.refused.add('mcpat_alice');
+      // tools/list reaches no platform route itself: only the check can refuse it.
+      const res = await c.send(LIST, {
+        Authorization: 'Bearer mcpat_alice',
+        'mcp-session-id': session,
+      });
+      expect(res.status).toBe(401);
+      expect(res.headers.get('www-authenticate')).toBe(CHALLENGE);
+      await res.text();
+    } finally {
+      await stop(server);
+    }
+  });
+
+  it('ends a call refused after the keep-alive as a tool error, and 401s the next request unsent', async () => {
+    platform = platformWithRefusals();
+    const { server, url } = await start({
+      resourceMetadataUrl: METADATA,
+      serviceSecret: SECRET,
+      // The SDK's 15 s keep-alive, shortened so it fires well before the
+      // platform's refusal below arrives.
+      sseKeepAliveMs: 20,
+    });
+    try {
+      const c = client(url);
+      const session = await c.open('mcpat_alice');
+      platform.slowRefusals.set('mcpat_alice', 200);
+      const res = await c.send(ACCOUNT, {
+        Authorization: 'Bearer mcpat_alice',
+        'mcp-session-id': session,
+      });
+      // The stream was already committed, so this one call cannot be a 401.
+      expect(res.status).toBe(200);
+      const text = await res.text();
+      expect(text).toContain(': keepalive');
+      const result = text
+        .split('\n')
+        .filter((l) => l.startsWith('data: '))
+        .map((l) => JSON.parse(l.slice(6)) as { result?: { isError?: boolean } })
+        .find((m) => m.result);
+      expect(result?.result?.isError).toBe(true);
+
+      platform.seen.length = 0;
+      const next = await c.send(LIST, {
+        Authorization: 'Bearer mcpat_alice',
+        'mcp-session-id': session,
+      });
+      expect(next.status).toBe(401);
+      expect(next.headers.get('www-authenticate')).toBe(CHALLENGE);
+      await next.text();
+      expect(platform.seen).toHaveLength(0);
+    } finally {
+      await stop(server);
+    }
   });
 });

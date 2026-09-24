@@ -6,7 +6,9 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
 import express, { type Request, type Response } from 'express';
 import { Api, MODEL_KEY_HEADER } from './api.js';
+import { APIError } from './errors.js';
 import { MeteredBody } from './http-body.js';
+import { SSH_KEYS } from './paths.js';
 import { createServer, SERVER_NAME, SERVER_VERSION, type ServerConfig } from './server.js';
 import { toolFilter } from './tool-filters.js';
 
@@ -36,6 +38,18 @@ export type HttpConfig = Omit<ServerConfig, 'apiKey' | 'activity'> & {
    * for the platform to take an OAuth access token at all. Never logged.
    */
   serviceSecret?: string;
+  /**
+   * Hosted mode: how long a bearer the platform accepted is taken on trust
+   * before it is checked again, in ms. Default 60 s.
+   */
+  bearerCheckTtlMs?: number;
+  /**
+   * Hosted mode: refused initializes one source may make per minute before it
+   * is answered 429 without asking the platform. Default 20.
+   */
+  maxFailedInitializes?: number;
+  /** The SDK's SSE keep-alive interval, in ms. For tests; default 15 s. */
+  sseKeepAliveMs?: number;
 };
 
 type Live = {
@@ -273,6 +287,92 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
   /** The POST being answered, so a refused bearer can turn it into a 401. */
   const heldAnswer = new AsyncLocalStorage<HeldAnswer | undefined>();
 
+  // ---- Checking a bearer with the platform (hosted mode) -----------------
+  //
+  // Initialize makes no platform request, so without this an invented bearer
+  // bought a whole session: 256 of them filled the cap and every real client
+  // was 503'd until the sweep. And a POST's event stream is committed by the
+  // SDK's keep-alive after 15 s, after which a refused token can only end that
+  // call as a tool error. So in hosted mode a bearer is checked before a
+  // session is created for it, and before a POST carrying a request is
+  // dispatched — the latter cached briefly, keyed by the token's digest and
+  // never by the token.
+  const checkTtl = cfg.bearerCheckTtlMs ?? DEFAULT_BEARER_CHECK_TTL_MS;
+  const accepted = new Map<string, number>();
+  let checksInFlight = 0;
+
+  /**
+   * `ok`: the platform knows this credential (any answer but a 401, a 429 or a
+   * 5xx — a 403 is a known credential without the role). `refused`: a 401.
+   * `unknown`: the platform could not say, or this server is already asking
+   * about as many bearers as it will at once.
+   */
+  const checkBearer = async (key: string): Promise<'ok' | 'refused' | 'unknown'> => {
+    const id = digest(key).toString('hex');
+    const now = Date.now();
+    const until = accepted.get(id);
+    if (until !== undefined && until > now) return 'ok';
+    if (checksInFlight >= MAX_BEARER_CHECKS_IN_FLIGHT) return 'unknown';
+    checksInFlight++;
+    try {
+      const api = new Api(key, cfg.baseUrl, AbortSignal.timeout(BEARER_CHECK_TIMEOUT_MS), {
+        serviceSecret,
+      });
+      // The cheapest authenticated read there is: the account's SSH keys, a
+      // short list the control plane answers without asking any host. It
+      // takes no parameters, so none are sent.
+      await api.json('GET', SSH_KEYS);
+    } catch (err) {
+      if (!(err instanceof APIError)) return 'unknown';
+      if (err.status === 401) return 'refused';
+      if (err.status === 429 || err.status >= 500) return 'unknown';
+    } finally {
+      checksInFlight--;
+    }
+    if (accepted.size >= MAX_ACCEPTED_BEARERS) {
+      for (const [k, t] of accepted) if (t <= now) accepted.delete(k);
+      // Still full: drop the oldest, which Map iteration yields first.
+      if (accepted.size >= MAX_ACCEPTED_BEARERS) {
+        accepted.delete(accepted.keys().next().value as string);
+      }
+    }
+    accepted.set(id, now + checkTtl);
+    return 'ok';
+  };
+
+  // Refused initializes per source, in fixed one-minute windows. Kept apart
+  // from the session cap so a flood of invented tokens is turned away before
+  // it asks the platform anything, rather than by starving the pool.
+  const maxFailed = cfg.maxFailedInitializes ?? DEFAULT_MAX_FAILED_INITIALIZES;
+  const failures = new Map<string, { count: number; resetAt: number }>();
+  const sourceOf = (req: Request) => req.ip ?? req.socket.remoteAddress ?? 'unknown';
+  const overFailureBudget = (req: Request): number | undefined => {
+    const entry = failures.get(sourceOf(req));
+    if (!entry) return undefined;
+    const now = Date.now();
+    if (entry.resetAt <= now) {
+      failures.delete(sourceOf(req));
+      return undefined;
+    }
+    return entry.count >= maxFailed ? Math.ceil((entry.resetAt - now) / 1000) : undefined;
+  };
+  const noteFailure = (req: Request) => {
+    const source = sourceOf(req);
+    const now = Date.now();
+    const entry = failures.get(source);
+    if (entry && entry.resetAt > now) {
+      entry.count++;
+      return;
+    }
+    if (failures.size >= MAX_FAILURE_SOURCES) {
+      for (const [k, e] of failures) if (e.resetAt <= now) failures.delete(k);
+      if (failures.size >= MAX_FAILURE_SOURCES) {
+        failures.delete(failures.keys().next().value as string);
+      }
+    }
+    failures.set(source, { count: 1, resetAt: now + FAILURE_WINDOW_MS });
+  };
+
   /** A 401 an OAuth client acts on: authorize, or refresh and try again. */
   const challenged = (res: Response, message: string, id: RpcId = null) => {
     if (challenge) res.set('WWW-Authenticate', challenge);
@@ -280,6 +380,11 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
   };
 
   const app = express();
+  // Hosted mode sits behind a proxy on this machine, and the refused-
+  // initialize budget is per source: without this every caller would be the
+  // proxy's one loopback address, sharing one budget. Only a loopback peer's
+  // X-Forwarded-For is believed, so a direct caller cannot choose its source.
+  if (challenge) app.set('trust proxy', 'loopback');
 
   // parseBody consumes every POST /mcp body. Every other route deliberately
   // ignores request bodies, so put those requests in flowing mode immediately:
@@ -728,6 +833,14 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
           return unauthorized(res, 'This session belongs to a different API key.', rpcId(req));
         }
         if (challenge && live.refused) return challenged(res, TOKEN_REFUSED, rpcId(req));
+        // Checked before a request is dispatched, while the answer can still
+        // be a 401 whatever the call goes on to do. A platform that cannot say
+        // is not a refusal: the call goes ahead, and a real refusal during it
+        // still reaches the client through the held answer or the mark.
+        if (challenge && carriesRequest(req.body) && (await checkBearer(key)) === 'refused') {
+          live.refused = true;
+          return challenged(res, TOKEN_REFUSED, rpcId(req));
+        }
         const lease = res.locals.largeBodyLease as LargeBodyLease | undefined;
         const id = rpcId(req);
         const held = challenge
@@ -767,6 +880,33 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
     const hosts = allowedHosts(boundPort);
     const refused = dnsRebindingRefusal(req, hosts, allowedOrigins);
     if (refused) return rpcError(res, 403, -32000, refused, rpcId(req));
+    // Hosted: no session for a bearer the platform does not accept. Before the
+    // cap and the reservation, so a refused bearer never holds a slot.
+    if (challenge) {
+      const retryAfter = overFailureBudget(req);
+      if (retryAfter !== undefined) {
+        res.set('Retry-After', String(retryAfter));
+        return rpcError(
+          res,
+          429,
+          -32002,
+          'Too many refused initializes from this address. Retry later with a valid token.',
+          rpcId(req),
+        );
+      }
+      const verdict = await checkBearer(key);
+      if (verdict === 'refused') {
+        noteFailure(req);
+        return challenged(res, TOKEN_REFUSED, rpcId(req));
+      }
+      if (verdict === 'unknown') {
+        return unavailable(
+          res,
+          'The platform could not confirm this token just now. Retry shortly.',
+          rpcId(req),
+        );
+      }
+    }
     // Swept sessions free their slot on the timer; this is the backstop for the
     // case the timer cannot help with, which is arrivals faster than the TTL.
     if (sessions.size + pending >= maxSessions) {
@@ -803,6 +943,7 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
     try {
       const t = new StreamableHTTPServerTransport({
         sessionIdGenerator: () => randomUUID(),
+        ...(cfg.sseKeepAliveMs !== undefined ? { keepAliveMs: cfg.sseKeepAliveMs } : {}),
         // On whenever there is a list to check against, which for a loopback
         // bind is always — see `allowedHosts`. A browser cannot be stopped from
         // resolving a name it controls to 127.0.0.1, so the Host header is the
@@ -1076,6 +1217,22 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
     }) as typeof http.close;
     http.on('close', teardown);
   });
+}
+
+const DEFAULT_BEARER_CHECK_TTL_MS = 60_000;
+const DEFAULT_MAX_FAILED_INITIALIZES = 20;
+const FAILURE_WINDOW_MS = 60_000;
+const BEARER_CHECK_TIMEOUT_MS = 10_000;
+/** How many bearers this server will be asking the platform about at once. */
+const MAX_BEARER_CHECKS_IN_FLIGHT = 32;
+const MAX_ACCEPTED_BEARERS = 4096;
+const MAX_FAILURE_SOURCES = 10_000;
+
+/** Whether a POST body holds a JSON-RPC request, which is what opens a stream. */
+function carriesRequest(body: unknown): boolean {
+  const isRequest = (m: unknown) =>
+    typeof m === 'object' && m !== null && 'method' in m && 'id' in m;
+  return Array.isArray(body) ? body.some(isRequest) : isRequest(body);
 }
 
 const NO_TOKEN =
