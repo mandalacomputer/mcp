@@ -139,6 +139,13 @@ export const V1_ROUTES: Route[] = [
   // A computer's secret bindings: ids, revisions and env names, never a value.
   r('GET', 'computers/:id/secrets'),
   r('PUT', 'computers/:id/secrets'),
+
+  // The account's secret store (OPL-4984).
+  r('GET', 'secrets'),
+  r('POST', 'secrets'),
+  r('GET', 'secrets/:id'),
+  r('PUT', 'secrets/:id'),
+  r('DELETE', 'secrets/:id'),
 ];
 
 /**
@@ -377,6 +384,13 @@ export const PARAMETERS: ReadonlyMap<string, readonly string[]> = new Map([
   // conditional on the list a read answered.
   ['GET computers/:id/secrets', []],
   ['PUT computers/:id/secrets', ['body:secrets', 'body:version']],
+
+  // The account's secret store (OPL-4984).
+  ['GET secrets', ['query:workspace_id']],
+  ['POST secrets', ['body:name', 'body:value', 'body:workspace_id']],
+  ['GET secrets/:id', ['query:workspace_id']],
+  ['PUT secrets/:id', ['body:revision_id', 'body:value', 'body:workspace_id']],
+  ['DELETE secrets/:id', ['query:revision_id', 'query:workspace_id']],
 ]);
 
 /**
@@ -433,8 +447,18 @@ export const UNIMPLEMENTED_PARAMETERS: ReadonlySet<string> = new Set([
 export const key = (route: Route) => `${route.method} ${route.pattern}`;
 export const ALLOWED = new Set(V1_ROUTES.map(key));
 
-/** Every mirrored operation must be exercised; parameter exceptions stay separate. */
-export const UNIMPLEMENTED = new Set<string>();
+/**
+ * Mirrored operations no tool reaches yet. Every other mirrored operation must
+ * be exercised; parameter exceptions stay separate.
+ */
+export const UNIMPLEMENTED = new Set<string>([
+  // GAP. The account's secret store (OPL-4984); no tool yet.
+  'GET secrets',
+  'POST secrets',
+  'GET secrets/:id',
+  'PUT secrets/:id',
+  'DELETE secrets/:id',
+]);
 
 /**
  * Reduce a concrete path to its route pattern, exactly as `patternFor` in the
