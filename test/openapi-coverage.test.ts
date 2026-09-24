@@ -58,6 +58,28 @@ it('covers the explicitly synthetic offline fixture with successful actual MCP t
   ).toThrow('Zero request coverage for tools: list_directory');
 });
 
+it('reports a published operation listed as not yet sent, and fails every other gap', async () => {
+  const observed = operationEvidence(await collectExercises());
+  const changed = structuredClone(fixture);
+  changed.paths['/secrets'] = { get: operation(), post: operation() };
+  changed.paths['/secrets/{id}'] = { get: operation(), delete: operation() };
+  const unsent = ['GET secrets', 'POST secrets', 'GET secrets/:id', 'DELETE secrets/:id'];
+  const summary = compareCoverage(parseOperations(changed), observed, { unsent });
+  expect(summary.unsent).toEqual([
+    'DELETE /api/v1/secrets/{id}',
+    'GET /api/v1/secrets',
+    'GET /api/v1/secrets/{id}',
+    'POST /api/v1/secrets',
+  ]);
+  // Only what is listed: a route beside it is still a failure.
+  expect(() =>
+    compareCoverage(parseOperations(changed), observed, { unsent: unsent.slice(1) }),
+  ).toThrow('GET /api/v1/secrets');
+  expect(() => compareCoverage(parseOperations(changed), observed)).toThrow(
+    'Missing published operations',
+  );
+});
+
 it('requires exact registered/exercise inventory in both directions', () => {
   expect(() => checkInventory(['one', 'two'], { one: [{}] })).toThrow('missing tools [two]');
   expect(() => checkInventory(['one'], { one: [{}], two: [{}] })).toThrow(

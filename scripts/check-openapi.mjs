@@ -110,8 +110,35 @@ export function parseOperations(document) {
   return { operations, excluded: [...new Set(excluded)].sort() };
 }
 
-/** Credit one concrete request to at most one operation, respecting literal paths. */
-export function compareCoverage(contract, evidence) {
+/**
+ * `METHOD pattern` with every parameter reduced to `{}`, from either spelling:
+ * a published operation's `/api/v1/secrets/{id}` or the mirror's `secrets/:id`.
+ */
+function routeShape(method, path) {
+  const bare = path.replace(/^\/api\/v1(?=\/|$)/, '').replace(/^\/+|\/+$/g, '');
+  const shape = bare
+    .split('/')
+    .map((seg) => (/^\{[^}]+\}$/.test(seg) || /^:[^/]+$/.test(seg) ? '{}' : seg))
+    .join('/');
+  return `${method.toUpperCase()} ${shape}`;
+}
+
+/**
+ * Credit one concrete request to at most one operation, respecting literal paths.
+ *
+ * `unsent` names operations no tool reaches YET, in the mirror's spelling
+ * (`GET secrets/:id`) — the same list as `UNIMPLEMENTED` in test/allowlist.ts,
+ * so a gap is written down once. A published operation on that list is
+ * reported rather than failed; every other one must still be exercised.
+ */
+export function compareCoverage(contract, evidence, { unsent = [] } = {}) {
+  const pending = new Set(
+    [...unsent].map((entry) => {
+      const [method, pattern] = String(entry).split(' ');
+      if (!method || pattern === undefined) throw new Error('Invalid unsent operation');
+      return routeShape(method, pattern);
+    }),
+  );
   if (!Array.isArray(evidence) || !evidence.length) throw new Error('No tool request evidence');
   const seen = new Set();
   let requests = 0;
@@ -150,8 +177,13 @@ export function compareCoverage(contract, evidence) {
   }
   if (zero.length) throw new Error(`Zero request coverage for tools: ${zero.sort().join(', ')}`);
   if (!requests) throw new Error('No tool request evidence');
-  const missing = contract.operations
-    .filter((op) => !seen.has(op.key))
+  const uncovered = contract.operations.filter((op) => !seen.has(op.key));
+  const notYetSent = uncovered
+    .filter((op) => pending.has(routeShape(op.method, op.path)))
+    .map((op) => op.key)
+    .sort();
+  const missing = uncovered
+    .filter((op) => !pending.has(routeShape(op.method, op.path)))
     .map((op) => op.key)
     .sort();
   if (missing.length) throw new Error(`Missing published operations:\n${missing.join('\n')}`);
@@ -160,6 +192,7 @@ export function compareCoverage(contract, evidence) {
     requests,
     tools: evidence.length,
     excluded: contract.excluded,
+    unsent: notYetSent,
   };
 }
 
