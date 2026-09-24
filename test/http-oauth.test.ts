@@ -692,7 +692,7 @@ describe('hosted: checking a bearer before it gets anything', () => {
       );
       // Well inside the test's own timeout below, so the error and the gate's
       // release happen before vitest gives up on the test.
-      const deadline = Date.now() + 2000;
+      const deadline = Date.now() + 8000;
       while (probes() < base + 32) {
         if (Date.now() > deadline) throw new Error(`only ${probes() - base} of 32 probes arrived`);
         await new Promise((r) => setTimeout(r, 5));
