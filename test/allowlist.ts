@@ -416,9 +416,6 @@ export const PARAMETERS: ReadonlyMap<string, readonly string[]> = new Map([
  * would say nothing that route's own line does not.
  */
 export const UNIMPLEMENTED_PARAMETERS: ReadonlySet<string> = new Set([
-  // GAP. File transfers cannot yet opt out of waking a suspended computer.
-  'GET computers/:id/files  query:no_wake',
-  'PUT computers/:id/files  query:no_wake',
   // DECISION. start_computer requests a boot or resume. With resume_only=true,
   // a stopped computer without a saved session returns 200 without starting.
   // Keep that successful no-op out of the tool so a model cannot mistake the
@@ -448,12 +445,9 @@ export const ALLOWED = new Set(V1_ROUTES.map(key));
  * be exercised; parameter exceptions stay separate.
  */
 export const UNIMPLEMENTED = new Set<string>([
-  // GAP. The account's secret store (OPL-4984); no tool yet.
-  'GET secrets',
-  'POST secrets',
-  'GET secrets/:id',
-  'PUT secrets/:id',
-  'DELETE secrets/:id',
+  // Empty since OPL-5026: the account's secret store, the last entry, is
+  // reached by list_secrets, get_secret, create_secret, replace_secret and
+  // delete_secret. An operation left out on purpose goes here with its reason.
 ]);
 
 /**
@@ -477,7 +471,10 @@ export function patternFor(path: string): string {
         parent === 'snapshots' ||
         parent === 'builds' ||
         parent === 'webhooks' ||
-        parent === 'ssh-keys'
+        parent === 'ssh-keys' ||
+        // The secret store (OPL-4984), pinned to the second segment as the
+        // platform pins it: `computers/:id/secrets` has no child to reduce.
+        (i === 1 && parent === 'secrets')
       )
         return ':id';
       if (i === 3 && parts[0] === 'computers' && parts[2] === 'activities') return ':activity';

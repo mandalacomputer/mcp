@@ -439,7 +439,7 @@ export const registerWebhooks: Registrar = (server, session) => {
     {
       title: 'List a webhook’s deliveries',
       description:
-        'The newest hundred deliveries to one subscription, newest first, each with its state (pending, in_flight, delivered, exhausted or dropped), its attempt count, and the HTTP status or one-line error of its newest attempt. This is where a delivery that ran out of attempts shows up — nothing is dropped silently. Finished deliveries are kept for seven days. Each carries the event’s cursor, which is what to pass as since to the socket to read on from that point.',
+        'The newest hundred deliveries to one subscription, newest first, each with its state (pending, in_flight, delivered, exhausted or dropped), its attempt count, and the HTTP status or one-line error of its newest attempt. This is where a delivery that ran out of attempts shows up — nothing is dropped silently. Finished deliveries are kept until seven days after they were queued; pending ones until they finish. The one-line error is an open set — `timeout`, `dns`, `refused`, `reset`, `unreachable`, `tls`, `redirect`, `address refused`, `status NNN` and others — and a dropped delivery says why it was dropped. Each carries the event’s cursor, which is what to pass as since to the socket to read on from that point.',
       inputSchema: webhookIdArg,
       annotations: { readOnlyHint: true },
     },

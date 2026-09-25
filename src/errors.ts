@@ -22,6 +22,13 @@ export interface APIErrorMetadata {
   requestId?: string;
   allow?: string;
   wwwAuthenticate?: string;
+  /**
+   * The HTTP method of the request that was refused, when known. Read by
+   * {@link isTransient} for one status: a `503` answered to a change may or may
+   * not have been acted on, so only a request that is safe to repeat is
+   * transient on it.
+   */
+  method?: string;
 }
 
 const nonblank = (value: unknown): string | undefined =>
@@ -51,6 +58,8 @@ export class APIError extends MandalaError {
   readonly allow?: string;
   /** The received WWW-Authenticate header, when supplied. */
   readonly wwwAuthenticate?: string;
+  /** The method of the refused request, upper case, when known. */
+  readonly method?: string;
   constructor(
     message: string,
     readonly status: number,
@@ -65,6 +74,7 @@ export class APIError extends MandalaError {
       nonblank(metadata?.requestId) ?? (record(body) ? nonblank(body.request_id) : undefined);
     this.allow = nonblank(metadata?.allow);
     this.wwwAuthenticate = nonblank(metadata?.wwwAuthenticate);
+    this.method = nonblank(metadata?.method)?.toUpperCase();
   }
 }
 
@@ -163,7 +173,10 @@ export function reasonAdvice(reason: string | undefined): string | undefined {
     case 'contention':
       return 'something was in flight; the same call works once it finishes, so this one is worth sending again';
     case 'starting':
-      return 'the guest agent is still inside its boot window, so this is worth sending again in a moment';
+      // The boot window is bounded (OPL-5025): two minutes from a start, a
+      // restart, or a reboot inside the guest. An agent still silent after it
+      // is answered 502 instead, which is not this word and not this advice.
+      return 'the guest agent has not answered yet and the computer is still inside its boot window (about two minutes after a start, a restart or a reboot inside the guest), so this is worth sending again in a moment. A guest agent still silent after that window is answered 502 instead, which waiting alone does not fix';
     case 'unavailable':
       // Softened from "does NOT clear by waiting", which was false of exactly
       // the case OPL-4631 is about and is the sentence a model actually sees:
@@ -422,7 +435,12 @@ export function createOnlyRefusal(err: APIError): APIError {
     err.status,
     err.body,
     err.retryAfterMs,
-    { requestId: err.requestId, allow: err.allow, wwwAuthenticate: err.wwwAuthenticate },
+    {
+      requestId: err.requestId,
+      allow: err.allow,
+      wwwAuthenticate: err.wwwAuthenticate,
+      method: err.method,
+    },
   );
   // The constructor reads the body again, and would keep a blank word. Unknown
   // is `undefined`, as documented on CreateOnlyConflictError.
@@ -518,9 +536,37 @@ export class RateLimitError extends APIError {
   }
 }
 
-/** 503 — a hypervisor could not be reached, so an inventory would be short. */
+/**
+ * 503 — something the request depends on (a hypervisor, a store, a host's
+ * capacity) could not answer or take it right now.
+ *
+ * A READ answered 503 can be asked again shortly. A CHANGE answered 503 may or
+ * may not have happened: the platform answers a failure after the request was
+ * sent the same way, with or without a warning in the message. So
+ * {@link isTransient} calls a 503 worth repeating only for a request that is
+ * safe to repeat — a GET or HEAD, see {@link REPEATABLE_METHODS} — and any
+ * change has its current state read before it is sent again.
+ */
 export class UnavailableError extends APIError {
   override name = 'UnavailableError';
+}
+
+/**
+ * The methods a `503` leaves safe to send again: the two reads.
+ *
+ * Every other method is a change, and the platform documents that a change
+ * answered `503` may or may not have happened. PUT and DELETE are idempotent in
+ * HTTP's terms, but "may have happened" still means the caller reads the state
+ * rather than replaying blind — the answer the TypeScript and Python SDKs give.
+ */
+const REPEATABLE_METHODS: ReadonlySet<string> = new Set(['GET', 'HEAD']);
+
+/**
+ * Whether a `503` leaves the request's outcome unknown: it was a change, or its
+ * method was not recorded.
+ */
+export function outcomeUnknownOn503(err: unknown): boolean {
+  return err instanceof UnavailableError && !(err.method && REPEATABLE_METHODS.has(err.method));
 }
 
 /**
@@ -1031,7 +1077,9 @@ export function errorForStatus(
  * - {@link ConflictError} — something is in flight that this cannot run
  *   alongside, minus the one that is a decision
  * - {@link RateLimitError} — a cadence, and the response usually says how long
- * - {@link UnavailableError} — a hypervisor briefly out of reach
+ * - {@link UnavailableError} — something briefly out of reach, for a GET or
+ *   HEAD only. Any change answered 503 may have happened, so it is not
+ *   transient, whatever `reason` it carries
  * - {@link ConnectivityError} — the request never left
  *
  * That last line is now literally true, and it was not always. The class used
@@ -1110,6 +1158,13 @@ export function isTransient(err: unknown): boolean {
   // is safe to replay blind. Same shape as the line above and the same reason:
   // a subclass of a branch below that would otherwise say yes (OPL-3855).
   if (err instanceof ConnectivityInterruptedError) return false;
+  // A 503 is a passing moment for a read and an unknown outcome for a change
+  // (OPL-5026): the platform answers a failure after the request was sent the
+  // same way. Decided BEFORE the reason word, which is about the computer and
+  // cannot say whether this request's change landed — a `contention` on a
+  // create's 503 must not make the create look safe to replay. Anything but a
+  // GET or HEAD, or a request whose method was not recorded, is not replayed.
+  if (err instanceof UnavailableError) return !outcomeUnknownOn503(err);
   // The platform's own word, ahead of the types below, because it is the more
   // specific answer and it is the one that tells the 409 that never clears from
   // the two that do (OPL-3898). Only an APIError carries a shape-checked one:
@@ -1126,7 +1181,6 @@ export function isTransient(err: unknown): boolean {
   return (
     err instanceof ConflictError ||
     err instanceof RateLimitError ||
-    err instanceof UnavailableError ||
     err instanceof ConnectivityError
   );
 }

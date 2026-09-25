@@ -1,5 +1,13 @@
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
-import { APIError, MandalaError, platformSaid, reasonAdvice, statusAdvice } from './errors.js';
+import {
+  APIError,
+  MandalaError,
+  outcomeUnknownOn503,
+  platformSaid,
+  reasonAdvice,
+  statusAdvice,
+  UnavailableError,
+} from './errors.js';
 
 /** A plain text result. */
 export const text = (s: string): CallToolResult => ({ content: [{ type: 'text', text: s }] });
@@ -147,6 +155,20 @@ export function apiErrorMessage(error: APIError): string {
   return error.message;
 }
 
+/**
+ * What to tell a model about a `503`, or `undefined` for anything else.
+ *
+ * Two answers, told apart by the request's method, and the same split
+ * isTransient makes: a GET or HEAD can be sent again shortly; any change may
+ * already have happened, so the current state is read first.
+ */
+export function unavailableAdvice(err: APIError): string | undefined {
+  if (!(err instanceof UnavailableError)) return undefined;
+  return outcomeUnknownOn503(err)
+    ? 'something this depends on could not answer right now, and THIS CHANGE MAY OR MAY NOT HAVE HAPPENED: a failure after the request was sent is answered the same way. Read the current state before sending it again — repeating a create, a command, a clone or a snapshot blind can do it twice'
+    : 'something this depends on could not answer right now; the same request can be sent again shortly';
+}
+
 /** A model-visible refusal. A projected run failure must withhold reason-based replay advice. */
 export function failed(err: unknown, includeReasonAdvice = true): CallToolResult {
   const message =
@@ -178,9 +200,15 @@ export function failed(err: unknown, includeReasonAdvice = true): CallToolResult
   // call works once it finishes", which is exactly the replay this is here to
   // stop (Codex review). Every other status keeps the platform's word ahead of
   // anything generic, which is where it belongs: it is specific to one refusal.
+  //
+  // A 503 answered to a change is the one status whose advice outranks the
+  // platform's word: the change may or may not have happened, and a reason
+  // saying "worth sending again" would invite the blind replay of a create or a
+  // command that the platform's own docs warn against (OPL-5026).
   const advice =
     err instanceof APIError
-      ? (statusAdvice(err.status, err.reason) ??
+      ? (unavailableAdvice(err) ??
+        statusAdvice(err.status, err.reason) ??
         (includeReasonAdvice &&
         ![404, 405].includes(err.status) &&
         (!err.body ||
@@ -324,6 +352,23 @@ export type Computer = {
    * wrote before reading the computer back. See `nothingAdmitted`.
    */
   running_ram_mb?: number;
+  /**
+   * The secrets bound to this computer, as references (secret id, the revision
+   * last delivered, and exactly one of `env` or `file`). Never a value. The
+   * whole `secrets*` group is absent on a computer that holds none.
+   */
+  secrets?: unknown[];
+  /**
+   * Whether the desktop is missing a change to its secrets that a restart would
+   * deliver. Three answers: `true` (a restart delivers it), `false` (nothing
+   * pending), and `null` — the platform could not check, which is not `false`.
+   * Only ever true of a running or suspended computer.
+   */
+  secrets_pending?: boolean | null;
+  /** Why the last delivering start was stopped, in one fixed sentence. Never a value. */
+  secrets_error?: string;
+  secrets_generation?: number;
+  secrets_applied?: unknown;
   vnc?: Record<string, unknown>;
 };
 
@@ -426,5 +471,13 @@ export function describe(c: Computer): string {
   if (c.resolution) bits.push(c.resolution);
   if (c.suspended?.at) bits.push(`suspended ${c.suspended.at}`);
   if (c.unreachable) bits.push('UNREACHABLE — its hypervisor could not be reached');
+  // Secrets, only where there is something to say: `false` and absent say
+  // nothing, and `null` is the platform saying it could not check — not that
+  // nothing is pending.
+  if (c.secrets_pending === true) bits.push('a change to its secrets is pending until it restarts');
+  else if (c.secrets_pending === null)
+    bits.push('whether its secrets are current is unknown until it restarts');
+  if (typeof c.secrets_error === 'string' && c.secrets_error.trim())
+    bits.push(`secrets not delivered: ${c.secrets_error.trim()}`);
   return bits.join(' · ');
 }

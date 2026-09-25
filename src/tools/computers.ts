@@ -303,12 +303,12 @@ const POWER_NEXT: Record<string, string> = {
 
 const POWER_DESCRIPTIONS: Record<string, string> = {
   start:
-    'Boot a computer, or resume a suspended one — a resume restores the saved session, same processes and windows, in about a second.',
-  stop: 'Shut a computer down: the guest is asked, and given time to do it. Discards a saved session if there is one. The disk is kept. `force` pulls the power instead, for a guest that will not come down on its own.',
+    "Boot a computer, or resume a suspended one — a resume restores the saved session, same processes and windows, in about a second. A resumed guest's clock is set to the current time within a few seconds, best effort through its guest agent (one whose agent does not answer keeps the old time until NTP corrects it), and the desktop panel's clock can show the old time for up to a minute after that.",
+  stop: 'Shut a computer down: the guest is asked, and given time to do it. On a suspended computer this discards the saved session, and the next start is a fresh boot. The disk is kept. `force` pulls the power instead, for a guest that will not come down on its own.',
   suspend:
-    "Write the guest's RAM to disk and give the host its memory back. A pause, not a stop: start_computer resumes the same session.",
+    "Write the guest's RAM to disk and give the host its memory back. A pause, not a stop: start_computer resumes the same session. A computer that holds secrets suspends only on a host that seals saved sessions (its memory is encrypted on the way to disk); elsewhere, and while its secrets are still being delivered, it is refused with 409. After a change to its secret bindings that dropped a secret or moved one to another revision while it ran, it cannot be suspended until it restarts, since its memory may still hold the old value.",
   restart:
-    'Reset the computer. Refused while a session is suspended, since it would have to guess whether you meant to resume or discard it.',
+    'Reset the computer, like the reset button — not a fresh boot, so a change that needs a new machine shape (a resize) needs a stop and a start instead. A suspended computer is refused with 409: start it to resume, or stop it to discard the session. A stopped computer with no secrets bound is started instead; one with secrets bound is refused with 409 while stopped (start it, which delivers them) or while its secrets are being delivered, and otherwise gets its secrets again as it comes back up. A restart issues new desktop credentials and closes open desktop connections, so a get_desktop_url link from before it stops working.',
 };
 
 export const registerComputers: Registrar = (server, session, opts) => {
@@ -317,7 +317,7 @@ export const registerComputers: Registrar = (server, session, opts) => {
     {
       title: 'List templates',
       description:
-        'The base images a computer can be created from — name, OS, and the default CPU, RAM and disk each one implies.',
+        'The base images a computer can be created from — name, OS, and the default CPU, RAM and disk each one implies. For the templates the platform publishes, `name` is what a create takes as `template`; for one you published yourself, pass its `ref` (namespace/name@version) — a short name is not resolved to your own templates and falls back to the default.',
       inputSchema: {},
       annotations: { readOnlyHint: true },
     },
@@ -690,10 +690,11 @@ export const registerComputers: Registrar = (server, session, opts) => {
           .number()
           .int()
           .min(0)
+          .max(10080)
           .nullable()
           .optional()
           .describe(
-            "Minutes untouched before the host suspends it. null follows the host's own window; send this on its own.",
+            "Minutes untouched before the host suspends it, at most 10080 (a week). 0 disables idle suspend and pressure eviction, up to the plan's limit on computers that never suspend (a 402 beyond it). null returns it to the host's own window. Send this on its own.",
           ),
       },
     },
@@ -1426,7 +1427,7 @@ export const registerComputers: Registrar = (server, session, opts) => {
           .string()
           .optional()
           .describe(
-            'From list_templates, e.g. "base" for Linux/Xfce. Defaults to the platform default.',
+            'From list_templates: the short name of a template the platform publishes, e.g. "base" for Linux/Xfce, or a pinned ref (namespace/name@version) — which a template you published must be named by. A short name the host lacks falls back to the default template; a ref that names nothing is refused. Defaults to base.',
           ),
         template_transfer: z
           .string()
@@ -1449,13 +1450,13 @@ export const registerComputers: Registrar = (server, session, opts) => {
           .string()
           .optional()
           .describe(
-            'WIDTHxHEIGHT or WIDTHxHEIGHTxDEPTH, 640x480 to 3840x2160, even numbers. Create-time only — the display is a QEMU property and there is no route that changes it later. Defaults to 1280x800x24.',
+            'WIDTHxHEIGHT or WIDTHxHEIGHTxDEPTH, 640x480 to 3840x2160, even numbers, depth 16, 24 or 32 (24 when left out); anything else is refused. Create-time only — the display is a QEMU property and there is no route that changes it later. Defaults to 1280x800x24.',
           ),
         start: z.boolean().optional().describe('Boot it immediately. True by default.'),
         secrets: secretBindingsSchema(false)
           .optional()
           .describe(
-            `Secrets from the account to deliver into the desktop session each time the computer starts, each as an environment variable (\`env\`) or as a file under ${FILES_DIR} (\`file\`). Only ids and names are sent — never a value. Linux only, and only on a template whose image can receive them. get_computer_secrets and set_computer_secrets read and change them later.`,
+            `Secrets from the account to deliver into the desktop session each time the computer starts, each as an environment variable (\`env\`) or as a file under ${FILES_DIR} (\`file\`). Only ids and names are sent — never a value. Secret ids come from list_secrets (create_secret stores a new one). Linux only, and only on a template whose image can receive them. A value replaced later reaches the running computer live when bound as a file, and as a variable on an image that supports it reaches new shells and exec with desktop: true. get_computer_secrets and set_computer_secrets read and change the bindings later.`,
           ),
       },
       annotations: { destructiveHint: false, openWorldHint: true },
@@ -1561,7 +1562,7 @@ export const registerComputers: Registrar = (server, session, opts) => {
     {
       title: 'Clone a computer',
       description:
-        'Copy a computer to a new one — the fork half of snapshot-and-fork. The copy inherits the resolution, because its disk carries a desktop laid out at that size.',
+        'Copy a computer\'s current disk to a new computer — the fork half of snapshot-and-fork. The source is untouched and must be stopped or suspended: a running source is refused with 409. The answer arrives as soon as the copy exists, reading status "building" while its disk is copied — wait for that to finish before starting it. The copy keeps the source\'s size and resolution (its disk carries a desktop laid out at that size), lands stopped, and has no secrets bound.',
       inputSchema: {
         ...idArg,
         name: z.string().optional().describe('A name for the copy.'),

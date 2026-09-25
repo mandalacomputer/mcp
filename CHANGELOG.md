@@ -50,6 +50,77 @@ are wording changes, and they are behaviour changes in the way that matters.
   unknown. `isTransient` calls it permanent, and it claims nothing about the
   path.
 
+- **The account's secret store: `list_secrets`, `get_secret`,
+  `create_secret`, `replace_secret` and `delete_secret`** (OPL-4984, OPL-5026).
+  A value is a tool argument and goes one way. A success shows only the
+  decoded documented fields. A refusal shows only the status, the `reason`
+  word and the tool's own sentence, never the platform's response text, which
+  the `Api` does not keep for these routes. Any output is also scrubbed of the
+  value, however short. Every public `Api` operation on a secret route runs
+  inside one boundary. The route is judged on the URL actually sent, so `//`,
+  `./`, `..` and percent-encoded spellings count. That covers `json`, `send`,
+  `bytes`, `listing`, `sse` and `api.secrets`, including body reads,
+  validation, iteration and reading the value itself. Any error that escapes is
+  rebuilt with a fixed message. It keeps its class, so `isTransient` is
+  unchanged, plus the status, the method, a documented `reason` word, a UUID
+  request id and an `Allow` list of method names. Any of those that shares
+  four characters with the value is dropped, and `Retry-After` is dropped
+  entirely. `replace_secret` and `delete_secret` need the current
+  `revision_id`, and `delete_secret` needs `confirm: true` and says that a
+  computer still bound to the secret cannot start again. For embedders,
+  `api.secrets` offers `list`, `create`, `get`, `replace` and `delete`, decoded
+  strictly, with `Secret`, `SecretList`, `SecretLimits` and `SecretStore`
+  exported as types. Every documented operation is now called by a tool.
+- **`read_file` and `write_file` take `no_wake`.** With `no_wake: true` a
+  computer that is not running is refused (409) rather than resumed, so nothing
+  is charged for a resume. The refusal is read the same way whether it carries
+  no `reason` or `reason: "unavailable"`.
+- **`type_text` reports how the text was typed** (`mechanism`: key presses,
+  Unicode composition, or both in order) and says that sending is not the
+  application accepting it. Empty text and more than 400 characters are
+  refused before anything is sent.
+- **`APIError.method`**: the method of the refused request, set by the `Api`.
+
+### Changed
+
+- **`isTransient` is true for a `503` only on a GET or HEAD.** The platform
+  documents that a change answered `503` may or may not have happened, so any
+  other method, or an unknown one, is false. This is decided before the
+  `reason` word, so `contention` or `starting` cannot make a create look safe to
+  replay. The TypeScript and Python SDKs answer the same way. A tool refused
+  with `503` says the same thing: read the current state before sending a
+  change again.
+- **`window_action` resize needs both `width` and `height`**, as the platform
+  requires. `x`/`y` are bounded to -32768..32767 and `width`/`height` to
+  1..32767.
+- **`update_computer`'s `idle_suspend_min` is capped at 10080** (a week), as
+  documented.
+- **Tool descriptions brought in line with the corrected API docs**
+  (OPL-5025):
+  - Env secret live apply reaches new shells and `exec` with `desktop: true`.
+    It is worded to hold after the platform also gives plain `exec` the bound
+    environment (app OPL-5028).
+  - A resumed guest's clock is resynced within seconds.
+  - `start_computer`, `suspend_computer`, `restart_computer` and
+    `stop_computer` state their conditions for computers that hold secrets.
+  - `clone_computer`: the source must be stopped or suspended, and the copy
+    lands stopped with no secrets.
+  - `write_file` says a failure can leave the complete file at the path.
+  - `list_templates` and `create_computer` say a template you published is
+    named by its `ref`, and `create_computer` gives the resolution depths.
+  - `restore_available` is explained on the snapshot tools.
+  - `exec` says a missing `cwd` exits 127.
+  - `window_action` covers Wayland tiling.
+  - `list_webhook_deliveries` calls `last_error` an open set, with the
+    retention measured from when a delivery was queued.
+  - The `starting` refusal names its two-minute window and the `502` after it.
+- **`get_computer` and the listings say when a computer's secrets are
+  pending** (`secrets_pending: true`), when that is unknown (`null`), and why a
+  delivery failed (`secrets_error`).
+- **`clone_snapshot` names the `capture unrecorded` reason** for a memory
+  snapshot built from its disk, and shows a reason it does not know rather than
+  a generic sentence.
+
 ## [0.5.0] — 2026-09-23
 
 ### Added

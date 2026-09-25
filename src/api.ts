@@ -13,6 +13,16 @@ import {
   RangeNotSatisfiableError,
   RedirectError,
 } from './errors.js';
+import * as P from './paths.js';
+import {
+  MalformedSecretAnswerError,
+  type SecretRoute,
+  sanitizeSecretError,
+  secretRouteOf,
+} from './secret-errors.js';
+import { DOCUMENTED_REASONS, type SecretStore, secretListOf, secretOf } from './secret-store.js';
+
+export { isSecretStoreRoute } from './secret-errors.js';
 
 export const DEFAULT_BASE_URL = 'https://app.mandala.computer/api/v1';
 
@@ -29,6 +39,23 @@ export const MODEL_KEY_HEADER = 'X-Model-Key';
  * `#fetch`, so a client cannot supply the secret or learn anything by trying.
  */
 export const SERVICE_HEADER = 'X-Mandala-MCP-Service';
+
+/**
+ * All that is kept of a secret-store refusal's body: its `reason`, if it is a
+ * word. Nothing else, and never a sentence.
+ */
+function secretStoreRefusalBody(text: string | undefined): { reason: string } | undefined {
+  if (!text) return undefined;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return undefined;
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return undefined;
+  const reason = (parsed as { reason?: unknown }).reason;
+  return typeof reason === 'string' && DOCUMENTED_REASONS.has(reason) ? { reason } : undefined;
+}
 
 function responseMetadata(resp: Response): APIErrorMetadata {
   return {
@@ -325,6 +352,64 @@ export class Api {
     return url.toString();
   }
 
+  /**
+   * The secret-store route a path lands on, judged on the URL it is actually
+   * sent to — after the same joining and dot-segment normalization dispatch
+   * uses, and percent-decoded — so `//secrets`, `./secrets` and
+   * `x/../secrets` are the store too. A path whose URL cannot be built is
+   * treated as the store: an error from it is sanitized, which costs nothing.
+   */
+  #secretRoute(path: string): SecretRoute | undefined {
+    try {
+      const pathname = new URL(this.#url(path)).pathname;
+      const base = this.#base.pathname.replace(/\/+$/, '');
+      const decode = (p: string) =>
+        p
+          .split('/')
+          .map((seg) => {
+            try {
+              return decodeURIComponent(seg);
+            } catch {
+              return seg;
+            }
+          })
+          .join('/');
+      if (pathname === base || pathname.startsWith(`${base}/`))
+        return secretRouteOf(decode(pathname.slice(base.length)));
+      // Above the API root: judge by the last segments, which is where the
+      // store's own two routes would be.
+      const parts = decode(pathname).toLowerCase().split('/').filter(Boolean);
+      if (parts.at(-1) === 'secrets') return 'secrets';
+      if (parts.includes('secrets')) return 'secrets/:id';
+      return undefined;
+    } catch {
+      return 'secrets/:id';
+    }
+  }
+
+  /**
+   * The one boundary for the secret store. Every public operation runs inside
+   * it, so ANY exception a request to `secrets` or `secrets/:id` raises — a
+   * refusal, a redirect, a malformed or empty answer, a body read, a header
+   * check, a network failure, an argument that throws when it is read — leaves
+   * as the rebuilt error {@link sanitizeSecretError} makes. The request's value
+   * is read inside the sanitizer's own guard, never here.
+   */
+  async #guard<T>(
+    method: string,
+    path: string,
+    opts: RequestOptions | undefined,
+    fn: () => Promise<T>,
+  ): Promise<T> {
+    const route = this.#secretRoute(path);
+    if (route === undefined) return fn();
+    try {
+      return await fn();
+    } catch (err) {
+      throw sanitizeSecretError(err, method, route, () => opts?.body);
+    }
+  }
+
   async #fetch(
     method: string,
     path: string,
@@ -509,7 +594,15 @@ export class Api {
       // must not be told the platform answered with an ordinary HTTP failure.
       if (cause instanceof CancelledError) throw cause;
     }
-    if (text) {
+    if (text && this.#secretRoute(path) !== undefined) {
+      // The secret store takes a value in its request, so its answers are the
+      // one place a platform echoing input would echo a secret. No response
+      // text is kept for them at all — not as the message, not as the body:
+      // only the one-word `reason`, when it is a word, and the status. A
+      // truncated copy of the text cannot be redacted reliably, so none is
+      // made (OPL-5026).
+      body = secretStoreRefusalBody(truncated ? undefined : text);
+    } else if (text) {
       try {
         // A prefix is not JSON even when it happens to end at a syntactically
         // valid boundary. Only trust a structured platform message after the
@@ -532,19 +625,19 @@ export class Api {
       }
     }
     const delay = retryAfterMs(resp.headers.get('retry-after'));
+    const metadata = responseMetadata(resp);
     // Content-Range describes the file length, independently of Retry-After.
     if (resp.status === 416) {
       const total = parseContentRange(resp.headers.get('content-range'))?.total;
-      return new RangeNotSatisfiableError(
-        message,
-        resp.status,
-        body,
-        total,
-        delay,
-        responseMetadata(resp),
-      );
+      return new RangeNotSatisfiableError(message, resp.status, body, total, delay, {
+        ...metadata,
+        method,
+      });
     }
-    return errorForStatus(resp.status, message, body, delay, responseMetadata(resp));
+    return errorForStatus(resp.status, message, body, delay, {
+      ...metadata,
+      method,
+    });
   }
 
   /**
@@ -576,7 +669,12 @@ export class Api {
     try {
       return JSON.parse(text) as T;
     } catch {
-      throw new MandalaError(`expected JSON from ${method} ${path}, got: ${text.slice(0, 200)}`);
+      // Never the text for the secret store: see #error.
+      throw new MandalaError(
+        this.#secretRoute(path) !== undefined
+          ? `expected JSON from ${method} ${path}, got a body that is not JSON (not shown)`
+          : `expected JSON from ${method} ${path}, got: ${text.slice(0, 200)}`,
+      );
     }
   }
 
@@ -594,6 +692,10 @@ export class Api {
    * Routes where an empty body IS the answer use `send`.
    */
   async json<T = unknown>(method: string, path: string, opts: RequestOptions = {}): Promise<T> {
+    return this.#guard(method, path, opts, () => this.#jsonRaw<T>(method, path, opts));
+  }
+
+  async #jsonRaw<T = unknown>(method: string, path: string, opts: RequestOptions = {}): Promise<T> {
     const resp = await this.#fetch(method, path, opts);
     const body = await this.#decode<T>(resp, method, path, opts.signal ?? this.#signal);
     if (body === undefined || body === null) {
@@ -610,6 +712,14 @@ export class Api {
     path: string,
     opts: RequestOptions = {},
   ): Promise<{ status: number; value: T }> {
+    return this.#guard(method, path, opts, () => this.#jsonWithStatusRaw<T>(method, path, opts));
+  }
+
+  async #jsonWithStatusRaw<T>(
+    method: string,
+    path: string,
+    opts: RequestOptions = {},
+  ): Promise<{ status: number; value: T }> {
     const resp = await this.#fetch(method, path, opts);
     const value = await this.#decode<T>(resp, method, path, opts.signal ?? this.#signal);
     if (value === undefined || value === null) throw new MandalaError('Expected an exec response');
@@ -618,6 +728,18 @@ export class Api {
 
   /** Complete bounded responses for immutable retained protocols; never a successful prefix. */
   async boundedBytes(
+    method: string,
+    path: string,
+    limit: number,
+    status: number,
+    opts: RequestOptions = {},
+  ): Promise<BoundedBytes> {
+    return this.#guard(method, path, opts, () =>
+      this.#boundedBytesRaw(method, path, limit, status, opts),
+    );
+  }
+
+  async #boundedBytesRaw(
     method: string,
     path: string,
     limit: number,
@@ -677,6 +799,18 @@ export class Api {
     status: number,
     opts: RequestOptions = {},
   ): Promise<unknown> {
+    return this.#guard(method, path, opts, () =>
+      this.#boundedJsonRaw(method, path, limit, status, opts),
+    );
+  }
+
+  async #boundedJsonRaw(
+    method: string,
+    path: string,
+    limit: number,
+    status: number,
+    opts: RequestOptions = {},
+  ): Promise<unknown> {
     const response = await this.boundedBytes(method, path, limit, status, opts);
     if (!/^application\/json(?:\s*;|$)/i.test(response.headers['content-type'] ?? ''))
       throw new MandalaError('Expected retained JSON metadata');
@@ -695,6 +829,14 @@ export class Api {
    * possibly-absent so a caller has to decide what to say when it is.
    */
   async send<T = unknown>(
+    method: string,
+    path: string,
+    opts: RequestOptions = {},
+  ): Promise<T | undefined> {
+    return this.#guard(method, path, opts, () => this.#sendRaw<T>(method, path, opts));
+  }
+
+  async #sendRaw<T = unknown>(
     method: string,
     path: string,
     opts: RequestOptions = {},
@@ -722,6 +864,13 @@ export class Api {
     path: string,
     opts: RequestOptions = {},
   ): Promise<{ items: T | undefined; incomplete: number | null }> {
+    return this.#guard('GET', path, opts, () => this.#listingRaw<T>(path, opts));
+  }
+
+  async #listingRaw<T>(
+    path: string,
+    opts: RequestOptions = {},
+  ): Promise<{ items: T | undefined; incomplete: number | null }> {
     const resp = await this.#fetch('GET', path, opts);
     const short = resp.headers.get('X-GC-Incomplete');
     return {
@@ -735,6 +884,15 @@ export class Api {
 
   /** For the two routes whose body is not JSON: the screenshot and the download. */
   async bytes(
+    method: string,
+    path: string,
+    opts: RequestOptions = {},
+    maxBytes?: number | ((contentType: string) => number),
+  ): Promise<Bytes> {
+    return this.#guard(method, path, opts, () => this.#bytesRaw(method, path, opts, maxBytes));
+  }
+
+  async #bytesRaw(
     method: string,
     path: string,
     opts: RequestOptions = {},
@@ -823,6 +981,114 @@ export class Api {
     };
   }
 
+  // --- the account's secret store (OPL-4984) ------------------------------
+
+  /**
+   * The account's secret store, `GET|POST secrets` and `GET|PUT|DELETE
+   * secrets/:id`, as five typed calls.
+   *
+   * Typed, and decoded strictly, because a value goes IN here and the caller
+   * must be able to rely on nothing coming back: every answer is reduced to the
+   * documented fields before it is returned, so no answer can hand a value on.
+   * A malformed answer is a {@link MandalaError}; for a change it says the
+   * change may have been made. Bound to this client, so
+   * `api.with(signal).secrets` carries the signal.
+   */
+  get secrets(): SecretStore {
+    // Each call runs wholly inside the boundary: its arguments are read, the
+    // request made and the answer decoded within one try, and anything thrown
+    // is rebuilt by the sanitizer — which reads the value under its own guard.
+    const guard = <T>(
+      method: string,
+      route: SecretRoute,
+      value: () => unknown,
+      fn: () => Promise<T>,
+    ): Promise<T> =>
+      (async () => {
+        try {
+          return await fn();
+        } catch (err) {
+          throw sanitizeSecretError(err, method, route, value);
+        }
+      })();
+    const malformed = () => new MalformedSecretAnswerError('malformed');
+    return {
+      list: (opts) =>
+        guard(
+          'GET',
+          'secrets',
+          () => undefined,
+          async () => {
+            const list = secretListOf(
+              await this.json<unknown>('GET', P.SECRETS, {
+                query: P.secretScopeQuery(opts?.workspaceId),
+              }),
+            );
+            if (!list) throw malformed();
+            return list;
+          },
+        ),
+      create: (args) =>
+        guard(
+          'POST',
+          'secrets',
+          () => args.value,
+          async () => {
+            const body = {
+              name: args.name,
+              value: args.value,
+              ...(args.workspaceId === undefined ? {} : { workspace_id: args.workspaceId }),
+            };
+            const secret = secretOf(await this.json<unknown>('POST', P.SECRETS, { body }));
+            if (!secret) throw malformed();
+            return secret;
+          },
+        ),
+      get: (id, opts) =>
+        guard(
+          'GET',
+          'secrets/:id',
+          () => undefined,
+          async () => {
+            const secret = secretOf(
+              await this.json<unknown>('GET', P.secret(id), {
+                query: P.secretScopeQuery(opts?.workspaceId),
+              }),
+            );
+            if (!secret) throw malformed();
+            return secret;
+          },
+        ),
+      replace: (id, args) =>
+        guard(
+          'PUT',
+          'secrets/:id',
+          () => args.value,
+          async () => {
+            const body = {
+              value: args.value,
+              revision_id: args.revisionId,
+              ...(args.workspaceId === undefined ? {} : { workspace_id: args.workspaceId }),
+            };
+            const secret = secretOf(await this.json<unknown>('PUT', P.secret(id), { body }));
+            if (!secret) throw malformed();
+            return secret;
+          },
+        ),
+      delete: (id, args) =>
+        guard(
+          'DELETE',
+          'secrets/:id',
+          () => undefined,
+          async () => {
+            await this.send('DELETE', P.secret(id), {
+              query: { revision_id: args.revisionId, ...P.secretScopeQuery(args.workspaceId) },
+            });
+          },
+        ),
+    };
+  }
+
   /**
    * The agent route, which answers with a stream of steps rather than a result.
    *
@@ -831,6 +1097,25 @@ export class Api {
    * it is over is one the person watching cannot tell from a hang.
    */
   async *sse(method: string, path: string, opts: RequestOptions = {}): AsyncGenerator<SSEEvent> {
+    // The iterator runs inside the boundary too: an error while reading the
+    // stream is raised from here, not from the request.
+    const route = this.#secretRoute(path);
+    if (route === undefined) {
+      yield* this.#sseRaw(method, path, opts);
+      return;
+    }
+    try {
+      yield* this.#sseRaw(method, path, opts);
+    } catch (err) {
+      throw sanitizeSecretError(err, method, route, () => opts.body);
+    }
+  }
+
+  async *#sseRaw(
+    method: string,
+    path: string,
+    opts: RequestOptions = {},
+  ): AsyncGenerator<SSEEvent> {
     const resp = await this.#fetch(method, path, {
       ...opts,
       headers: { ...opts.headers, Accept: 'text/event-stream' },

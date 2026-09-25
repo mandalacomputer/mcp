@@ -164,6 +164,9 @@ describe('patternFor', () => {
     expect(
       patternFor('/computers/vm-1/activities/act_0123456789abcdef0123456789abcdef/results'),
     ).toBe('computers/:id/activities/:activity/results');
+    expect(patternFor('/secrets')).toBe('secrets');
+    expect(patternFor('/secrets/csec-0123456789abcdef')).toBe('secrets/:id');
+    expect(patternFor('/computers/vm-1/secrets')).toBe('computers/:id/secrets');
     // A computer whose id looks like a route segment is still an id.
     expect(patternFor('/computers/audit')).toBe('computers/:id');
   });

@@ -39,6 +39,7 @@ export {
   UnavailableError,
 } from './errors.js';
 export { bearerChallenge, type HttpConfig, runHttp } from './http.js';
+export type { Secret, SecretLimits, SecretList, SecretStore } from './secret-store.js';
 export { createServer, SERVER_NAME, SERVER_VERSION, type ServerConfig } from './server.js';
 export { Session, type SessionConfig } from './session.js';
 export { runStdio, type StdioConfig } from './stdio.js';

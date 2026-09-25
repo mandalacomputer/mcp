@@ -157,8 +157,11 @@ Parameter and response-mode support remains a separate contract.
 
 `write_file` replaces a file already at the path. With `overwrite: false` it
 creates the file only if nothing is there, and a path that is taken is refused
-without that attempt writing anything (Linux computers only). If an earlier
-attempt's outcome was unknown, the file may be the one it wrote. For
+without that attempt writing anything (Linux computers only). Incomplete
+contents are never published at the path, but a failure while publishing or
+answering can leave the complete file there, so after any error read the path
+before retrying or overwriting. `read_file` and `write_file` take `no_wake: true`
+to refuse (409) rather than resume a computer that is not running. For
 embedders, the `Api` raises that refusal as `FileExistsError`, and a
 create-only 409 whose reason could not be read as `CreateOnlyConflictError`,
 which says nothing about the path; `isTransient` is false for both.
@@ -194,14 +197,27 @@ was issued to, not to the account, and are accepted by every computer with SSH
 on, on every account where that person is an owner or member. A
 workspace-scoped key can read keys but not add or remove them.
 
-**Secret bindings** — `get_computer_secrets`, `set_computer_secrets`, and
-`create_computer`'s `secrets`. Which of the account's secrets a computer
-receives, at which revision, and where: as an environment variable (`env`) or as
-a file under `/run/mandala-secrets/user/files` (`file`). Values never cross these
-tools. A set replaces the whole list (`[]` removes every binding) and reaches the
-guest at the computer's next start or restart; send the `version` a read
-answered to have it refused with 409 if the list changed since. A secret bound
-as a file is also rewritten on a running computer when its value is replaced.
+**Secrets** — `list_secrets`, `get_secret`, `create_secret`, `replace_secret`,
+`delete_secret` for the account's secret store, and `get_computer_secrets`,
+`set_computer_secrets` and `create_computer`'s `secrets` for which of them a
+computer receives. A value goes in through `create_secret` or `replace_secret`
+and never comes back out. No route answers one, and a store tool's result
+holds only the decoded documented fields (success) or the status, the `reason`
+word and a sentence of its own (refusal). It never includes the platform's
+response text, and the `Api` keeps none for these routes. The bindings carry
+only secret ids, revisions and names. A computer receives a secret as an environment variable (`env`) or as a
+file under `/run/mandala-secrets/user/files` (`file`). A set replaces the whole
+binding list (`[]` removes every binding) and reaches the guest at the
+computer's next start or restart; send the `version` a read answered to have it
+refused with 409 if the list changed since. A replaced value also reaches a
+running computer: a file binding's file is rewritten in place, and on an image
+that supports it an env binding reaches new shells and `exec` with
+`desktop: true` (programs already running keep the old value until a restart).
+A command that needs a bound variable should use `desktop: true`. Whether a
+plain root `exec` sees it depends on the platform version. `replace_secret`
+and `delete_secret` need the current `revision_id`, and a stale one is a 409.
+`delete_secret` also needs `confirm: true`: a computer still bound to a deleted
+secret cannot start again until that binding is removed.
 
 **Delegating** — `run_agent`, `run_agent_chat`, registered only when a model key is present:
 `MANDALA_MODEL_KEY` on stdio, or the caller's own `X-Model-Key` header over HTTP.
@@ -241,7 +257,7 @@ with an error listing all valid tags.
 | `usage` | `get_usage` |
 | `webhooks` | All webhook tools listed above |
 | `ssh` | All SSH tools listed above |
-| `secrets` | `get_computer_secrets`, `set_computer_secrets` |
+| `secrets` | `list_secrets`, `get_secret`, `create_secret`, `replace_secret`, `delete_secret`, `get_computer_secrets`, `set_computer_secrets` |
 | `agent` | `run_agent`, `run_agent_chat` |
 | `activities` | `list_activities`, `get_activity`, `get_activity_results` |
 | `signals` | `read_signals` |
@@ -727,6 +743,25 @@ available. A missing computer, snapshot, route or guest file remains
 `NotFoundError` (404); other guest failures keep their own status and message.
 Neither response causes an automatic retry or method switch.
 
+`isTransient(err)` answers "is this worth sending again unchanged". A `503` is
+transient only for a GET or HEAD. Any change answered `503` may or may not have
+happened, because the platform answers a failure after the request was sent the
+same way. So `isTransient` is false for it whatever `reason` it carries, the
+tool's answer says to read the current state first, and `error.method` records
+the method. A `reason` this version does not
+know, such as a new word, is treated as no classification. `reasonKind` returns
+`undefined` for it, and the status decides.
+
+The secret store has typed calls on `api.secrets`: `list`, `create`, `get`,
+`replace` and `delete`. Each answer is decoded strictly to the documented
+fields, and none of them carries a value:
+
+```ts
+const { secrets } = await api.secrets.list();
+const s = await api.secrets.create({ name: 'OPENAI_API_KEY', value: key });
+await api.secrets.replace(s.id, { value: next, revisionId: s.revision_id });
+```
+
 Embedders can inspect optional diagnostics on every `APIError`:
 
 ```ts
@@ -754,7 +789,7 @@ and nested chat accounting. `allow` and `wwwAuthenticate` come only from receive
 headers. HEAD failures can carry these fields with no body. Older servers,
 intermediaries and connection failures may supply none of them. Existing
 constructor arguments retain their meanings; an optional trailing
-`APIErrorMetadata` object adds these three fields.
+`APIErrorMetadata` object adds these three fields, and `method`.
 
 MCP error results include supplied `reason`, `request_id`, `allow`,
 `www_authenticate` and `retry_after_ms` as labelled JSON metadata. Diagnostic
@@ -932,7 +967,10 @@ address.
   `WWW-Authenticate: Bearer resource_metadata="<that URL>", scope="mcp:tools"`,
   which is how a client finds where to authorize. `/healthz` stays open.
 - **The bearer is passed through unchanged** — an `mcpat_…` access token, or an
-  API key, which the platform still accepts.
+  API key, which the platform still accepts. The access token is good for this
+  endpoint only. It is not an API key: sent to the API directly, the platform
+  refuses it with `401` (`reason: "invalid"`). A person revokes it under
+  Settings → Connected apps.
 - **A bearer is checked with the platform before it gets anything.** An
   initialize makes no session until the platform accepts its token — a `2xx`
   from `GET ssh-keys`, which every valid credential gets — so invented tokens

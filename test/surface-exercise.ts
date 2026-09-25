@@ -147,6 +147,44 @@ export const EXERCISE: Record<string, Record<string, unknown>[]> = {
     { secrets: [{ secret_id: 'csec-0123456789abcde0', file: 'kubeconfig' }], version: 3 },
     { secrets: [], version: 4 },
   ],
+  // The account's secret store (OPL-4984, tools in OPL-5026). workspace_id is
+  // sent on one variant of each, because the parameter sweep is what proves it
+  // can be.
+  list_secrets: [{}, { workspace_id: 'ws-1' }],
+  get_secret: [
+    { secret_id: 'csec-0123456789abcdef' },
+    { secret_id: 'csec-0123456789abcdef', workspace_id: 'ws-1' },
+  ],
+  create_secret: [
+    { name: 'OPENAI_API_KEY', value: 'sk-fixture-value-0001' },
+    { name: 'DEPLOY_TOKEN', value: 'tok-fixture-value-0002', workspace_id: 'ws-1' },
+  ],
+  replace_secret: [
+    {
+      secret_id: 'csec-0123456789abcdef',
+      value: 'sk-fixture-value-0003',
+      revision_id: 'csr-0123456789abcdef01234567',
+    },
+    {
+      secret_id: 'csec-0123456789abcdef',
+      value: 'sk-fixture-value-0004',
+      revision_id: 'csr-0123456789abcdef01234567',
+      workspace_id: 'ws-1',
+    },
+  ],
+  delete_secret: [
+    {
+      secret_id: 'csec-0123456789abcdef',
+      revision_id: 'csr-0123456789abcdef01234567',
+      confirm: true,
+    },
+    {
+      secret_id: 'csec-0123456789abcdef',
+      revision_id: 'csr-0123456789abcdef01234567',
+      workspace_id: 'ws-1',
+      confirm: true,
+    },
+  ],
   wait_for_computer: [{ until: 'guest' }],
   get_desktop_url: [{}],
   // A named size and an explicit shape are alternatives, never both.
@@ -239,11 +277,17 @@ export const EXERCISE: Record<string, Record<string, unknown>[]> = {
     { path: '/home/user/a.txt', content: 'hello' },
     // Create-only, which is what sends query:overwrite (OPL-4994).
     { path: '/home/user/b.txt', content: 'hello', overwrite: false },
+    // Refuse rather than resume a computer that is not running (OPL-5026).
+    { path: '/home/user/c.txt', content: 'hello', no_wake: true },
   ],
   // The offset is the parameter, and it is the whole of OPL-3740: without an
   // argument that turns into a Range this route is reachable and a file over
   // 64 MiB still is not.
-  read_file: [{ path: '/home/user/a.txt' }, { path: '/home/user/a.txt', offset: 2 }],
+  read_file: [
+    { path: '/home/user/a.txt' },
+    { path: '/home/user/a.txt', offset: 2 },
+    { path: '/home/user/a.txt', no_wake: true },
+  ],
 
   list_snapshots: [{}, { allow_partial: true, include_unfinished: true }],
   snapshot_holdings: [{}],
