@@ -146,6 +146,11 @@ export const V1_ROUTES: Route[] = [
   r('GET', 'secrets/:id'),
   r('PUT', 'secrets/:id'),
   r('DELETE', 'secrets/:id'),
+
+  // The account's workspaces, read only (OPL-5057).
+  r('GET', 'workspaces'),
+  r('GET', 'workspaces/:id'),
+  r('GET', 'workspaces/:id/members'),
 ];
 
 /**
@@ -394,6 +399,11 @@ export const PARAMETERS: ReadonlyMap<string, readonly string[]> = new Map([
   ['GET secrets/:id', ['query:workspace_id']],
   ['PUT secrets/:id', ['body:revision_id', 'body:value', 'body:workspace_id']],
   ['DELETE secrets/:id', ['query:revision_id', 'query:workspace_id']],
+
+  // The account's workspaces, read only (OPL-5057). None takes a parameter.
+  ['GET workspaces', []],
+  ['GET workspaces/:id', []],
+  ['GET workspaces/:id/members', []],
 ]);
 
 /**
@@ -455,9 +465,15 @@ export const ALLOWED = new Set(V1_ROUTES.map(key));
  * be exercised; parameter exceptions stay separate.
  */
 export const UNIMPLEMENTED = new Set<string>([
-  // Empty since OPL-5026: the account's secret store, the last entry, is
-  // reached by list_secrets, get_secret, create_secret, replace_secret and
-  // delete_secret. An operation left out on purpose goes here with its reason.
+  // The account's secret store left this list in OPL-5026, reached by
+  // list_secrets, get_secret, create_secret, replace_secret and delete_secret.
+  // An operation left out on purpose goes here with its reason.
+  //
+  // The account's workspaces, read only (OPL-5057). Listed to stay in step
+  // with the surface; no tool reaches them yet.
+  'GET workspaces',
+  'GET workspaces/:id',
+  'GET workspaces/:id/members',
 ]);
 
 /**
