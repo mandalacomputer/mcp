@@ -1,6 +1,6 @@
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
-import { APIError, MandalaError, NotFoundError, statusAdvice } from '../errors.js';
+import { APIError, ConflictError, MandalaError, NotFoundError, statusAdvice } from '../errors.js';
 import { guarded, refused, said, unavailableAdvice } from '../format.js';
 import * as P from '../paths.js';
 import {
@@ -19,7 +19,7 @@ import type { Registrar } from './types.js';
  * The BINDINGS (get/set_computer_secrets) carry only ids, revision ids, env
  * names and file names — no value crosses those routes in either direction.
  *
- * The STORE (list/get/create/replace/delete_secret) is where a value goes in,
+ * The STORE (list/get/create/set/replace/delete_secret) is where a value goes in,
  * and only in: the platform never answers one, the decoded answers here carry
  * none, and a tool that took a value never repeats it — not in a success, not
  * in a refusal. See {@link withoutValue}.
@@ -246,6 +246,34 @@ const workspaceArg = z
   .describe(
     'The workspace the secret belongs to. Leave it out for an account-wide secret. A secret in a workspace is found only with its workspace_id.',
   );
+
+/** A secret's name as a tool argument, checked for what the platform would refuse. */
+const nameArg = z
+  .string()
+  .min(1, 'name must not be empty')
+  .refine((v) => [...v].length <= SECRET_NAME_MAX_CHARS, {
+    message: `name must be at most ${SECRET_NAME_MAX_CHARS} characters`,
+  })
+  .refine((v) => !/\p{Cc}/u.test(v), {
+    message: 'name must not contain control characters',
+  })
+  .describe(
+    `What the secret is called, e.g. OPENAI_API_KEY. Up to ${SECRET_NAME_MAX_CHARS} characters, unique in its scope. This is a label, not where the value lands: set_computer_secrets names the variable or file.`,
+  );
+
+/** How many times set_secret reads the scope again after a conflict. */
+export const SECRET_SET_RETRIES = 3;
+
+/**
+ * The secret called `name` in a listing of one scope, or `undefined`: trimmed
+ * as the platform trims names, and ignoring ASCII case and nothing else, which
+ * is how it keeps them unique — `openai_api_key` is taken when `OPENAI_API_KEY` is.
+ */
+export function namedSecret(secrets: readonly Secret[], name: string): Secret | undefined {
+  const fold = (text: string) => text.trim().replace(/[A-Z]/g, (c) => c.toLowerCase());
+  const wanted = fold(name);
+  return secrets.find((s) => fold(s.name) === wanted);
+}
 
 const revisionArg = (use: string) =>
   idString('revision_id').describe(
@@ -496,18 +524,7 @@ export const registerSecrets: Registrar = (server, session) => {
       title: 'Store a new secret',
       description: `Store a value under a name on this account, encrypted, for binding to computers with set_computer_secrets (or the secrets field of a create). The value is sent once and NEVER shown again: this answer, every other tool and every route give back only the name, id and revision. Do not put the value anywhere else — not in a command line, a file or a message — when a binding can deliver it. Owners only. A name is unique within its scope (up to ${SECRET_NAME_MAX_CHARS} characters, no control characters); a taken name is refused with 409. The account holds at most 100 secrets at once and may create at most 1000 over its lifetime — list_secrets reports both. Without workspace_id the secret is account-wide and any computer on the account may be bound to it. NOT safe to repeat blind: if the answer is lost, list_secrets before creating again, since the secret may exist.`,
       inputSchema: {
-        name: z
-          .string()
-          .min(1, 'name must not be empty')
-          .refine((v) => [...v].length <= SECRET_NAME_MAX_CHARS, {
-            message: `name must be at most ${SECRET_NAME_MAX_CHARS} characters`,
-          })
-          .refine((v) => !/\p{Cc}/u.test(v), {
-            message: 'name must not contain control characters',
-          })
-          .describe(
-            `What the secret is called, e.g. OPENAI_API_KEY. Up to ${SECRET_NAME_MAX_CHARS} characters, unique in its scope. This is a label, not where the value lands: set_computer_secrets names the variable or file.`,
-          ),
+        name: nameArg,
         value: valueArg('The value'),
         workspace_id: workspaceArg.describe(
           'The workspace it belongs to. Leave it out for an account-wide secret.',
@@ -524,6 +541,52 @@ export const registerSecrets: Registrar = (server, session) => {
           `Stored ${secret.name} as ${secret.id}, revision ${secret.revision_id}, ${secret.workspace_id === null ? 'account-wide' : `in workspace ${secret.workspace_id}`}. The value is not shown and cannot be read back. Bind it to a computer with set_computer_secrets.`,
           secret,
         );
+      }),
+  );
+
+  server.registerTool(
+    'set_secret',
+    {
+      title: 'Store or replace a secret by name',
+      description: `Make a name hold a value: create the secret if the scope has no secret by that name, or replace its value if it has — the one to reach for when either will do. It reads the scope first and replaces against the revision it read; names match ignoring ASCII case, as the platform keeps them unique. If the secret is created or replaced by someone else between the read and the write, it reads again and tries again, up to ${SECRET_SET_RETRIES} times. The value is NEVER shown back. Owners only. A new name counts against the account's limits on secrets held and created (list_secrets reports both). ${LIVE_VALUES} NOT safe to repeat blind when the answer is lost: list_secrets says whether the change landed.`,
+      inputSchema: {
+        name: nameArg,
+        value: valueArg('The value'),
+        workspace_id: workspaceArg.describe(
+          'The scope to look in, and to create in. Leave it out for the account-wide secrets.',
+        ),
+      },
+      annotations: { destructiveHint: true, idempotentHint: false },
+    },
+    ({ name, value, workspace_id }, extra) =>
+      storeGuarded(`Setting ${name.trim()}`, true, value, async () => {
+        const store = session.api.with(extra.signal).secrets;
+        for (let attempt = 0; ; attempt++) {
+          const found = namedSecret(
+            (await store.list({ workspaceId: workspace_id })).secrets,
+            name,
+          );
+          try {
+            const secret = found
+              ? await store.replace(found.id, {
+                  value,
+                  revisionId: found.revision_id,
+                  workspaceId: workspace_id,
+                })
+              : await store.create({ name: name.trim(), value, workspaceId: workspace_id });
+            const scope =
+              secret.workspace_id === null ? 'account-wide' : `in workspace ${secret.workspace_id}`;
+            return said(
+              found
+                ? `Replaced the value of ${secret.name} (${secret.id}), ${scope}; it is now at revision ${secret.revision_id}. The value is not shown. Computers bound to it get it at their next start or restart, and a running one is sent it now on a best-effort basis.`
+                : `Stored ${secret.name} as ${secret.id}, revision ${secret.revision_id}, ${scope}. The value is not shown and cannot be read back. Bind it to a computer with set_computer_secrets.`,
+              { ...secret, created: !found },
+            );
+          } catch (err) {
+            // A revision that moved, or a name somebody else just took: read again.
+            if (!(err instanceof ConflictError) || attempt >= SECRET_SET_RETRIES) throw err;
+          }
+        }
       }),
   );
 

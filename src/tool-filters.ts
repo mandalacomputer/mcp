@@ -87,6 +87,7 @@ export const TOOL_TAGS = {
     'list_secrets',
     'get_secret',
     'create_secret',
+    'set_secret',
     'replace_secret',
     'delete_secret',
   ],

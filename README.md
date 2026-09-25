@@ -197,11 +197,12 @@ was issued to, not to the account, and are accepted by every computer with SSH
 on, on every account where that person is an owner or member. A
 workspace-scoped key can read keys but not add or remove them.
 
-**Secrets** — `list_secrets`, `get_secret`, `create_secret`, `replace_secret`,
-`delete_secret` for the account's secret store, and `get_computer_secrets`,
-`set_computer_secrets` and `create_computer`'s `secrets` for which of them a
-computer receives. A value goes in through `create_secret` or `replace_secret`
-and never comes back out. No route answers one, and a store tool's result
+**Secrets** — `list_secrets`, `get_secret`, `create_secret`, `set_secret`,
+`replace_secret`, `delete_secret` for the account's secret store, and
+`get_computer_secrets`, `set_computer_secrets` and `create_computer`'s `secrets`
+for which of them a computer receives. A value goes in through `create_secret`,
+`set_secret` (create the name, or replace its value if the scope holds it —
+names match ignoring ASCII case) or `replace_secret`, and never comes back out. No route answers one, and a store tool's result
 holds only the decoded documented fields (success) or the status, the `reason`
 word and a sentence of its own (refusal). It never includes the platform's
 response text, and the `Api` keeps none for these routes. The bindings carry
@@ -217,7 +218,10 @@ A command that needs a bound variable should use `desktop: true`. Whether a
 plain root `exec` sees it depends on the platform version. `replace_secret`
 and `delete_secret` need the current `revision_id`, and a stale one is a 409.
 `delete_secret` also needs `confirm: true`: a computer still bound to a deleted
-secret cannot start again until that binding is removed.
+secret cannot start again until that binding is removed. A bound computer runs,
+and its guest answers, a few seconds before its secrets land, so
+`wait_for_computer(until="guest")` on one also waits until they have;
+`get_computer` shows the gap as "its secrets are still on their way in".
 
 **Delegating** — `run_agent`, `run_agent_chat`, registered only when a model key is present:
 `MANDALA_MODEL_KEY` on stdio, or the caller's own `X-Model-Key` header over HTTP.
@@ -257,7 +261,7 @@ with an error listing all valid tags.
 | `usage` | `get_usage` |
 | `webhooks` | All webhook tools listed above |
 | `ssh` | All SSH tools listed above |
-| `secrets` | `list_secrets`, `get_secret`, `create_secret`, `replace_secret`, `delete_secret`, `get_computer_secrets`, `set_computer_secrets` |
+| `secrets` | `list_secrets`, `get_secret`, `create_secret`, `set_secret`, `replace_secret`, `delete_secret`, `get_computer_secrets`, `set_computer_secrets` |
 | `agent` | `run_agent`, `run_agent_chat` |
 | `activities` | `list_activities`, `get_activity`, `get_activity_results` |
 | `signals` | `read_signals` |

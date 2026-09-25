@@ -159,6 +159,11 @@ export const EXERCISE: Record<string, Record<string, unknown>[]> = {
     { name: 'OPENAI_API_KEY', value: 'sk-fixture-value-0001' },
     { name: 'DEPLOY_TOKEN', value: 'tok-fixture-value-0002', workspace_id: 'ws-1' },
   ],
+  // The upsert by name: a read of the scope, then the create or replace it picks.
+  set_secret: [
+    { name: 'OPENAI_API_KEY', value: 'sk-fixture-value-0005' },
+    { name: 'DEPLOY_TOKEN', value: 'tok-fixture-value-0006', workspace_id: 'ws-1' },
+  ],
   replace_secret: [
     {
       secret_id: 'csec-0123456789abcdef',

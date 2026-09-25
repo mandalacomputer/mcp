@@ -367,6 +367,13 @@ export type Computer = {
   secrets_pending?: boolean | null;
   /** Why the last delivering start was stopped, in one fixed sentence. Never a value. */
   secrets_error?: string;
+  /**
+   * Whether values are on their way into the desktop right now: true from a
+   * delivering start until they are applied, so a computer reads `running`
+   * with this still true for a few seconds. Absent where nothing is bound, or
+   * from a platform that predates it.
+   */
+  secrets_delivering?: boolean;
   secrets_generation?: number;
   secrets_applied?: unknown;
   vnc?: Record<string, unknown>;
@@ -474,6 +481,7 @@ export function describe(c: Computer): string {
   // Secrets, only where there is something to say: `false` and absent say
   // nothing, and `null` is the platform saying it could not check — not that
   // nothing is pending.
+  if (c.secrets_delivering === true) bits.push('its secrets are still on their way in');
   if (c.secrets_pending === true) bits.push('a change to its secrets is pending until it restarts');
   else if (c.secrets_pending === null)
     bits.push('whether its secrets are current is unknown until it restarts');
