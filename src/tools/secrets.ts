@@ -3,7 +3,13 @@ import { z } from 'zod';
 import { APIError, MandalaError, NotFoundError, statusAdvice } from '../errors.js';
 import { guarded, refused, said, unavailableAdvice } from '../format.js';
 import * as P from '../paths.js';
-import type { Secret, SecretList } from '../secret-store.js';
+import {
+  DOCUMENTED_REASONS,
+  isRequestId,
+  overlaps,
+  type Secret,
+  type SecretList,
+} from '../secret-store.js';
 import type { Registrar } from './types.js';
 
 /**
@@ -273,9 +279,6 @@ export function withoutValue(result: CallToolResult, value: string): CallToolRes
   };
 }
 
-/** A reason word as the platform spells one; anything else is not repeated. */
-const REASON_WORD = /^[a-z][a-z _-]{0,31}$/;
-
 /** This server's own sentence for a store refusal, by status. Never the platform's. */
 function storeAdvice(err: APIError, change: boolean): string {
   const unavailable = unavailableAdvice(err);
@@ -320,12 +323,16 @@ async function storeGuarded(
     result = await fn();
   } catch (err) {
     if (err instanceof APIError) {
+      // Exactly a documented word, and exactly a platform-minted id — and
+      // neither if it shares four characters with the value sent. Nothing else
+      // from the refusal is interpolated.
+      const safe = (v: string) => value === undefined || !overlaps(v, value);
       const reason =
-        err.reason !== undefined && REASON_WORD.test(err.reason) ? `, reason "${err.reason}"` : '';
-      const id =
-        err.requestId && /^[\w.:-]{1,128}$/.test(err.requestId)
-          ? ` Request id ${err.requestId}.`
+        err.reason !== undefined && DOCUMENTED_REASONS.has(err.reason) && safe(err.reason)
+          ? `, reason "${err.reason}"`
           : '';
+      const id =
+        isRequestId(err.requestId) && safe(err.requestId) ? ` Request id ${err.requestId}.` : '';
       result = refused(
         `${what} was refused (HTTP ${err.status}${reason}): ${storeAdvice(err, change)}. The platform\u2019s own message is not shown, because a refusal of a secret-store request could quote the value.${id}`,
       );

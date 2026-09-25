@@ -187,6 +187,112 @@ describe('the secret store tools', () => {
     },
   );
 
+  // The re-review (OPL-5026): a refusal whose `reason` or request id is a
+  // PREFIX of the value passed a shape check and was shown. Only a documented
+  // reason word and a platform-minted UUID get through, and neither if it
+  // overlaps the value. No run of four characters of the value may surface.
+  const LEAKY = `sk-${'qzxwvjk'.repeat(5)}qz`.slice(0, 36);
+  const SHORT = 'qzxwvj';
+  const ESCAPY = 'qz"xw\\vj-kq\nzx';
+  const runs = (v: string) => {
+    const out = new Set<string>();
+    for (const form of [v, JSON.stringify(v).slice(1, -1)])
+      for (let i = 0; i + 4 <= form.length; i++) out.add(form.slice(i, i + 4));
+    return [...out];
+  };
+  const prefixCases = (
+    v: string,
+  ): [string, number, Record<string, unknown>, Record<string, string>][] => {
+    const esc = JSON.stringify(v).slice(1, -1);
+    const p32 = v.slice(0, 32);
+    return [
+      ['reason = a prefix', 409, { error: 'x', reason: p32 }, {}],
+      ['reason = an escaped prefix', 409, { error: 'x', reason: esc.slice(0, 32) }, {}],
+      ['request_id = a prefix', 400, { error: 'x', request_id: p32 }, {}],
+      [
+        'headers = prefixes',
+        400,
+        { error: 'x', reason: 'contention' },
+        { 'X-Request-ID': v.slice(0, 20), Allow: p32, 'WWW-Authenticate': p32 },
+      ],
+      ['a short prefix as the reason', 409, { error: 'x', reason: v.slice(0, 4) }, {}],
+    ];
+  };
+
+  it.each([
+    ['a 36-character sk- value', LEAKY],
+    ['a 6-character value', SHORT],
+    ['a value that needs JSON escaping', ESCAPY],
+  ])('lets no piece of %s through a refusal\u2019s metadata', async (_what, v) => {
+    expect(LEAKY).toHaveLength(36);
+    for (const [label, status, body, headers] of prefixCases(v)) {
+      const restore = globalThis.fetch;
+      globalThis.fetch = (async () =>
+        new Response(JSON.stringify(body), {
+          status,
+          headers: { 'Content-Type': 'application/json', ...headers },
+        })) as typeof fetch;
+      try {
+        for (const tool of ['create_secret', 'replace_secret'] as const) {
+          const c = await connect();
+          const res = await c.call(
+            tool,
+            tool === 'create_secret'
+              ? { name: 'A_TOKEN', value: v }
+              : { secret_id: SECRET.id, value: v, revision_id: REV },
+          );
+          await c.close();
+          const out = `${textOf(res)}\n${JSON.stringify(res)}`;
+          for (const run of runs(v))
+            expect(out.includes(run), `${tool} ${label}: ${run}`).toBe(false);
+        }
+        const api = new Api('com_test', BASE);
+        for (const call of [
+          () => api.secrets.create({ name: 'A_TOKEN', value: v }),
+          () => api.secrets.replace(SECRET.id, { value: v, revisionId: REV }),
+        ]) {
+          const err = (await call().then(
+            () => undefined,
+            (e: unknown) => e,
+          )) as Record<string, unknown> & Error;
+          expect(err).toBeInstanceOf(MandalaError);
+          const thrown = [
+            err.message,
+            JSON.stringify(err.body ?? null),
+            String(err.reason),
+            String(err.requestId),
+            String(err.allow),
+            String(err.wwwAuthenticate),
+          ].join('\n');
+          for (const run of runs(v))
+            expect(thrown.includes(run), `Api ${label}: ${run}`).toBe(false);
+        }
+      } finally {
+        globalThis.fetch = restore;
+      }
+    }
+  });
+
+  it('still shows a documented reason word and a platform request id', async () => {
+    const id = '0f8fad5b-d9cb-469f-a165-70867728950e';
+    const restore = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify({ error: 'x', reason: 'contention', request_id: 'not-it' }), {
+        status: 409,
+        headers: { 'Content-Type': 'application/json', 'X-Request-ID': id },
+      })) as typeof fetch;
+    try {
+      const c = await connect();
+      const res = await c.call('create_secret', { name: 'A_TOKEN', value: LEAKY });
+      await c.close();
+      expect(textOf(res)).toContain('reason "contention"');
+      expect(textOf(res)).toContain(`Request id ${id}`);
+      expect(textOf(res)).not.toContain('not-it');
+    } finally {
+      globalThis.fetch = restore;
+    }
+  });
+
   it('refuses an oversized value before sending, without quoting it', async () => {
     const { call, close } = await connect();
     const big = `secret-${'x'.repeat(4096)}`;

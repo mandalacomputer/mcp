@@ -83,6 +83,52 @@ export interface SecretStore {
   delete(id: string, args: { revisionId: string; workspaceId?: string }): Promise<void>;
 }
 
+/**
+ * The refusal words the platform documents, and the only ones a secret-store
+ * refusal is allowed to carry through this package. Taken from the published
+ * `Error.reason` (contention, starting, unavailable, unsupported, exists,
+ * revoked) and the API-key ingress words beside it (missing, invalid).
+ *
+ * An allow-list rather than a shape check, because a shape check is exactly
+ * what a secret prefix passes: `sk-proj-abc…` cut to thirty-two characters is a
+ * perfectly word-like string (OPL-5026 review). Any other word is dropped, not
+ * shown — the status still says what kind of failure it was.
+ */
+export const DOCUMENTED_REASONS: ReadonlySet<string> = new Set([
+  'contention',
+  'starting',
+  'unavailable',
+  'unsupported',
+  'exists',
+  'revoked',
+  'missing',
+  'invalid',
+]);
+
+/**
+ * A request id in the platform's own format: a random UUID, which is all it
+ * mints (callers' ids are ignored). Anything else is not repeated.
+ */
+const REQUEST_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+/** Whether a string is a request id the platform could have minted. */
+export const isRequestId = (v: unknown): v is string => typeof v === 'string' && REQUEST_ID.test(v);
+
+/**
+ * Whether two strings share any run of four or more characters — the test for
+ * "this metadata may be a piece of that value". Used to drop even a documented
+ * word or a well-formed id that happens to overlap the value sent.
+ */
+export function overlaps(a: string, b: string, run = 4): boolean {
+  if (!a || !b) return false;
+  const [short, long] = a.length <= b.length ? [a, b] : [b, a];
+  if (short.length < run) return long.includes(short);
+  for (let i = 0; i + run <= short.length; i++) {
+    if (long.includes(short.slice(i, i + run))) return true;
+  }
+  return false;
+}
+
 const isRecord = (v: unknown): v is Record<string, unknown> =>
   v !== null && typeof v === 'object' && !Array.isArray(v);
 

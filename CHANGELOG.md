@@ -56,7 +56,9 @@ are wording changes, and they are behaviour changes in the way that matters.
   decoded documented fields. A refusal shows only the status, the `reason`
   word and the tool's own sentence, never the platform's response text, which
   the `Api` does not keep for these routes. Any output is also scrubbed of the
-  value, however short. `replace_secret` and `delete_secret` need the current
+  value, however short. A refusal's `reason` is shown only if it is a documented
+  word, and its request id only if it is a platform UUID; neither is shown if it
+  shares four characters with the value. `replace_secret` and `delete_secret` need the current
   `revision_id`, and `delete_secret` needs `confirm: true` and says that a
   computer still bound to the secret cannot start again. For embedders,
   `api.secrets` offers `list`, `create`, `get`, `replace` and `delete`, decoded

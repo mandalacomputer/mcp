@@ -14,7 +14,15 @@ import {
   RedirectError,
 } from './errors.js';
 import * as P from './paths.js';
-import { malformedSecretAnswer, type SecretStore, secretListOf, secretOf } from './secret-store.js';
+import {
+  DOCUMENTED_REASONS,
+  isRequestId,
+  malformedSecretAnswer,
+  overlaps,
+  type SecretStore,
+  secretListOf,
+  secretOf,
+} from './secret-store.js';
 
 export const DEFAULT_BASE_URL = 'https://app.mandala.computer/api/v1';
 
@@ -37,9 +45,6 @@ export function isSecretStoreRoute(path: string): boolean {
   return /^\/?secrets(?:\/[^/]*)?\/?$/.test(path.split('?')[0]);
 }
 
-/** A reason word, as the platform spells one: short, lower case, no punctuation. */
-const REASON_WORD = /^[a-z][a-z _-]{0,31}$/;
-
 /**
  * All that is kept of a secret-store refusal's body: its `reason`, if it is a
  * word. Nothing else, and never a sentence.
@@ -54,7 +59,7 @@ function secretStoreRefusalBody(text: string | undefined): { reason: string } | 
   }
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return undefined;
   const reason = (parsed as { reason?: unknown }).reason;
-  return typeof reason === 'string' && REASON_WORD.test(reason) ? { reason } : undefined;
+  return typeof reason === 'string' && DOCUMENTED_REASONS.has(reason) ? { reason } : undefined;
 }
 
 /**
@@ -68,14 +73,35 @@ async function withheld<T>(value: string, fn: () => Promise<T>): Promise<T> {
     return await fn();
   } catch (err) {
     if (value && err instanceof Error && 'reason' in err) {
-      const e = err as { reason?: unknown; body?: unknown };
-      if (typeof e.reason === 'string' && e.reason.includes(value)) {
+      // A documented word or a UUID that shares four or more characters with
+      // the value is dropped anyway: the filter above says what shape it has,
+      // not that it is not a piece of this value.
+      const e = err as { reason?: unknown; body?: unknown; requestId?: unknown };
+      if (typeof e.reason === 'string' && overlaps(e.reason, value)) {
         e.reason = undefined;
         e.body = undefined;
+      }
+      if (typeof e.requestId === 'string' && overlaps(e.requestId, value)) {
+        e.requestId = undefined;
       }
     }
     throw err;
   }
+}
+
+/** A secret-store response's metadata, keeping only what has the platform's fixed shape. */
+function secretStoreMetadata(resp: Response): APIErrorMetadata {
+  const id = resp.headers.get('x-request-id') ?? undefined;
+  const allow = resp.headers.get('allow') ?? undefined;
+  const challenge = resp.headers.get('www-authenticate') ?? undefined;
+  return {
+    requestId: isRequestId(id) ? id : undefined,
+    allow: allow !== undefined && /^[A-Z]+(?:, ?[A-Z]+)*$/.test(allow) ? allow : undefined,
+    wwwAuthenticate:
+      challenge !== undefined && /^Bearer(?: error="invalid_token")?$/.test(challenge)
+        ? challenge
+        : undefined,
+  };
 }
 
 function responseMetadata(resp: Response): APIErrorMetadata {
@@ -588,16 +614,21 @@ export class Api {
       }
     }
     const delay = retryAfterMs(resp.headers.get('retry-after'));
+    // The secret store's metadata is filtered as its body is: a request id only
+    // in the platform's own UUID format, and Allow / WWW-Authenticate only in
+    // the fixed shapes the platform sends. Nothing else a refusal carries is
+    // kept (OPL-5026).
+    const metadata = isSecretStoreRoute(path) ? secretStoreMetadata(resp) : responseMetadata(resp);
     // Content-Range describes the file length, independently of Retry-After.
     if (resp.status === 416) {
       const total = parseContentRange(resp.headers.get('content-range'))?.total;
       return new RangeNotSatisfiableError(message, resp.status, body, total, delay, {
-        ...responseMetadata(resp),
+        ...metadata,
         method,
       });
     }
     return errorForStatus(resp.status, message, body, delay, {
-      ...responseMetadata(resp),
+      ...metadata,
       method,
     });
   }
