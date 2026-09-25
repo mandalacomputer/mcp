@@ -380,7 +380,7 @@ export class Api {
       // store's own two routes would be.
       const parts = decode(pathname).toLowerCase().split('/').filter(Boolean);
       if (parts.at(-1) === 'secrets') return 'secrets';
-      if (parts.at(-2) === 'secrets') return 'secrets/:id';
+      if (parts.includes('secrets')) return 'secrets/:id';
       return undefined;
     } catch {
       return 'secrets/:id';

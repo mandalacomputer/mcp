@@ -645,6 +645,19 @@ describe('the secret-route boundary', () => {
     },
   );
 
+  it.each(['secrets/a%2Fb', 'secrets/a%2F..%2Fb', 'secrets/a/b/c'])(
+    'sanitizes %s, a secret id whose encoded slash splits into segments',
+    async (path) => {
+      const v = 'qzxwvjkqzxwvjk-slash';
+      const err = await answering(
+        () => new Response(JSON.stringify({ error: `bad ${v}`, value: v }), { status: 400 }),
+        () => rejection(api().json('PUT', path, { body: { value: v } })),
+      );
+      expect(err).toBeInstanceOf(MandalaError);
+      expect(leaks(err, v)).toEqual([]);
+    },
+  );
+
   it('keeps an id out of an empty-answer error', async () => {
     const err = await answering(
       () => new Response(null, { status: 204 }),

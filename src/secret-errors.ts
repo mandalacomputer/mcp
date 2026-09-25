@@ -89,8 +89,10 @@ export function secretRouteOf(canonical: string): SecretRoute | undefined {
   const parts = canonical.toLowerCase().split('/').filter(Boolean);
   if (parts[0] !== 'secrets') return undefined;
   if (parts.length === 1) return 'secrets';
-  if (parts.length === 2) return 'secrets/:id';
-  return undefined;
+  // Anything deeper is the store too, conservatively: an id carrying an
+  // encoded slash decodes into extra segments, and the platform has no other
+  // route under `secrets`, so sanitizing a descendant costs nothing.
+  return 'secrets/:id';
 }
 
 /** Whether a path is one of the account's secret store routes, as written. */
