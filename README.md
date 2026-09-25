@@ -185,6 +185,9 @@ which says nothing about the path; `isTransient` is false for both.
 
 **Account quota** — `get_account`
 
+**Who you are** — `whoami`, `list_api_keys`. Minting and revoking API keys are
+deliberately not tools — see [Who you are, and API keys](#who-you-are-and-api-keys).
+
 **Spending** — `get_usage`
 
 **Being told somewhere else** — `list_webhooks`, `create_webhook`,
@@ -246,7 +249,7 @@ with an error listing all valid tags.
 
 | Tag | Tools |
 | --- | --- |
-| `account` | `get_account` |
+| `account` | `get_account`, `whoami`, `list_api_keys` |
 | `computers` | `list_computers`, `get_computer`, `use_computer`, `wait_for_computer`, `get_desktop_url`, `list_sizes` |
 | `lifecycle` | `create_computer`, `start_computer`, `stop_computer`, `suspend_computer`, `restart_computer`, `update_computer`, `clone_computer`, `delete_computer`, `move_computer`, `list_moves` |
 | `input` | `screenshot`, `click`, `type_text`, `press_key`, `scroll`, `drag`, `move_mouse`, `mouse_button`, `cursor_position`, `wait` |
@@ -283,6 +286,30 @@ HTTP callers must supply their own computer selection. These variables apply
 to both transports and the plugin forwards them. Embedders can pass
 `readOnly: true` and `tags: ['input', 'guest']` in `ServerConfig`; the server
 does not read the environment itself.
+
+### Who you are, and API keys
+
+`whoami` takes no arguments and reads `GET /api/v1/whoami`: the person this
+server's API key was issued to, the account and role it acts with (the role as
+it is now), the workspace it is confined to, and the key itself — including
+`manage_keys`, whether it may manage API keys. It needs no permission and any
+role, and a suspended account can call it; the answer says so when the account
+is suspended. Behind the hosted server's OAuth sign-in, the key is the Connected
+app's (`prefix` `oauth`).
+
+`list_api_keys` lists the key holder's API keys on the account, newest first —
+never a raw key. It needs this server's key to have the **Manage keys**
+permission, which only a person can turn on, in the dashboard; without it the
+tool answers the platform's 403, whose sentence says exactly that. A Connected
+app's key never has the permission.
+
+**Minting and revoking keys are not offered here, on purpose.** A mint answers
+the new key in full, once, and a model's context — the conversation, the
+client's logs, whatever the transcript is shared with — is the worst place for a
+long-lived credential and one nobody can take it back from. A revoke is
+irreversible, and on a model's reading of a list it can cut off the person's CI,
+another agent, or this very session. People do both from the dashboard or with
+the `mandala api-keys` CLI.
 
 ### Current account quota
 

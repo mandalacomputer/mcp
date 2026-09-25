@@ -16,6 +16,13 @@ are wording changes, and they are behaviour changes in the way that matters.
 
 ### Added
 
+- **`whoami`** and **`list_api_keys`**, in the `account` tag, over the
+  platform's new `GET whoami` and `GET api-keys`. `whoami` needs no permission;
+  `list_api_keys` needs the key's opt-in "Manage keys" permission, and without
+  it answers the platform's 403 sentence, which says how to turn it on. Neither
+  ever shows a raw key. Minting and revoking keys are deliberately not tools: a
+  mint would put a long-lived credential into the model's context, and a revoke
+  is irreversible.
 - **`set_secret`**: make a name hold a value — create the secret, or replace its
   value if the scope already holds one by that name (matched ignoring ASCII
   case, as the platform keeps names unique). The upsert the SDKs and both CLIs

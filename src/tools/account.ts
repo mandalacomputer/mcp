@@ -80,7 +80,98 @@ const report = z
     return true;
   });
 
+// Who the credential is, and the holder's keys (platform OPL-5053). Both
+// projected to the public fields only; the raw key is never on either answer.
+const apiKey = z.object({
+  id: label,
+  name: z.string().nullable(),
+  prefix: z.string(),
+  created_at: z.string(),
+  last_used_at: z.string().nullable(),
+  workspace_id: z.string().nullable(),
+  workspace_name: z.string().nullable(),
+  manage_keys: z.boolean(),
+});
+const whoami = z.object({
+  user: z.object({ id: label, email: z.string(), name: z.string().nullable() }),
+  account: z.object({
+    id: label,
+    name: z.string().nullable(),
+    plan: z.string(),
+    status: z.string(),
+  }),
+  role: label,
+  workspace: z.object({ id: label, name: z.string(), created_at: z.string() }).nullable(),
+  key: apiKey.nullable(),
+});
+
+/**
+ * Minting and revoking keys are deliberately NOT tools (OPL-5053), though the
+ * platform has both routes:
+ *
+ * - A mint answers the raw key, once. Handed to a model it lands in the
+ *   conversation, the client's logs and whatever the transcript is shared
+ *   with — the worst place a long-lived credential can be, and one nobody can
+ *   take it back from.
+ * - A revoke is irreversible and can cut off the person's CI, another agent,
+ *   or this very session, on a model's reading of a list.
+ *
+ * Listing is safe to offer: it never carries a raw key. People mint and revoke
+ * from the dashboard or the `mandala api-keys` CLI.
+ */
 export const registerAccount: Registrar = (server, session) => {
+  server.registerTool(
+    'whoami',
+    {
+      title: 'Who this credential is',
+      description:
+        'Who the API key this server runs with belongs to: the person (id, email, name), the account it acts on (id, name, plan, status: active or suspended), the role it acts with now (owner, member or viewer), the workspace it is confined to (null for the whole account), and the key itself (id, name, prefix, and manage_keys: whether it may manage API keys). Needs no permission and any role; a suspended account can call it. No arguments.',
+      inputSchema: z.object({}).strict(),
+      annotations: readAnnotations,
+    },
+    (_args, extra) =>
+      metadataCall(async () => {
+        const data = metadata(
+          whoami,
+          await session.api.json('GET', P.WHOAMI, { signal: extra.signal }),
+        );
+        const scope = data.workspace
+          ? `confined to workspace ${data.workspace.name} (${data.workspace.id})`
+          : 'acting on the whole account';
+        return said(
+          `${data.user.email} as ${data.role} on ${data.account.name ?? data.account.id} (${data.account.status}), ${scope}.` +
+            (data.account.status === 'suspended'
+              ? ' The account is SUSPENDED: other calls will be refused until it is reinstated.'
+              : ''),
+          data,
+        );
+      }),
+  );
+
+  server.registerTool(
+    'list_api_keys',
+    {
+      title: 'List your API keys',
+      description:
+        'The API keys of the person this server\'s key belongs to, on the account it acts on, newest first: id, name, prefix (display only), scope, when last used, and manage_keys. Never a raw key. Needs this server\'s key to have the "Manage keys" permission, which only a person can turn on, in the dashboard; without it the answer is a 403 that says so — relay it rather than retrying. A key confined to a workspace sees only keys confined to that workspace. Minting and revoking keys are not available here: they are done in the dashboard or with the mandala CLI.',
+      inputSchema: z.object({}).strict(),
+      annotations: readAnnotations,
+    },
+    (_args, extra) =>
+      metadataCall(async () => {
+        const data = metadata(
+          z.array(apiKey),
+          await session.api.json('GET', P.API_KEYS, { signal: extra.signal }),
+        );
+        return said(
+          data.length
+            ? `${data.length} API key${data.length === 1 ? '' : 's'} this key can reach, newest first. None of them is shown in full; revoking one is done by a person, in the dashboard or with the mandala CLI.`
+            : 'No API keys this key can reach.',
+          data,
+        );
+      }),
+  );
+
   server.registerTool(
     'get_account',
     {

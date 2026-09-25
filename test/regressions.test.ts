@@ -3526,6 +3526,9 @@ describe('the tools our own prose tells a model to call', () => {
     'revision_id',
     // Chat agent.stop terminal value, not a callable tool.
     'end_turn',
+    // whoami and list_api_keys name it: the field saying whether a key may
+    // manage API keys (OPL-5053). A response field, not a tool.
+    'manage_keys',
     // Activity-page history continuation and revision-change checkpoints.
     'next_cursor',
     'changes_cursor',
@@ -5200,6 +5203,8 @@ describe('the event tools and what their annotations claim', () => {
           'get_execution',
           'get_result',
           'list_activities',
+          // Reads only; never a raw key (OPL-5053).
+          'list_api_keys',
           'list_directory',
           'poll_events',
           'publish_artifact',
@@ -5212,6 +5217,8 @@ describe('the event tools and what their annotations claim', () => {
           'use_computer',
           'wait_for_computer',
           'wait_for_event',
+          // Reads only (OPL-5053).
+          'whoami',
         ].sort(),
       );
     } finally {

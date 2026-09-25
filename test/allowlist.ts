@@ -151,6 +151,12 @@ export const V1_ROUTES: Route[] = [
   r('GET', 'workspaces'),
   r('GET', 'workspaces/:id'),
   r('GET', 'workspaces/:id/members'),
+
+  // Who the credential is, and the holder's own API keys (OPL-5053).
+  r('GET', 'whoami'),
+  r('GET', 'api-keys'),
+  r('POST', 'api-keys'),
+  r('DELETE', 'api-keys/:id'),
 ];
 
 /**
@@ -404,6 +410,12 @@ export const PARAMETERS: ReadonlyMap<string, readonly string[]> = new Map([
   ['GET workspaces', []],
   ['GET workspaces/:id', []],
   ['GET workspaces/:id/members', []],
+
+  // Who the credential is, and the holder's own API keys (OPL-5053).
+  ['GET whoami', []],
+  ['GET api-keys', []],
+  ['POST api-keys', ['body:manage_keys', 'body:name', 'body:workspace_id']],
+  ['DELETE api-keys/:id', []],
 ]);
 
 /**
@@ -474,6 +486,13 @@ export const UNIMPLEMENTED = new Set<string>([
   'GET workspaces',
   'GET workspaces/:id',
   'GET workspaces/:id/members',
+  // DECISION (OPL-5053). Minting answers a raw API key once, and a model's
+  // context is the worst place for a long-lived credential; revoking is
+  // irreversible and can cut off the person's CI or this session. People do
+  // both from the dashboard or the mandala CLI. list_api_keys and whoami are
+  // offered: neither ever carries a raw key.
+  'POST api-keys',
+  'DELETE api-keys/:id',
 ]);
 
 /**
@@ -498,6 +517,7 @@ export function patternFor(path: string): string {
         parent === 'builds' ||
         parent === 'webhooks' ||
         parent === 'ssh-keys' ||
+        parent === 'api-keys' ||
         // The secret store (OPL-4984), pinned to the second segment as the
         // platform pins it: `computers/:id/secrets` has no child to reduce.
         (i === 1 && parent === 'secrets')

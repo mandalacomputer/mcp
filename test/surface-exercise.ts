@@ -135,6 +135,9 @@ export const EXERCISE: Record<string, Record<string, unknown>[]> = {
   // SSH: the caller's keys, and one computer's switch. The name is sent on one
   // of the two adds, because the parameter sweep is what proves it can be.
   list_ssh_keys: [{}],
+  // Who the credential is, and the holder's keys (OPL-5053). No arguments.
+  whoami: [{}],
+  list_api_keys: [{}],
   add_ssh_key: [{ public_key: SSH_PUBLIC_KEY }, { public_key: SSH_PUBLIC_KEY, name: 'laptop' }],
   remove_ssh_key: [{ key_id: 'sshk-3c9a51d07be2f846', confirm: true }],
   get_computer_ssh: [{}],

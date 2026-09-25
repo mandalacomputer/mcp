@@ -154,6 +154,27 @@ export const SSH_PUBLIC_KEY =
   'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMxlN5MDRT9cXdHi871o7Ty3dKfNLt8mNmjSWtwv6DTw you@laptop';
 
 /** One registered SSH key as the platform lists it: canonical, no comment. */
+/** One API key as `GET api-keys` lists it (OPL-5053): never the raw key. */
+export const API_KEY = {
+  id: 'key-a1b2c3d4e5f6',
+  name: 'ci',
+  prefix: 'com_1a2b3c4d…',
+  created_at: '2026-09-20T08:00:00.000Z',
+  last_used_at: '2026-09-25T14:05:00.000Z',
+  workspace_id: null,
+  workspace_name: null,
+  manage_keys: false,
+};
+
+/** `GET whoami` for an account-wide key that manages keys. */
+export const WHOAMI = {
+  user: { id: 'usr-1', email: 'dana@example.com', name: 'Dana' },
+  account: { id: 'acc-1', name: 'Acme', plan: 'team', status: 'active' },
+  role: 'owner',
+  workspace: null,
+  key: { ...API_KEY, id: 'key-000000000001', name: 'laptop', manage_keys: true },
+};
+
 export const SSH_KEY = {
   id: 'sshk-3c9a51d07be2f846',
   name: 'laptop',
@@ -741,6 +762,8 @@ function respond(
   }
   // SSH: the caller's keys (201 on an add, an ack on a remove), and one
   // computer's setting, which a read and a write both answer in full.
+  if (path === '/whoami') return json(WHOAMI);
+  if (path === '/api-keys') return json([API_KEY]);
   if (path === '/ssh-keys')
     return json(method === 'GET' ? [SSH_KEY] : SSH_KEY, method === 'GET' ? 200 : 201);
   if (path.startsWith('/ssh-keys/')) return json({ ok: true });
