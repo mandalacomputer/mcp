@@ -544,6 +544,46 @@ describe('hosted: checking a bearer before it gets anything', () => {
     });
   }
 
+  // OPL-5050: a refused bearer on a sessionless request that is not an
+  // initialize was answered 400 "No session id", which sent the client to its
+  // session handling when the fix was its token.
+  it('answers a refused bearer with no session 401, and a valid one 400', async () => {
+    platform = platformWithRefusals();
+    platform.state.onlyAccept = 'mcpat_good';
+    const { server, url } = await start({ resourceMetadataUrl: METADATA, serviceSecret: SECRET });
+    try {
+      const c = client(url);
+      const bad = await c.send(LIST, { Authorization: 'Bearer mcpat_invented' });
+      expect(bad.status).toBe(401);
+      expect(bad.headers.get('www-authenticate')).toBe(CHALLENGE);
+      expect(((await bad.json()) as { id: unknown }).id).toBe(LIST.id);
+
+      // The protocol mistake is still named once the key is not the problem.
+      const good = await c.send(LIST, { Authorization: 'Bearer mcpat_good' });
+      expect(good.status).toBe(400);
+      expect(((await good.json()) as { error: { message: string } }).error.message).toContain(
+        'No session id',
+      );
+      expect(await sessions(url)).toBe(0);
+    } finally {
+      await stop(server);
+    }
+  });
+
+  it('answers a bearer the platform cannot confirm with no session 400, not 503', async () => {
+    platform = platformWithRefusals();
+    platform.state.probeStatus = 503;
+    const { server, url } = await start({ resourceMetadataUrl: METADATA, serviceSecret: SECRET });
+    try {
+      const res = await client(url).send(LIST, { Authorization: 'Bearer mcpat_alice' });
+      // Only a refusal changes the answer; an unconfirmed key is not one.
+      expect(res.status).toBe(400);
+      await res.text();
+    } finally {
+      await stop(server);
+    }
+  });
+
   it('still initializes a valid client from an address whose budget is spent', async () => {
     platform = platformWithRefusals();
     platform.state.onlyAccept = 'mcpat_good';

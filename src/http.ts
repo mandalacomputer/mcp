@@ -889,9 +889,14 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
     // ownership explicit if the parser policy changes later.
     releaseLargeBody(res);
 
-    if (!isInitializeRequest(req.body)) {
-      return badRequest(res, 'No session id, and this is not an initialize request.', rpcId(req));
-    }
+    // Who is asking is settled before what they asked for. A sessionless
+    // request that is not an initialize is a protocol mistake (400), but a
+    // client with no credential, or one the platform refuses, has an auth
+    // problem first — and a 400 "No session id" sent it looking at its session
+    // handling when the fix was its key. So the key, the Host check and, hosted,
+    // the bearer probe all run before the initialize test; only the session cap
+    // and the build below are an initialize's alone.
+    const initialize = isInitializeRequest(req.body);
     if (!key) {
       return unauthorized(
         res,
@@ -928,7 +933,7 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
             res,
             429,
             -32002,
-            'Too many refused initializes from this address. Retry later with a valid token.',
+            'Too many refused tokens from this address. Retry later with a valid token.',
             rpcId(req),
           );
         }
@@ -949,13 +954,18 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
         noteFailure(req);
         return challenged(res, TOKEN_REFUSED, rpcId(req));
       }
-      if (verdict === 'unknown') {
+      // Not an initialize, it is a 400 whatever the platform could say about
+      // the key short of refusing it.
+      if (verdict === 'unknown' && initialize) {
         return unavailable(
           res,
           'The platform could not confirm this token just now. Retry shortly.',
           rpcId(req),
         );
       }
+    }
+    if (!initialize) {
+      return badRequest(res, 'No session id, and this is not an initialize request.', rpcId(req));
     }
     // Swept sessions free their slot on the timer; this is the backstop for the
     // case the timer cannot help with, which is arrivals faster than the TTL.

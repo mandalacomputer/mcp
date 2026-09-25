@@ -34,6 +34,13 @@ are wording changes, and they are behaviour changes in the way that matters.
   failed stops the computer, and the refusal now says so, with the platform's
   reason. `get_computer` and the other computer summaries say "its secrets are
   still on their way in" while it lasts.
+- `--http`: a request with no session that is not an initialize now answers
+  `401` when it carries no key, and, in hosted OAuth mode, when the platform
+  refuses its token. It answered `400` "No session id" either way, which sent a
+  client to its session handling when the fix was its credential. A caller
+  whose key is fine still gets the `400`. The `429` for an address that has
+  sent too many refused tokens now says "tokens" rather than "initializes",
+  since it counts both.
 
 ## [0.6.0] — 2026-09-25
 
