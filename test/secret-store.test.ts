@@ -554,3 +554,154 @@ describe('the Api secret store methods', () => {
     });
   });
 });
+
+// The third re-review (OPL-5026): one boundary around every public operation
+// on a secret route, judged on the canonical URL; no Retry-After; the error's
+// class kept whatever is redacted; a value that throws when read. Each case
+// walks every property of what is thrown, `cause` included.
+describe('the secret-route boundary', () => {
+  const grams = (v: string) => {
+    const out = new Set<string>();
+    for (const form of [v, JSON.stringify(v).slice(1, -1)])
+      for (let i = 0; i + 4 <= form.length; i++) out.add(form.slice(i, i + 4));
+    return [...out];
+  };
+  const strings = (v: unknown, seen = new Set<unknown>(), depth = 0): string[] => {
+    if (typeof v === 'string') return [v];
+    if (typeof v === 'number') return [String(v)];
+    if (v === null || typeof v !== 'object' || seen.has(v) || depth > 6) return [];
+    seen.add(v);
+    const out: string[] = [];
+    for (const key of Object.getOwnPropertyNames(v)) {
+      let inner: unknown;
+      try {
+        inner = (v as Record<string, unknown>)[key];
+      } catch {
+        continue;
+      }
+      out.push(key, ...strings(inner, seen, depth + 1));
+    }
+    return out;
+  };
+  const leaks = (thing: unknown, v: string) => {
+    const text = strings(thing).join('\n');
+    return grams(v).filter((g) => text.includes(g));
+  };
+  async function rejection(p: Promise<unknown> | AsyncGenerator<unknown>): Promise<unknown> {
+    try {
+      if (Symbol.asyncIterator in (p as object)) {
+        for await (const _ of p as AsyncGenerator<unknown>) {
+          // drain
+        }
+      } else await p;
+    } catch (err) {
+      return err;
+    }
+    throw new Error('expected a rejection');
+  }
+  const answering = async <T>(answer: () => Response, fn: () => Promise<T>): Promise<T> => {
+    const restore = globalThis.fetch;
+    globalThis.fetch = (async () => answer()) as typeof fetch;
+    try {
+      return await fn();
+    } finally {
+      globalThis.fetch = restore;
+    }
+  };
+  const api = () => new Api('com_test', BASE);
+
+  it('drops a Retry-After that is a piece of the value, in the Api and the tool', async () => {
+    const v = '482917-secret-suffix';
+    const reply = () =>
+      new Response('{"error":"slow down"}', { status: 429, headers: { 'Retry-After': '482917' } });
+    const err = (await answering(reply, () =>
+      rejection(api().secrets.create({ name: 'A', value: v })),
+    )) as { retryAfterMs?: number; name?: string };
+    expect(err.name).toBe('RateLimitError');
+    expect(err.retryAfterMs).toBeUndefined();
+    // The value's words ("secret") are the tool's own vocabulary too; what
+    // must not appear is any piece of its number.
+    const numeric = (found: string[]) => found.filter((g) => /\d/.test(g));
+    expect(numeric(leaks(err, v))).toEqual([]);
+    const res = await answering(reply, async () => {
+      const c = await connect();
+      const r = await c.call('create_secret', { name: 'A', value: v });
+      await c.close();
+      return r;
+    });
+    expect(numeric(leaks(res, v))).toEqual([]);
+  });
+
+  it.each(['//secrets', './secrets', 'x/../secrets', '%73ecrets'])(
+    'sanitizes %s, which lands on the store',
+    async (path) => {
+      const v = 'qzxwvjkqzxwvjk-xqzv';
+      const err = await answering(
+        () => new Response(JSON.stringify({ error: `bad ${v}`, value: v }), { status: 400 }),
+        () => rejection(api().json('POST', path, { body: { name: 'A', value: v } })),
+      );
+      expect(err).toBeInstanceOf(MandalaError);
+      expect(leaks(err, v)).toEqual([]);
+    },
+  );
+
+  it('keeps an id out of an empty-answer error', async () => {
+    const err = await answering(
+      () => new Response(null, { status: 204 }),
+      () => rejection(api().json('PUT', 'secrets/PRIVATEIDQZXW', { body: { value: 'x' } })),
+    );
+    expect(leaks(err, 'PRIVATEIDQZXW')).toEqual([]);
+  });
+
+  it('keeps a Content-Range and a Content-Type out of bytes and sse errors', async () => {
+    const v = 'qzxwvjkqzxwvjk-header';
+    const ranged = await answering(
+      () =>
+        new Response('abc', {
+          status: 206,
+          headers: { 'Content-Range': `bytes ${v}`, 'Content-Type': 'text/plain' },
+        }),
+      () => rejection(api().bytes('GET', 'secrets/x', { headers: { Range: 'bytes=0-2' } })),
+    );
+    expect(leaks(ranged, v)).toEqual([]);
+    const streamed = await answering(
+      () => new Response('data: 1\n\n', { status: 200, headers: { 'Content-Type': `text/${v}` } }),
+      () => rejection(api().sse('POST', 'secrets', { body: { value: v } })),
+    );
+    expect(leaks(streamed, v)).toEqual([]);
+  });
+
+  it('keeps a value whose getter throws inside the boundary', async () => {
+    const v = 'qzxwvjkqzxwvjk-getter';
+    const body = {
+      name: 'A',
+      get value(): string {
+        throw new Error(`cannot read ${v}`);
+      },
+    };
+    const generic = await answering(
+      () => new Response('{}', { status: 201 }),
+      () => rejection(api().json('POST', 'secrets', { body })),
+    );
+    expect(generic).toBeInstanceOf(MandalaError);
+    expect(leaks(generic, v)).toEqual([]);
+    const typed = await answering(
+      () => new Response('{}', { status: 201 }),
+      () => rejection(api().secrets.create(body as unknown as { name: string; value: string })),
+    );
+    expect(typed).toBeInstanceOf(MandalaError);
+    expect(leaks(typed, v)).toEqual([]);
+  });
+
+  it('keeps FileExistsError, and isTransient false, when the reason overlaps the value', async () => {
+    const v = 'exists-credential';
+    const err = await answering(
+      () => new Response(JSON.stringify({ error: 'x', reason: 'exists' }), { status: 409 }),
+      () => rejection(api().secrets.create({ name: 'A', value: v })),
+    );
+    const { FileExistsError, isTransient } = await import('../src/errors.js');
+    expect(err).toBeInstanceOf(FileExistsError);
+    expect(isTransient(err)).toBe(false);
+    expect((err as { reason?: string }).reason).toBeUndefined();
+  });
+});

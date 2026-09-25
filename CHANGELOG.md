@@ -56,12 +56,16 @@ are wording changes, and they are behaviour changes in the way that matters.
   decoded documented fields. A refusal shows only the status, the `reason`
   word and the tool's own sentence, never the platform's response text, which
   the `Api` does not keep for these routes. Any output is also scrubbed of the
-  value, however short. Every error the `Api` raises for a secret route
-  (refusal, redirect, malformed answer, network failure, cancellation) is
-  rebuilt by one sanitizer with a fixed message. It keeps only the status, the
-  method, a documented `reason` word, a UUID request id and an `Allow` list of
-  method names, and drops any of those that shares four characters with the
-  value. `replace_secret` and `delete_secret` need the current
+  value, however short. Every public `Api` operation on a secret route runs
+  inside one boundary. The route is judged on the URL actually sent, so `//`,
+  `./`, `..` and percent-encoded spellings count. That covers `json`, `send`,
+  `bytes`, `listing`, `sse` and `api.secrets`, including body reads,
+  validation, iteration and reading the value itself. Any error that escapes is
+  rebuilt with a fixed message. It keeps its class, so `isTransient` is
+  unchanged, plus the status, the method, a documented `reason` word, a UUID
+  request id and an `Allow` list of method names. Any of those that shares
+  four characters with the value is dropped, and `Retry-After` is dropped
+  entirely. `replace_secret` and `delete_secret` need the current
   `revision_id`, and `delete_secret` needs `confirm: true` and says that a
   computer still bound to the secret cannot start again. For embedders,
   `api.secrets` offers `list`, `create`, `get`, `replace` and `delete`, decoded
