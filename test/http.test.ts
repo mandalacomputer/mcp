@@ -152,9 +152,22 @@ describe('the hosted transport', () => {
   });
 
   it('refuses a non-initialize request that carries no session', async () => {
-    const res = await post({ jsonrpc: '2.0', id: 2, method: 'tools/list' });
+    const res = await post(
+      { jsonrpc: '2.0', id: 2, method: 'tools/list' },
+      { Authorization: 'Bearer com_alice' },
+    );
     expect(res.status).toBe(400);
     expect(((await res.json()) as { id: unknown }).id).toBe(2);
+  });
+
+  // OPL-5050: with no key at all, the missing key is the answer, not the
+  // missing session — as it already was for an initialize.
+  it('answers a sessionless non-initialize with no key 401, not 400', async () => {
+    const res = await post({ jsonrpc: '2.0', id: 2, method: 'tools/list' });
+    expect(res.status).toBe(401);
+    const body = (await res.json()) as { error: { message: string }; id: unknown };
+    expect(body.error.message).toContain('Bearer');
+    expect(body.id).toBe(2);
   });
 
   it('gives each caller a session of their own', async () => {
@@ -588,11 +601,12 @@ describe('a body from a caller who sent no key', () => {
   });
 
   it('still reaches the routes that answer without one', async () => {
-    // The statuses a bearer-less caller used to get are unchanged: the body is
-    // still parsed, just not at the large limit.
+    // The statuses a bearer-less caller gets are the route's own: the body is
+    // still parsed, just not at the large limit. With no key, a sessionless
+    // tools/list is a 401 like an initialize (OPL-5050).
     expect(
       (await post(JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/list' }))).status,
-    ).toBe(400);
+    ).toBe(401);
     expect((await post(JSON.stringify(INIT))).status).toBe(401);
   });
 
