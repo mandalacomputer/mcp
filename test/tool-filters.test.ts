@@ -16,7 +16,7 @@ import { BASE, connect, fakeEvents, installFakePlatform } from './harness.js';
 // Independent expectations: changing the production mapping must change the
 // advertised contract deliberately, rather than making both sides agree silently.
 const GROUPS = {
-  account: 'get_account',
+  account: 'get_account whoami list_api_keys',
   computers:
     'list_computers get_computer use_computer wait_for_computer get_desktop_url list_sizes',
   lifecycle:
@@ -331,7 +331,11 @@ describe('tool registration filters over MCP', () => {
       modelKey: undefined,
       webSocket: events.factory,
     });
-    expect(names((await account.client.listTools()).tools)).toEqual(['get_account']);
+    expect(names((await account.client.listTools()).tools)).toEqual([
+      'get_account',
+      'list_api_keys',
+      'whoami',
+    ]);
     expect((await account.call('get_account')).isError).not.toBe(true);
     expect(platform.calls.map(({ method, pathname }) => [method, pathname])).toEqual([
       ['GET', '/api/v1/account'],
