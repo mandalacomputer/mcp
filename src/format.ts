@@ -367,6 +367,13 @@ export type Computer = {
   secrets_pending?: boolean | null;
   /** Why the last delivering start was stopped, in one fixed sentence. Never a value. */
   secrets_error?: string;
+  /**
+   * Whether values are on their way into the desktop right now: true from a
+   * delivering start until they are applied, so a computer reads `running`
+   * with this still true for a few seconds. Absent where nothing is bound, or
+   * from a platform that predates it.
+   */
+  secrets_delivering?: boolean;
   secrets_generation?: number;
   secrets_applied?: unknown;
   vnc?: Record<string, unknown>;
@@ -393,6 +400,31 @@ export function nothingAdmitted(c: Computer): boolean {
     Number.isFinite(c.running_ram_mb) &&
     c.running_ram_mb === 0
   );
+}
+
+/**
+ * Whether a running computer's secrets are still on their way into its desktop.
+ *
+ * `secrets_delivering` answers it where the platform reports the field. Where
+ * it does not (a platform that predates it), the receipt does: it names the
+ * delivering start it is for, so a receipt behind `secrets_generation` is a
+ * delivery still under way — the fallback both SDKs' waits use. Nothing bound
+ * is nothing coming.
+ */
+export function secretsOnTheirWay(c: Computer): boolean {
+  if (typeof c.secrets_delivering === 'boolean') return c.secrets_delivering;
+  if (!Array.isArray(c.secrets) || c.secrets.length === 0) return false;
+  const generation = c.secrets_generation;
+  if (typeof generation !== 'number' || !Number.isFinite(generation) || generation <= 0)
+    return false;
+  const receipt = c.secrets_applied;
+  const applied =
+    receipt !== null &&
+    typeof receipt === 'object' &&
+    typeof (receipt as { generation?: unknown }).generation === 'number'
+      ? (receipt as { generation: number }).generation
+      : -1;
+  return applied < generation;
 }
 
 /**
@@ -474,6 +506,7 @@ export function describe(c: Computer): string {
   // Secrets, only where there is something to say: `false` and absent say
   // nothing, and `null` is the platform saying it could not check — not that
   // nothing is pending.
+  if (c.secrets_delivering === true) bits.push('its secrets are still on their way in');
   if (c.secrets_pending === true) bits.push('a change to its secrets is pending until it restarts');
   else if (c.secrets_pending === null)
     bits.push('whether its secrets are current is unknown until it restarts');

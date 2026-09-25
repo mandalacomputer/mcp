@@ -12,6 +12,29 @@ about a refusal is what the model reads and reasons from. Several entries below
 are wording changes, and they are behaviour changes in the way that matters.
 
 
+## [Unreleased]
+
+### Added
+
+- **`set_secret`**: make a name hold a value — create the secret, or replace its
+  value if the scope already holds one by that name (matched ignoring ASCII
+  case, as the platform keeps names unique). The upsert the SDKs and both CLIs
+  already had. A conflict between its read and its write is read again up to
+  three times; a 503 is never sent again, and the value is never shown back.
+  In the `secrets` tag.
+
+### Changed
+
+- **`wait_for_computer(until="guest")` waits for a bound computer's secrets.** A
+  computer with secrets bound runs, and its guest answers, a few seconds before
+  the values land, and a command run in between saw them unset. "guest" now
+  also waits until the platform's `secrets_delivering` is false — or, on a
+  platform that predates the field, until the receipt names the latest
+  delivering start, the fallback both SDKs use. A delivery that
+  failed stops the computer, and the refusal now says so, with the platform's
+  reason. `get_computer` and the other computer summaries say "its secrets are
+  still on their way in" while it lasts.
+
 ## [0.6.0] — 2026-09-25
 
 Read before upgrading. The model gains five secret store tools, including

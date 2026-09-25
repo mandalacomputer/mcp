@@ -15,6 +15,7 @@ import {
   nothingAdmitted,
   refused,
   said,
+  secretsOnTheirWay,
   unwrapComputer,
   withErrorMetadata,
   withoutCredentials,
@@ -989,14 +990,14 @@ export const registerComputers: Registrar = (server, session, opts) => {
     {
       title: 'Wait for a computer to be ready',
       description:
-        'Poll until the computer is running, or until the software inside it answers. Use "guest" before exec, files or windows, and before expecting a screenshot to show a desktop rather than a boot screen. Reports progress while it waits, so a client that sends a progressToken and sets resetTimeoutOnProgress can hold the request open; a client that cannot should lower timeout_s and call again rather than watch its own default timeout cancel the wait.',
+        'Poll until the computer is running, or until the software inside it answers. Use "guest" before exec, files or windows, and before expecting a screenshot to show a desktop rather than a boot screen; on a computer with secrets bound, "guest" also waits until they have reached the desktop, so a command run next sees them. Reports progress while it waits, so a client that sends a progressToken and sets resetTimeoutOnProgress can hold the request open; a client that cannot should lower timeout_s and call again rather than watch its own default timeout cancel the wait.',
       inputSchema: {
         ...idArg,
         until: z
           .enum(['running', 'guest'])
           .default('guest')
           .describe(
-            '"running" is the hypervisor reporting the VM up. "guest" is the software inside it answering, which is what exec and a painted desktop actually need.',
+            '"running" is the hypervisor reporting the VM up. "guest" is the software inside it answering, which is what exec and a painted desktop actually need — and, on a computer with secrets bound, its secrets delivered.',
           ),
         timeout_s: z.number().int().min(5).max(900).default(180),
       },
@@ -1154,11 +1155,29 @@ export const registerComputers: Registrar = (server, session, opts) => {
               );
             }
             if (last === 'stopped' && nothingAdmitted(c)) {
-              return refused(`${id} is stopped. start_computer boots it.`, withoutCredentials(c));
+              const why =
+                typeof c.secrets_error === 'string' && c.secrets_error.trim()
+                  ? ` Its secrets were not delivered, so the platform stopped it: ${c.secrets_error.trim()}.`
+                  : '';
+              return refused(
+                `${id} is stopped.${why} start_computer boots it.`,
+                withoutCredentials(c),
+              );
             }
             if (last === 'running') {
               if (until === 'running')
                 return said(`Running: ${describe(c)}`, withoutCredentials(c));
+              // A bound computer runs, and its guest answers, a few seconds
+              // before its secrets land — and a command run in between sees
+              // them unset. "guest" is what a caller waits on before exec, so
+              // it waits for those too. A delivery that fails stops the
+              // computer, which the stopped refusal below then reports. On a
+              // platform without secrets_delivering, the receipt says instead.
+              if (secretsOnTheirWay(c)) {
+                await beat(`Waiting for ${id} — running; its secrets are still on their way.`);
+                await sleep(POLL_MS, signal);
+                continue;
+              }
               // "The guest is up" is not a status the platform reports, so it is
               // asked rather than waited for: a trivial exec either answers, or
               // refuses with the 409 that says the agent is not up yet.

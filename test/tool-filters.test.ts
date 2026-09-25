@@ -39,7 +39,7 @@ const GROUPS = {
   events: 'wait_for_event poll_events wait_for_file_change',
   usage: 'get_usage',
   secrets:
-    'get_computer_secrets set_computer_secrets list_secrets get_secret create_secret replace_secret delete_secret',
+    'get_computer_secrets set_computer_secrets list_secrets get_secret create_secret set_secret replace_secret delete_secret',
   ssh: 'list_ssh_keys add_ssh_key remove_ssh_key get_computer_ssh set_computer_ssh',
   webhooks:
     'list_webhooks create_webhook get_webhook update_webhook rotate_webhook_secret test_webhook list_webhook_deliveries delete_webhook',
