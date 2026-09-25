@@ -16,6 +16,16 @@ are wording changes, and they are behaviour changes in the way that matters.
 
 ### Added
 
+- **`screenshot` takes `region`, `scale`, `format` and `quality`**, over the
+  platform's new query parameters: a crop in screen pixels (measured before
+  any scaling), a shrink factor in (0, 1], `png` or `jpeg`, and a JPEG quality
+  of 1-100 — a cheaper frame for the model. A shaped picture comes back with a
+  note that says how to turn a position in it into the screen coordinates
+  `click` takes. `width` with `scale`, and `quality` on a PNG, are refused
+  before anything is sent. A suspended computer refuses a crop, a scale, a PNG
+  or a quality (409 `unavailable`), and the refusal names the two ways out:
+  `start_computer`, or `fresh: false` without those arguments for the saved
+  picture.
 - **`whoami`** and **`list_api_keys`**, in the `account` tag, over the
   platform's new `GET whoami` and `GET api-keys`. `whoami` needs no permission;
   `list_api_keys` needs the key's opt-in "Manage keys" permission, and without

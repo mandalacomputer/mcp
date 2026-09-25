@@ -362,6 +362,12 @@ anything and keep the hint. When a stretch of work is over, `suspend_computer` (
 suspend catches the ones a model forgets, but only after 30 minutes untouched.
 `get_usage` is what says what any of it cost.
 
+**A screenshot need not be the whole screen.** `screenshot` takes `region` (a
+crop, in the screen pixels `click` takes, before any scaling), `scale` (0 to 1),
+`format` (`png` or `jpeg`) and `quality` (JPEG, 1-100). A cropped or scaled
+picture is in its own pixel space, so the tool says alongside it how to turn a
+position in it back into screen coordinates.
+
 **Ten clicks need not be ten screenshots.** Driving the desktop one tool at a
 time — `screenshot`, `click`, `screenshot` — puts an image in the calling
 model's context for every step. `run_agent` hands a task in plain language to
