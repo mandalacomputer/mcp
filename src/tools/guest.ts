@@ -689,6 +689,9 @@ export const registerGuest: Registrar = (server, session) => {
             },
           );
         } catch (err) {
+          // A create-only upload's reasonless 409 is CreateOnlyConflictError
+          // whether or not no_wake was sent, and claims nothing about the path
+          // or the computer's state — the same answer the Python SDK gives.
           if (no_wake && !(err instanceof CreateOnlyConflictError)) {
             const asleep = noWakeRefusal(err, id, `nothing was written to ${path}`);
             if (asleep) return asleep;
@@ -723,11 +726,7 @@ export const registerGuest: Registrar = (server, session) => {
                 `${err.message} (HTTP ${err.status})\n\nThis create-only write to ${path} was refused ` +
                   'as a conflict, reason unknown, and whether this attempt wrote anything is ' +
                   'unconfirmed. Do not send the same call again: it was not said to clear by waiting. ' +
-                  'Read the path to see what is there before choosing another path or overwriting.' +
-                  (no_wake
-                    ? ' With no_wake set, this is also how a computer that is not running is refused: ' +
-                      'if it is suspended or stopped, nothing was written.'
-                    : ''),
+                  'Read the path to see what is there before choosing another path or overwriting.',
               ),
               err,
             );

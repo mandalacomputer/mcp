@@ -1784,11 +1784,11 @@ describe('wait failures that are worth another poll', () => {
     // A change answered 503 may or may not have happened (OPL-5025 docs), so
     // the exported predicate says yes only where a repeat cannot do it twice.
     // The poll predicate still rides every one of them out: it replays reads.
-    for (const method of ['GET', 'HEAD', 'OPTIONS', 'PUT', 'DELETE', 'get']) {
+    for (const method of ['GET', 'HEAD', 'get']) {
       const err = errorForStatus(503, 'HTTP 503', undefined, undefined, { method });
       expect(isTransient(err), method).toBe(true);
     }
-    for (const method of ['POST', 'PATCH', undefined]) {
+    for (const method of ['POST', 'PATCH', 'PUT', 'DELETE', 'OPTIONS', undefined]) {
       const err = errorForStatus(503, 'HTTP 503', undefined, undefined, { method });
       expect(isTransient(err), String(method)).toBe(false);
       expect(isTransientForPoll(err)).toBe(true);

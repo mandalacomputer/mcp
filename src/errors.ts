@@ -544,29 +544,22 @@ export class RateLimitError extends APIError {
  * may not have happened: the platform answers a failure after the request was
  * sent the same way, with or without a warning in the message. So
  * {@link isTransient} calls a 503 worth repeating only for a request that is
- * safe to repeat — see {@link REPEATABLE_METHODS} — and a create, a command or
- * any other POST or PATCH has its current state read before it is sent again.
+ * safe to repeat — a GET or HEAD, see {@link REPEATABLE_METHODS} — and any
+ * change has its current state read before it is sent again.
  */
 export class UnavailableError extends APIError {
   override name = 'UnavailableError';
 }
 
 /**
- * The methods whose request can be sent twice with the effect of once.
+ * The methods a `503` leaves safe to send again: the two reads.
  *
- * GET, HEAD and OPTIONS change nothing; PUT and DELETE name the end state, so a
- * repeat of one that landed arrives at the same place (or at a `404` or a stale
- * revision's `409`, which say so rather than doing it twice). POST and PATCH are
- * not on the list: a create, a command, a clone or a snapshot repeated after a
- * lost answer is a second one.
+ * Every other method is a change, and the platform documents that a change
+ * answered `503` may or may not have happened. PUT and DELETE are idempotent in
+ * HTTP's terms, but "may have happened" still means the caller reads the state
+ * rather than replaying blind — the answer the TypeScript and Python SDKs give.
  */
-const REPEATABLE_METHODS: ReadonlySet<string> = new Set([
-  'GET',
-  'HEAD',
-  'OPTIONS',
-  'PUT',
-  'DELETE',
-]);
+const REPEATABLE_METHODS: ReadonlySet<string> = new Set(['GET', 'HEAD']);
 
 /**
  * Whether a `503` leaves the request's outcome unknown: it was a change, or its
@@ -1084,9 +1077,9 @@ export function errorForStatus(
  * - {@link ConflictError} — something is in flight that this cannot run
  *   alongside, minus the one that is a decision
  * - {@link RateLimitError} — a cadence, and the response usually says how long
- * - {@link UnavailableError} — something briefly out of reach, for a request
- *   that is safe to repeat (GET, HEAD, OPTIONS, PUT, DELETE). A POST or PATCH
- *   answered 503 may have happened, so it is not transient
+ * - {@link UnavailableError} — something briefly out of reach, for a GET or
+ *   HEAD only. Any change answered 503 may have happened, so it is not
+ *   transient, whatever `reason` it carries
  * - {@link ConnectivityError} — the request never left
  *
  * That last line is now literally true, and it was not always. The class used
@@ -1165,6 +1158,13 @@ export function isTransient(err: unknown): boolean {
   // is safe to replay blind. Same shape as the line above and the same reason:
   // a subclass of a branch below that would otherwise say yes (OPL-3855).
   if (err instanceof ConnectivityInterruptedError) return false;
+  // A 503 is a passing moment for a read and an unknown outcome for a change
+  // (OPL-5026): the platform answers a failure after the request was sent the
+  // same way. Decided BEFORE the reason word, which is about the computer and
+  // cannot say whether this request's change landed — a `contention` on a
+  // create's 503 must not make the create look safe to replay. Anything but a
+  // GET or HEAD, or a request whose method was not recorded, is not replayed.
+  if (err instanceof UnavailableError) return !outcomeUnknownOn503(err);
   // The platform's own word, ahead of the types below, because it is the more
   // specific answer and it is the one that tells the 409 that never clears from
   // the two that do (OPL-3898). Only an APIError carries a shape-checked one:
@@ -1178,11 +1178,6 @@ export function isTransient(err: unknown): boolean {
     if (kind === 'clears' && record(err.body) && typeof err.body.reason === 'string') return true;
     if (kind === 'permanent') return false;
   }
-  // A 503 is a passing moment for a read and an unknown outcome for a change
-  // (OPL-5026): the platform answers a failure after the request was sent the
-  // same way. A POST or PATCH, or a request whose method was not recorded, is
-  // not replayed blind — its state is read first.
-  if (err instanceof UnavailableError) return !outcomeUnknownOn503(err);
   return (
     err instanceof ConflictError ||
     err instanceof RateLimitError ||

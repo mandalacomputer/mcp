@@ -201,9 +201,11 @@ workspace-scoped key can read keys but not add or remove them.
 `delete_secret` for the account's secret store, and `get_computer_secrets`,
 `set_computer_secrets` and `create_computer`'s `secrets` for which of them a
 computer receives. A value goes in through `create_secret` or `replace_secret`
-and never comes back out: no route answers one, no tool result repeats one
-(success or refusal), and the bindings carry only secret ids, revisions and
-names. A computer receives a secret as an environment variable (`env`) or as a
+and never comes back out. No route answers one, and a store tool's result
+holds only the decoded documented fields (success) or the status, the `reason`
+word and a sentence of its own (refusal). It never includes the platform's
+response text, and the `Api` keeps none for these routes. The bindings carry
+only secret ids, revisions and names. A computer receives a secret as an environment variable (`env`) or as a
 file under `/run/mandala-secrets/user/files` (`file`). A set replaces the whole
 binding list (`[]` removes every binding) and reaches the guest at the
 computer's next start or restart; send the `version` a read answered to have it
@@ -742,11 +744,11 @@ available. A missing computer, snapshot, route or guest file remains
 Neither response causes an automatic retry or method switch.
 
 `isTransient(err)` answers "is this worth sending again unchanged". A `503` is
-transient only for a request that is safe to repeat (GET, HEAD, OPTIONS, PUT,
-DELETE). A POST or PATCH answered `503` may or may not have happened, because
-the platform answers a failure after the request was sent the same way. So
-`isTransient` is false for it, the tool's answer says to read the current state
-first, and `error.method` records the method. A `reason` this version does not
+transient only for a GET or HEAD. Any change answered `503` may or may not have
+happened, because the platform answers a failure after the request was sent the
+same way. So `isTransient` is false for it whatever `reason` it carries, the
+tool's answer says to read the current state first, and `error.method` records
+the method. A `reason` this version does not
 know, such as a new word, is treated as no classification. `reasonKind` returns
 `undefined` for it, and the status decides.
 

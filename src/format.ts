@@ -158,11 +158,11 @@ export function apiErrorMessage(error: APIError): string {
 /**
  * What to tell a model about a `503`, or `undefined` for anything else.
  *
- * Two answers, told apart by the request's method: a read, or a request that
- * names its end state (PUT, DELETE), can be sent again shortly; a POST or PATCH
- * may already have happened, so the current state is read first.
+ * Two answers, told apart by the request's method, and the same split
+ * isTransient makes: a GET or HEAD can be sent again shortly; any change may
+ * already have happened, so the current state is read first.
  */
-function unavailableAdvice(err: APIError): string | undefined {
+export function unavailableAdvice(err: APIError): string | undefined {
   if (!(err instanceof UnavailableError)) return undefined;
   return outcomeUnknownOn503(err)
     ? 'something this depends on could not answer right now, and THIS CHANGE MAY OR MAY NOT HAVE HAPPENED: a failure after the request was sent is answered the same way. Read the current state before sending it again — repeating a create, a command, a clone or a snapshot blind can do it twice'

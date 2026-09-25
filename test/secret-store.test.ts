@@ -91,16 +91,23 @@ describe('the secret store tools', () => {
     await close();
   });
 
-  it('keeps a value out of a refusal that quotes it, and out of an answer that carries it', async () => {
-    const quoted = await answering(400, { error: `value "${VALUE}" is not allowed` }, async () => {
-      const c = await connect();
-      const r = await c.call('create_secret', { name: 'X_TOKEN', value: VALUE });
-      await c.close();
-      return r;
-    });
+  it('shows none of a refusal\u2019s text, only the status, the reason word and its own sentence', async () => {
+    const quoted = await answering(
+      400,
+      { error: `value "${VALUE}" is not allowed`, reason: 'unsupported' },
+      async () => {
+        const c = await connect();
+        const r = await c.call('create_secret', { name: 'X_TOKEN', value: VALUE });
+        await c.close();
+        return r;
+      },
+    );
     expect(quoted.isError).toBe(true);
-    expect(textOf(quoted)).not.toContain(VALUE);
-    expect(textOf(quoted)).toContain('[secret value withheld]');
+    const text = textOf(quoted);
+    expect(text).not.toContain(VALUE);
+    expect(text).not.toContain('is not allowed');
+    expect(text).toContain('HTTP 400, reason "unsupported"');
+    expect(text).toContain('own message is not shown');
 
     // A platform that should never answer a value, answering one: the decoded
     // secret carries only the documented fields, so it goes no further.
@@ -108,7 +115,7 @@ describe('the secret store tools', () => {
       const c = await connect();
       const r = await c.call('replace_secret', {
         secret_id: SECRET.id,
-        value: 'x',
+        value: 'x-other-value',
         revision_id: REV,
       });
       await c.close();
@@ -117,6 +124,68 @@ describe('the secret store tools', () => {
     expect(echoed.isError).toBeFalsy();
     expect(textOf(echoed)).not.toContain(VALUE);
   });
+
+  // The Codex review's cases (OPL-5026): short values, a long value echoed in
+  // an error the client would truncate, a JSON-escaped value, a reason that is
+  // not a word, and a malformed success body. None may surface anywhere.
+  const LONG = `sk-${'q'.repeat(600)}-tail`;
+  const ESCAPED = 'pa"ss\\word\nwith-newline';
+  const values = ['z', 'hunter', LONG, ESCAPED];
+  it.each(values.map((v) => [v.length, v] as const))(
+    'never shows a %i-character value in any answer',
+    async (_n, v) => {
+      const json = JSON.stringify(v).slice(1, -1);
+      const bodies: [number, string][] = [
+        [400, JSON.stringify({ error: `bad value ${v}` })],
+        [409, JSON.stringify({ error: 'x', reason: v })],
+        [400, `{"error":"${json}${' '.repeat(9000)}`],
+        [502, `<html>${v}</html>`],
+        [503, JSON.stringify({ error: v, request_id: v })],
+        [200, `oops ${v}`],
+        [201, JSON.stringify({ id: SECRET.id, echo: v })],
+      ];
+      for (const [status, raw] of bodies) {
+        for (const tool of ['create_secret', 'replace_secret'] as const) {
+          const restore = globalThis.fetch;
+          globalThis.fetch = (async () =>
+            new Response(raw, {
+              status,
+              headers: { 'Content-Type': 'application/json' },
+            })) as typeof fetch;
+          try {
+            const c = await connect();
+            const args =
+              tool === 'create_secret'
+                ? { name: 'A_TOKEN', value: v }
+                : { secret_id: SECRET.id, value: v, revision_id: REV };
+            const res = await c.call(tool, args);
+            await c.close();
+            const out = JSON.stringify(res);
+            expect(res.isError, `${tool} ${status}`).toBe(true);
+            expect(textOf(res).includes(v), `${tool} ${status} ${raw.slice(0, 40)}`).toBe(false);
+            expect(out.includes(json), `${tool} ${status} escaped`).toBe(false);
+            if (v.length > 20) expect(textOf(res)).not.toContain(v.slice(0, 20));
+            // The Api itself: no thrown message or body carries it either.
+            const api = new Api('com_test', BASE);
+            const call =
+              tool === 'create_secret'
+                ? api.secrets.create({ name: 'A_TOKEN', value: v })
+                : api.secrets.replace(SECRET.id, { value: v, revisionId: REV });
+            const err = await call.then(
+              () => undefined,
+              (e: unknown) => e,
+            );
+            expect(err).toBeInstanceOf(MandalaError);
+            const thrown = `${(err as Error).message} ${JSON.stringify((err as { body?: unknown }).body ?? null)}`;
+            if (v.length > 1) expect(thrown.includes(v), `Api ${status}`).toBe(false);
+            if (v.length > 20) expect(thrown).not.toContain(v.slice(0, 20));
+          } finally {
+            globalThis.fetch = restore;
+          }
+        }
+      }
+    },
+  );
 
   it('refuses an oversized value before sending, without quoting it', async () => {
     const { call, close } = await connect();
@@ -148,7 +217,7 @@ describe('the secret store tools', () => {
     expect(textOf(res)).not.toContain(VALUE);
   });
 
-  it('surfaces a stale revision with the platform’s sentence', async () => {
+  it('answers a stale revision in its own words, not the platform’s', async () => {
     const error = 'This secret was changed since you read it. Read it again and retry.';
     const res = await answering(409, { error }, async () => {
       const c = await connect();
@@ -161,7 +230,8 @@ describe('the secret store tools', () => {
       return r;
     });
     expect(res.isError).toBe(true);
-    expect(textOf(res)).toContain(error);
+    expect(textOf(res)).not.toContain(error);
+    expect(textOf(res)).toContain('revision_id is no longer the current one');
   });
 
   it('deletes only with the revision and confirm, and names a miss', async () => {

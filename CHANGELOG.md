@@ -52,9 +52,11 @@ are wording changes, and they are behaviour changes in the way that matters.
 
 - **The account's secret store: `list_secrets`, `get_secret`,
   `create_secret`, `replace_secret` and `delete_secret`** (OPL-4984, OPL-5026).
-  A value is a tool argument and goes one way: no answer repeats it, a refusal
-  that quotes it has it withheld, and the decoded answers carry only the
-  documented fields. `replace_secret` and `delete_secret` need the current
+  A value is a tool argument and goes one way. A success shows only the
+  decoded documented fields. A refusal shows only the status, the `reason`
+  word and the tool's own sentence, never the platform's response text, which
+  the `Api` does not keep for these routes. Any output is also scrubbed of the
+  value, however short. `replace_secret` and `delete_secret` need the current
   `revision_id`, and `delete_secret` needs `confirm: true` and says that a
   computer still bound to the secret cannot start again. For embedders,
   `api.secrets` offers `list`, `create`, `get`, `replace` and `delete`, decoded
@@ -72,12 +74,13 @@ are wording changes, and they are behaviour changes in the way that matters.
 
 ### Changed
 
-- **`isTransient` is false for a `503` answered to a POST or PATCH**, or to a
-  request whose method is unknown. The platform documents that a change
-  answered `503` may or may not have happened. It is still true for GET, HEAD,
-  OPTIONS, PUT and DELETE. A tool refused with `503` now says which case it is,
-  and for a change it says to read the current state before sending it again.
-  This outranks a `reason` word.
+- **`isTransient` is true for a `503` only on a GET or HEAD.** The platform
+  documents that a change answered `503` may or may not have happened, so any
+  other method, or an unknown one, is false. This is decided before the
+  `reason` word, so `contention` or `starting` cannot make a create look safe to
+  replay. The TypeScript and Python SDKs answer the same way. A tool refused
+  with `503` says the same thing: read the current state before sending a
+  change again.
 - **`window_action` resize needs both `width` and `height`**, as the platform
   requires. `x`/`y` are bounded to -32768..32767 and `width`/`height` to
   1..32767.

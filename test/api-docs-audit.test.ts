@@ -73,6 +73,28 @@ describe('a 503: a read can be sent again, a change may have happened', () => {
   });
 });
 
+describe('a 503 decided before the reason word', () => {
+  // The Codex review (OPL-5026): a `contention` or `starting` on a change's 503
+  // made isTransient say yes while failed() said the change may have happened.
+  // Only a GET or HEAD is transient on a 503, and the two answers agree.
+  const changes = ['POST', 'PATCH', 'PUT', 'DELETE', 'OPTIONS', undefined];
+  const bodies = [undefined, { reason: 'contention' }, { reason: 'starting' }];
+  it.each(changes.map((m) => [String(m), m] as const))('a %s is not replayed', (_n, method) => {
+    for (const body of bodies) {
+      const err = errorForStatus(503, 'x', body, undefined, { method });
+      expect(isTransient(err), JSON.stringify(body)).toBe(false);
+      expect(textOf(failed(err))).toContain('MAY OR MAY NOT HAVE HAPPENED');
+    }
+  });
+  it.each([['GET'], ['HEAD']])('a %s can be sent again', (method) => {
+    for (const body of bodies) {
+      const err = errorForStatus(503, 'x', body, undefined, { method });
+      expect(isTransient(err)).toBe(true);
+      expect(textOf(failed(err))).toContain('can be sent again shortly');
+    }
+  });
+});
+
 describe('the boot window and after it', () => {
   it('says starting clears and names the 502 that follows the window', () => {
     const starting = errorForStatus(409, 'guest agent not answering yet', {
@@ -162,6 +184,14 @@ describe('no_wake on a file transfer', () => {
       );
       expect(textOf(write)).toContain('nothing was written to /tmp/a');
     }
+    // A create-only upload with no_wake: a reasonless 409 is the create-only
+    // conflict, claiming nothing about the path or the computer's state.
+    const both = await answering(409, { error: 'conflict' }, () =>
+      once('write_file', { path: '/tmp/a', content: 'x', no_wake: true, overwrite: false }),
+    );
+    expect(textOf(both)).toContain('reason unknown');
+    expect(textOf(both)).not.toContain('no_wake was set');
+    expect(textOf(both)).not.toMatch(/not running|suspended or stopped/);
     // Another word is left to the ordinary refusal.
     const busy = await answering(409, { error: 'busy', reason: 'contention' }, () =>
       once('read_file', { path: '/tmp/a', no_wake: true }),

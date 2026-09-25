@@ -1,7 +1,7 @@
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
-import { NotFoundError } from '../errors.js';
-import { guarded, refused, said } from '../format.js';
+import { APIError, MandalaError, NotFoundError, statusAdvice } from '../errors.js';
+import { guarded, refused, said, unavailableAdvice } from '../format.js';
 import * as P from '../paths.js';
 import type { Secret, SecretList } from '../secret-store.js';
 import type { Registrar } from './types.js';
@@ -249,17 +249,17 @@ const revisionArg = (use: string) =>
 /**
  * A tool result with every occurrence of a value taken out.
  *
- * The platform does not echo a value and the decoded answers carry none, so on
- * the success path this changes nothing. It exists for the paths this server
- * does not write: a refusal's message is the platform's own prose, and a
- * gateway in front of a self-hosted base URL can answer with anything. A value
- * shorter than eight characters is not searched for — replacing every "a" in a
- * sentence would destroy it and hide nothing worth hiding — and its JSON-escaped
- * spelling is searched for too, since an error body is shown as JSON.
+ * The SECOND layer. The first is that no secret-store tool puts response text
+ * in its answer at all — see {@link storeGuarded} — and the Api keeps none for
+ * those routes. This catches what the first could still let through: a value
+ * that happens to equal a decoded field, or a message this server did not
+ * write. No length exemption: a one-character value is searched for too,
+ * which can mangle the sentence and is the price of never showing it. The
+ * JSON-escaped spelling is searched for as well, since data is shown as JSON.
  */
 export function withoutValue(result: CallToolResult, value: string): CallToolResult {
-  if (value.length < 8) return result;
-  const spellings = [...new Set([value, JSON.stringify(value).slice(1, -1)])];
+  if (value === '') return result;
+  const spellings = [...new Set([value, JSON.stringify(value).slice(1, -1)])].filter(Boolean);
   return {
     ...result,
     content: result.content.map((c) =>
@@ -271,6 +271,73 @@ export function withoutValue(result: CallToolResult, value: string): CallToolRes
         : c,
     ),
   };
+}
+
+/** A reason word as the platform spells one; anything else is not repeated. */
+const REASON_WORD = /^[a-z][a-z _-]{0,31}$/;
+
+/** This server's own sentence for a store refusal, by status. Never the platform's. */
+function storeAdvice(err: APIError, change: boolean): string {
+  const unavailable = unavailableAdvice(err);
+  if (unavailable) return unavailable;
+  const status = statusAdvice(err.status, err.reason);
+  if (status) return status;
+  switch (err.status) {
+    case 400:
+      return 'the request was refused as invalid: a name or value outside the documented limits, a malformed id or revision_id, or the store\u2019s limit on secrets held or created (list_secrets reports both). Sending it again unchanged is refused the same way';
+    case 404:
+      return 'no such secret in this scope. A secret in a workspace is found only with its workspace_id; list_secrets says which exist';
+    case 409:
+      return change
+        ? 'refused as a conflict and nothing changed: for a create, the name is taken in that scope; for a replace or delete, the revision_id is no longer the current one — get_secret for the current one, and send it again only if you still mean to'
+        : 'refused as a conflict';
+    case 429:
+      return `too many requests${err.retryAfterMs === undefined ? '' : `; wait ${Math.ceil(err.retryAfterMs / 1000)}s`} before sending it again`;
+    default:
+      return change
+        ? 'the platform did not complete this, and whether the change was made is not known. Read the secret back with list_secrets or get_secret before sending it again'
+        : 'the platform did not answer this; it can be asked again shortly';
+  }
+}
+
+/**
+ * Run a secret-store tool, answering a failure only in this server's words.
+ *
+ * `failed` shows the platform's own sentence, which is right almost everywhere
+ * and wrong here: a request that carried a value is the one whose refusal
+ * could quote it back. So a refusal is reported as the status, the reason word
+ * when it is a word, the request id, and a fixed sentence — and the result,
+ * success or failure, goes through {@link withoutValue} as well.
+ */
+async function storeGuarded(
+  what: string,
+  change: boolean,
+  value: string | undefined,
+  fn: () => Promise<CallToolResult>,
+): Promise<CallToolResult> {
+  let result: CallToolResult;
+  try {
+    result = await fn();
+  } catch (err) {
+    if (err instanceof APIError) {
+      const reason =
+        err.reason !== undefined && REASON_WORD.test(err.reason) ? `, reason "${err.reason}"` : '';
+      const id =
+        err.requestId && /^[\w.:-]{1,128}$/.test(err.requestId)
+          ? ` Request id ${err.requestId}.`
+          : '';
+      result = refused(
+        `${what} was refused (HTTP ${err.status}${reason}): ${storeAdvice(err, change)}. The platform\u2019s own message is not shown, because a refusal of a secret-store request could quote the value.${id}`,
+      );
+    } else if (err instanceof MandalaError) {
+      // Written by this package, and for these routes never carrying response
+      // text: a transport failure, a cancellation, or a malformed answer.
+      result = refused(`${what} failed: ${err.message}`);
+    } else {
+      result = refused(`${what} failed inside this server before an answer could be read.`);
+    }
+  }
+  return value === undefined ? result : withoutValue(result, value);
 }
 
 export const registerSecrets: Registrar = (server, session) => {
@@ -380,7 +447,7 @@ export const registerSecrets: Registrar = (server, session) => {
       annotations: { readOnlyHint: true },
     },
     ({ workspace_id }, extra) =>
-      guarded(async () => {
+      storeGuarded('Listing the secrets', false, undefined, async () => {
         const list: SecretList = await session.api
           .with(extra.signal)
           .secrets.list({ workspaceId: workspace_id });
@@ -408,7 +475,7 @@ export const registerSecrets: Registrar = (server, session) => {
       annotations: { readOnlyHint: true },
     },
     ({ secret_id, workspace_id }, extra) =>
-      guarded(async () => {
+      storeGuarded(`Reading ${secret_id}`, false, undefined, async () => {
         const secret = await session.api
           .with(extra.signal)
           .secrets.get(secret_id, { workspaceId: workspace_id });
@@ -441,19 +508,16 @@ export const registerSecrets: Registrar = (server, session) => {
       },
       annotations: { destructiveHint: false, idempotentHint: false },
     },
-    async ({ name, value, workspace_id }, extra) =>
-      withoutValue(
-        await guarded(async () => {
-          const secret = await session.api
-            .with(extra.signal)
-            .secrets.create({ name, value, workspaceId: workspace_id });
-          return said(
-            `Stored ${secret.name} as ${secret.id}, revision ${secret.revision_id}, ${secret.workspace_id === null ? 'account-wide' : `in workspace ${secret.workspace_id}`}. The value is not shown and cannot be read back. Bind it to a computer with set_computer_secrets.`,
-            secret,
-          );
-        }),
-        value,
-      ),
+    ({ name, value, workspace_id }, extra) =>
+      storeGuarded('Storing the secret', true, value, async () => {
+        const secret = await session.api
+          .with(extra.signal)
+          .secrets.create({ name, value, workspaceId: workspace_id });
+        return said(
+          `Stored ${secret.name} as ${secret.id}, revision ${secret.revision_id}, ${secret.workspace_id === null ? 'account-wide' : `in workspace ${secret.workspace_id}`}. The value is not shown and cannot be read back. Bind it to a computer with set_computer_secrets.`,
+          secret,
+        );
+      }),
   );
 
   server.registerTool(
@@ -469,21 +533,18 @@ export const registerSecrets: Registrar = (server, session) => {
       },
       annotations: { destructiveHint: true, idempotentHint: false },
     },
-    async ({ secret_id, value, revision_id, workspace_id }, extra) =>
-      withoutValue(
-        await guarded(async () => {
-          const secret = await session.api.with(extra.signal).secrets.replace(secret_id, {
-            value,
-            revisionId: revision_id,
-            workspaceId: workspace_id,
-          });
-          return said(
-            `Replaced the value of ${secret.name} (${secret.id}); it is now at revision ${secret.revision_id}. The value is not shown. Computers bound to it get it at their next start or restart, and a running one is sent it now on a best-effort basis.`,
-            secret,
-          );
-        }),
-        value,
-      ),
+    ({ secret_id, value, revision_id, workspace_id }, extra) =>
+      storeGuarded(`Replacing the value of ${secret_id}`, true, value, async () => {
+        const secret = await session.api.with(extra.signal).secrets.replace(secret_id, {
+          value,
+          revisionId: revision_id,
+          workspaceId: workspace_id,
+        });
+        return said(
+          `Replaced the value of ${secret.name} (${secret.id}); it is now at revision ${secret.revision_id}. The value is not shown. Computers bound to it get it at their next start or restart, and a running one is sent it now on a best-effort basis.`,
+          secret,
+        );
+      }),
   );
 
   server.registerTool(
@@ -505,7 +566,7 @@ export const registerSecrets: Registrar = (server, session) => {
       annotations: { destructiveHint: true, idempotentHint: true },
     },
     ({ secret_id, revision_id, workspace_id }, extra) =>
-      guarded(async () => {
+      storeGuarded(`Deleting ${secret_id}`, true, undefined, async () => {
         try {
           await session.api
             .with(extra.signal)

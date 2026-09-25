@@ -32,6 +32,52 @@ export const MODEL_KEY_HEADER = 'X-Model-Key';
  */
 export const SERVICE_HEADER = 'X-Mandala-MCP-Service';
 
+/** Whether a path is one of the account's secret store routes: `secrets` or `secrets/:id`. */
+export function isSecretStoreRoute(path: string): boolean {
+  return /^\/?secrets(?:\/[^/]*)?\/?$/.test(path.split('?')[0]);
+}
+
+/** A reason word, as the platform spells one: short, lower case, no punctuation. */
+const REASON_WORD = /^[a-z][a-z _-]{0,31}$/;
+
+/**
+ * All that is kept of a secret-store refusal's body: its `reason`, if it is a
+ * word. Nothing else, and never a sentence.
+ */
+function secretStoreRefusalBody(text: string | undefined): { reason: string } | undefined {
+  if (!text) return undefined;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return undefined;
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return undefined;
+  const reason = (parsed as { reason?: unknown }).reason;
+  return typeof reason === 'string' && REASON_WORD.test(reason) ? { reason } : undefined;
+}
+
+/**
+ * Run a request that carried a secret value, and keep that value off whatever
+ * it throws. The Api keeps no response text for these routes, so all that is
+ * left to check is the one word it does keep: a `reason` that contains the
+ * value is dropped, with the body it came from.
+ */
+async function withheld<T>(value: string, fn: () => Promise<T>): Promise<T> {
+  try {
+    return await fn();
+  } catch (err) {
+    if (value && err instanceof Error && 'reason' in err) {
+      const e = err as { reason?: unknown; body?: unknown };
+      if (typeof e.reason === 'string' && e.reason.includes(value)) {
+        e.reason = undefined;
+        e.body = undefined;
+      }
+    }
+    throw err;
+  }
+}
+
 function responseMetadata(resp: Response): APIErrorMetadata {
   return {
     requestId: resp.headers.get('x-request-id') ?? undefined,
@@ -511,7 +557,15 @@ export class Api {
       // must not be told the platform answered with an ordinary HTTP failure.
       if (cause instanceof CancelledError) throw cause;
     }
-    if (text) {
+    if (text && isSecretStoreRoute(path)) {
+      // The secret store takes a value in its request, so its answers are the
+      // one place a platform echoing input would echo a secret. No response
+      // text is kept for them at all — not as the message, not as the body:
+      // only the one-word `reason`, when it is a word, and the status. A
+      // truncated copy of the text cannot be redacted reliably, so none is
+      // made (OPL-5026).
+      body = secretStoreRefusalBody(truncated ? undefined : text);
+    } else if (text) {
       try {
         // A prefix is not JSON even when it happens to end at a syntactically
         // valid boundary. Only trust a structured platform message after the
@@ -577,7 +631,12 @@ export class Api {
     try {
       return JSON.parse(text) as T;
     } catch {
-      throw new MandalaError(`expected JSON from ${method} ${path}, got: ${text.slice(0, 200)}`);
+      // Never the text for the secret store: see #error.
+      throw new MandalaError(
+        isSecretStoreRoute(path)
+          ? `expected JSON from ${method} ${path}, got a body that is not JSON (not shown)`
+          : `expected JSON from ${method} ${path}, got: ${text.slice(0, 200)}`,
+      );
     }
   }
 
@@ -848,13 +907,15 @@ export class Api {
         return list;
       },
       create: async (args) => {
-        const body = await this.json<unknown>('POST', P.SECRETS, {
-          body: {
-            name: args.name,
-            value: args.value,
-            ...(args.workspaceId === undefined ? {} : { workspace_id: args.workspaceId }),
-          },
-        });
+        const body = await withheld(args.value, () =>
+          this.json<unknown>('POST', P.SECRETS, {
+            body: {
+              name: args.name,
+              value: args.value,
+              ...(args.workspaceId === undefined ? {} : { workspace_id: args.workspaceId }),
+            },
+          }),
+        );
         const secret = secretOf(body);
         if (!secret) throw malformedSecretAnswer('POST /secrets', body, true);
         return secret;
@@ -870,13 +931,15 @@ export class Api {
       },
       replace: async (id, args) => {
         const path = P.secret(id);
-        const body = await this.json<unknown>('PUT', path, {
-          body: {
-            value: args.value,
-            revision_id: args.revisionId,
-            ...(args.workspaceId === undefined ? {} : { workspace_id: args.workspaceId }),
-          },
-        });
+        const body = await withheld(args.value, () =>
+          this.json<unknown>('PUT', path, {
+            body: {
+              value: args.value,
+              revision_id: args.revisionId,
+              ...(args.workspaceId === undefined ? {} : { workspace_id: args.workspaceId }),
+            },
+          }),
+        );
         const secret = secretOf(body);
         if (!secret) throw malformedSecretAnswer(`PUT /${path}`, body, true);
         return secret;
