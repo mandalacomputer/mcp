@@ -273,6 +273,119 @@ describe('the secret store tools', () => {
     }
   });
 
+  // The second re-review (OPL-5026): an uppercase value passed as `Allow`, and
+  // a redirect's Location went into the message. Every error a secret route
+  // raises is now rebuilt by one sanitizer; these walk every property of what
+  // is thrown, `cause` included, for any four-character run of the value.
+  const UPPER = LEAKY.toUpperCase();
+  const everyString = (v: unknown, seen = new Set<unknown>(), depth = 0): string[] => {
+    if (typeof v === 'string') return [v];
+    if (v === null || typeof v !== 'object' || seen.has(v) || depth > 6) return [];
+    seen.add(v);
+    const out: string[] = [];
+    for (const key of Object.getOwnPropertyNames(v)) {
+      out.push(key, ...everyString((v as Record<string, unknown>)[key], seen, depth + 1));
+    }
+    return out;
+  };
+  const leaksIn = (text: string, v: string) => runs(v).filter((r) => text.includes(r));
+
+  type Scenario = [string, () => Response | Promise<Response>];
+  const scenarios = (v: string): Scenario[] => [
+    ...[400, 405].flatMap((status): Scenario[] => [
+      [
+        `${status} with the whole value as Allow`,
+        () => new Response('{}', { status, headers: { Allow: v } }),
+      ],
+      [
+        `${status} with a prefix as Allow`,
+        () => new Response('{}', { status, headers: { Allow: `GET, ${v.slice(0, 12)}` } }),
+      ],
+    ]),
+    ...[301, 302, 307, 308].map(
+      (status): Scenario => [
+        `a ${status} carrying it`,
+        () =>
+          new Response(null, {
+            status,
+            headers: {
+              Location: `https://evil.example/${v}`,
+              Allow: v,
+              'WWW-Authenticate': `Bearer realm="${v}"`,
+            },
+          }),
+      ],
+    ),
+    [
+      'a network error quoting it',
+      () => {
+        throw new TypeError(`fetch failed: ${v}`, { cause: new Error(`connect ${v}`) });
+      },
+    ],
+  ];
+
+  it.each([
+    ['an uppercase 36-character value', UPPER],
+    // Letters only: the shape the earlier Allow check accepted whole.
+    ['an uppercase value of letters alone', UPPER.replace(/[^A-Z]/g, 'Q').padEnd(36, 'Z')],
+    ['a lowercase 36-character value', LEAKY],
+  ])('lets no piece of %s out of a header, a redirect or a network error', async (_w, v) => {
+    for (const [label, answer] of scenarios(v)) {
+      const restore = globalThis.fetch;
+      globalThis.fetch = (async () => answer()) as typeof fetch;
+      try {
+        for (const tool of ['create_secret', 'replace_secret'] as const) {
+          const c = await connect();
+          const res = await c.call(
+            tool,
+            tool === 'create_secret'
+              ? { name: 'A_TOKEN', value: v }
+              : { secret_id: SECRET.id, value: v, revision_id: REV },
+          );
+          await c.close();
+          expect(res.isError, `${tool} ${label}`).toBe(true);
+          expect(leaksIn(JSON.stringify(res), v), `${tool} ${label}`).toEqual([]);
+        }
+        const api = new Api('com_test', BASE);
+        for (const call of [
+          () => api.secrets.create({ name: 'A_TOKEN', value: v }),
+          () => api.secrets.replace(SECRET.id, { value: v, revisionId: REV }),
+          // The generic entry points reach the same gate.
+          () => api.json('POST', 'secrets', { body: { name: 'A_TOKEN', value: v } }),
+          () => api.send('PUT', `secrets/${SECRET.id}`, { body: { value: v, revision_id: REV } }),
+        ]) {
+          const err = await call().then(
+            () => undefined,
+            (e: unknown) => e,
+          );
+          expect(err, label).toBeInstanceOf(MandalaError);
+          expect(leaksIn(everyString(err).join('\n'), v), `Api ${label}`).toEqual([]);
+        }
+      } finally {
+        globalThis.fetch = restore;
+      }
+    }
+  });
+
+  it('keeps an Allow of method names, and the class of each error', async () => {
+    const restore = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      new Response('{"error":"no"}', {
+        status: 405,
+        headers: { Allow: 'GET, POST' },
+      })) as typeof fetch;
+    try {
+      const err = (await new Api('com_test', BASE).secrets
+        .create({ name: 'A', value: LEAKY })
+        .catch((e: unknown) => e)) as { allow?: string; status?: number; name?: string };
+      expect(err.allow).toBe('GET, POST');
+      expect(err.status).toBe(405);
+      expect(err.name).toBe('MethodNotAllowedError');
+    } finally {
+      globalThis.fetch = restore;
+    }
+  });
+
   it('still shows a documented reason word and a platform request id', async () => {
     const id = '0f8fad5b-d9cb-469f-a165-70867728950e';
     const restore = globalThis.fetch;

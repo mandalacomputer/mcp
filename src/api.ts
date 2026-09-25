@@ -15,14 +15,14 @@ import {
 } from './errors.js';
 import * as P from './paths.js';
 import {
-  DOCUMENTED_REASONS,
-  isRequestId,
-  malformedSecretAnswer,
-  overlaps,
-  type SecretStore,
-  secretListOf,
-  secretOf,
-} from './secret-store.js';
+  isSecretStoreRoute,
+  MalformedSecretAnswerError,
+  sanitizeSecretError,
+  secretValueOf,
+} from './secret-errors.js';
+import { DOCUMENTED_REASONS, type SecretStore, secretListOf, secretOf } from './secret-store.js';
+
+export { isSecretStoreRoute } from './secret-errors.js';
 
 export const DEFAULT_BASE_URL = 'https://app.mandala.computer/api/v1';
 
@@ -40,11 +40,6 @@ export const MODEL_KEY_HEADER = 'X-Model-Key';
  */
 export const SERVICE_HEADER = 'X-Mandala-MCP-Service';
 
-/** Whether a path is one of the account's secret store routes: `secrets` or `secrets/:id`. */
-export function isSecretStoreRoute(path: string): boolean {
-  return /^\/?secrets(?:\/[^/]*)?\/?$/.test(path.split('?')[0]);
-}
-
 /**
  * All that is kept of a secret-store refusal's body: its `reason`, if it is a
  * word. Nothing else, and never a sentence.
@@ -60,48 +55,6 @@ function secretStoreRefusalBody(text: string | undefined): { reason: string } | 
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return undefined;
   const reason = (parsed as { reason?: unknown }).reason;
   return typeof reason === 'string' && DOCUMENTED_REASONS.has(reason) ? { reason } : undefined;
-}
-
-/**
- * Run a request that carried a secret value, and keep that value off whatever
- * it throws. The Api keeps no response text for these routes, so all that is
- * left to check is the one word it does keep: a `reason` that contains the
- * value is dropped, with the body it came from.
- */
-async function withheld<T>(value: string, fn: () => Promise<T>): Promise<T> {
-  try {
-    return await fn();
-  } catch (err) {
-    if (value && err instanceof Error && 'reason' in err) {
-      // A documented word or a UUID that shares four or more characters with
-      // the value is dropped anyway: the filter above says what shape it has,
-      // not that it is not a piece of this value.
-      const e = err as { reason?: unknown; body?: unknown; requestId?: unknown };
-      if (typeof e.reason === 'string' && overlaps(e.reason, value)) {
-        e.reason = undefined;
-        e.body = undefined;
-      }
-      if (typeof e.requestId === 'string' && overlaps(e.requestId, value)) {
-        e.requestId = undefined;
-      }
-    }
-    throw err;
-  }
-}
-
-/** A secret-store response's metadata, keeping only what has the platform's fixed shape. */
-function secretStoreMetadata(resp: Response): APIErrorMetadata {
-  const id = resp.headers.get('x-request-id') ?? undefined;
-  const allow = resp.headers.get('allow') ?? undefined;
-  const challenge = resp.headers.get('www-authenticate') ?? undefined;
-  return {
-    requestId: isRequestId(id) ? id : undefined,
-    allow: allow !== undefined && /^[A-Z]+(?:, ?[A-Z]+)*$/.test(allow) ? allow : undefined,
-    wwwAuthenticate:
-      challenge !== undefined && /^Bearer(?: error="invalid_token")?$/.test(challenge)
-        ? challenge
-        : undefined,
-  };
 }
 
 function responseMetadata(resp: Response): APIErrorMetadata {
@@ -399,7 +352,27 @@ export class Api {
     return url.toString();
   }
 
+  /**
+   * Every request, and for the secret store the one gate its errors pass:
+   * whatever a request to `secrets` or `secrets/:id` throws — a refusal, a
+   * redirect, a network failure — is rebuilt by {@link sanitizeSecretError}
+   * before it leaves, so no response text can reach a caller.
+   */
   async #fetch(
+    method: string,
+    path: string,
+    opts: RequestOptions = {},
+    bounded = false,
+  ): Promise<Response> {
+    if (!isSecretStoreRoute(path)) return this.#fetchRaw(method, path, opts, bounded);
+    try {
+      return await this.#fetchRaw(method, path, opts, bounded);
+    } catch (err) {
+      throw sanitizeSecretError(err, method, path, secretValueOf(opts.body));
+    }
+  }
+
+  async #fetchRaw(
     method: string,
     path: string,
     opts: RequestOptions = {},
@@ -614,11 +587,7 @@ export class Api {
       }
     }
     const delay = retryAfterMs(resp.headers.get('retry-after'));
-    // The secret store's metadata is filtered as its body is: a request id only
-    // in the platform's own UUID format, and Allow / WWW-Authenticate only in
-    // the fixed shapes the platform sends. Nothing else a refusal carries is
-    // kept (OPL-5026).
-    const metadata = isSecretStoreRoute(path) ? secretStoreMetadata(resp) : responseMetadata(resp);
+    const metadata = responseMetadata(resp);
     // Content-Range describes the file length, independently of Retry-After.
     if (resp.status === 416) {
       const total = parseContentRange(resp.headers.get('content-range'))?.total;
@@ -644,6 +613,20 @@ export class Api {
    * request went wrong.
    */
   async #decode<T>(
+    resp: Response,
+    method: string,
+    path: string,
+    signal?: AbortSignal,
+  ): Promise<T | undefined> {
+    if (!isSecretStoreRoute(path)) return this.#decodeRaw<T>(resp, method, path, signal);
+    try {
+      return await this.#decodeRaw<T>(resp, method, path, signal);
+    } catch (err) {
+      throw sanitizeSecretError(err, method, path);
+    }
+  }
+
+  async #decodeRaw<T>(
     resp: Response,
     method: string,
     path: string,
@@ -928,58 +911,72 @@ export class Api {
    * `api.with(signal).secrets` carries the signal.
    */
   get secrets(): SecretStore {
+    // Each call runs inside `guard`, which rebuilds anything it throws through
+    // the same sanitizer as #fetch — the decode of a malformed answer included.
+    const guard = async <T>(
+      method: string,
+      path: string,
+      value: string | undefined,
+      fn: () => Promise<T>,
+    ): Promise<T> => {
+      try {
+        return await fn();
+      } catch (err) {
+        throw sanitizeSecretError(err, method, path, value);
+      }
+    };
+    const malformed = () => new MalformedSecretAnswerError('malformed');
     return {
-      list: async (opts = {}) => {
-        const body = await this.json<unknown>('GET', P.SECRETS, {
-          query: P.secretScopeQuery(opts.workspaceId),
-        });
-        const list = secretListOf(body);
-        if (!list) throw malformedSecretAnswer('GET /secrets', body, false);
-        return list;
-      },
-      create: async (args) => {
-        const body = await withheld(args.value, () =>
-          this.json<unknown>('POST', P.SECRETS, {
+      list: (opts = {}) =>
+        guard('GET', P.SECRETS, undefined, async () => {
+          const body = await this.json<unknown>('GET', P.SECRETS, {
+            query: P.secretScopeQuery(opts.workspaceId),
+          });
+          const list = secretListOf(body);
+          if (!list) throw malformed();
+          return list;
+        }),
+      create: (args) =>
+        guard('POST', P.SECRETS, args.value, async () => {
+          const body = await this.json<unknown>('POST', P.SECRETS, {
             body: {
               name: args.name,
               value: args.value,
               ...(args.workspaceId === undefined ? {} : { workspace_id: args.workspaceId }),
             },
-          }),
-        );
-        const secret = secretOf(body);
-        if (!secret) throw malformedSecretAnswer('POST /secrets', body, true);
-        return secret;
-      },
-      get: async (id, opts = {}) => {
-        const path = P.secret(id);
-        const body = await this.json<unknown>('GET', path, {
-          query: P.secretScopeQuery(opts.workspaceId),
-        });
-        const secret = secretOf(body);
-        if (!secret) throw malformedSecretAnswer(`GET /${path}`, body, false);
-        return secret;
-      },
-      replace: async (id, args) => {
-        const path = P.secret(id);
-        const body = await withheld(args.value, () =>
-          this.json<unknown>('PUT', path, {
+          });
+          const secret = secretOf(body);
+          if (!secret) throw malformed();
+          return secret;
+        }),
+      get: (id, opts = {}) =>
+        guard('GET', 'secrets/:id', undefined, async () => {
+          const body = await this.json<unknown>('GET', P.secret(id), {
+            query: P.secretScopeQuery(opts.workspaceId),
+          });
+          const secret = secretOf(body);
+          if (!secret) throw malformed();
+          return secret;
+        }),
+      replace: (id, args) =>
+        guard('PUT', 'secrets/:id', args.value, async () => {
+          const body = await this.json<unknown>('PUT', P.secret(id), {
             body: {
               value: args.value,
               revision_id: args.revisionId,
               ...(args.workspaceId === undefined ? {} : { workspace_id: args.workspaceId }),
             },
-          }),
-        );
-        const secret = secretOf(body);
-        if (!secret) throw malformedSecretAnswer(`PUT /${path}`, body, true);
-        return secret;
-      },
-      delete: async (id, args) => {
-        await this.send('DELETE', P.secret(id), {
-          query: { revision_id: args.revisionId, ...P.secretScopeQuery(args.workspaceId) },
-        });
-      },
+          });
+          const secret = secretOf(body);
+          if (!secret) throw malformed();
+          return secret;
+        }),
+      delete: (id, args) =>
+        guard('DELETE', 'secrets/:id', undefined, async () => {
+          await this.send('DELETE', P.secret(id), {
+            query: { revision_id: args.revisionId, ...P.secretScopeQuery(args.workspaceId) },
+          });
+        }),
     };
   }
 

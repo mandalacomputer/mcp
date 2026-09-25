@@ -11,8 +11,6 @@
  * held a `value` could not carry it any further than the decoder.
  */
 
-import { MandalaError } from './errors.js';
-
 /** One secret, without its value. */
 export type Secret = {
   /** `csec-` and sixteen hex characters: what a binding names as `secret_id`. */
@@ -175,25 +173,4 @@ export function secretListOf(body: unknown): SecretList | undefined {
     delivery,
     limits: { name_max_chars, value_max_bytes, active_per_account, created_per_account },
   };
-}
-
-/** The shape of an answer, for a sentence that says it was not the expected one. */
-export const shapeOf = (v: unknown): string =>
-  v === undefined ? 'no body at all' : v === null ? 'null' : Array.isArray(v) ? 'a list' : typeof v;
-
-/**
- * An answer that arrived and is not the documented shape.
- *
- * For a change, `mutated` says so in the message: the platform may well have
- * made it, and the one thing a caller must not do is send it again on the
- * strength of a body this could not read.
- */
-export function malformedSecretAnswer(what: string, body: unknown, mutated: boolean): MandalaError {
-  return new MandalaError(
-    `${what} answered with ${shapeOf(body)}, not the documented secret shape.${
-      mutated
-        ? ' THE CHANGE MAY HAVE BEEN MADE — read the secret back before sending it again.'
-        : ''
-    }`,
-  );
 }
