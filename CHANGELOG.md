@@ -12,7 +12,17 @@ about a refusal is what the model reads and reasons from. Several entries below
 are wording changes, and they are behaviour changes in the way that matters.
 
 
-## [Unreleased]
+## [0.6.0] — 2026-09-25
+
+Read before upgrading. The model gains five secret store tools, including
+`create_secret`, `replace_secret` and `delete_secret`, which change the
+account's secrets; they are in the `secrets` tag, so a deployment that should
+not do that can leave them out with `MANDALA_TAGS`, or with `MANDALA_READ_ONLY`,
+which keeps only their reads, `list_secrets` and `get_secret`. `--http` gains a hosted OAuth mode, off unless its
+variables are set. For embedders, `isTransient` no longer calls a `503` on a
+change transient, and a create-only upload's refusals arrive as two new
+`ConflictError` subclasses, `FileExistsError` and `CreateOnlyConflictError`.
+Several tool refusals and descriptions are reworded (see **Changed**).
 
 ### Added
 
@@ -305,5 +315,6 @@ No effect on the tool surface, listed because it is most of the window.
 - Several parser fixes landed before that scanner was retired, each ported to
   and from the TypeScript SDK's byte-identical copy.
 
+[0.6.0]: https://github.com/mandalacomputer/mcp/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/mandalacomputer/mcp/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/mandalacomputer/mcp/compare/v0.3.0...v0.4.0
