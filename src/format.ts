@@ -403,6 +403,31 @@ export function nothingAdmitted(c: Computer): boolean {
 }
 
 /**
+ * Whether a running computer's secrets are still on their way into its desktop.
+ *
+ * `secrets_delivering` answers it where the platform reports the field. Where
+ * it does not (a platform that predates it), the receipt does: it names the
+ * delivering start it is for, so a receipt behind `secrets_generation` is a
+ * delivery still under way — the fallback both SDKs' waits use. Nothing bound
+ * is nothing coming.
+ */
+export function secretsOnTheirWay(c: Computer): boolean {
+  if (typeof c.secrets_delivering === 'boolean') return c.secrets_delivering;
+  if (!Array.isArray(c.secrets) || c.secrets.length === 0) return false;
+  const generation = c.secrets_generation;
+  if (typeof generation !== 'number' || !Number.isFinite(generation) || generation <= 0)
+    return false;
+  const receipt = c.secrets_applied;
+  const applied =
+    receipt !== null &&
+    typeof receipt === 'object' &&
+    typeof (receipt as { generation?: unknown }).generation === 'number'
+      ? (receipt as { generation: number }).generation
+      : -1;
+  return applied < generation;
+}
+
+/**
  * A create or a clone can answer `{computer, start_error}` rather than a bare
  * computer: the guest was made and then would not boot, so the machine exists
  * and is billable and the caller needs its id. Flattened here, as the SDK

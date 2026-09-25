@@ -1,5 +1,6 @@
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { secretsOnTheirWay } from '../src/format.js';
 import { namedSecret, SECRET_SET_RETRIES } from '../src/tools/secrets.js';
 import { connect, installFakePlatform, SECRET, SECRET_LIST } from './harness.js';
 
@@ -202,6 +203,51 @@ describe('wait_for_computer on a computer with secrets bound', () => {
     );
     expect(res.isError).toBeFalsy();
     expect(textOf(res)).toContain('Guest is answering');
+  });
+
+  it('reads the receipt on a platform that predates secrets_delivering', async () => {
+    let gets = 0;
+    const res = await platform(
+      (seen) => {
+        if (seen.path.endsWith('/exec'))
+          return [200, { exit_code: 0, stdout_b64: '', stderr_b64: '' }];
+        gets++;
+        // No secrets_delivering at all: the receipt trails the generation
+        // until the values land, then names it.
+        return [
+          200,
+          bound(
+            gets === 1
+              ? { secrets_applied: { generation: 0 } }
+              : { secrets_applied: { generation: 1, applied_at: '2026-09-25T00:00:00Z' } },
+          ),
+        ];
+      },
+      async (seen) => {
+        const { call, close } = await connect();
+        const r = await call('wait_for_computer', { until: 'guest', timeout_s: 30 });
+        await close();
+        expect(seen.map((c) => [c.method, c.path])).toEqual([
+          ['GET', '/computers/vm-1'],
+          ['GET', '/computers/vm-1'],
+          ['POST', '/computers/vm-1/exec'],
+        ]);
+        return r;
+      },
+    );
+    expect(res.isError).toBeFalsy();
+    expect(textOf(res)).toContain('Guest is answering');
+  });
+
+  it('decides "on their way" from the field first, then the receipt', () => {
+    const base = { status: 'running', secrets: [BINDING], secrets_generation: 2 };
+    expect(secretsOnTheirWay({ ...base, secrets_delivering: false })).toBe(false);
+    expect(secretsOnTheirWay({ ...base, secrets_delivering: true })).toBe(true);
+    expect(secretsOnTheirWay(base)).toBe(true);
+    expect(secretsOnTheirWay({ ...base, secrets_applied: { generation: 1 } })).toBe(true);
+    expect(secretsOnTheirWay({ ...base, secrets_applied: { generation: 2 } })).toBe(false);
+    expect(secretsOnTheirWay({ status: 'running' })).toBe(false);
+    expect(secretsOnTheirWay({ ...base, secrets_generation: 0 })).toBe(false);
   });
 
   it('does not wait for them with "running"', async () => {

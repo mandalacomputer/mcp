@@ -15,6 +15,7 @@ import {
   nothingAdmitted,
   refused,
   said,
+  secretsOnTheirWay,
   unwrapComputer,
   withErrorMetadata,
   withoutCredentials,
@@ -1170,8 +1171,9 @@ export const registerComputers: Registrar = (server, session, opts) => {
               // before its secrets land — and a command run in between sees
               // them unset. "guest" is what a caller waits on before exec, so
               // it waits for those too. A delivery that fails stops the
-              // computer, which the stopped refusal below then reports.
-              if (c.secrets_delivering === true) {
+              // computer, which the stopped refusal below then reports. On a
+              // platform without secrets_delivering, the receipt says instead.
+              if (secretsOnTheirWay(c)) {
                 await beat(`Waiting for ${id} — running; its secrets are still on their way.`);
                 await sleep(POLL_MS, signal);
                 continue;
