@@ -376,6 +376,17 @@ export type Computer = {
   secrets_delivering?: boolean;
   secrets_generation?: number;
   secrets_applied?: unknown;
+  /**
+   * The proxy this computer's browsers are sent through (platform OPL-5056):
+   * the server URL and the hosts they reach directly. Absent when none is set.
+   */
+  browser_proxy?: { server?: string; bypass?: string[] };
+  /**
+   * `true` while a running computer's guest does not have its browser proxy
+   * yet, or still holds the files of one just removed. Absent otherwise, and
+   * never present on a computer that is not running.
+   */
+  browser_proxy_pending?: boolean;
   vnc?: Record<string, unknown>;
 };
 
@@ -512,5 +523,10 @@ export function describe(c: Computer): string {
     bits.push('whether its secrets are current is unknown until it restarts');
   if (typeof c.secrets_error === 'string' && c.secrets_error.trim())
     bits.push(`secrets not delivered: ${c.secrets_error.trim()}`);
+  // The proxy by its server alone: the bypass list rides in the structured
+  // result, and a line naming sixty hosts says nothing a model can act on.
+  const proxy = c.browser_proxy?.server;
+  if (typeof proxy === 'string' && proxy) bits.push(`browsers via ${proxy}`);
+  if (c.browser_proxy_pending === true) bits.push('its browser proxy is still being applied');
   return bits.join(' · ');
 }

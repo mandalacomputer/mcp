@@ -33,6 +33,32 @@ const idArg = {
 };
 
 /**
+ * A browser proxy as the tools take it: checked for shape only. Which schemes,
+ * hosts and bypass entries are accepted is the platform's rule and is growing,
+ * so a value it refuses comes back as its own 400 sentence rather than a copy
+ * of the rule here that would refuse what it has since learned to accept.
+ * Strict, as a secret binding is: a misspelt `bypass` dropped would send the
+ * browsers through the proxy for every host the caller meant to exempt.
+ */
+const browserProxySchema = z.strictObject({
+  server: z
+    .string()
+    .refine((v) => v.trim().length > 0, 'server must not be blank')
+    .describe(
+      'The proxy URL, e.g. "http://proxy.example.com:3128" or "socks5://127.0.0.1:1080". The platform says which schemes and hosts it accepts, and refuses anything else with a sentence naming why.',
+    ),
+  bypass: z
+    .array(z.string().refine((v) => v.trim().length > 0, 'a bypass entry must not be blank'))
+    .optional()
+    .describe(
+      'Hosts the browsers reach directly: "example.com", "*.example.com", an address or a range such as "192.0.2.0/24", or "<local>" for names with no dot.',
+    ),
+});
+
+const BROWSER_PROXY_ABOUT =
+  "Sends the computer's browsers (Chromium, Chrome, Firefox) through a proxy; nothing else on it uses the proxy, so exec and a terminal go out directly. Linux only.";
+
+/**
  * The answer to a wait the caller ended.
  *
  * `refused`, not `said`: the wait never reached what it was told to wait for,
@@ -676,7 +702,7 @@ export const registerComputers: Registrar = (server, session, opts) => {
     {
       title: 'Rename or resize a computer',
       description:
-        "Change a computer's name, its size, or its idle window. The platform refuses these in combination on purpose — a resize needs the computer stopped and the other two do not, so one request cannot honour both without applying half of it. A SUSPENDED computer counts as stopped for a resize, and its saved desktop cannot survive one: the vCPU count and the memory size are part of the saved state, so it is discarded and the next start is a cold boot. Resume it and finish what is open before resizing, or say so before you do it.",
+        "Change a computer's name, its size, its idle window, or its browser proxy. The platform refuses these in combination on purpose — a resize needs the computer stopped and the others do not, so one request cannot honour both without applying half of it. A SUSPENDED computer counts as stopped for a resize, and its saved desktop cannot survive one: the vCPU count and the memory size are part of the saved state, so it is discarded and the next start is a cold boot. Resume it and finish what is open before resizing, or say so before you do it.",
       inputSchema: {
         ...idArg,
         name: z.string().optional(),
@@ -698,17 +724,24 @@ export const registerComputers: Registrar = (server, session, opts) => {
           .describe(
             "Minutes untouched before the host suspends it, at most 10080 (a week). 0 disables idle suspend and pressure eviction, up to the plan's limit on computers that never suspend (a 402 beyond it). null returns it to the host's own window. Send this on its own.",
           ),
+        browser_proxy: browserProxySchema
+          .nullable()
+          .optional()
+          .describe(
+            `${BROWSER_PROXY_ABOUT} Replaces the setting whole; null removes it. Send this on its own. A running computer has it within seconds — wait_for_computer with until="guest" before opening a browser that must use it — and a stopped or suspended one is given it as it starts. A browser already open picks it up at its next start.`,
+          ),
       },
     },
     ({ computer_id, ...fields }, extra) =>
       guarded(async () => {
         const id = session.resolve(computer_id);
-        // `null` is meaningful for idle_suspend_min and must survive the filter;
-        // every other absent field is dropped so the platform leaves it alone.
+        // `null` is meaningful for idle_suspend_min and browser_proxy and must
+        // survive the filter; every other absent field is dropped so the
+        // platform leaves it alone.
         const body = Object.fromEntries(Object.entries(fields).filter(([, v]) => v !== undefined));
         if (!Object.keys(body).length) {
           return refused(
-            'Nothing to change — give at least one of name, cpu, ram_mb, disk_gb, idle_suspend_min.',
+            'Nothing to change — give at least one of name, cpu, ram_mb, disk_gb, idle_suspend_min, browser_proxy.',
           );
         }
         let c: Computer;
@@ -991,14 +1024,14 @@ export const registerComputers: Registrar = (server, session, opts) => {
     {
       title: 'Wait for a computer to be ready',
       description:
-        'Poll until the computer is running, or until the software inside it answers. Use "guest" before exec, files or windows, and before expecting a screenshot to show a desktop rather than a boot screen; on a computer with secrets bound, "guest" also waits until they have reached the desktop, so a command run next sees them. Reports progress while it waits, so a client that sends a progressToken and sets resetTimeoutOnProgress can hold the request open; a client that cannot should lower timeout_s and call again rather than watch its own default timeout cancel the wait.',
+        'Poll until the computer is running, or until the software inside it answers. Use "guest" before exec, files or windows, and before expecting a screenshot to show a desktop rather than a boot screen; on a computer with secrets bound, "guest" also waits until they have reached the desktop, so a command run next sees them, and on one whose browser proxy is being set or removed it waits until its browsers have the change. Reports progress while it waits, so a client that sends a progressToken and sets resetTimeoutOnProgress can hold the request open; a client that cannot should lower timeout_s and call again rather than watch its own default timeout cancel the wait.',
       inputSchema: {
         ...idArg,
         until: z
           .enum(['running', 'guest'])
           .default('guest')
           .describe(
-            '"running" is the hypervisor reporting the VM up. "guest" is the software inside it answering, which is what exec and a painted desktop actually need — and, on a computer with secrets bound, its secrets delivered.',
+            '"running" is the hypervisor reporting the VM up. "guest" is the software inside it answering, which is what exec and a painted desktop actually need — and, on a computer with secrets bound, its secrets delivered, and on one with a browser proxy, its browsers holding it.',
           ),
         timeout_s: z.number().int().min(5).max(900).default(180),
       },
@@ -1176,6 +1209,17 @@ export const registerComputers: Registrar = (server, session, opts) => {
               // platform without secrets_delivering, the receipt says instead.
               if (secretsOnTheirWay(c)) {
                 await beat(`Waiting for ${id} — running; its secrets are still on their way.`);
+                await sleep(POLL_MS, signal);
+                continue;
+              }
+              // The same gap for a browser proxy: the guest answers before the
+              // policy is on disk, and a browser opened in between goes out
+              // directly. Never pending on a computer that is not running, so
+              // this is the only place it can be waited on.
+              if (c.browser_proxy_pending === true) {
+                await beat(
+                  `Waiting for ${id} — running; its browser proxy is still being applied.`,
+                );
                 await sleep(POLL_MS, signal);
                 continue;
               }
@@ -1477,6 +1521,11 @@ export const registerComputers: Registrar = (server, session, opts) => {
           .optional()
           .describe(
             `Secrets from the account to deliver into the desktop session each time the computer starts, each as an environment variable (\`env\`) or as a file under ${FILES_DIR} (\`file\`). Only ids and names are sent — never a value. Secret ids come from list_secrets (create_secret stores a new one). Linux only, and only on a template whose image can receive them. A value replaced later reaches the running computer live when bound as a file, and as a variable on an image that supports it reaches new shells and exec with desktop: true. get_computer_secrets and set_computer_secrets read and change the bindings later.`,
+          ),
+        browser_proxy: browserProxySchema
+          .optional()
+          .describe(
+            `${BROWSER_PROXY_ABOUT} A create carrying one is always a cold boot. wait_for_computer with until="guest" waits until its browsers have it; update_computer changes or removes it later.`,
           ),
       },
       annotations: { destructiveHint: false, openWorldHint: true },

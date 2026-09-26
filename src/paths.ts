@@ -289,6 +289,8 @@ export function createBody(args: {
   start?: boolean;
   /** Already in the wire spelling, and checked by the tool's schema. */
   secrets?: { secret_id: string; env?: string; file?: string }[];
+  /** Checked for shape by the tool's schema; the rules on values are the platform's. */
+  browser_proxy?: { server: string; bypass?: string[] };
 }): Json {
   if (args.template_transfer !== undefined) {
     if (typeof args.template_transfer !== 'string' || !args.template_transfer.trim()) {

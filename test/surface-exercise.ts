@@ -90,6 +90,9 @@ export const EXERCISE: Record<string, Record<string, unknown>[]> = {
     { name: 'renamed' },
     { cpu: 4, ram_mb: 4096, disk_gb: 40 },
     { idle_suspend_min: 30 },
+    // A browser proxy, and the null that removes it (OPL-5144).
+    { browser_proxy: { server: 'http://proxy.example.com:3128', bypass: ['<local>'] } },
+    { browser_proxy: null },
   ],
   // All three sizing fields in one call, because the platform reads exactly
   // these three off a move and the parameter sweep below is what proves it. A
@@ -215,6 +218,8 @@ export const EXERCISE: Record<string, Record<string, unknown>[]> = {
         { secret_id: 'csec-0123456789abcde0', file: 'kubeconfig' },
       ],
     },
+    // A browser proxy at create (OPL-5144).
+    { template: 'base', browser_proxy: { server: 'socks5://127.0.0.1:1080' } },
   ],
   clone_computer: [{ name: 'copy' }],
   delete_computer: [

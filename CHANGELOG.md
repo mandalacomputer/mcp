@@ -16,6 +16,13 @@ are wording changes, and they are behaviour changes in the way that matters.
 
 ### Added
 
+- **`browser_proxy` on `create_computer` and `update_computer`**: a proxy
+  (`{server, bypass}`) for a computer's browsers, over the platform's new body
+  field; `null` on `update_computer` removes it. Only the shape is checked
+  here — which schemes and hosts are accepted is the platform's rule, and its
+  400 sentence comes back as it is. `wait_for_computer` with `until: "guest"`
+  now also waits while the platform reports the setting still being applied,
+  and a computer's one-line description names its proxy and that gap.
 - **`screenshot` takes `region`, `scale`, `format` and `quality`**, over the
   platform's new query parameters: a crop in screen pixels (measured before
   any scaling), a shrink factor in (0, 1], `png` or `jpeg`, and a JPEG quality

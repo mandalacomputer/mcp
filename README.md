@@ -226,6 +226,15 @@ and its guest answers, a few seconds before its secrets land, so
 `wait_for_computer(until="guest")` on one also waits until they have;
 `get_computer` shows the gap as "its secrets are still on their way in".
 
+**A proxy for the browsers** — `browser_proxy: {server, bypass}` on
+`create_computer` and `update_computer` sends a Linux computer's browsers
+(Chromium, Chrome, Firefox) through a proxy; nothing else on the computer uses
+it. On `update_computer` it goes alone, replaces the setting whole, and `null`
+removes it. Which proxies are accepted is the platform's rule, and its refusal
+comes back as it is. A running computer has a change within seconds:
+`wait_for_computer(until="guest")` waits until its browsers have it, and
+`get_computer` shows the gap as "its browser proxy is still being applied".
+
 **Delegating** — `run_agent`, `run_agent_chat`, registered only when a model key is present:
 `MANDALA_MODEL_KEY` on stdio, or the caller's own `X-Model-Key` header over HTTP.
 Both must also survive the configured filters.
