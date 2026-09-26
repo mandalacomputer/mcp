@@ -214,6 +214,29 @@ describe('operation_id on the lifecycle tools', () => {
     expect(text(result)).not.toContain('operation');
   });
 
+  it('update_computer says the operation a resize carried', async () => {
+    answer((m, p) => m === 'PATCH' && p === '/computers/vm-1', {
+      ...COMPUTER,
+      status: 'stopped',
+      cpu: 4,
+      operation_id: 'op_000000000000000000000006',
+    });
+    const result = await (await open()).call('update_computer', { computer_id: 'vm-1', cpu: 4 });
+    expect(result.isError).not.toBe(true);
+    expect(text(result).split('\n\n')[0]).toContain('(operation op_000000000000000000000006)');
+    expect(data(result)).toMatchObject({ operation_id: 'op_000000000000000000000006' });
+  });
+
+  it('update_computer says nothing about an operation when a rename carried none', async () => {
+    answer((m, p) => m === 'PATCH' && p === '/computers/vm-1', { ...COMPUTER, name: 'renamed' });
+    const result = await (await open()).call('update_computer', {
+      computer_id: 'vm-1',
+      name: 'renamed',
+    });
+    expect(result.isError).not.toBe(true);
+    expect(text(result)).not.toContain('operation');
+  });
+
   it('create_computer keeps the operation off the envelope of a create that would not boot', async () => {
     answer((m, p) => m === 'POST' && p === '/computers', {
       computer: { ...COMPUTER, status: 'stopped' },

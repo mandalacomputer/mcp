@@ -526,7 +526,7 @@ export const registerComputers: Registrar = (server, session, opts) => {
         const id = session.resolve(computer_id);
         const c = unwrapComputer(await session.api.with(extra.signal).json('GET', P.computer(id)));
         session.noteResolution(id, c.resolution);
-        return said(`${describe(c)}${operationClause(c)}`, withoutCredentials(c));
+        return said(describe(c), withoutCredentials(c));
       }),
   );
 
@@ -770,7 +770,9 @@ export const registerComputers: Registrar = (server, session, opts) => {
           throw err;
         }
         session.noteResolution(id, c.resolution);
-        return said(describe(c), withoutCredentials(c));
+        // A resize is recorded as an operation and its answer carries the id;
+        // a rename or a setting change carries none, and the clause is empty.
+        return said(`${describe(c)}${operationClause(c)}`, withoutCredentials(c));
       }),
   );
 
