@@ -299,7 +299,8 @@ const finishedMove = (id: string, m: Move) => {
  */
 const POWER_NEXT: Record<string, string> = {
   start: ' wait_for_computer with until="guest" is what says when the desktop is answering.',
-  restart: ' wait_for_computer with until="guest" is what says when the desktop is back.',
+  restart:
+    ' wait_for_computer with until="guest" is what says when the desktop is back — and, on a computer with secrets bound, when they have been delivered again, where the platform reports that redelivery. Where it does not, the wait can return a few seconds before they land, so a command that finds a secret unset just after a restart is worth retrying.',
 };
 
 const POWER_DESCRIPTIONS: Record<string, string> = {
@@ -309,7 +310,7 @@ const POWER_DESCRIPTIONS: Record<string, string> = {
   suspend:
     "Write the guest's RAM to disk and give the host its memory back. A pause, not a stop: start_computer resumes the same session. A computer that holds secrets suspends only on a host that seals saved sessions (its memory is encrypted on the way to disk); elsewhere, and while its secrets are still being delivered, it is refused with 409. After a change to its secret bindings that dropped a secret or moved one to another revision while it ran, it cannot be suspended until it restarts, since its memory may still hold the old value.",
   restart:
-    'Reset the computer, like the reset button — not a fresh boot, so a change that needs a new machine shape (a resize) needs a stop and a start instead. A suspended computer is refused with 409: start it to resume, or stop it to discard the session. A stopped computer with no secrets bound is started instead; one with secrets bound is refused with 409 while stopped (start it, which delivers them) or while its secrets are being delivered, and otherwise gets its secrets again as it comes back up. A restart issues new desktop credentials and closes open desktop connections, so a get_desktop_url link from before it stops working.',
+    'Reset the computer, like the reset button — not a fresh boot, so a change that needs a new machine shape (a resize) needs a stop and a start instead. A suspended computer is refused with 409: start it to resume, or stop it to discard the session. A stopped computer with no secrets bound is started instead; one with secrets bound is refused with 409 while stopped (start it, which delivers them) or while its secrets are being delivered, and otherwise gets its secrets again as it comes back up, a few seconds after it reads running: wait_for_computer with until="guest" waits for them where the platform reports that redelivery, and where it does not, a command run in those seconds can see them unset. A restart issues new desktop credentials and closes open desktop connections, so a get_desktop_url link from before it stops working.',
 };
 
 export const registerComputers: Registrar = (server, session, opts) => {

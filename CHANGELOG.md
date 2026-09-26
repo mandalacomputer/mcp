@@ -59,7 +59,11 @@ are wording changes, and they are behaviour changes in the way that matters.
   delivering start, the fallback both SDKs use. A delivery that
   failed stops the computer, and the refusal now says so, with the platform's
   reason. `get_computer` and the other computer summaries say "its secrets are
-  still on their way in" while it lasts.
+  still on their way in" while it lasts. A restart delivers bound secrets again
+  and reads running before they land. `restart_computer`'s description and its
+  answer now say so: waiting with "guest" covers that redelivery on a platform
+  that reports it as `secrets_delivering`, and on one that does not, a command
+  run in those first seconds can see its secrets unset.
 - `--http`: a request with no session that is not an initialize now answers
   `401` when it carries no key, and, in hosted OAuth mode, when the platform
   refuses its token. It answered `400` "No session id" either way, which sent a
