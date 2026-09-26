@@ -169,6 +169,24 @@ describe('patternFor', () => {
     expect(patternFor('/computers/vm-1/secrets')).toBe('computers/:id/secrets');
     // A computer whose id looks like a route segment is still an id.
     expect(patternFor('/computers/audit')).toBe('computers/:id');
+    expect(patternFor('/operations/op_0123456789abcdef01234567')).toBe('operations/:id');
+    expect(patternFor('/workspaces/wsp-1/members')).toBe('workspaces/:id/members');
+  });
+
+  it('reduces a concrete path on every allowed route back to that route', () => {
+    // A route in ALLOWED that patternFor cannot reach is one whose first tool
+    // fails as "outside ALLOWED" for a reason nothing about the failure
+    // explains. `workspaces/:id` and `operations/:id` were two: no rule reduced
+    // the id after them, as the platform's own patternFor does.
+    const concrete = (pattern: string) =>
+      pattern
+        .split('/')
+        .map((seg, i) => (seg.startsWith(':') ? `v${i}-0123456789abcdef` : seg))
+        .join('/');
+    const missed = [...ALLOWED]
+      .map((route) => route.slice(route.indexOf(' ') + 1))
+      .filter((pattern) => patternFor(concrete(pattern)) !== pattern);
+    expect(missed).toEqual([]);
   });
 });
 

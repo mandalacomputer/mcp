@@ -157,6 +157,10 @@ export const V1_ROUTES: Route[] = [
   r('GET', 'api-keys'),
   r('POST', 'api-keys'),
   r('DELETE', 'api-keys/:id'),
+
+  // Lifecycle operations, read only (OPL-5055).
+  r('GET', 'operations'),
+  r('GET', 'operations/:id'),
 ];
 
 /**
@@ -416,6 +420,10 @@ export const PARAMETERS: ReadonlyMap<string, readonly string[]> = new Map([
   ['GET api-keys', []],
   ['POST api-keys', ['body:manage_keys', 'body:name', 'body:workspace_id']],
   ['DELETE api-keys/:id', []],
+
+  // Lifecycle operations, read only (OPL-5055).
+  ['GET operations', ['query:computer_id', 'query:cursor', 'query:limit']],
+  ['GET operations/:id', []],
 ]);
 
 /**
@@ -486,6 +494,10 @@ export const UNIMPLEMENTED = new Set<string>([
   // offered: neither ever carries a raw key.
   'POST api-keys',
   'DELETE api-keys/:id',
+  // Lifecycle operations, read only (OPL-5055). Listed to stay in step with
+  // the surface; no tool reaches them yet.
+  'GET operations',
+  'GET operations/:id',
 ]);
 
 /**
@@ -513,7 +525,11 @@ export function patternFor(path: string): string {
         parent === 'api-keys' ||
         // The secret store (OPL-4984), pinned to the second segment as the
         // platform pins it: `computers/:id/secrets` has no child to reduce.
-        (i === 1 && parent === 'secrets')
+        (i === 1 && parent === 'secrets') ||
+        // A workspace (OPL-5057) and an operation (OPL-5055), second segment
+        // only, as the platform pins them.
+        (i === 1 && parent === 'workspaces') ||
+        (i === 1 && parent === 'operations')
       )
         return ':id';
       if (i === 3 && parts[0] === 'computers' && parts[2] === 'activities') return ':activity';
