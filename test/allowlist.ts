@@ -231,6 +231,7 @@ export const PARAMETERS: ReadonlyMap<string, readonly string[]> = new Map([
       'body:start',
       'body:secrets',
       'body:browser_proxy',
+      'body:egress_proxy',
     ],
   ],
   ['GET computers/:id', []],
@@ -243,6 +244,7 @@ export const PARAMETERS: ReadonlyMap<string, readonly string[]> = new Map([
       'body:disk_gb',
       'body:idle_suspend_min',
       'body:browser_proxy',
+      'body:egress_proxy',
     ],
   ],
   ['DELETE computers/:id', ['query:snapshots', 'query:expect']],
@@ -457,6 +459,11 @@ export const PARAMETERS: ReadonlyMap<string, readonly string[]> = new Map([
  * would say nothing that route's own line does not.
  */
 export const UNIMPLEMENTED_PARAMETERS: ReadonlySet<string> = new Set([
+  // OPL-5142: `egress_proxy` ({server}) sends ALL of a computer's outbound TCP
+  // through a proxy, set at create or by PATCH (null clears it). Listed to stay
+  // in step with the surface; not yet sent.
+  'POST computers  body:egress_proxy',
+  'PATCH computers/:id  body:egress_proxy',
   // DECISION. start_computer requests a boot or resume. With resume_only=true,
   // a stopped computer without a saved session returns 200 without starting.
   // Keep that successful no-op out of the tool so a model cannot mistake the
