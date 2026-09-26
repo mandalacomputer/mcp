@@ -441,13 +441,6 @@ export const PARAMETERS: ReadonlyMap<string, readonly string[]> = new Map([
  * would say nothing that route's own line does not.
  */
 export const UNIMPLEMENTED_PARAMETERS: ReadonlySet<string> = new Set([
-  // OPL-5051: `format` (png or jpeg), `quality`, `region` (x,y,w,h) and
-  // `scale` shape the screenshot. Listed to stay in step with the surface;
-  // not yet sent.
-  'GET computers/:id/screenshot  query:format',
-  'GET computers/:id/screenshot  query:quality',
-  'GET computers/:id/screenshot  query:region',
-  'GET computers/:id/screenshot  query:scale',
   // DECISION. start_computer requests a boot or resume. With resume_only=true,
   // a stopped computer without a saved session returns 200 without starting.
   // Keep that successful no-op out of the tool so a model cannot mistake the

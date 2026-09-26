@@ -1,5 +1,6 @@
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { MAX_INLINE_IMAGE_BYTES } from '../src/format.js';
 import { connect, installFakePlatform } from './harness.js';
 
 const textOf = (res: CallToolResult) =>
@@ -266,6 +267,217 @@ describe('screenshots', () => {
       expect(res.isError).toBe(true);
       expect(textOf(res)).toContain('no saved frame for this computer');
       expect(textOf(res)).not.toContain('fresh: false');
+    } finally {
+      globalThis.fetch = real;
+    }
+  });
+});
+
+describe('shaped screenshots', () => {
+  let platform: ReturnType<typeof installFakePlatform>;
+  beforeEach(() => {
+    platform = installFakePlatform();
+  });
+  afterEach(() => platform.restore());
+
+  const lastShot = () => [...platform.calls].reverse().find((c) => c.path.endsWith('/screenshot'));
+
+  it('sends a crop, a scale, an encoding and a quality as the platform spells them', async () => {
+    const { call, close } = await connect();
+    const res = await call('screenshot', {
+      region: { x: 100, y: 50, width: 640, height: 400 },
+      scale: 0.5,
+      format: 'jpeg',
+      quality: 60,
+    });
+    await close();
+    expect(res.isError).toBeFalsy();
+    const q = lastShot()?.query;
+    expect(q?.get('region')).toBe('100,50,640,400');
+    expect(q?.get('scale')).toBe('0.5');
+    expect(q?.get('format')).toBe('jpeg');
+    expect(q?.get('quality')).toBe('60');
+    expect(q?.get('fresh')).toBe('1');
+    // The picture is in its own pixel space and click takes screen pixels, so
+    // the tool says how to get from one to the other, with the numbers.
+    expect(textOf(res)).toContain('divide its position by 0.5, then add 100 to x and 50 to y');
+  });
+
+  it('turns a width over a region into the factor the platform applies', async () => {
+    const { call, close } = await connect();
+    const res = await call('screenshot', {
+      region: { x: 0, y: 0, width: 800, height: 600 },
+      width: 400,
+    });
+    await close();
+    expect(lastShot()?.query.get('w')).toBe('400');
+    expect(textOf(res)).toContain('scaled by 0.5');
+  });
+
+  it('says how to click in a crop that is not scaled', async () => {
+    const { call, close } = await connect();
+    const res = await call('screenshot', { region: { x: 10, y: 20, width: 30, height: 40 } });
+    await close();
+    expect(textOf(res)).toContain('add 10 to its x and 20 to its y');
+  });
+
+  it('sends none of them when none is asked for', async () => {
+    const { call, close } = await connect();
+    await call('screenshot', {});
+    await close();
+    const q = lastShot()?.query;
+    for (const name of ['region', 'scale', 'format', 'quality']) expect(q?.has(name)).toBe(false);
+  });
+
+  it('refuses what the platform would refuse, before sending anything', async () => {
+    const { call, close } = await connect();
+    const sent = platform.calls.length;
+    const both = await call('screenshot', { width: 320, scale: 0.5 });
+    const pngQuality = await call('screenshot', { quality: 60 });
+    const explicitPng = await call('screenshot', { format: 'png', width: 320, quality: 60 });
+    const tooBig = await call('screenshot', { scale: 1.5 });
+    const empty = await call('screenshot', { region: { x: 0, y: 0, width: 0, height: 5 } });
+    await close();
+    expect(both.isError).toBe(true);
+    expect(textOf(both)).toContain('not both');
+    expect(pngQuality.isError).toBe(true);
+    expect(textOf(pngQuality)).toContain('format: jpeg');
+    expect(explicitPng.isError).toBe(true);
+    expect(tooBig.isError).toBe(true);
+    expect(empty.isError).toBe(true);
+    expect(platform.calls.length).toBe(sent);
+  });
+
+  it("names the way out of a suspended computer's refusal to shape its saved picture", async () => {
+    // Only a width and format: jpeg are answered from a suspended computer's
+    // saved JPEG. A crop asked for with fresh off is refused 409 unavailable,
+    // and the ways out are to start the computer or drop the crop.
+    const real = globalThis.fetch;
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      if (String(input).includes('/screenshot')) {
+        return Response.json(
+          {
+            error:
+              'this computer is suspended and has only its saved desktop picture, which cannot be cropped, scaled or re-encoded; start it for a live screenshot',
+            reason: 'unavailable',
+          },
+          { status: 409 },
+        );
+      }
+      return real(input as never, init);
+    }) as typeof fetch;
+    try {
+      const { call, close } = await connect();
+      const res = await call('screenshot', {
+        fresh: false,
+        region: { x: 0, y: 0, width: 10, height: 10 },
+        quality: 50,
+        format: 'jpeg',
+      });
+      const fresh = await call('screenshot', { scale: 0.5 });
+      await close();
+      expect(res.isError).toBe(true);
+      expect(textOf(res)).toContain('cannot be cropped, scaled or re-encoded');
+      expect(textOf(res)).toContain('start_computer');
+      expect(textOf(res)).toContain('without region, quality');
+      // With fresh on, fresh: false is still named, but not as enough by itself.
+      expect(fresh.isError).toBe(true);
+      expect(textOf(fresh)).toContain('fresh: false has to go without scale as well');
+    } finally {
+      globalThis.fetch = real;
+    }
+  });
+
+  it('does not tell a busy running computer to drop the shape from fresh: false', async () => {
+    // A word that clears by itself comes from a computer that is up, and there
+    // fresh: false is served from the frame cache and shaped like any other
+    // capture. Telling that caller the saved frame cannot be shaped costs them
+    // the crop for nothing.
+    const real = globalThis.fetch;
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      if (String(input).includes('/screenshot')) {
+        return Response.json(
+          { error: 'a capture is already running', reason: 'contention' },
+          { status: 409 },
+        );
+      }
+      return real(input as never, init);
+    }) as typeof fetch;
+    try {
+      const { call, close } = await connect();
+      const res = await call('screenshot', { region: { x: 0, y: 0, width: 10, height: 10 } });
+      await close();
+      expect(res.isError).toBe(true);
+      expect(textOf(res)).toContain('worth sending again');
+      expect(textOf(res)).toContain('fresh: false');
+      expect(textOf(res)).not.toContain('cannot be shaped');
+      expect(textOf(res)).not.toContain('has to go without');
+    } finally {
+      globalThis.fetch = real;
+    }
+  });
+
+  it('does not promise a saved picture to a suspended computer that has none', async () => {
+    // The platform names a missing saved desktop before it looks at the shape,
+    // with the same 409 unavailable, so a shaped fresh: false call on such a
+    // computer arrives here too — and an unshaped retry is refused the same way.
+    const real = globalThis.fetch;
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      if (String(input).includes('/screenshot')) {
+        return Response.json(
+          {
+            error:
+              'this computer is suspended and has no saved desktop to show; start it for a live screenshot',
+            reason: 'unavailable',
+          },
+          { status: 409 },
+        );
+      }
+      return real(input as never, init);
+    }) as typeof fetch;
+    try {
+      const { call, close } = await connect();
+      const res = await call('screenshot', {
+        fresh: false,
+        region: { x: 0, y: 0, width: 10, height: 10 },
+      });
+      await close();
+      expect(res.isError).toBe(true);
+      expect(textOf(res)).toContain('has no saved desktop to show');
+      expect(textOf(res)).toContain('start_computer');
+      // The unshaped retry is offered under its condition, not as the answer.
+      expect(textOf(res)).toContain(
+        'Only where the sentence above says the computer has its saved',
+      );
+      expect(textOf(res)).toContain('Where it says there is no saved desktop');
+    } finally {
+      globalThis.fetch = real;
+    }
+  });
+
+  it('names every way to a smaller picture when a screenshot is over the inline limit', async () => {
+    // A width was the only one there was. A crop or a JPEG is often the better
+    // answer, and a refusal that does not name them leaves them unfound.
+    const real = globalThis.fetch;
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      if (String(input).includes('/screenshot')) {
+        return new Response(new Uint8Array(MAX_INLINE_IMAGE_BYTES + 1), {
+          headers: { 'Content-Type': 'image/png' },
+        });
+      }
+      return real(input as never, init);
+    }) as typeof fetch;
+    try {
+      const { call, close } = await connect();
+      const res = await call('screenshot', {});
+      await close();
+      expect(res.isError).toBe(true);
+      expect(res.content.some((c) => c.type === 'image')).toBe(false);
+      const text = textOf(res);
+      expect(text).toContain('inline limit');
+      for (const way of ['width: 1280', 'scale: 0.5', 'format: jpeg', 'a region of the screen']) {
+        expect(text).toContain(way);
+      }
     } finally {
       globalThis.fetch = real;
     }

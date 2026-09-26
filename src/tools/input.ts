@@ -1,6 +1,6 @@
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
-import { ConflictError } from '../errors.js';
+import { ConflictError, reasonKind } from '../errors.js';
 import {
   failed,
   guarded,
@@ -73,20 +73,121 @@ const point = {
  * look is a 400 rather than a picture. So the retry is named as the first thing
  * to try, and the caller is told what it is not.
  */
-const cachedFrameOffered = (err: ConflictError): CallToolResult => {
+const cachedFrameOffered = (err: ConflictError, shaped: string[] = []): CallToolResult => {
   const sentence = failed(err)
     .content.map((c) => ('text' in c ? c.text : ''))
     .join('\n');
+  // A shaped request has one more condition on the fallback: the saved frame
+  // of a suspended computer is a single JPEG that cannot be cropped, scaled,
+  // re-encoded as PNG or given a quality, and the platform refuses those on
+  // it too. Said here, or fresh: false is advice that meets the same wall.
+  //
+  // But only where the refusal can BE a suspended computer's. A word that
+  // clears by itself (contention, starting) comes from a computer that is up,
+  // and on one of those fresh: false is served from the frame cache and
+  // shaped like any other capture — so telling that caller to drop a crop
+  // costs them the crop for nothing. And conditional even then: `unavailable`
+  // is also a computer that is merely stopped, and an unclassified 409 could
+  // be anything, so the platform's sentence is what says which it is.
+  const without =
+    shaped.length && reasonKind(err.reason) !== 'clears'
+      ? ` If the sentence above says the computer is suspended, its saved frame cannot be shaped, so ` +
+        `fresh: false has to go without ${shaped.join(', ')} as well, or it is refused for that instead.`
+      : '';
   return refused(
     `${sentence}\n\nThat was a request for a NEW capture. Read the sentence above before anything else: where ` +
       `it says this is worth another attempt, sending the same call again in a moment is the first thing to ` +
       `try — it is not a promise that the capture then works, since a computer that turns out not to be ` +
       `running needs starting rather than another look. The other option is fresh: false, which asks for the ` +
       `last frame the platform saved rather than a new one and so needs nothing captured; it is refused in ` +
-      `the same way when there is no saved frame to serve, so it is a fallback and not a guarantee either. ` +
+      `the same way when there is no saved frame to serve, so it is a fallback and not a guarantee either.` +
+      `${without} ` +
       `Whatever comes back is the screen as it was when that frame was taken and not the screen now: it ` +
       `cannot show the result of anything sent since.`,
   );
+};
+
+/**
+ * The four things that shape a screenshot besides a width, and whether this
+ * call asked for any of them that a suspended computer cannot answer.
+ *
+ * A suspended computer has one saved JPEG of its desktop, and the platform
+ * refuses a crop, a scale, a PNG or a quality on it with 409 `unavailable`
+ * (only a width and `format: jpeg` are answered with the saved picture). So
+ * this is the question that decides whether `fresh: false` is still a way out.
+ */
+type Shape = {
+  region?: { x: number; y: number; width: number; height: number };
+  scale?: number;
+  format?: 'png' | 'jpeg';
+  quality?: number;
+};
+const unshapeable = (s: Shape): string[] =>
+  [
+    s.region && 'region',
+    s.scale !== undefined && 'scale',
+    s.format === 'png' && 'format: png',
+    s.quality !== undefined && 'quality',
+  ].filter((v): v is string => typeof v === 'string');
+
+/**
+ * A refused request for the saved picture that also asked for a shape.
+ *
+ * Reached on a 409 `unavailable` to a call with fresh off and a shape, and
+ * that is three different computers which this cannot tell apart: a suspended
+ * one that has its saved JPEG and refuses to shape it, a suspended one with no
+ * saved picture at all (the platform names that before it looks at the shape),
+ * and one that is simply not running, which has neither. Dropping the shape is
+ * a way out of the first only — offered as such, the second and third would be
+ * sent round to a retry that is refused again. So the platform's sentence
+ * first, as everywhere, since it is the half that says which of the three this
+ * is; then start_computer, which answers all three; then the unshaped retry,
+ * under the one condition that makes it worth sending.
+ */
+const shapeRefused = (err: ConflictError, asked: string[]): CallToolResult => {
+  const sentence = failed(err)
+    .content.map((c) => ('text' in c ? c.text : ''))
+    .join('\n');
+  return refused(
+    `${sentence}\n\nThis call asked for ${asked.join(', ')}, which only a running computer's screen can ` +
+      `answer: a suspended computer keeps at most one JPEG of its desktop, saved when it suspended, and that ` +
+      `cannot be cropped, scaled, re-encoded as PNG or given a quality. start_computer is the way to a screen ` +
+      `that can be shaped. Only where the sentence above says the computer has its saved desktop picture is ` +
+      `there one to fall back on: ask again with fresh: false and without ${asked.join(', ')} for it, which is the screen ` +
+      `as it was when the computer suspended and not the screen now. Where it says there is no saved desktop, ` +
+      `or that the computer is not running, dropping them is refused the same way and only a start helps.`,
+  );
+};
+
+/**
+ * What the coordinates in a shaped picture mean, as the one sentence a model
+ * needs before it clicks on anything in it.
+ *
+ * A crop or a scale puts the picture in its OWN pixel space, and click, drag
+ * and scroll take SCREEN pixels. The mapping is arithmetic the model can do,
+ * but only if it is told the numbers, so they are stated rather than implied.
+ * A width is turned into its factor here the way the platform turns it: at
+ * least 64 pixels, never wider than what is being shrunk.
+ */
+const shapeNote = (width: number | undefined, s: Shape): string | undefined => {
+  const r = s.region;
+  const source = r?.width;
+  let factor = s.scale;
+  if (width !== undefined) {
+    factor = source === undefined ? undefined : Math.min(Math.max(width, 64), source) / source;
+  }
+  if (!r) {
+    if (width !== undefined)
+      return `(scaled to ${width}px wide — click using full-size coordinates)`;
+    if (factor === undefined || factor === 1) return undefined;
+    return `(scaled by ${factor}: to click on something in this picture, divide its position by ${factor})`;
+  }
+  const at = `${r.x},${r.y},${r.width},${r.height}`;
+  if (factor === undefined || factor === 1) {
+    return `(the region ${at} of the screen: to click on something in this picture, add ${r.x} to its x and ${r.y} to its y)`;
+  }
+  const f = Number(factor.toPrecision(6));
+  return `(the region ${at} of the screen, scaled by ${f}: to click on something in this picture, divide its position by ${f}, then add ${r.x} to x and ${r.y} to y)`;
 };
 
 /** The longest text one `type` takes, in characters. */
@@ -132,11 +233,60 @@ export const registerInput: Registrar = (server, session) => {
           .describe(
             'Skip the platform\'s frame cache, which serves any capture under 1.5s old — up to 30s old while the computer is busy with another operation. True by default: after a click, a cached frame can predate the action entirely, and a model reading it concludes the click missed and clicks again. A capture needs a computer that is awake, so on a suspended one this is refused rather than answered — pass false to ask for the last saved frame instead, which is refused in turn when there is no saved frame to serve. A saved frame answers "what was on the screen" and cannot answer "did my click land".',
           ),
+        region: z
+          .object({
+            x: z.number().int().min(0),
+            y: z.number().int().min(0),
+            width: z.number().int().min(1),
+            height: z.number().int().min(1),
+          })
+          .optional()
+          .describe(
+            'Crop to this rectangle of the screen. x, y, width and height are SCREEN pixels, the ones click takes, measured before any scaling. It has to lie inside the screen: one that reaches past an edge is refused with the screen size rather than clipped. The picture that comes back starts at (0, 0), so add x and y to a position in it before clicking there.',
+          ),
+        scale: z
+          .number()
+          .gt(0)
+          .max(1)
+          .optional()
+          .describe(
+            'Shrink the picture by this factor, greater than 0 and at most 1: 0.5 halves both sides, a quarter of the pixels. Not with width. Divide a position in the smaller picture by this before clicking there.',
+          ),
+        format: z
+          .enum(['png', 'jpeg'])
+          .optional()
+          .describe(
+            'png (the default) or jpeg (the default with width). A JPEG is much smaller for the same picture.',
+          ),
+        quality: z
+          .number()
+          .int()
+          .min(1)
+          .max(100)
+          .optional()
+          .describe(
+            'JPEG quality, 1 to 100 (72 when not given). A JPEG only: pass format: jpeg with it.',
+          ),
       },
       annotations: { readOnlyHint: true },
     },
-    ({ computer_id, width, fresh }, extra) =>
+    ({ computer_id, width, fresh, region, scale, format, quality }, extra) =>
       guarded(async () => {
+        const shape: Shape = { region, scale, format, quality };
+        // The two refusals the platform would make that are knowable from the
+        // arguments alone, made here so the answer names this tool's own
+        // parameters and costs no round trip. Everything else about a shape —
+        // chiefly whether a region fits the screen — is the platform's to say.
+        if (width !== undefined && scale !== undefined) {
+          return refused(
+            'Give width or scale, not both: each sets the size of the picture. Nothing was sent.',
+          );
+        }
+        if (quality !== undefined && (format ?? (width === undefined ? 'png' : 'jpeg')) === 'png') {
+          return refused(
+            'quality applies to a JPEG only, and this picture would be a PNG. Add format: jpeg (or drop quality). Nothing was sent.',
+          );
+        }
         const id = session.resolve(computer_id);
         let shot: Awaited<ReturnType<typeof session.api.bytes>>;
         try {
@@ -144,7 +294,14 @@ export const registerInput: Registrar = (server, session) => {
             'GET',
             P.computerAction(id, 'screenshot'),
             {
-              query: { w: width, fresh: fresh ? 1 : undefined },
+              query: {
+                w: width,
+                fresh: fresh ? 1 : undefined,
+                region: region && `${region.x},${region.y},${region.width},${region.height}`,
+                scale,
+                format,
+                quality,
+              },
             },
             MAX_INLINE_IMAGE_BYTES,
           );
@@ -158,6 +315,20 @@ export const registerInput: Registrar = (server, session) => {
           // refusal can be about asking for one. A model that meets a bare 409
           // here has nothing to try, and the thing it does instead is ask again
           // — a loop over a computer that cannot answer it.
+          //
+          // And a shaped picture: a suspended computer refuses a crop, a scale,
+          // a PNG or a quality even with fresh off, so offering fresh: false
+          // alone would send the caller into the same wall. Checked first, and
+          // for fresh too, since the platform names the capture before the
+          // shape and the shape would be the next refusal.
+          const asked = unshapeable(shape);
+          if (
+            err instanceof ConflictError &&
+            asked.length > 0 &&
+            (fresh || err.reason === 'unavailable')
+          ) {
+            return fresh ? cachedFrameOffered(err, asked) : shapeRefused(err, asked);
+          }
           if (fresh && err instanceof ConflictError) return cachedFrameOffered(err);
           throw err;
         }
@@ -168,8 +339,14 @@ export const registerInput: Registrar = (server, session) => {
         if (shot.truncated) {
           const size =
             shot.totalBytes === undefined ? `more than ${shot.bytes.length}` : shot.totalBytes;
+          // Every argument that makes the picture smaller, not only the
+          // oldest: a crop is often the better answer (the part of the screen
+          // in question, at full detail), and a JPEG shrinks a dense screen
+          // several times over at the same size. The note on the picture that
+          // comes back says how its positions map to the screen, so this does
+          // not have to.
           return refused(
-            `That screenshot is ${size} bytes, over the ${MAX_INLINE_IMAGE_BYTES}-byte inline limit. An image cannot be truncated, so nothing was returned. Ask again with a width — e.g. width: 1280 — and click using full-size coordinates.`,
+            `That screenshot is ${size} bytes, over the ${MAX_INLINE_IMAGE_BYTES}-byte inline limit. An image cannot be truncated, so nothing was returned. Ask again for a smaller picture: a width (e.g. width: 1280) or a scale (e.g. scale: 0.5), format: jpeg, or a region of the screen — any of them, or a region with one of the others. The note on the picture that comes back says how its positions map to the screen click takes.`,
           );
         }
         if (shot.bytes.length === 0) {
@@ -195,9 +372,8 @@ export const registerInput: Registrar = (server, session) => {
             `That screenshot came back as ${shot.contentType}, not one of the image types this can hand over (${[...INLINE_IMAGE_TYPES].join(', ')}) — ${shot.bytes.length} bytes. Something between here and the guest answered in place of the capture; nothing was returned rather than passing it off as a picture.`,
           );
         }
-        const scaled = width
-          ? ` (scaled to ${width}px wide — click using full-size coordinates)`
-          : '';
+        const shaped = shapeNote(width, shape);
+        const scaled = shaped ? ` ${shaped}` : '';
         // Only for the bound computer. session.screen is definitionally the
         // bound machine's geometry — noteResolution refuses to update it for
         // any other id — so printing it beside a screenshot of a computer named

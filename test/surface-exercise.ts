@@ -222,7 +222,16 @@ export const EXERCISE: Record<string, Record<string, unknown>[]> = {
     { computer_id: 'vm-2', confirm: true, delete_snapshots: true, expect: 'fp-abc123' },
   ],
 
-  screenshot: [{}, { width: 800, fresh: true }],
+  screenshot: [
+    {},
+    { width: 800, fresh: true },
+    {
+      region: { x: 0, y: 0, width: 640, height: 400 },
+      scale: 0.5,
+      format: 'jpeg',
+      quality: 60,
+    },
+  ],
   click: [{ x: 10, y: 20 }],
   type_text: [{ text: 'hi' }],
   press_key: [{ keys: ['ctrl', 'c'] }],
