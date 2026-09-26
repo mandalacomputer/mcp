@@ -2,6 +2,7 @@ import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
 import { ConflictError, reasonKind } from '../errors.js';
 import {
+  apiErrorMessage,
   failed,
   guarded,
   INLINE_IMAGE_TYPES,
@@ -83,16 +84,30 @@ const cachedFrameOffered = (err: ConflictError, shaped: string[] = []): CallTool
   // it too. Said here, or fresh: false is advice that meets the same wall.
   //
   // But only where the refusal can BE a suspended computer's. A word that
-  // clears by itself (contention, starting) comes from a computer that is up,
-  // and on one of those fresh: false is served from the frame cache and
+  // clears by itself (contention, starting) usually comes from a computer that
+  // is up, and on one of those fresh: false is served from the frame cache and
   // shaped like any other capture — so telling that caller to drop a crop
-  // costs them the crop for nothing. And conditional even then: `unavailable`
-  // is also a computer that is merely stopped, and an unclassified 409 could
-  // be anything, so the platform's sentence is what says which it is.
+  // costs them the crop for nothing. Usually, not always: a suspended
+  // computer's saved desktop is read under its lifecycle lock, and a busy lock
+  // is contention too ("this computer's saved desktop is being updated"), as
+  // is a computer caught part way into a suspend. So a clearing word keeps the
+  // sentence where the platform's own sentence speaks of a suspend or of the
+  // saved desktop. The same busy lock is also a resume under way, which ends
+  // in a computer that can shape a frame, and the two read alike; hence "while
+  // it stays suspended", and the retry named first. That is a reading of the
+  // platform's prose, and it fails safe: a rewording loses only this hint, and
+  // the shaped fresh: false it would have prevented is refused with
+  // shapeRefused's full advice.
+  //
+  // And conditional even then: `unavailable` is also a computer that is
+  // merely stopped, and an unclassified 409 could be anything, so the
+  // platform's sentence is what says which it is.
+  const suspendedWords = /suspend|saved desktop/i.test(apiErrorMessage(err));
   const without =
-    shaped.length && reasonKind(err.reason) !== 'clears'
-      ? ` If the sentence above says the computer is suspended, its saved frame cannot be shaped, so ` +
-        `fresh: false has to go without ${shaped.join(', ')} as well, or it is refused for that instead.`
+    shaped.length && (reasonKind(err.reason) !== 'clears' || suspendedWords)
+      ? ` If the sentence above says the computer is suspended or being suspended, or speaks of its saved ` +
+        `desktop, its saved frame cannot be shaped while it stays suspended, so fresh: false has to go ` +
+        `without ${shaped.join(', ')} as well, or it is refused for that instead.`
       : '';
   return refused(
     `${sentence}\n\nThat was a request for a NEW capture. Read the sentence above before anything else: where ` +

@@ -389,10 +389,10 @@ describe('shaped screenshots', () => {
   });
 
   it('does not tell a busy running computer to drop the shape from fresh: false', async () => {
-    // A word that clears by itself comes from a computer that is up, and there
-    // fresh: false is served from the frame cache and shaped like any other
-    // capture. Telling that caller the saved frame cannot be shaped costs them
-    // the crop for nothing.
+    // A word that clears by itself usually comes from a computer that is up,
+    // and there fresh: false is served from the frame cache and shaped like any
+    // other capture. Telling that caller the saved frame cannot be shaped costs
+    // them the crop for nothing.
     const real = globalThis.fetch;
     globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
       if (String(input).includes('/screenshot')) {
@@ -412,6 +412,41 @@ describe('shaped screenshots', () => {
       expect(textOf(res)).toContain('fresh: false');
       expect(textOf(res)).not.toContain('cannot be shaped');
       expect(textOf(res)).not.toContain('has to go without');
+    } finally {
+      globalThis.fetch = real;
+    }
+  });
+
+  it("keeps the shape rule on a suspended computer's contention", async () => {
+    // A suspended computer's saved desktop is read under its lifecycle lock,
+    // and a busy lock is contention: a word that clears by itself, from a
+    // computer that is NOT up. There fresh: false with a crop meets the
+    // suspended computer's refusal to shape its saved picture, so the caveat
+    // stays, and so it does for a computer caught part way into a suspend.
+    const sentences = [
+      "this computer's saved desktop is being updated; try again shortly",
+      'this computer is being suspended right now; try again in a moment and it will be resumed',
+    ];
+    const real = globalThis.fetch;
+    let next = 0;
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      if (String(input).includes('/screenshot')) {
+        return Response.json({ error: sentences[next++], reason: 'contention' }, { status: 409 });
+      }
+      return real(input as never, init);
+    }) as typeof fetch;
+    try {
+      const { call, close } = await connect();
+      const busy = await call('screenshot', { region: { x: 0, y: 0, width: 10, height: 10 } });
+      const suspending = await call('screenshot', { scale: 0.5, format: 'png' });
+      await close();
+      expect(busy.isError).toBe(true);
+      expect(textOf(busy)).toContain('worth sending again');
+      expect(textOf(busy)).toContain('fresh: false has to go without region as well');
+      expect(suspending.isError).toBe(true);
+      expect(textOf(suspending)).toContain(
+        'fresh: false has to go without scale, format: png as well',
+      );
     } finally {
       globalThis.fetch = real;
     }
