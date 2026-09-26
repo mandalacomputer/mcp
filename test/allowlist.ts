@@ -230,12 +230,20 @@ export const PARAMETERS: ReadonlyMap<string, readonly string[]> = new Map([
       'body:resolution',
       'body:start',
       'body:secrets',
+      'body:browser_proxy',
     ],
   ],
   ['GET computers/:id', []],
   [
     'PATCH computers/:id',
-    ['body:name', 'body:cpu', 'body:ram_mb', 'body:disk_gb', 'body:idle_suspend_min'],
+    [
+      'body:name',
+      'body:cpu',
+      'body:ram_mb',
+      'body:disk_gb',
+      'body:idle_suspend_min',
+      'body:browser_proxy',
+    ],
   ],
   ['DELETE computers/:id', ['query:snapshots', 'query:expect']],
   ['POST computers/:id/start', ['query:resume_only']],
@@ -449,6 +457,11 @@ export const PARAMETERS: ReadonlyMap<string, readonly string[]> = new Map([
  * would say nothing that route's own line does not.
  */
 export const UNIMPLEMENTED_PARAMETERS: ReadonlySet<string> = new Set([
+  // OPL-5056: `browser_proxy` ({server, bypass}) sends a computer's browsers
+  // through a proxy, set at create or by PATCH (null clears it). Listed to
+  // stay in step with the surface; not yet sent.
+  'POST computers  body:browser_proxy',
+  'PATCH computers/:id  body:browser_proxy',
   // DECISION. start_computer requests a boot or resume. With resume_only=true,
   // a stopped computer without a saved session returns 200 without starting.
   // Keep that successful no-op out of the tool so a model cannot mistake the
