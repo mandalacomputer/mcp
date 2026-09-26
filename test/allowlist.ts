@@ -525,7 +525,11 @@ export function patternFor(path: string): string {
         parent === 'api-keys' ||
         // The secret store (OPL-4984), pinned to the second segment as the
         // platform pins it: `computers/:id/secrets` has no child to reduce.
-        (i === 1 && parent === 'secrets')
+        (i === 1 && parent === 'secrets') ||
+        // A workspace (OPL-5057) and an operation (OPL-5055), second segment
+        // only, as the platform pins them.
+        (i === 1 && parent === 'workspaces') ||
+        (i === 1 && parent === 'operations')
       )
         return ':id';
       if (i === 3 && parts[0] === 'computers' && parts[2] === 'activities') return ':activity';
