@@ -157,6 +157,10 @@ export const V1_ROUTES: Route[] = [
   r('GET', 'api-keys'),
   r('POST', 'api-keys'),
   r('DELETE', 'api-keys/:id'),
+
+  // Lifecycle operations, read only (OPL-5055).
+  r('GET', 'operations'),
+  r('GET', 'operations/:id'),
 ];
 
 /**
@@ -416,6 +420,10 @@ export const PARAMETERS: ReadonlyMap<string, readonly string[]> = new Map([
   ['GET api-keys', []],
   ['POST api-keys', ['body:manage_keys', 'body:name', 'body:workspace_id']],
   ['DELETE api-keys/:id', []],
+
+  // Lifecycle operations, read only (OPL-5055).
+  ['GET operations', ['query:computer_id', 'query:cursor', 'query:limit']],
+  ['GET operations/:id', []],
 ]);
 
 /**
@@ -486,6 +494,10 @@ export const UNIMPLEMENTED = new Set<string>([
   // offered: neither ever carries a raw key.
   'POST api-keys',
   'DELETE api-keys/:id',
+  // Lifecycle operations, read only (OPL-5055). Listed to stay in step with
+  // the surface; no tool reaches them yet.
+  'GET operations',
+  'GET operations/:id',
 ]);
 
 /**
