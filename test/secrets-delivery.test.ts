@@ -250,6 +250,37 @@ describe('wait_for_computer on a computer with secrets bound', () => {
     expect(secretsOnTheirWay({ ...base, secrets_generation: 0 })).toBe(false);
   });
 
+  it('waits, with "guest", for the secrets a restart delivers again', async () => {
+    // A restart reads running before its secrets land; secrets_delivering is
+    // true until they do, and the answer to the restart says to wait.
+    let gets = 0;
+    const res = await platform(
+      (seen) => {
+        if (seen.path.endsWith('/restart')) return [200, { ok: true }];
+        if (seen.path.endsWith('/exec'))
+          return [200, { exit_code: 0, stdout_b64: '', stderr_b64: '' }];
+        gets++;
+        return [200, bound({ secrets_delivering: gets === 1 })];
+      },
+      async (seen) => {
+        const { call, close } = await connect();
+        const restarted = await call('restart_computer', {});
+        expect(textOf(restarted)).toContain('when they have been delivered again');
+        const r = await call('wait_for_computer', { until: 'guest', timeout_s: 30 });
+        await close();
+        expect(seen.map((c) => [c.method, c.path])).toEqual([
+          ['POST', '/computers/vm-1/restart'],
+          ['GET', '/computers/vm-1'],
+          ['GET', '/computers/vm-1'],
+          ['POST', '/computers/vm-1/exec'],
+        ]);
+        return r;
+      },
+    );
+    expect(res.isError).toBeFalsy();
+    expect(textOf(res)).toContain('Guest is answering');
+  });
+
   it('does not wait for them with "running"', async () => {
     const res = await platform(
       () => [200, bound({ secrets_delivering: true })],
