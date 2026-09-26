@@ -337,6 +337,12 @@ export type Computer = {
   lost_at?: string;
   start_error?: string;
   /**
+   * The lifecycle operation this answer started (platform OPL-5055), on a
+   * create, a clone or a resize only — never on a read. `wait_for_operation`
+   * follows it to its end.
+   */
+  operation_id?: string;
+  /**
    * Guest RAM the platform is holding for this computer against the account's
    * running pool (platform OPL-4630).
    *
@@ -445,6 +451,27 @@ export function secretsOnTheirWay(c: Computer): boolean {
  * flattens it, so every reader of a computer sees the same shape and the
  * failure travels beside the fields rather than wrapping them.
  */
+/**
+ * The `operation_id` a lifecycle answer carried, or `undefined` for none
+ * (platform OPL-5055). Absent is ordinary: the platform leaves it out, with the
+ * call still done, when it could not record the operation. Anything that is not
+ * a non-empty string reads as absent for the same reason.
+ */
+export function operationIdOf(body: unknown): string | undefined {
+  if (!body || typeof body !== 'object') return undefined;
+  const v = (body as Record<string, unknown>).operation_id;
+  return typeof v === 'string' && v ? v : undefined;
+}
+
+/**
+ * The operation an answer carried, as the clause a tool's sentence ends with:
+ * `` (operation op_…)`` or nothing.
+ */
+export const operationClause = (body: unknown): string => {
+  const id = operationIdOf(body);
+  return id ? ` (operation ${id})` : '';
+};
+
 export function unwrapComputer(body: unknown): Computer {
   if (!body || typeof body !== 'object') return {};
   const v = body as Record<string, unknown>;
@@ -455,9 +482,13 @@ export function unwrapComputer(body: unknown): Computer {
     // the computer and replace it with nothing — discarding the reason a
     // billable machine did not boot, in the function that exists to surface it.
     const nested = inner as Computer;
+    // `operation_id` the same way (platform OPL-5055): on a create that would
+    // not boot it is on the envelope, beside `start_error`.
+    const operation = operationIdOf(v) ?? nested.operation_id;
     return {
       ...nested,
       start_error: (v.start_error as string | undefined) ?? nested.start_error,
+      ...(operation === undefined ? {} : { operation_id: operation }),
     };
   }
   return v as Computer;

@@ -502,10 +502,6 @@ export const UNIMPLEMENTED = new Set<string>([
   // offered: neither ever carries a raw key.
   'POST api-keys',
   'DELETE api-keys/:id',
-  // Lifecycle operations, read only (OPL-5055). Listed to stay in step with
-  // the surface; no tool reaches them yet.
-  'GET operations',
-  'GET operations/:id',
 ]);
 
 /**

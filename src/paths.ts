@@ -72,9 +72,17 @@ export const WHOAMI = 'whoami';
  * tools/account.ts for why minting and revoking are not.
  */
 export const API_KEYS = 'api-keys';
+/**
+ * Lifecycle operations (platform OPL-5055): what each accepted create, clone,
+ * start, stop, suspend, restart, restore, resize and move started, and how it
+ * ended. Read only.
+ */
+export const OPERATIONS = 'operations';
 
 /** One SSH key. The id is `sshk-`-shaped. */
 export const sshKey = (id: string) => `${SSH_KEYS}/${segment('key_id', id)}`;
+/** One lifecycle operation. The id is `op_`-shaped. */
+export const operation = (id: string) => `${OPERATIONS}/${segment('operation_id', id)}`;
 
 /**
  * The account's secret store (OPL-4984). Account-scoped, or one workspace's

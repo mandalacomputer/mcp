@@ -145,7 +145,8 @@ Parameter and response-mode support remains a separate contract.
 
 **Lifecycle** — `create_computer`, `start_computer`, `stop_computer`,
 `suspend_computer`, `restart_computer`, `update_computer`, `clone_computer`,
-`delete_computer`, `move_computer`, `list_moves`
+`delete_computer`, `move_computer`, `list_moves`, `get_operation`,
+`list_operations`, `wait_for_operation` — see [Lifecycle operations](#lifecycle-operations)
 
 **Driving the desktop** — `screenshot`, `click`, `type_text`, `press_key`,
 `scroll`, `drag`, `move_mouse`, `mouse_button`, `cursor_position`, `wait`
@@ -260,7 +261,7 @@ with an error listing all valid tags.
 | --- | --- |
 | `account` | `get_account`, `whoami`, `list_api_keys` |
 | `computers` | `list_computers`, `get_computer`, `use_computer`, `wait_for_computer`, `get_desktop_url`, `list_sizes` |
-| `lifecycle` | `create_computer`, `start_computer`, `stop_computer`, `suspend_computer`, `restart_computer`, `update_computer`, `clone_computer`, `delete_computer`, `move_computer`, `list_moves` |
+| `lifecycle` | `create_computer`, `start_computer`, `stop_computer`, `suspend_computer`, `restart_computer`, `update_computer`, `clone_computer`, `delete_computer`, `move_computer`, `list_moves`, `get_operation`, `list_operations`, `wait_for_operation` |
 | `input` | `screenshot`, `click`, `type_text`, `press_key`, `scroll`, `drag`, `move_mouse`, `mouse_button`, `cursor_position`, `wait` |
 | `guest` | `exec`, `exec_poll`, `exec_kill`, `open_url`, `list_windows`, `window_action`, `read_clipboard`, `write_clipboard` |
 | `files` | `list_directory`, `read_file`, `write_file`, `wait_for_file_change` |
@@ -295,6 +296,28 @@ HTTP callers must supply their own computer selection. These variables apply
 to both transports and the plugin forwards them. Embedders can pass
 `readOnly: true` and `tags: ['input', 'guest']` in `ServerConfig`; the server
 does not read the environment itself.
+
+### Lifecycle operations
+
+Every accepted create, clone, start, stop, suspend, restart, snapshot restore,
+resize and move records a lifecycle operation, and the tool that made the call
+says its `operation_id` — in its sentence, as `(operation op_…)`, and in the
+JSON. `move_computer` carries it onto the outcome it reports. It is absent where
+the platform could not record one; the call happened either way.
+
+`get_operation` reads one, and `list_operations` pages through them newest
+first (`computer_id`, `limit`, `cursor`; `computer_id` is not defaulted to the
+selected computer). `wait_for_operation` polls one until it is final: it
+answers on `succeeded`, and a `failed` one is an error carrying the platform's
+`error.code` (`start_failed`, `build_failed`, `computer_gone`, `move_failed`,
+`resize_not_applied`, `lost`, and more may be added) and its sentence.
+
+`succeeded` means the platform finished its step, not that the desktop has
+booted: `wait_for_computer` is still the wait for a desktop that answers. Most
+operations are already `succeeded` when their tool answers; a clone is
+`running` until its disk is copied, and a move until it lands. All three are
+reads, and all three stay registered when the lifecycle tools are withheld,
+since start, stop, suspend and restart record operations too.
 
 ### Who you are, and API keys
 

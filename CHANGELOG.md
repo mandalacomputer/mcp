@@ -16,6 +16,18 @@ are wording changes, and they are behaviour changes in the way that matters.
 
 ### Added
 
+- **Lifecycle operations: `get_operation`, `list_operations` and
+  `wait_for_operation`**, over the platform's `GET operations` and
+  `GET operations/{id}`. `wait_for_operation` answers on `succeeded` and is an
+  error carrying the platform's `error.code` and sentence on `failed`; it
+  reports progress while it waits. `succeeded` means the platform finished its
+  step, not that the desktop has booted, and every answer says so beside it.
+  `kind` and `state` are open strings. The lifecycle tools now say the
+  `operation_id` their answer carried (`create_computer`, `clone_computer`,
+  the four power tools, `update_computer` when it resized, `restore_snapshot`,
+  `clone_snapshot`), `create_computer` keeps it off the envelope of a create
+  that would not boot, and `move_computer` carries it onto the outcome it
+  reports. The three tools are in the `lifecycle` tag.
 - **`browser_proxy` on `create_computer` and `update_computer`**: a proxy
   (`{server, bypass}`) for a computer's browsers, over the platform's new body
   field; `null` on `update_computer` removes it. Only the shape is checked

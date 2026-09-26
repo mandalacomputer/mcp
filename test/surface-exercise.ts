@@ -141,6 +141,11 @@ export const EXERCISE: Record<string, Record<string, unknown>[]> = {
   // Who the credential is, and the holder's keys (OPL-5053). No arguments.
   whoami: [{}],
   list_api_keys: [{}],
+  // Lifecycle operations (OPL-5055): every listing parameter on one variant,
+  // because the parameter sweep is what proves each can be sent.
+  get_operation: [{ operation_id: 'op_0123456789abcdef01234567' }],
+  list_operations: [{}, { computer_id: 'vm-1', limit: 5, cursor: 'op_00000000000000000000000a' }],
+  wait_for_operation: [{ operation_id: 'op_0123456789abcdef01234567', timeout_s: 5 }],
   add_ssh_key: [{ public_key: SSH_PUBLIC_KEY }, { public_key: SSH_PUBLIC_KEY, name: 'laptop' }],
   remove_ssh_key: [{ key_id: 'sshk-3c9a51d07be2f846', confirm: true }],
   get_computer_ssh: [{}],

@@ -166,6 +166,18 @@ export const API_KEY = {
   manage_keys: false,
 };
 
+/** A finished lifecycle operation, as `GET operations/:id` answers it (OPL-5055). */
+export const OPERATION = {
+  id: 'op_0123456789abcdef01234567',
+  kind: 'clone',
+  computer_id: 'vm-2',
+  state: 'succeeded',
+  error: null,
+  created_at: '2026-09-26T08:00:00.000Z',
+  updated_at: '2026-09-26T08:01:10.000Z',
+  finished_at: '2026-09-26T08:01:10.000Z',
+};
+
 /** `GET whoami` for an account-wide key that manages keys. */
 export const WHOAMI = {
   user: { id: 'usr-1', email: 'dana@example.com', name: 'Dana' },
@@ -762,6 +774,8 @@ function respond(
   }
   // SSH: the caller's keys (201 on an add, an ack on a remove), and one
   // computer's setting, which a read and a write both answer in full.
+  if (path === '/operations') return json({ operations: [OPERATION], next_cursor: null });
+  if (path.startsWith('/operations/')) return json(OPERATION);
   if (path === '/whoami') return json(WHOAMI);
   if (path === '/api-keys') return json([API_KEY]);
   if (path === '/ssh-keys')

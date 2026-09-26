@@ -20,7 +20,7 @@ const GROUPS = {
   computers:
     'list_computers get_computer use_computer wait_for_computer get_desktop_url list_sizes',
   lifecycle:
-    'create_computer start_computer stop_computer suspend_computer restart_computer update_computer clone_computer delete_computer move_computer list_moves',
+    'create_computer start_computer stop_computer suspend_computer restart_computer update_computer clone_computer delete_computer move_computer list_moves get_operation list_operations wait_for_operation',
   input:
     'screenshot click type_text press_key scroll drag move_mouse mouse_button cursor_position wait',
   guest:
