@@ -6,6 +6,7 @@ import {
   guarded,
   incompleteWarning,
   json,
+  operationClause,
   refused,
   said,
   unwrapComputer,
@@ -678,7 +679,7 @@ export const registerSnapshots: Registrar = (server, session, opts) => {
         const res = await session.api
           .with(extra.signal)
           .send('POST', P.snapshotAction(snapshot_id, 'restore'));
-        return said(`Restored ${snapshot_id}.`, res);
+        return said(`Restored ${snapshot_id}${operationClause(res)}.`, res);
       }),
   );
 
@@ -858,7 +859,7 @@ export const registerSnapshots: Registrar = (server, session, opts) => {
           );
         }
         return said(
-          `${memory === false ? 'Built' : 'Forked'} ${snapshot_id} into ${describe(c)}${memory === false ? ' from its disk' : ''}${select && c.id ? ', and selected it' : ''}.`,
+          `${memory === false ? 'Built' : 'Forked'} ${snapshot_id} into ${describe(c)}${memory === false ? ' from its disk' : ''}${select && c.id ? ', and selected it' : ''}${operationClause(c)}.`,
           withoutCredentials(c),
         );
       }),

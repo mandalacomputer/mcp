@@ -13,6 +13,8 @@ import {
   incompleteWarning,
   json,
   nothingAdmitted,
+  operationClause,
+  operationIdOf,
   refused,
   said,
   secretsOnTheirWay,
@@ -95,6 +97,12 @@ type Move = {
   disk_gb?: number;
   started_at?: string;
   finished_at?: string;
+  /**
+   * The move's lifecycle operation (platform OPL-5055), on the 202 that
+   * accepted it only — never on a row of GET /moves. Carried onto every answer
+   * move_computer gives, so get_operation can read the outcome later.
+   */
+  operation_id?: string;
 };
 
 /**
@@ -518,7 +526,7 @@ export const registerComputers: Registrar = (server, session, opts) => {
         const id = session.resolve(computer_id);
         const c = unwrapComputer(await session.api.with(extra.signal).json('GET', P.computer(id)));
         session.noteResolution(id, c.resolution);
-        return said(describe(c), withoutCredentials(c));
+        return said(`${describe(c)}${operationClause(c)}`, withoutCredentials(c));
       }),
   );
 
@@ -644,12 +652,15 @@ export const registerComputers: Registrar = (server, session, opts) => {
       // with no id is not thereby a body with no `vnc`.
       if (!c.id) {
         return said(
-          `${action}: ok — ${id}.${POWER_NEXT[action] ?? ''}${opts.note ?? ''}`,
+          `${action}: ok — ${id}${operationClause(body)}.${POWER_NEXT[action] ?? ''}${opts.note ?? ''}`,
           withoutCredentials(c),
         );
       }
       session.noteResolution(id, c.resolution);
-      return said(`${action}: ${describe(c)}${opts.note ?? ''}`, withoutCredentials(c));
+      return said(
+        `${action}: ${describe(c)}${operationClause(body)}${opts.note ?? ''}`,
+        withoutCredentials(c),
+      );
     });
 
   for (const action of ['start', 'suspend', 'restart'] as const) {
@@ -828,6 +839,10 @@ export const registerComputers: Registrar = (server, session, opts) => {
         // and it is kept because it is the only description of this move that
         // does not depend on a later read succeeding.
         const started = (await api.json('POST', P.computerAction(id, 'move'), { body })) as Move;
+        // The rows of GET /moves never carry the operation, so it is carried
+        // onto each one this wait reports.
+        const operation = operationIdOf(started);
+        const tagged = (m: Move): Move => (operation ? { ...m, operation_id: operation } : m);
 
         // The keepalive. A disk crossing between two hosts is minutes, and a
         // tool that says nothing for minutes is one a client cancels — see
@@ -919,8 +934,8 @@ export const registerComputers: Registrar = (server, session, opts) => {
               await sleep(POLL_MS, signal);
               continue;
             }
-            last = mine;
-            if (!mine.live) return finishedMove(id, mine);
+            last = tagged(mine);
+            if (!mine.live) return finishedMove(id, last);
             await beat(`Moving ${id} — ${mine.state}${mine.detail ? `: ${mine.detail}` : ''}`);
             await sleep(POLL_MS, signal);
           }
@@ -1615,8 +1630,8 @@ export const registerComputers: Registrar = (server, session, opts) => {
         // with the reason on it. Saying so plainly is the difference between a
         // model retrying the start and a model creating a second computer.
         const note = c.start_error
-          ? `Created ${describe(c)}, but it did not start: ${c.start_error}\nThe computer exists and is selected. start_computer often works on a second attempt.`
-          : `Created and selected ${describe(c)}.`;
+          ? `Created ${describe(c)}${operationClause(c)}, but it did not start: ${c.start_error}\nThe computer exists and is selected. start_computer often works on a second attempt.`
+          : `Created and selected ${describe(c)}${operationClause(c)}.`;
         return said(
           args.template_transfer === undefined
             ? note
@@ -1652,7 +1667,10 @@ export const registerComputers: Registrar = (server, session, opts) => {
           );
         }
         return said(
-          `Cloned ${id} to ${describe(c)}. The original stays selected; use_computer to switch.`,
+          `Cloned ${id} to ${describe(c)}${operationClause(c)}. The original stays selected; use_computer to switch.` +
+            (c.operation_id
+              ? ` wait_for_operation with ${c.operation_id} answers when its disk has been copied.`
+              : ''),
           withoutCredentials(c),
         );
       }),

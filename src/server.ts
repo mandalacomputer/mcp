@@ -19,6 +19,7 @@ import { registerEvents } from './tools/events.js';
 import { registerExecutions } from './tools/executions.js';
 import { registerGuest } from './tools/guest.js';
 import { registerInput } from './tools/input.js';
+import { registerOperations } from './tools/operations.js';
 import { registerResults } from './tools/results.js';
 import { registerSecrets } from './tools/secrets.js';
 import { registerSignals } from './tools/signals.js';
@@ -133,6 +134,7 @@ export function createServer(cfg: ServerConfig): McpServer {
 
   registerAccount(server, session, opts);
   registerComputers(server, session, opts);
+  registerOperations(server, session, opts);
   registerInput(server, session, opts);
   registerGuest(server, session, opts);
   registerExecutions(server, session, opts);

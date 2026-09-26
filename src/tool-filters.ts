@@ -51,6 +51,9 @@ export const TOOL_TAGS = {
     'delete_computer',
     'move_computer',
     'list_moves',
+    'get_operation',
+    'list_operations',
+    'wait_for_operation',
   ],
   results: [
     'get_activity_results',

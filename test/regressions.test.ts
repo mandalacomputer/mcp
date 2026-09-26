@@ -3529,6 +3529,15 @@ describe('the tools our own prose tells a model to call', () => {
     // whoami and list_api_keys name it: the field saying whether a key may
     // manage API keys (OPL-5053). A response field, not a tool.
     'manage_keys',
+    // The lifecycle operation tools name the id a lifecycle answer carries,
+    // and the platform's failure codes a failed one carries (OPL-5124).
+    // Response fields and values, not tools.
+    'operation_id',
+    'start_failed',
+    'build_failed',
+    'computer_gone',
+    'move_failed',
+    'resize_not_applied',
     // Activity-page history continuation and revision-change checkpoints.
     'next_cursor',
     'changes_cursor',
@@ -5201,10 +5210,14 @@ describe('the event tools and what their annotations claim', () => {
           'get_artifact',
           'get_desktop_url',
           'get_execution',
+          // Reads only (OPL-5124).
+          'get_operation',
           'get_result',
           'list_activities',
           // Reads only; never a raw key (OPL-5053).
           'list_api_keys',
+          // Reads only (OPL-5124).
+          'list_operations',
           'list_directory',
           'poll_events',
           'publish_artifact',
@@ -5217,6 +5230,8 @@ describe('the event tools and what their annotations claim', () => {
           'use_computer',
           'wait_for_computer',
           'wait_for_event',
+          // Polls a read (OPL-5124).
+          'wait_for_operation',
           // Reads only (OPL-5053).
           'whoami',
         ].sort(),
