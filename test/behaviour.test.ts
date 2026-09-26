@@ -422,7 +422,8 @@ describe('shaped screenshots', () => {
     // and a busy lock is contention: a word that clears by itself, from a
     // computer that is NOT up. There fresh: false with a crop meets the
     // suspended computer's refusal to shape its saved picture, so the caveat
-    // stays, and so it does for a computer caught part way into a suspend.
+    // stays. A sentence naming a suspend keeps it too; the platform does not
+    // send one to a screenshot today, so that case guards a rewording.
     const sentences = [
       "this computer's saved desktop is being updated; try again shortly",
       'this computer is being suspended right now; try again in a moment and it will be resumed',
@@ -447,6 +448,39 @@ describe('shaped screenshots', () => {
       expect(textOf(suspending)).toContain(
         'fresh: false has to go without scale, format: png as well',
       );
+    } finally {
+      globalThis.fetch = real;
+    }
+  });
+
+  it('gives a busy screen no shape rule, even though a computer part way into a suspend sends it', async () => {
+    // A computer part way into a suspend has no saved desktop yet, so its
+    // screenshot takes the running path and the platform refuses it as a busy
+    // screen. That is the same sentence every running computer's busy screen
+    // gets, where fresh: false is served shaped, so it gets no caveat: the
+    // crop is not given up for the rarer case, and that case fails safe (the
+    // retry meets the suspended computer and is told then).
+    const real = globalThis.fetch;
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      if (String(input).includes('/screenshot')) {
+        return Response.json(
+          {
+            error: "this computer's screen is busy with another operation; try again shortly",
+            reason: 'contention',
+          },
+          { status: 409 },
+        );
+      }
+      return real(input as never, init);
+    }) as typeof fetch;
+    try {
+      const { call, close } = await connect();
+      const res = await call('screenshot', { region: { x: 0, y: 0, width: 10, height: 10 } });
+      await close();
+      expect(res.isError).toBe(true);
+      expect(textOf(res)).toContain('worth sending again');
+      expect(textOf(res)).toContain('fresh: false');
+      expect(textOf(res)).not.toContain('has to go without');
     } finally {
       globalThis.fetch = real;
     }

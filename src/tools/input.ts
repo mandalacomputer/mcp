@@ -89,15 +89,21 @@ const cachedFrameOffered = (err: ConflictError, shaped: string[] = []): CallTool
   // shaped like any other capture — so telling that caller to drop a crop
   // costs them the crop for nothing. Usually, not always: a suspended
   // computer's saved desktop is read under its lifecycle lock, and a busy lock
-  // is contention too ("this computer's saved desktop is being updated"), as
-  // is a computer caught part way into a suspend. So a clearing word keeps the
-  // sentence where the platform's own sentence speaks of a suspend or of the
-  // saved desktop. The same busy lock is also a resume under way, which ends
-  // in a computer that can shape a frame, and the two read alike; hence "while
-  // it stays suspended", and the retry named first. That is a reading of the
-  // platform's prose, and it fails safe: a rewording loses only this hint, and
-  // the shaped fresh: false it would have prevented is refused with
-  // shapeRefused's full advice.
+  // is contention too ("this computer's saved desktop is being updated"). So a
+  // clearing word keeps the sentence where the platform's own sentence speaks
+  // of the saved desktop, or of a suspend. The same busy lock is also a resume
+  // under way, which ends in a computer that can shape a frame, and the two
+  // read alike; hence "while it stays suspended", and the retry named first.
+  //
+  // "suspend" is there in case the wording moves, not because a screenshot
+  // meets it today: a computer part way INTO a suspend has no saved desktop
+  // yet, so its screenshot takes the running path and is refused as a busy
+  // screen ("this computer's screen is busy with another operation"), which
+  // names neither. That one gets no caveat, on purpose: the same sentence is
+  // every running computer's busy screen, where the caveat would cost the crop
+  // for nothing. It fails safe, as does any rewording: the retry named first
+  // reaches the suspended computer and is refused with the caveat, and a
+  // shaped fresh: false is refused with shapeRefused's full advice.
   //
   // And conditional even then: `unavailable` is also a computer that is
   // merely stopped, and an unclassified 409 could be anything, so the
