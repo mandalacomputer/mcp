@@ -1,6 +1,6 @@
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
-import { ConflictError } from '../errors.js';
+import { ConflictError, reasonKind } from '../errors.js';
 import {
   failed,
   guarded,
@@ -81,10 +81,19 @@ const cachedFrameOffered = (err: ConflictError, shaped: string[] = []): CallTool
   // of a suspended computer is a single JPEG that cannot be cropped, scaled,
   // re-encoded as PNG or given a quality, and the platform refuses those on
   // it too. Said here, or fresh: false is advice that meets the same wall.
-  const without = shaped.length
-    ? ` A suspended computer's saved frame cannot be shaped, so fresh: false has to go without ` +
-      `${shaped.join(', ')} as well, or it is refused for that instead.`
-    : '';
+  //
+  // But only where the refusal can BE a suspended computer's. A word that
+  // clears by itself (contention, starting) comes from a computer that is up,
+  // and on one of those fresh: false is served from the frame cache and
+  // shaped like any other capture — so telling that caller to drop a crop
+  // costs them the crop for nothing. And conditional even then: `unavailable`
+  // is also a computer that is merely stopped, and an unclassified 409 could
+  // be anything, so the platform's sentence is what says which it is.
+  const without =
+    shaped.length && reasonKind(err.reason) !== 'clears'
+      ? ` If the sentence above says the computer is suspended, its saved frame cannot be shaped, so ` +
+        `fresh: false has to go without ${shaped.join(', ')} as well, or it is refused for that instead.`
+      : '';
   return refused(
     `${sentence}\n\nThat was a request for a NEW capture. Read the sentence above before anything else: where ` +
       `it says this is worth another attempt, sending the same call again in a moment is the first thing to ` +
@@ -122,22 +131,31 @@ const unshapeable = (s: Shape): string[] =>
   ].filter((v): v is string => typeof v === 'string');
 
 /**
- * The refusal a suspended computer gives to a picture it cannot shape.
+ * A refused request for the saved picture that also asked for a shape.
  *
- * The platform's sentence first, as everywhere, then the two ways out — both
- * of which are this tool's own arguments or its neighbour's, which neither the
- * sentence nor the error class can name.
+ * Reached on a 409 `unavailable` to a call with fresh off and a shape, and
+ * that is three different computers which this cannot tell apart: a suspended
+ * one that has its saved JPEG and refuses to shape it, a suspended one with no
+ * saved picture at all (the platform names that before it looks at the shape),
+ * and one that is simply not running, which has neither. Dropping the shape is
+ * a way out of the first only — offered as such, the second and third would be
+ * sent round to a retry that is refused again. So the platform's sentence
+ * first, as everywhere, since it is the half that says which of the three this
+ * is; then start_computer, which answers all three; then the unshaped retry,
+ * under the one condition that makes it worth sending.
  */
 const shapeRefused = (err: ConflictError, asked: string[]): CallToolResult => {
   const sentence = failed(err)
     .content.map((c) => ('text' in c ? c.text : ''))
     .join('\n');
   return refused(
-    `${sentence}\n\nThis call asked for ${asked.join(', ')}. A suspended computer has only the one JPEG of its ` +
-      `desktop it saved when it suspended, which cannot be cropped, scaled, re-encoded as PNG or given a ` +
-      `quality. Start it with start_computer for a screen that can be shaped, or ask again with fresh: false ` +
-      `and without ${asked.join(', ')} for that saved picture, which is the screen as it was when the ` +
-      `computer suspended and not the screen now.`,
+    `${sentence}\n\nThis call asked for ${asked.join(', ')}, which only a running computer's screen can ` +
+      `answer: a suspended computer keeps at most one JPEG of its desktop, saved when it suspended, and that ` +
+      `cannot be cropped, scaled, re-encoded as PNG or given a quality. start_computer is the way to a screen ` +
+      `that can be shaped. Only where the sentence above says the computer has its saved desktop picture is ` +
+      `there one to fall back on: ask again with fresh: false and without ${asked.join(', ')} for it, which is the screen ` +
+      `as it was when the computer suspended and not the screen now. Where it says there is no saved desktop, ` +
+      `or that the computer is not running, dropping them is refused the same way and only a start helps.`,
   );
 };
 
@@ -321,8 +339,14 @@ export const registerInput: Registrar = (server, session) => {
         if (shot.truncated) {
           const size =
             shot.totalBytes === undefined ? `more than ${shot.bytes.length}` : shot.totalBytes;
+          // Every argument that makes the picture smaller, not only the
+          // oldest: a crop is often the better answer (the part of the screen
+          // in question, at full detail), and a JPEG shrinks a dense screen
+          // several times over at the same size. The note on the picture that
+          // comes back says how its positions map to the screen, so this does
+          // not have to.
           return refused(
-            `That screenshot is ${size} bytes, over the ${MAX_INLINE_IMAGE_BYTES}-byte inline limit. An image cannot be truncated, so nothing was returned. Ask again with a width — e.g. width: 1280 — and click using full-size coordinates.`,
+            `That screenshot is ${size} bytes, over the ${MAX_INLINE_IMAGE_BYTES}-byte inline limit. An image cannot be truncated, so nothing was returned. Ask again for a smaller picture: a width (e.g. width: 1280) or a scale (e.g. scale: 0.5), format: jpeg, or a region of the screen — any of them, or a region with one of the others. The note on the picture that comes back says how its positions map to the screen click takes.`,
           );
         }
         if (shot.bytes.length === 0) {

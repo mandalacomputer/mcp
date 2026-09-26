@@ -1,5 +1,6 @@
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { MAX_INLINE_IMAGE_BYTES } from '../src/format.js';
 import { connect, installFakePlatform } from './harness.js';
 
 const textOf = (res: CallToolResult) =>
@@ -382,6 +383,101 @@ describe('shaped screenshots', () => {
       // With fresh on, fresh: false is still named, but not as enough by itself.
       expect(fresh.isError).toBe(true);
       expect(textOf(fresh)).toContain('fresh: false has to go without scale as well');
+    } finally {
+      globalThis.fetch = real;
+    }
+  });
+
+  it('does not tell a busy running computer to drop the shape from fresh: false', async () => {
+    // A word that clears by itself comes from a computer that is up, and there
+    // fresh: false is served from the frame cache and shaped like any other
+    // capture. Telling that caller the saved frame cannot be shaped costs them
+    // the crop for nothing.
+    const real = globalThis.fetch;
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      if (String(input).includes('/screenshot')) {
+        return Response.json(
+          { error: 'a capture is already running', reason: 'contention' },
+          { status: 409 },
+        );
+      }
+      return real(input as never, init);
+    }) as typeof fetch;
+    try {
+      const { call, close } = await connect();
+      const res = await call('screenshot', { region: { x: 0, y: 0, width: 10, height: 10 } });
+      await close();
+      expect(res.isError).toBe(true);
+      expect(textOf(res)).toContain('worth sending again');
+      expect(textOf(res)).toContain('fresh: false');
+      expect(textOf(res)).not.toContain('cannot be shaped');
+      expect(textOf(res)).not.toContain('has to go without');
+    } finally {
+      globalThis.fetch = real;
+    }
+  });
+
+  it('does not promise a saved picture to a suspended computer that has none', async () => {
+    // The platform names a missing saved desktop before it looks at the shape,
+    // with the same 409 unavailable, so a shaped fresh: false call on such a
+    // computer arrives here too — and an unshaped retry is refused the same way.
+    const real = globalThis.fetch;
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      if (String(input).includes('/screenshot')) {
+        return Response.json(
+          {
+            error:
+              'this computer is suspended and has no saved desktop to show; start it for a live screenshot',
+            reason: 'unavailable',
+          },
+          { status: 409 },
+        );
+      }
+      return real(input as never, init);
+    }) as typeof fetch;
+    try {
+      const { call, close } = await connect();
+      const res = await call('screenshot', {
+        fresh: false,
+        region: { x: 0, y: 0, width: 10, height: 10 },
+      });
+      await close();
+      expect(res.isError).toBe(true);
+      expect(textOf(res)).toContain('has no saved desktop to show');
+      expect(textOf(res)).toContain('start_computer');
+      // The unshaped retry is offered under its condition, not as the answer.
+      expect(textOf(res)).toContain(
+        'Only where the sentence above says the computer has its saved',
+      );
+      expect(textOf(res)).toContain('Where it says there is no saved desktop');
+    } finally {
+      globalThis.fetch = real;
+    }
+  });
+
+  it('names every way to a smaller picture when a screenshot is over the inline limit', async () => {
+    // A width was the only one there was. A crop or a JPEG is often the better
+    // answer, and a refusal that does not name them leaves them unfound.
+    const real = globalThis.fetch;
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      if (String(input).includes('/screenshot')) {
+        return new Response(new Uint8Array(MAX_INLINE_IMAGE_BYTES + 1), {
+          headers: { 'Content-Type': 'image/png' },
+        });
+      }
+      return real(input as never, init);
+    }) as typeof fetch;
+    try {
+      const { call, close } = await connect();
+      const res = await call('screenshot', {});
+      await close();
+      expect(res.isError).toBe(true);
+      expect(res.content.some((c) => c.type === 'image')).toBe(false);
+      const text = textOf(res);
+      expect(text).toContain('inline limit');
+      for (const way of ['width: 1280', 'scale: 0.5', 'format: jpeg', 'a region of the screen']) {
+        expect(text).toContain(way);
+      }
     } finally {
       globalThis.fetch = real;
     }
