@@ -42,6 +42,15 @@ are wording changes, and they are behaviour changes in the way that matters.
 
 ### Changed
 
+- **A busy suspended computer's `screenshot` refusal keeps the shape rule.** A
+  shaped screenshot refused with a word that clears by itself used to offer
+  `fresh: false` without saying the crop, scale, PNG or quality has to go too.
+  That word can come from a suspended computer whose saved desktop is busy, and
+  there a shaped `fresh: false` is refused. The caveat now stays whenever the
+  platform's sentence speaks of the saved desktop or of a suspend. A computer
+  part way into a suspend is still refused as a busy screen, like a running one,
+  and gets no caveat; the retry named first reaches it once it is suspended.
+
 - **`wait_for_computer(until="guest")` waits for a bound computer's secrets.** A
   computer with secrets bound runs, and its guest answers, a few seconds before
   the values land, and a command run in between saw them unset. "guest" now
