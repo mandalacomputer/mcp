@@ -221,6 +221,54 @@ export function reasonAdvice(reason: string | undefined): string | undefined {
   }
 }
 
+/** The platform's `code` on a keyed call's own refusals (OPL-5127), or `undefined`. */
+export function idempotencyCode(err: APIError): string | undefined {
+  const code = record(err.body) ? err.body.code : undefined;
+  return code === 'idempotency_in_progress' ||
+    code === 'idempotency_outcome_unknown' ||
+    code === 'idempotency_key_reused'
+    ? code
+    : undefined;
+}
+
+/**
+ * What to tell a model about the refusals a call's `idempotency_key` produces
+ * (platform OPL-5127), or `undefined` for any other error. Ahead of the
+ * `reason` advice, which for `idempotency_in_progress` says only "worth sending
+ * again" and not with WHAT.
+ */
+export function idempotencyAdvice(err: unknown): string | undefined {
+  if (!(err instanceof APIError)) return undefined;
+  const operation =
+    record(err.body) && typeof err.body.operation_id === 'string'
+      ? err.body.operation_id
+      : undefined;
+  switch (idempotencyCode(err)) {
+    case 'idempotency_in_progress':
+      return `the same call with this idempotency_key is still running; wait and call again with the same idempotency_key for its answer${operation ? `, or read get_operation ${operation}` : ''}`;
+    case 'idempotency_outcome_unknown':
+      return `the platform did not hear how the call with this idempotency_key ended. Read the computer to see whether it took effect${operation ? ` (get_operation ${operation} says what was recorded)` : ''}; do not send it again blindly, since the same key answers the same thing`;
+    case 'idempotency_key_reused':
+      return 'this idempotency_key was already used with a different request, so nothing was done; send this request with a new key, or none';
+    default:
+      return undefined;
+  }
+}
+
+/**
+ * Whether a lifecycle call that failed with this may still have happened, so
+ * that sending it again with its key — rather than without — is the safe retry:
+ * a request that may have been received before the connection died, a `5xx`, or
+ * the platform saying the keyed call is still running.
+ */
+export function keyedOutcomeUnknown(err: unknown): boolean {
+  return (
+    err instanceof ConnectivityInterruptedError ||
+    (err instanceof APIError &&
+      (err.status >= 500 || idempotencyCode(err) === 'idempotency_in_progress'))
+  );
+}
+
 /**
  * What to tell a model about a refusal that is about the CALLER, not the computer.
  *
@@ -1149,6 +1197,15 @@ export function errorForStatus(
  */
 export function isTransient(err: unknown): boolean {
   if (err instanceof APIError && [401, 402, 403, 404, 405].includes(err.status)) return false;
+  // A keyed call the platform never heard end (platform OPL-5127). A 409 with no
+  // `reason`, so the ConflictError branch below would call it worth sending
+  // again — and the same key answers the same thing forever: the computer is
+  // what says whether it happened. Its sibling `idempotency_in_progress` carries
+  // `reason: "contention"` and IS worth sending again: that is the wait for the
+  // first call's answer.
+  if (err instanceof APIError && idempotencyCode(err) === 'idempotency_outcome_unknown') {
+    return false;
+  }
   // Preparation requires the original template and a token, and may have failed.
   // A generic retry of the unchanged create is not the continuation protocol.
   if (

@@ -16,6 +16,23 @@ are wording changes, and they are behaviour changes in the way that matters.
 
 ### Added
 
+- **`idempotency_key` on every lifecycle tool:** `create_computer`,
+  `clone_computer`, `start_computer`, `stop_computer`, `suspend_computer`,
+  `restart_computer`, `update_computer`, `move_computer`, `delete_computer`,
+  `restore_snapshot` and `clone_snapshot` send an `Idempotency-Key` — a fresh
+  random one per call, or the tool's new optional `idempotency_key` input
+  (1 to 255 printable ASCII characters, no spaces; anything else is refused
+  before a request is sent). A failure whose outcome is unknown — a dropped
+  connection or timeout after the request went out, a `5xx`, or the
+  platform's `409 idempotency_in_progress` — now ends with the one retry that
+  cannot do the step twice: `To retry without risking a second <what>, call
+  <tool> again with idempotency_key "<K>".` The platform's
+  `idempotency_in_progress`, `idempotency_outcome_unknown` and
+  `idempotency_key_reused` refusals each get a sentence of their own, and
+  `isTransient` is false for `idempotency_outcome_unknown`. `list_operations`
+  takes `idempotency_key`, an operation carries the key it was started with,
+  and `delete` is a documented kind.
+
 - **Lifecycle operations: `get_operation`, `list_operations` and
   `wait_for_operation`**, over the platform's `GET operations` and
   `GET operations/{id}`. `wait_for_operation` answers on `succeeded` and is an

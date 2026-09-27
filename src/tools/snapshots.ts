@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import type { Api } from '../api.js';
+import { idempotencyHeaders, idempotencyKeyFor } from '../api.js';
 import { CancelledError, ConflictError, isTransientForPoll, NotFoundError } from '../errors.js';
 import {
   describe,
@@ -14,6 +15,7 @@ import {
 } from '../format.js';
 import * as P from '../paths.js';
 import { heartbeat, POLL_MS, pollDelay, sleep } from '../poll.js';
+import { idempotencyKeyArg, keyedFailure } from './operations.js';
 import type { Registrar } from './types.js';
 
 const idArg = {
@@ -669,16 +671,25 @@ export const registerSnapshots: Registrar = (server, session, opts) => {
         confirm: z
           .literal(true)
           .describe("Must be true. This overwrites the source computer's current disk."),
+        idempotency_key: idempotencyKeyArg,
       },
       annotations: { destructiveHint: true },
     },
-    ({ snapshot_id }, extra) =>
+    ({ snapshot_id, idempotency_key }, extra) =>
       guarded(async () => {
         // An acknowledgement, which /api/v1 is free to send as a 204 — and
         // `said` already omits the body when there is none to repeat.
-        const res = await session.api
-          .with(extra.signal)
-          .send('POST', P.snapshotAction(snapshot_id, 'restore'));
+        const key = idempotencyKeyFor(idempotency_key);
+        let res: unknown;
+        try {
+          res = await session.api
+            .with(extra.signal)
+            .send('POST', P.snapshotAction(snapshot_id, 'restore'), {
+              headers: idempotencyHeaders(key),
+            });
+        } catch (err) {
+          return keyedFailure(err, 'restore_snapshot', 'restore', key);
+        }
         return said(`Restored ${snapshot_id}${operationClause(res)}.`, res);
       }),
   );
@@ -804,9 +815,10 @@ export const registerSnapshots: Registrar = (server, session, opts) => {
           .boolean()
           .default(true)
           .describe("Make the new computer this session's selected one."),
+        idempotency_key: idempotencyKeyArg,
       },
     },
-    ({ snapshot_id, name, select, memory, inherit_secrets }, extra) =>
+    ({ snapshot_id, name, select, memory, inherit_secrets, idempotency_key }, extra) =>
       guarded(async () => {
         // Each option only when set, so an ordinary clone sends what it always
         // did; consent is sent only when given, since its absence is the default.
@@ -814,9 +826,18 @@ export const registerSnapshots: Registrar = (server, session, opts) => {
         if (name !== undefined) body.name = name;
         if (memory !== undefined) body.memory = memory;
         if (inherit_secrets === true) body.inherit_secrets = true;
-        const answer = await session.api
-          .with(extra.signal)
-          .json('POST', P.snapshotAction(snapshot_id, 'clone'), { body });
+        const key = idempotencyKeyFor(idempotency_key);
+        let answer: unknown;
+        try {
+          answer = await session.api
+            .with(extra.signal)
+            .json('POST', P.snapshotAction(snapshot_id, 'clone'), {
+              body,
+              headers: idempotencyHeaders(key),
+            });
+        } catch (err) {
+          return keyedFailure(err, 'clone_snapshot', 'computer', key);
+        }
         const c = unwrapComputer(answer);
         if (!c.id) {
           return refused(

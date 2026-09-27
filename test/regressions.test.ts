@@ -3002,12 +3002,17 @@ describe('a guest that will not shut down', () => {
     const { client, close } = await connect();
     const tools = new Map((await client.listTools()).tools.map((t) => [t.name, t]));
     await close();
+    // `idempotency_key` on all four since OPL-5127: every lifecycle call takes one.
     expect(Object.keys(tools.get('stop_computer')?.inputSchema.properties ?? {}).sort()).toEqual([
       'computer_id',
       'force',
+      'idempotency_key',
     ]);
     for (const other of ['start_computer', 'suspend_computer', 'restart_computer']) {
-      expect(Object.keys(tools.get(other)?.inputSchema.properties ?? {})).toEqual(['computer_id']);
+      expect(Object.keys(tools.get(other)?.inputSchema.properties ?? {}).sort()).toEqual([
+        'computer_id',
+        'idempotency_key',
+      ]);
     }
   });
 
@@ -3548,6 +3553,9 @@ describe('the tools our own prose tells a model to call', () => {
     // and the platform's failure codes a failed one carries (OPL-5124).
     // Response fields and values, not tools.
     'operation_id',
+    // Every lifecycle tool's own parameter (OPL-5127), named in the descriptions
+    // that say how to send a call again without it being done twice.
+    'idempotency_key',
     'start_failed',
     'build_failed',
     'computer_gone',

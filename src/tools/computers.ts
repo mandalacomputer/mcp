@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { idempotencyHeaders, idempotencyKeyFor } from '../api.js';
 import {
   CancelledError,
   ConflictError,
@@ -24,6 +25,7 @@ import {
 } from '../format.js';
 import * as P from '../paths.js';
 import { heartbeat, POLL_MS, pollDelay, sleep } from '../poll.js';
+import { idempotencyKeyArg, keyedFailure } from './operations.js';
 import { FILES_DIR, secretBindingsSchema } from './secrets.js';
 import type { Registrar } from './types.js';
 
@@ -642,13 +644,22 @@ export const registerComputers: Registrar = (server, session, opts) => {
     action: string,
     computer_id: string | undefined,
     extra: { signal?: AbortSignal },
-    opts: { query?: Record<string, string | undefined>; note?: string } = {},
+    opts: { query?: Record<string, string | undefined>; note?: string; key?: string } = {},
   ) =>
     guarded(async () => {
       const id = session.resolve(computer_id);
-      const body = await session.api
-        .with(extra.signal)
-        .json('POST', P.computerAction(id, action), { query: opts.query });
+      // Made once, before the request: the key this call is known by if its
+      // answer is lost (OPL-5127).
+      const key = idempotencyKeyFor(opts.key);
+      let body: unknown;
+      try {
+        body = await session.api.with(extra.signal).json('POST', P.computerAction(id, action), {
+          query: opts.query,
+          headers: idempotencyHeaders(key),
+        });
+      } catch (err) {
+        return keyedFailure(err, `${action}_computer`, action, key);
+      }
       const c = unwrapComputer(body);
       // What the platform documents for all four is an Ack — `{ok: true}` and
       // nothing else — and that is what it sends. Formatting it as a computer
@@ -679,9 +690,10 @@ export const registerComputers: Registrar = (server, session, opts) => {
       {
         title: `${action[0].toUpperCase()}${action.slice(1)} a computer`,
         description: POWER_DESCRIPTIONS[action],
-        inputSchema: { ...idArg },
+        inputSchema: { ...idArg, idempotency_key: idempotencyKeyArg },
       },
-      ({ computer_id }, extra) => power(action, computer_id, extra),
+      ({ computer_id, idempotency_key }, extra) =>
+        power(action, computer_id, extra, { key: idempotency_key }),
     );
   }
 
@@ -698,10 +710,12 @@ export const registerComputers: Registrar = (server, session, opts) => {
           .describe(
             'Pull the power instead of asking, the way holding the button in does. Anything the guest had not written to disk is lost, so this is the second attempt and not the first: stop it politely, and reach for `force` when what comes back is a computer still running — a hung X session, a modal "unsaved changes" dialog, or a service that ignores SIGTERM will refuse the polite stop identically every time it is asked.',
           ),
+        idempotency_key: idempotencyKeyArg,
       },
     },
-    ({ computer_id, force }, extra) =>
+    ({ computer_id, force, idempotency_key }, extra) =>
       power('stop', computer_id, extra, {
+        key: idempotency_key,
         // The platform's schema for this one is `enum: ['true']` — a string,
         // with no false in it — so an unforced stop omits the parameter rather
         // than sending `force=false`, the way `allow_partial` and
@@ -751,9 +765,10 @@ export const registerComputers: Registrar = (server, session, opts) => {
           .describe(
             `${BROWSER_PROXY_ABOUT} Replaces the setting whole; null removes it. To change the bypass of the same proxy, start from get_computer's browser_proxy and copy its credentials_secret_id to keep it: leaving it out removes the credentials, and the proxy then refuses the browsers. Do not carry credentials_secret_id to a different server: those credentials belong to the proxy they were set for; send a new server without it unless the user says those credentials are for that server. Send this on its own. A running computer has it within seconds — wait_for_computer with until="guest" before opening a browser that must use it — and a stopped or suspended one is given it as it starts. A browser already open picks it up at its next start.`,
           ),
+        idempotency_key: idempotencyKeyArg,
       },
     },
-    ({ computer_id, ...fields }, extra) =>
+    ({ computer_id, idempotency_key, ...fields }, extra) =>
       guarded(async () => {
         const id = session.resolve(computer_id);
         // `null` is meaningful for idle_suspend_min and browser_proxy and must
@@ -765,10 +780,13 @@ export const registerComputers: Registrar = (server, session, opts) => {
             'Nothing to change — give at least one of name, cpu, ram_mb, disk_gb, idle_suspend_min, browser_proxy.',
           );
         }
+        const key = idempotencyKeyFor(idempotency_key);
         let c: Computer;
         try {
           c = unwrapComputer(
-            await session.api.with(extra.signal).json('PATCH', P.computer(id), { body }),
+            await session.api
+              .with(extra.signal)
+              .json('PATCH', P.computer(id), { body, headers: idempotencyHeaders(key) }),
           );
         } catch (err) {
           // The one refusal on this route that is an offer rather than an end
@@ -777,7 +795,7 @@ export const registerComputers: Registrar = (server, session, opts) => {
           // which the error class, shared with every embedder, has no business
           // knowing about.
           if (err instanceof MoveRequiredError) return moveOffered(id, err);
-          throw err;
+          return keyedFailure(err, 'update_computer', 'change', key);
         }
         session.noteResolution(id, c.resolution);
         // A resize is recorded as an operation and its answer carries the id;
@@ -826,9 +844,10 @@ export const registerComputers: Registrar = (server, session, opts) => {
           .describe(
             'How long to wait for the move to finish before handing back and letting you poll.',
           ),
+        idempotency_key: idempotencyKeyArg,
       },
     },
-    ({ computer_id, ram_mb, cpu, disk_gb, timeout_s }, extra) =>
+    ({ computer_id, ram_mb, cpu, disk_gb, timeout_s, idempotency_key }, extra) =>
       guarded(async () => {
         const id = session.resolve(computer_id);
         const body = {
@@ -850,7 +869,16 @@ export const registerComputers: Registrar = (server, session, opts) => {
         // The 202. Its body is the move as it stood the moment it was accepted,
         // and it is kept because it is the only description of this move that
         // does not depend on a later read succeeding.
-        const started = (await api.json('POST', P.computerAction(id, 'move'), { body })) as Move;
+        const key = idempotencyKeyFor(idempotency_key);
+        let started: Move;
+        try {
+          started = (await api.json('POST', P.computerAction(id, 'move'), {
+            body,
+            headers: idempotencyHeaders(key),
+          })) as Move;
+        } catch (err) {
+          return keyedFailure(err, 'move_computer', 'move', key);
+        }
         // The rows of GET /moves never carry the operation, so it is carried
         // onto each one this wait reports.
         const operation = operationIdOf(started);
@@ -1505,7 +1533,7 @@ export const registerComputers: Registrar = (server, session, opts) => {
     {
       title: 'Create a computer',
       description:
-        'Build a new cloud desktop and select it for this session. Creating and running a computer costs money on this account. Continue an image preparation refusal only as its result instructs, retaining all original create arguments, including template, and adding the returned preparation token as an argument. This token is not a create idempotency key. Stop after success; never automatically replay after a lost or ambiguous response.',
+        "Build a new cloud desktop and select it for this session. Creating and running a computer costs money on this account. Continue an image preparation refusal only as its result instructs, retaining all original create arguments, including template, and adding the returned preparation token as an argument. This token is not a create idempotency key. Stop after success; never automatically replay after a lost or ambiguous response without the idempotency_key that response names — with it, the same call answers the first one's result instead of building a second computer.",
       inputSchema: {
         name: z.string().optional().describe('A label. The platform picks one if you do not.'),
         size: z
@@ -1554,16 +1582,19 @@ export const registerComputers: Registrar = (server, session, opts) => {
           .describe(
             `${BROWSER_PROXY_ABOUT} A create carrying one is always a cold boot. A credentials_secret_id must name a secret bound as a file in this create's secrets. wait_for_computer with until="guest" waits until its browsers have it; update_computer changes or removes it later.`,
           ),
+        idempotency_key: idempotencyKeyArg,
       },
       annotations: { destructiveHint: false, openWorldHint: true },
     },
-    (args, extra) =>
+    ({ idempotency_key, ...args }, extra) =>
       guarded(async () => {
+        const key = idempotencyKeyFor(idempotency_key);
         let data: unknown;
         try {
-          data = await session.api
-            .with(extra.signal)
-            .json('POST', P.COMPUTERS, { body: P.createBody(args) });
+          data = await session.api.with(extra.signal).json('POST', P.COMPUTERS, {
+            body: P.createBody(args),
+            headers: idempotencyHeaders(key),
+          });
         } catch (error) {
           const body =
             error instanceof ConflictError
@@ -1622,7 +1653,7 @@ export const registerComputers: Registrar = (server, session, opts) => {
               ],
             };
           }
-          throw error;
+          return keyedFailure(error, 'create_computer', 'computer', key);
         }
         const c = unwrapComputer(data);
         // Selection and the sentence claiming it are the same decision. Bound
@@ -1662,16 +1693,25 @@ export const registerComputers: Registrar = (server, session, opts) => {
       inputSchema: {
         ...idArg,
         name: z.string().optional().describe('A name for the copy.'),
+        idempotency_key: idempotencyKeyArg,
       },
     },
-    ({ computer_id, name }, extra) =>
+    ({ computer_id, name, idempotency_key }, extra) =>
       guarded(async () => {
         const id = session.resolve(computer_id);
-        const c = unwrapComputer(
-          await session.api.with(extra.signal).json('POST', P.computerAction(id, 'clone'), {
-            body: name === undefined ? {} : { name },
-          }),
-        );
+        const key = idempotencyKeyFor(idempotency_key);
+        let answer: unknown;
+        try {
+          answer = await session.api
+            .with(extra.signal)
+            .json('POST', P.computerAction(id, 'clone'), {
+              body: name === undefined ? {} : { name },
+              headers: idempotencyHeaders(key),
+            });
+        } catch (err) {
+          return keyedFailure(err, 'clone_computer', 'copy', key);
+        }
+        const c = unwrapComputer(answer);
         if (!c.id) {
           return refused(
             `The platform accepted the clone of ${id} but sent no id back, so the copy cannot be identified. It may exist and be billable — list_computers will say. The original stays selected.`,
@@ -1715,10 +1755,11 @@ export const registerComputers: Registrar = (server, session, opts) => {
           .describe(
             'The fingerprint from snapshot_holdings. The purge is refused unless it still names the same set, so a capture that finished after you looked cannot be swept up in a decision that was never about it.',
           ),
+        idempotency_key: idempotencyKeyArg,
       },
       annotations: { destructiveHint: true, idempotentHint: true },
     },
-    ({ computer_id, delete_snapshots, expect }, extra) =>
+    ({ computer_id, delete_snapshots, expect, idempotency_key }, extra) =>
       guarded(async () => {
         // The platform makes `expect` optional, for callers that cannot read the
         // holdings and so were never shown a set to be held to. An MCP caller
@@ -1739,6 +1780,7 @@ export const registerComputers: Registrar = (server, session, opts) => {
               'Nothing has been deleted.',
           );
         }
+        const key = idempotencyKeyFor(idempotency_key);
         let res: { snapshots_deleted?: number } | undefined;
         try {
           res = await session.api
@@ -1748,6 +1790,7 @@ export const registerComputers: Registrar = (server, session, opts) => {
                 snapshots: delete_snapshots ? 'delete' : undefined,
                 expect: delete_snapshots ? fingerprint : undefined,
               },
+              headers: idempotencyHeaders(key),
             });
         } catch (err) {
           // A 404 means the computer is not there, which is the state this call
@@ -1785,7 +1828,7 @@ export const registerComputers: Registrar = (server, session, opts) => {
               // of this id, while preserving a different selected computer.
               if (absent && !signal.aborted) session.unbind(computer_id);
             }
-            throw err;
+            return keyedFailure(err, 'delete_computer', 'delete', key);
           }
           session.unbind(computer_id);
           // Reported as a success rather than an error, and deliberately not as

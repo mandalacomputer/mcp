@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { Agent, type Dispatcher, Headers as UndiciHeaders, fetch as undiciFetch } from 'undici';
 import {
   type APIError,
@@ -28,6 +29,31 @@ export const DEFAULT_BASE_URL = 'https://app.mandala.computer/api/v1';
 
 /** Anthropic's own key, forwarded for the one route that runs a model. */
 export const MODEL_KEY_HEADER = 'X-Model-Key';
+
+/**
+ * The header every lifecycle call carries so that sending it again cannot do
+ * it twice (platform OPL-5127). The platform records a call that carries one
+ * before carrying it out, and for 24 hours answers the same key with the same
+ * request from that record instead of doing the call again: `409` with `code:
+ * "idempotency_in_progress"` while it runs, the original answer once it has
+ * finished. A different request under the same key is a `422`.
+ */
+export const IDEMPOTENCY_KEY_HEADER = 'Idempotency-Key';
+
+/** The platform's rule for a key: 1 to 255 characters, each printable ASCII other than a space. */
+export const IDEMPOTENCY_KEY_PATTERN = /^[\x21-\x7e]{1,255}$/;
+
+/**
+ * The key for ONE lifecycle tool call — the caller's, already checked by the
+ * tool's input schema, or a fresh random one — made once, before the request,
+ * so that whatever re-sends this call re-sends the same key.
+ */
+export const idempotencyKeyFor = (given?: string): string => given ?? randomUUID();
+
+/** The header that carries it. */
+export const idempotencyHeaders = (key: string): Record<string, string> => ({
+  [IDEMPOTENCY_KEY_HEADER]: key,
+});
 
 /**
  * Proof, to the platform, that a request comes through the hosted MCP service
@@ -70,7 +96,7 @@ export type RequestOptions = {
   body?: unknown;
   /** Raw bytes as the request body, for the file upload. Mutually exclusive with `body`. */
   raw?: Uint8Array;
-  /** Extra headers for this call only — currently just the model key. */
+  /** Extra headers for this call only: the model key, and a lifecycle call's Idempotency-Key. */
   headers?: Record<string, string>;
   signal?: AbortSignal;
 };
