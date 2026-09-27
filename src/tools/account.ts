@@ -92,12 +92,15 @@ const apiKey = z.object({
   workspace_name: z.string().nullable(),
   manage_keys: z.boolean(),
 });
+// email and plan are null, and both names too, when the key is confined to a
+// workspace: the platform does not tell a key that may be in an end customer's
+// hands who the operator's people are, or what the account is on.
 const whoami = z.object({
-  user: z.object({ id: label, email: z.string(), name: z.string().nullable() }),
+  user: z.object({ id: label, email: z.string().nullable(), name: z.string().nullable() }),
   account: z.object({
     id: label,
     name: z.string().nullable(),
-    plan: z.string(),
+    plan: z.string().nullable(),
     status: z.string(),
   }),
   role: label,
@@ -125,7 +128,7 @@ export const registerAccount: Registrar = (server, session) => {
     {
       title: 'Who this credential is',
       description:
-        'Who the API key this server runs with belongs to: the person (id, email, name), the account it acts on (id, name, plan, status: active or suspended), the role it acts with now (owner, member or viewer), the workspace it is confined to (null for the whole account), and the key itself (id, name, prefix, and manage_keys: whether it may manage API keys). Needs no permission and any role; a suspended account can call it. No arguments.',
+        'Who the API key this server runs with belongs to: the person (id, email, name), the account it acts on (id, name, plan, status: active or suspended), the role it acts with now (owner, member or viewer), the workspace it is confined to (null for the whole account), and the key itself (id, name, prefix, and manage_keys: whether it may manage API keys). For a key confined to a workspace the email, both names and the plan are null: the platform withholds them from a key that may be in the hands of an end customer. Needs no permission and any role; a suspended account can call it. No arguments.',
       inputSchema: z.object({}).strict(),
       annotations: readAnnotations,
     },
@@ -139,7 +142,7 @@ export const registerAccount: Registrar = (server, session) => {
           ? `confined to workspace ${data.workspace.name} (${data.workspace.id})`
           : 'acting on the whole account';
         return said(
-          `${data.user.email} as ${data.role} on ${data.account.name ?? data.account.id} (${data.account.status}), ${scope}.` +
+          `${data.user.email ?? data.user.id} as ${data.role} on ${data.account.name ?? data.account.id} (${data.account.status}), ${scope}.` +
             (data.account.status === 'suspended'
               ? ' The account is SUSPENDED: other calls will be refused until it is reinstated.'
               : ''),
