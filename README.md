@@ -148,8 +148,9 @@ Parameter and response-mode support remains a separate contract.
 `delete_computer`, `move_computer`, `list_moves`, `get_operation`,
 `list_operations`, `wait_for_operation` — see [Lifecycle operations](#lifecycle-operations)
 
-**Driving the desktop** — `screenshot`, `click`, `type_text`, `press_key`,
-`scroll`, `drag`, `move_mouse`, `mouse_button`, `cursor_position`, `wait`
+**Driving the desktop** — `screenshot`, `click`, `type_text`, `paste_text`,
+`press_key`, `scroll`, `drag`, `move_mouse`, `mouse_button`, `cursor_position`,
+`wait`
 
 **Inside the guest** — `exec`, `exec_poll`, `exec_kill`, `get_execution`,
 `read_execution_output`, `open_url`,
@@ -186,7 +187,8 @@ which says nothing about the path; `isTransient` is false for both.
 
 **Account quota** — `get_account`
 
-**Who you are** — `whoami`, `list_api_keys`. Minting and revoking API keys are
+**Who you are** — `whoami`, `list_api_keys`, `list_workspaces`,
+`get_workspace`, `list_workspace_members`. Minting and revoking API keys are
 deliberately not tools — see [Who you are, and API keys](#who-you-are-and-api-keys).
 
 **Spending** — `get_usage`
@@ -275,10 +277,10 @@ with an error listing all valid tags.
 
 | Tag | Tools |
 | --- | --- |
-| `account` | `get_account`, `whoami`, `list_api_keys` |
+| `account` | `get_account`, `whoami`, `list_api_keys`, `list_workspaces`, `get_workspace`, `list_workspace_members` |
 | `computers` | `list_computers`, `get_computer`, `use_computer`, `wait_for_computer`, `get_desktop_url`, `list_sizes` |
 | `lifecycle` | `create_computer`, `start_computer`, `stop_computer`, `suspend_computer`, `restart_computer`, `update_computer`, `clone_computer`, `delete_computer`, `move_computer`, `list_moves`, `get_operation`, `list_operations`, `wait_for_operation` |
-| `input` | `screenshot`, `click`, `type_text`, `press_key`, `scroll`, `drag`, `move_mouse`, `mouse_button`, `cursor_position`, `wait` |
+| `input` | `screenshot`, `click`, `type_text`, `paste_text`, `press_key`, `scroll`, `drag`, `move_mouse`, `mouse_button`, `cursor_position`, `wait` |
 | `guest` | `exec`, `exec_poll`, `exec_kill`, `open_url`, `list_windows`, `window_action`, `read_clipboard`, `write_clipboard` |
 | `files` | `list_directory`, `read_file`, `write_file`, `wait_for_file_change` |
 | `executions` | `get_execution`, `read_execution_output` |
@@ -316,14 +318,15 @@ does not read the environment itself.
 ### Lifecycle operations
 
 Every accepted create, clone, start, stop, suspend, restart, snapshot restore,
-resize and move records a lifecycle operation, and the tool that made the call
+resize, move and delete records a lifecycle operation, and the tool that made the call
 says its `operation_id` — in its sentence, as `(operation op_…)`, and in the
 JSON. `move_computer` carries it onto the outcome it reports. It is absent where
 the platform could not record one; the call happened either way.
 
 `get_operation` reads one, and `list_operations` pages through them newest
-first (`computer_id`, `limit`, `cursor`; `computer_id` is not defaulted to the
-selected computer). `wait_for_operation` polls one until it is final: it
+first (`computer_id`, `limit`, `cursor`, `idempotency_key`; `computer_id` is not
+defaulted to the selected computer, and `idempotency_key` finds the operation a
+call sent with that key recorded, even when the call's answer was lost). `wait_for_operation` polls one until it is final: it
 answers on `succeeded`, and a `failed` one is an error carrying the platform's
 `error.code` (`start_failed`, `build_failed`, `computer_gone`, `move_failed`,
 `resize_not_applied`, `lost`, and more may be added) and its sentence.
@@ -334,6 +337,53 @@ operations are already `succeeded` when their tool answers; a clone is
 `running` until its disk is copied, and a move until it lands. All three are
 reads, and all three stay registered when the lifecycle tools are withheld,
 since start, stop, suspend and restart record operations too.
+
+The eleven lifecycle tools (`create_computer`, `clone_computer`,
+`start_computer`, `stop_computer`, `suspend_computer`, `restart_computer`,
+`update_computer`, `move_computer`, `delete_computer`, `restore_snapshot`,
+`clone_snapshot`) take an optional `idempotency_key`. Leave it out and a fresh
+one is sent for you; a failure whose outcome is unknown names the key it went
+with. What to do next depends on who answered:
+
+- **The answer was lost** (the connection dropped after the request went out,
+  or a proxy in front of the platform gave up), or the platform answers
+  `idempotency_in_progress`: call the same tool again with the same
+  `idempotency_key`. The platform answers with the first call's result, or says
+  it is still running; the step is not done twice.
+- **The platform answered a `5xx`**, or `idempotency_outcome_unknown`: the key
+  is spent, and resending with it only answers `idempotency_outcome_unknown`.
+  The platform then keeps the call's operation `pending` for up to an hour,
+  whatever happened, while its host may be carrying it out. What to read
+  depends on the tool:
+  - `start_computer`, `stop_computer`, `suspend_computer`,
+    `delete_computer`, `move_computer` and `update_computer`: read
+    `get_computer` (and `get_operation` with the `operation_id` the error
+    named: `succeeded` means the step happened, `running` means wait on it,
+    and `pending` alone is no reason to wait). If the step did not take
+    effect, send the call again with a new key, or none.
+  - `restart_computer`, which `get_computer` cannot show: a computer reads
+    `running` before and after a reset. Read the operation instead
+    (`get_operation` with the `operation_id` the error named, or
+    `list_operations` with the key): `succeeded` means the restart happened,
+    `running` means wait on it. Anything else leaves the restart possibly
+    done, so ask the user before sending it again with a new key, or none; a
+    second restart resets the guest again.
+  - `create_computer`, `clone_computer`, `clone_snapshot` and
+    `restore_snapshot`, where a read of the computer made straight away can
+    show no effect for a build or restore that then lands, and a second one
+    is a second computer or a second overwrite: read the operation first —
+    `get_operation` with the `operation_id` the error named, or
+    `list_operations` with the key — and while it is `pending` or `running`,
+    wait (`wait_for_operation`) and do not resend with any key. Only once it
+    is final as `failed` (`error.code` `lost`, for one) or no longer found, AND
+    `get_computer` (`list_computers` after a create or a clone) shows the step
+    did not happen, send the call again with a new key, or none. If no
+    operation is found at all, read the computer again after a few minutes
+    before resending.
+- **`idempotency_key_reused`**: a different call already used that key, and
+  nothing was done. Send this one with a new key, or none.
+
+Keys last 24 hours.
 
 ### Who you are, and API keys
 
@@ -346,7 +396,9 @@ is suspended. Behind the hosted server's OAuth sign-in, the key is the Connected
 app's (`prefix` `oauth`).
 
 `list_api_keys` lists the key holder's API keys on the account, newest first —
-never a raw key. It needs this server's key to have the **Manage keys**
+never a raw key. Each carries `minted_by_key_id`: the key that minted it over
+the API, or `null` for one minted from the dashboard. Revoking a key does not
+revoke the keys it minted. It needs this server's key to have the **Manage keys**
 permission, which only a person can turn on, in the dashboard; without it the
 tool answers the platform's 403, whose sentence says exactly that. A Connected
 app's key never has the permission.
@@ -358,6 +410,12 @@ long-lived credential and one nobody can take it back from. A revoke is
 irreversible, and on a model's reading of a list it can cut off the person's CI,
 another agent, or this very session. People do both from the dashboard or with
 the `mandala api-keys` CLI.
+
+`list_workspaces`, `get_workspace` and `list_workspace_members` read the
+account's workspaces, which partition its computers. A key confined to a
+workspace lists only that one, and is refused (403) the member list, which is
+the whole account's: workspaces do not divide people. All three are reads;
+workspaces are created, renamed and deleted in the dashboard.
 
 ### Current account quota
 
@@ -818,9 +876,15 @@ listing leaves it out — every ordinary caller is asking "what can I restore".
 `list_snapshots(include_unfinished: true)` is the flag for when the question is
 about storage instead.
 
-**A 409 usually clears; a 400 never does.** A guest still booting or a busy
-guest agent answers 409. The platform's own error messages come through
-unedited, because they are written to be acted on.
+**Read the `reason`, not the status.** Whether a refusal clears on its own is
+the platform's `reason` word, and each tool's answer says what it means:
+`contention` (something was in flight) and `starting` (the guest agent is still
+inside its boot window) clear, so the same call works in a moment;
+`unavailable`, `running`, `unsupported`, `exists` and `revoked` do not. A 409
+does not mean "wait": `exec`, input and the clipboard on a stopped computer
+answer 409 `unavailable`, and `start_computer` is what fixes that, while
+`running` needs the computer stopped first. The platform's own error messages
+come through unedited, because they are written to be acted on.
 
 HTTP failures preserve their actual response status. An unsupported method on a
 known path is `MethodNotAllowedError` (405), with the received `Allow` value when

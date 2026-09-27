@@ -590,10 +590,14 @@ export const registerGuest: Registrar = (server, session) => {
     {
       title: "Put text on the desktop's clipboard",
       description:
-        'Puts text on the computer\u2019s desktop clipboard, ready to paste. This leaves it on the clipboard and touches nothing on screen — follow it with press_key and keys ["ctrl","v"] to get the text into whatever has focus. Those are two separate key NAMES in the array, not one string "ctrl+v", which press_key would reject as an unknown key. Use this rather than the setsid/xclip/base64 recipe through exec: it is one call, it is confirmed, and it cannot be broken by a quote in the text. It requires a Linux desktop image with xclip installed and is refused on Windows. An older or custom image without xclip gets a 400 that never clears; changing runtime state or retrying cannot fix that image dependency. Unlike read_clipboard this DRIVES the computer, so a suspended one is resumed to serve it and that resume is charged. At most 64 KiB of text goes in — half what comes out, because the text crosses to the guest inside a single command argument. The platform confirms the write by reading the selection back before it answers, so a success here means the desktop is holding your text rather than that a command ran; a refusal saying the desktop did not take it means something else claimed the clipboard in that instant, and sending it again works. Not every refusal here is one of those, and the answer says which it is rather than leaving you to match on the sentence: a computer that is not running is a 409 that start_computer fixes and that retrying never will, while a guest agent still inside its boot window is worth another attempt. A desktop that is not answering is deliberately left unclassified — it can equally be a guest still coming up or a session nobody is logged into — so bound your attempts there instead of looping.',
+        'Puts text on the computer\u2019s desktop clipboard, ready to paste. This leaves it on the clipboard and touches nothing on screen — follow it with press_key and keys ["ctrl","v"] to get the text into whatever has focus. Those are two separate key NAMES in the array, not one string "ctrl+v", which press_key would reject as an unknown key. Use this rather than the setsid/xclip/base64 recipe through exec: it is one call, it is confirmed, and it cannot be broken by a quote in the text. It requires a Linux desktop image with xclip installed and is refused on Windows. An older or custom image without xclip gets a 400 that never clears; changing runtime state or retrying cannot fix that image dependency. Unlike read_clipboard this DRIVES the computer, so a suspended one is resumed to serve it and that resume is charged. At most 64 KiB of text goes in — half what comes out, because the text crosses to the guest inside a single command argument. Empty text ("") CLEARS the clipboard, and is the only way to: do it after pasting a secret, since otherwise the desktop keeps holding it. The platform confirms the write by reading the selection back before it answers, so a success here means the desktop is holding your text rather than that a command ran; a refusal saying the desktop did not take it means something else claimed the clipboard in that instant, and sending it again works. Not every refusal here is one of those, and the answer says which it is rather than leaving you to match on the sentence: a computer that is not running is a 409 that start_computer fixes and that retrying never will, while a guest agent still inside its boot window is worth another attempt. A desktop that is not answering is deliberately left unclassified — it can equally be a guest still coming up or a session nobody is logged into — so bound your attempts there instead of looping.',
       inputSchema: {
         ...idArg,
-        text: z.string().describe('The text to put on the clipboard. At most 64 KiB of UTF-8.'),
+        text: z
+          .string()
+          .describe(
+            'The text to put on the clipboard. At most 64 KiB of UTF-8. "" clears the clipboard.',
+          ),
       },
     },
     ({ computer_id, text }, extra) =>
@@ -602,6 +606,7 @@ export const registerGuest: Registrar = (server, session) => {
         await session.api
           .with(extra.signal)
           .json('PUT', P.computerAction(id, 'clipboard'), { body: P.clipboardBody(text) });
+        if (text === '') return said('The desktop clipboard is cleared.');
         return said(
           'On the desktop clipboard, and the desktop has taken it. To paste it into whatever has focus, ' +
             'call press_key with keys ["ctrl","v"] — two key NAMES, not the one string "ctrl+v" that ' +

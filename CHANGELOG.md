@@ -16,6 +16,29 @@ are wording changes, and they are behaviour changes in the way that matters.
 
 ### Added
 
+- **`list_workspaces`, `get_workspace` and `list_workspace_members`**, read
+  only, over the platform's `GET workspaces`, `GET workspaces/{id}` and
+  `GET workspaces/{id}/members`: a workspace is `{id, name, created_at}`, a
+  member `{user_id, email, name, role, accepted_at, suspended}`. A key confined
+  to a workspace lists only that one and is refused the members (403). All
+  three are in the `account` tag.
+- **`paste_text`**: puts 1 to 8192 bytes of UTF-8 on the desktop clipboard and
+  presses the paste shortcut, over the platform's input `paste` action, with an
+  optional `shortcut` of `ctrl+v` (the default) or `ctrl+shift+v`. It is in the
+  `input` tag, and `type_text`'s description points to it.
+- **`modifiers` on `drag`**, the same list `click` and `scroll` take: keys held
+  down for the whole gesture, sent as the drag's held keys.
+- **`resume_only` on `start_computer`**, sent as `resume_only=true`. On a
+  stopped computer with no saved session it succeeds without booting, and the
+  answer says to read the status rather than take it as a start.
+- **`model` on `run_agent`**: an Anthropic model id passed to the platform's
+  agent body; left out, the platform picks.
+- **`minted_by_key_id` on `list_api_keys` and `whoami`'s key**: the key that
+  minted it over the API, or `null`. It was dropped from both answers. The
+  description says revoking a key does not revoke the keys it minted.
+- **`delete_computer` says its operation**: `(operation op_…)` in its sentence,
+  and `operation_id` in the JSON it now appends when the platform recorded one.
+
 - **`egress_proxy` on `create_computer` and `update_computer`:** `{server,
   credentials_secret_id?}` sends ALL of a computer's outbound TCP through a
   proxy (`http://`, `https://` or `socks5://`, explicit port, no bypass list);
@@ -33,13 +56,39 @@ are wording changes, and they are behaviour changes in the way that matters.
   `restore_snapshot` and `clone_snapshot` send an `Idempotency-Key` — a fresh
   random one per call, or the tool's new optional `idempotency_key` input
   (1 to 255 printable ASCII characters, no spaces; anything else is refused
-  before a request is sent). A failure whose outcome is unknown — a dropped
-  connection or timeout after the request went out, a `5xx`, or the
-  platform's `409 idempotency_in_progress` — now ends with the one retry that
-  cannot do the step twice: `To retry without risking a second <what>, call
-  <tool> again with idempotency_key "<K>".` The platform's
-  `idempotency_in_progress`, `idempotency_outcome_unknown` and
-  `idempotency_key_reused` refusals each get a sentence of their own, and
+  before a request is sent). A failure whose outcome is unknown ends with the
+  retry that cannot do the step twice. After a dropped connection or timeout
+  once the request went out, a `5xx` a proxy in front of the platform answered
+  (an HTML or empty body, or `520`-`526`), or the platform's
+  `409 idempotency_in_progress`, that is the same key: `To retry without
+  risking a second <what>, call <tool> again with idempotency_key "<K>".` After
+  a `5xx` the platform answered itself, it is not: the platform has settled
+  that key as lost, so resending with it can only answer
+  `idempotency_outcome_unknown`, and the call may still be under way on its
+  host (its operation stays `pending` for up to an hour, whatever happened).
+  For `start_computer`, `stop_computer`, `suspend_computer`,
+  `delete_computer`, `move_computer` and `update_computer`, the answer says to
+  read `get_computer` (and `get_operation` when the error named one:
+  `succeeded` means it happened, `running` means wait, `pending` alone is no
+  reason to wait) and, if the step did not take effect, to call the tool again
+  with a new key, or none. For `restart_computer`, which `get_computer` cannot
+  show (a computer reads `running` before and after a reset), it says to read
+  the operation instead (`get_operation`, or `list_operations` with the key):
+  `succeeded` means the restart happened, `running` means wait, and anything
+  else leaves it possibly done, so the user is asked before a second restart
+  with a new key, or none. For
+  `create_computer`, `clone_computer`, `clone_snapshot` and `restore_snapshot`,
+  where a read made straight away cannot see a build or restore still landing,
+  it says to read the operation first (`get_operation` with the `operation_id`
+  the error named, or `list_operations` with the key), to wait with
+  `wait_for_operation` and not resend with any key while it is `pending` or
+  `running`, and to send the call with a new key, or none, only once the
+  operation is final as `failed` or not found AND `get_computer` (or
+  `list_computers` after a create or a clone) shows the step did not happen.
+  The `idempotency_key` input's description says the same, per tool. The
+  platform's `idempotency_in_progress`, `idempotency_outcome_unknown` and
+  `idempotency_key_reused` refusals each get a sentence of their own
+  (`idempotency_outcome_unknown` ends with the same per-tool route), and
   `isTransient` is false for `idempotency_outcome_unknown`. `list_operations`
   takes `idempotency_key`, an operation carries the key it was started with,
   and `delete` is a documented kind.
@@ -102,6 +151,43 @@ are wording changes, and they are behaviour changes in the way that matters.
 
 ### Changed
 
+- **`create_computer` takes `browser_proxy: null`**, and sends it: a template
+  you published may carry a default browser proxy, which the computer inherits
+  unless the create sends another one, or `null` for none. The schema refused
+  `null` before.
+- **`write_clipboard` takes empty text**, which the platform reads as a clear
+  (the only way to clear the clipboard, after pasting a secret, say). It was
+  refused before any request; the answer now says the clipboard is cleared.
+- **`wait_for_computer(until="guest")` waits for an egress proxy's
+  credentials.** While `egress_proxy_pending` is true every connection the
+  computer opens is closed, so the wait holds until it clears, as it does for
+  `browser_proxy_pending`. The tool and `until` descriptions say so. Because
+  a wait can time out on an ordinary delivery, one that times out on it names
+  `egress_proxy_pending` and says to call again to keep waiting; only if it
+  persists across waits (the credentials secret was deleted, or an
+  `update_computer` egress change got a `5xx` or no answer) does it say to
+  send the `egress_proxy` setting again with `update_computer`, naming a
+  secret that exists. Removing the proxy is named as the user's decision, since
+  it sends all traffic directly. A wait that times out held on
+  `browser_proxy_pending` names that flag too.
+- **`screenshot` labels a suspended computer's saved frame.** A response marked
+  `X-GC-Frame: suspended` (`fresh: false` on a suspended computer) is labelled
+  as a saved frame with its own pixel size, not the live screen and not in
+  click coordinates, instead of "Screen is WxH". The tool description qualifies
+  its coordinate claim to match. `Bytes` carries the header as `frame`.
+- **`get_computer_ssh` and `set_computer_ssh` say when only some keys are on
+  the computer.** When `keys_pushed` is below `key_count` (one computer accepts
+  at most 200), the answer says only that many are there and the rest are
+  refused, instead of saying all of them can log in.
+- **Descriptions brought in line with the platform:** `clone_snapshot` says a
+  resumed copy gets its own MAC, address, hostname, machine ID, SSH host keys
+  and desktop password and runs beside its source (it said the copy shared its
+  source's identity and could not); `create_computer`'s `egress_proxy` says a
+  create carrying one is never answered from the warm pool (not "always a cold
+  boot") and that connections are closed, not leaked, until the credentials
+  arrive; `check_template` names two refusals only a publish can make, a
+  `spec.hardware.disk_gb` below the family's or parent's disk floor (400) and a
+  build into a family that is not the account's (403).
 - **A busy suspended computer's `screenshot` refusal keeps the shape rule.** A
   shaped screenshot refused with a word that clears by itself used to offer
   `fresh: false` without saying the crop, scale, PNG or quality has to go too.

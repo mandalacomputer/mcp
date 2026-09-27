@@ -164,6 +164,7 @@ export const API_KEY = {
   workspace_id: null,
   workspace_name: null,
   manage_keys: false,
+  minted_by_key_id: null,
 };
 
 /** A finished lifecycle operation, as `GET operations/:id` answers it (OPL-5055). */
@@ -176,6 +177,23 @@ export const OPERATION = {
   created_at: '2026-09-26T08:00:00.000Z',
   updated_at: '2026-09-26T08:01:10.000Z',
   finished_at: '2026-09-26T08:01:10.000Z',
+};
+
+/** One workspace, as `GET workspaces` lists it (OPL-5057). */
+export const WORKSPACE = {
+  id: 'wsp-0123456789ab',
+  name: 'ci',
+  created_at: '2026-09-01T00:00:00.000Z',
+};
+
+/** One person who reaches a workspace, as `GET workspaces/:id/members` lists them. */
+export const WORKSPACE_MEMBER = {
+  user_id: 'usr-0123456789abcdef',
+  email: 'dana@example.com',
+  name: 'Dana',
+  role: 'owner',
+  accepted_at: '2026-08-01T00:00:00.000Z',
+  suspended: false,
 };
 
 /** `GET whoami` for an account-wide key that manages keys. */
@@ -778,6 +796,9 @@ function respond(
   if (path.startsWith('/operations/')) return json(OPERATION);
   if (path === '/whoami') return json(WHOAMI);
   if (path === '/api-keys') return json([API_KEY]);
+  if (path === '/workspaces') return json([WORKSPACE]);
+  if (/^\/workspaces\/[^/]+\/members$/.test(path)) return json([WORKSPACE_MEMBER]);
+  if (/^\/workspaces\/[^/]+$/.test(path)) return json(WORKSPACE);
   if (path === '/ssh-keys')
     return json(method === 'GET' ? [SSH_KEY] : SSH_KEY, method === 'GET' ? 200 : 201);
   if (path.startsWith('/ssh-keys/')) return json({ ok: true });

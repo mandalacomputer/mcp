@@ -25,7 +25,12 @@ import {
 } from '../format.js';
 import * as P from '../paths.js';
 import { heartbeat, POLL_MS, pollDelay, sleep } from '../poll.js';
-import { idempotencyKeyArg, keyedFailure } from './operations.js';
+import {
+  buildIdempotencyKeyArg,
+  idempotencyKeyArg,
+  keyedFailure,
+  restartIdempotencyKeyArg,
+} from './operations.js';
 import { FILES_DIR, secretBindingsSchema } from './secrets.js';
 import type { Registrar } from './types.js';
 
@@ -662,9 +667,9 @@ export const registerComputers: Registrar = (server, session, opts) => {
   // computers somebody else made still has to be able to bring one up, and a
   // stopped computer refuses every other tool here.
   //
-  // Four tools around one request, and stop registered on its own below it:
-  // stop is the only power action with a second argument to take, and folding
-  // an optional one into the loop would leave the other three advertising a
+  // Four tools around one request, with start and stop registered on their
+  // own: each has a second argument to take (resume_only, force), and folding
+  // an optional one into the loop would leave the others advertising a
   // parameter their route does not read.
   const power = (
     action: string,
@@ -710,13 +715,46 @@ export const registerComputers: Registrar = (server, session, opts) => {
       );
     });
 
-  for (const action of ['start', 'suspend', 'restart'] as const) {
+  server.registerTool(
+    'start_computer',
+    {
+      title: 'Start a computer',
+      description: POWER_DESCRIPTIONS.start,
+      inputSchema: {
+        ...idArg,
+        resume_only: z
+          .boolean()
+          .optional()
+          .describe(
+            'Resume a saved session only, never boot. On a suspended computer it resumes as usual; on a stopped computer with no saved session it SUCCEEDS WITHOUT BOOTING anything, so read get_computer afterwards to see which happened.',
+          ),
+        idempotency_key: idempotencyKeyArg,
+      },
+    },
+    ({ computer_id, resume_only, idempotency_key }, extra) =>
+      power('start', computer_id, extra, {
+        key: idempotency_key,
+        // `enum: ['true']` on the platform, as stop's `force` is: omitted
+        // rather than sent as false.
+        query: { resume_only: resume_only ? 'true' : undefined },
+        note: resume_only
+          ? '\n\nresume_only: a stopped computer with no saved session is answered the same way without being booted, so this does not say it is running — get_computer or wait_for_computer says which it is.'
+          : undefined,
+      }),
+  );
+
+  for (const action of ['suspend', 'restart'] as const) {
     server.registerTool(
       `${action}_computer`,
       {
         title: `${action[0].toUpperCase()}${action.slice(1)} a computer`,
         description: POWER_DESCRIPTIONS[action],
-        inputSchema: { ...idArg, idempotency_key: idempotencyKeyArg },
+        inputSchema: {
+          ...idArg,
+          // A restart reads running before and after, so its spent-key route
+          // is not "read get_computer" (see resendAfterSpentKey).
+          idempotency_key: action === 'restart' ? restartIdempotencyKeyArg : idempotencyKeyArg,
+        },
       },
       ({ computer_id, idempotency_key }, extra) =>
         power(action, computer_id, extra, { key: idempotency_key }),
@@ -795,7 +833,7 @@ export const registerComputers: Registrar = (server, session, opts) => {
           .nullable()
           .optional()
           .describe(
-            `${EGRESS_PROXY_ABOUT} Replaces the setting whole; null removes it and the computer's traffic goes directly again. To change the server of the same proxy, start from the egress proxy get_computer returns and copy its credentials_secret_id to keep it: leaving it out removes the credentials, and the proxy then refuses every connection. Do not carry credentials_secret_id to a different server unless the user says those credentials are for that server. Send this ON ITS OWN — never beside name, a resize, idle_suspend_min or browser_proxy. A running computer has it when the answer arrives; a stopped or suspended one is given it before it starts. After any other 5xx, or no answer, it may or may not have taken effect: call get_computer, and if its egress proxy names credentials and is still waiting for them after a few seconds, send the setting again.`,
+            `${EGRESS_PROXY_ABOUT} Replaces the setting whole; null removes it and the computer's traffic goes directly again. To change the server of the same proxy, start from the egress proxy get_computer returns and copy its credentials_secret_id to keep it: leaving it out removes the credentials, and the proxy then refuses every connection. Do not carry credentials_secret_id to a different server unless the user says those credentials are for that server. Send this ON ITS OWN — never beside name, a resize, idle_suspend_min or browser_proxy. A running computer has it when the answer arrives; a stopped or suspended one is given it before it starts. After any other 5xx, or no answer, it may or may not have taken effect: call get_computer, and if it does not show the setting you sent, or its egress proxy names credentials and is still waiting for them after a few seconds, send the setting again — with a new idempotency_key, or none, after a 5xx; with the key the answer named after no answer at all.`,
           ),
         idempotency_key: idempotencyKeyArg,
       },
@@ -1122,14 +1160,14 @@ export const registerComputers: Registrar = (server, session, opts) => {
     {
       title: 'Wait for a computer to be ready',
       description:
-        'Poll until the computer is running, or until the software inside it answers. Use "guest" before exec, files or windows, and before expecting a screenshot to show a desktop rather than a boot screen; on a computer with secrets bound, "guest" also waits until they have reached the desktop, so a command run next sees them, and on one whose browser proxy is being set or removed it waits until its browsers have the change. Reports progress while it waits, so a client that sends a progressToken and sets resetTimeoutOnProgress can hold the request open; a client that cannot should lower timeout_s and call again rather than watch its own default timeout cancel the wait.',
+        'Poll until the computer is running, or until the software inside it answers. Use "guest" before exec, files or windows, and before expecting a screenshot to show a desktop rather than a boot screen; on a computer with secrets bound, "guest" also waits until they have reached the desktop, so a command run next sees them, on one whose browser proxy is being set or removed it waits until its browsers have the change, and on one whose egress proxy is waiting for its credentials it waits until they arrive, since every connection the computer opens meanwhile is closed. Reports progress while it waits, so a client that sends a progressToken and sets resetTimeoutOnProgress can hold the request open; a client that cannot should lower timeout_s and call again rather than watch its own default timeout cancel the wait.',
       inputSchema: {
         ...idArg,
         until: z
           .enum(['running', 'guest'])
           .default('guest')
           .describe(
-            '"running" is the hypervisor reporting the VM up. "guest" is the software inside it answering, which is what exec and a painted desktop actually need — and, on a computer with secrets bound, its secrets delivered, and on one with a browser proxy, its browsers holding it.',
+            '"running" is the hypervisor reporting the VM up. "guest" is the software inside it answering, which is what exec and a painted desktop actually need — and, on a computer with secrets bound, its secrets delivered, on one with a browser proxy, its browsers holding it, and on one with an egress proxy that names credentials, its host holding them.',
           ),
         timeout_s: z.number().int().min(5).max(900).default(180),
       },
@@ -1173,6 +1211,15 @@ export const registerComputers: Registrar = (server, session, opts) => {
           // report, and swallowing every transient would end the wait saying only
           // that the status was never seen.
           let blocked: string | undefined;
+          // Which proxy flag, if any, held the last status read, so the give-up
+          // can name it. Only the last read counts, so a wait that ran out on
+          // egress_proxy_pending may have met an ordinary delivery: the give-up
+          // invites another wait first, and names what clears a flag that
+          // persists (a deleted credentials secret, an update whose answer was
+          // lost) as the fallback. browser_proxy_pending is named too, so a
+          // wait held on it does not
+          // end saying only "last seen running".
+          let heldOn: 'egress' | 'browser' | undefined;
           while (!untilDeadline.aborted) {
             // The caller giving up ends the wait. The signal aborts the request
             // in flight, but nothing about an aborted request stops the next
@@ -1213,6 +1260,7 @@ export const registerComputers: Registrar = (server, session, opts) => {
               continue;
             }
             blocked = undefined;
+            heldOn = undefined;
             session.noteResolution(id, c.resolution);
             last = c.status ?? 'unknown';
             // ONE beat per turn, and this is not it when a guest probe is about to
@@ -1315,8 +1363,20 @@ export const registerComputers: Registrar = (server, session, opts) => {
               // directly. Never pending on a computer that is not running, so
               // this is the only place it can be waited on.
               if (c.browser_proxy_pending === true) {
+                heldOn = 'browser';
                 await beat(
                   `Waiting for ${id} — running; its browser proxy is still being applied.`,
+                );
+                await sleep(POLL_MS, signal);
+                continue;
+              }
+              // And for an egress proxy whose credentials have not reached the
+              // host: the guest answers, but every connection it opens is
+              // closed until they do, so a command run next cannot reach out.
+              if (c.egress_proxy_pending === true) {
+                heldOn = 'egress';
+                await beat(
+                  `Waiting for ${id} — running; waiting for the egress proxy's credentials (egress_proxy_pending), which usually arrive within seconds.`,
                 );
                 await sleep(POLL_MS, signal);
                 continue;
@@ -1386,10 +1446,22 @@ export const registerComputers: Registrar = (server, session, opts) => {
           // which is the same shape of answer as a cancellation and not the same
           // as success. The message still says to call again, because the state
           // it was waiting on may yet arrive.
+          //
+          // Behind an egress proxy still waiting for its credentials, the
+          // answer names that state. It still says to call again first: the
+          // flag is read afresh on every poll, so a wait that ran out on it may
+          // have met an ordinary delivery a few seconds long. Only a flag that
+          // persists across waits points at something the caller has to fix,
+          // and even then removing the proxy is the user's call, not a fix: it
+          // sends every connection directly.
           return refused(
             blocked
               ? `Gave up after ${timeout_s}s; the platform could not be asked about ${id} for the whole wait — the last attempt said: ${blocked}. Nothing was changed — call again to keep waiting.`
-              : `Gave up after ${timeout_s}s; ${id} was last seen ${last}. Nothing was changed — call again to keep waiting.`,
+              : heldOn === 'egress'
+                ? `Gave up after ${timeout_s}s; ${id} is running, but its egress proxy's credentials have not reached its host yet (egress_proxy_pending), so every connection it opens is closed until they do. Nothing was changed — call again to keep waiting. If it persists across waits, the secret its egress_proxy.credentials_secret_id names may have been deleted, or an earlier update_computer egress_proxy change may have got a 5xx or no answer: send the egress_proxy setting again with update_computer, naming a secret that exists (list_secrets). Removing the proxy with null is for the user to decide, not a fix: it sends all of the computer's traffic directly.`
+                : heldOn === 'browser'
+                  ? `Gave up after ${timeout_s}s; ${id} is running, but its browser proxy was still being applied in the guest (browser_proxy_pending), so a browser opened now may not use it. Nothing was changed — call again to keep waiting; if it persists, send the browser_proxy setting again with update_computer.`
+                  : `Gave up after ${timeout_s}s; ${id} was last seen ${last}. Nothing was changed — call again to keep waiting.`,
           );
         } finally {
           await beat.stop();
@@ -1621,16 +1693,17 @@ export const registerComputers: Registrar = (server, session, opts) => {
             `Secrets from the account to deliver into the desktop session each time the computer starts, each as an environment variable (\`env\`) or as a file under ${FILES_DIR} (\`file\`). Only ids and names are sent — never a value. Secret ids come from list_secrets (create_secret stores a new one). Linux only, and only on a template whose image can receive them. A value replaced later reaches the running computer live when bound as a file, and as a variable on an image that supports it reaches new shells and exec with desktop: true. get_computer_secrets and set_computer_secrets read and change the bindings later.`,
           ),
         browser_proxy: browserProxySchema
+          .nullable()
           .optional()
           .describe(
-            `${BROWSER_PROXY_ABOUT} A create carrying one is always a cold boot. A credentials_secret_id must name a secret bound as a file in this create's secrets. wait_for_computer with until="guest" waits until its browsers have it; update_computer changes or removes it later.`,
+            `${BROWSER_PROXY_ABOUT} A create carrying one is always a cold boot. A credentials_secret_id must name a secret bound as a file in this create's secrets. A template you published may carry a default browser proxy, which the computer inherits when this is left out; send another proxy to use that instead, or null to create the computer with none. wait_for_computer with until="guest" waits until its browsers have it; update_computer changes or removes it later.`,
           ),
         egress_proxy: egressProxySchema
           .optional()
           .describe(
-            `${EGRESS_PROXY_ABOUT} It is in effect from the first packet the computer sends. A create carrying one is always a cold boot (never a pre-booted computer), and a clone does not inherit it. A credentials_secret_id naming no secret, or one whose value is not user:password, is refused with 400 before anything is created. update_computer changes or removes it later.`,
+            `${EGRESS_PROXY_ABOUT} It is in effect from the first packet the computer sends: until a proxy's credentials reach its host, connections are closed, not sent directly (wait_for_computer with until="guest" waits for them). A create carrying one is never answered from the warm pool, and a clone does not inherit it. A credentials_secret_id naming no secret, or one whose value is not user:password, is refused with 400 before anything is created. update_computer changes or removes it later.`,
           ),
-        idempotency_key: idempotencyKeyArg,
+        idempotency_key: buildIdempotencyKeyArg,
       },
       annotations: { destructiveHint: false, openWorldHint: true },
     },
@@ -1741,7 +1814,7 @@ export const registerComputers: Registrar = (server, session, opts) => {
       inputSchema: {
         ...idArg,
         name: z.string().optional().describe('A name for the copy.'),
-        idempotency_key: idempotencyKeyArg,
+        idempotency_key: buildIdempotencyKeyArg,
       },
     },
     ({ computer_id, name, idempotency_key }, extra) =>
@@ -1829,17 +1902,21 @@ export const registerComputers: Registrar = (server, session, opts) => {
           );
         }
         const key = idempotencyKeyFor(idempotency_key);
-        let res: { snapshots_deleted?: number } | undefined;
+        let res: { snapshots_deleted?: number; operation_id?: unknown } | undefined;
         try {
           res = await session.api
             .with(extra.signal)
-            .send<{ snapshots_deleted?: number }>('DELETE', P.computer(computer_id), {
-              query: {
-                snapshots: delete_snapshots ? 'delete' : undefined,
-                expect: delete_snapshots ? fingerprint : undefined,
+            .send<{ snapshots_deleted?: number; operation_id?: unknown }>(
+              'DELETE',
+              P.computer(computer_id),
+              {
+                query: {
+                  snapshots: delete_snapshots ? 'delete' : undefined,
+                  expect: delete_snapshots ? fingerprint : undefined,
+                },
+                headers: idempotencyHeaders(key),
               },
-              headers: idempotencyHeaders(key),
-            });
+            );
         } catch (err) {
           // A 404 means the computer is not there, which is the state this call
           // was asking for. The platform answers it for an id it cannot scope,
@@ -1908,10 +1985,24 @@ export const registerComputers: Registrar = (server, session, opts) => {
           res?.snapshots_deleted === undefined
             ? 'its snapshots'
             : `${res.snapshots_deleted} of its snapshot(s)`;
+        // The delete's operation (kind `delete`), where the platform recorded
+        // one, said like every other lifecycle tool's and kept in the
+        // structured answer so a caller can read it back with get_operation.
+        const op = operationIdOf(res);
+        const done = `Deleted ${computer_id}${operationClause(res)}`;
         return said(
           delete_snapshots
-            ? `Deleted ${computer_id} and ${purged}.`
-            : `Deleted ${computer_id}. Its disk is gone; any snapshots it had remain, as orphans that can be cloned but not restored.`,
+            ? `${done} and ${purged}.`
+            : `${done}. Its disk is gone; any snapshots it had remain, as orphans that can be cloned but not restored.`,
+          op
+            ? {
+                computer_id,
+                operation_id: op,
+                ...(res?.snapshots_deleted === undefined
+                  ? {}
+                  : { snapshots_deleted: res.snapshots_deleted }),
+              }
+            : undefined,
         );
       }),
   );

@@ -139,6 +139,12 @@ export type Bytes = {
    * differently" and "there is no offset that will work on this file".
    */
   unrangeable: boolean;
+  /**
+   * `X-GC-Frame`, when the platform labelled what it served: `suspended` is a
+   * screenshot answered with the saved frame of a suspended computer rather
+   * than a capture of its screen.
+   */
+  frame?: string;
 };
 
 /**
@@ -1004,6 +1010,7 @@ export class Api {
           : bytes.length,
       unrangeable: (resp.headers.get('accept-ranges') ?? '').trim().toLowerCase() === 'none',
       window,
+      frame: resp.headers.get('x-gc-frame')?.trim().toLowerCase() || undefined,
     };
   }
 

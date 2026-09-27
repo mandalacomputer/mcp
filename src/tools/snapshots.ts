@@ -15,7 +15,7 @@ import {
 } from '../format.js';
 import * as P from '../paths.js';
 import { heartbeat, POLL_MS, pollDelay, sleep } from '../poll.js';
-import { idempotencyKeyArg, keyedFailure } from './operations.js';
+import { buildIdempotencyKeyArg, keyedFailure } from './operations.js';
 import type { Registrar } from './types.js';
 
 const idArg = {
@@ -671,7 +671,7 @@ export const registerSnapshots: Registrar = (server, session, opts) => {
         confirm: z
           .literal(true)
           .describe("Must be true. This overwrites the source computer's current disk."),
-        idempotency_key: idempotencyKeyArg,
+        idempotency_key: buildIdempotencyKeyArg,
       },
       annotations: { destructiveHint: true },
     },
@@ -795,7 +795,7 @@ export const registerSnapshots: Registrar = (server, session, opts) => {
     {
       title: 'Fork a snapshot into a new computer',
       description:
-        "Build a new computer from a snapshot, leaving the original untouched. This is the fork half of snapshot-and-fork, and the only thing that works on an orphaned snapshot. A MEMORY snapshot is resumed: the copy comes up running the captured session, sharing its source's network identity, so it cannot run on the same host while its source is running. Pass memory: false to build it from the disk alone instead, as a fresh boot with its own identity. A memory snapshot of a computer that held SECRETS is resumed only with inherit_secrets: true, and then the copy HOLDS THE SAME CREDENTIALS as the computer it came from; without it the clone is built from the disk and this tool says so.",
+        'Build a new computer from a snapshot, leaving the original untouched. This is the fork half of snapshot-and-fork, and the only thing that works on an orphaned snapshot. A MEMORY snapshot is resumed: the copy comes up running the captured session, and is given its own MAC, address, hostname, machine ID, SSH host keys and desktop password before its network comes up, so it runs beside its source; if that fails it is left stopped, and starting it cold-boots its disk. Pass memory: false to build it from the disk alone instead, as a fresh boot. A memory snapshot of a computer that held SECRETS is resumed only with inherit_secrets: true, and then the copy HOLDS THE SAME CREDENTIALS as the computer it came from; without it the clone is built from the disk and this tool says so.',
       inputSchema: {
         snapshot_id: z.string(),
         name: z.string().optional().describe('A name for the new computer.'),
@@ -815,7 +815,7 @@ export const registerSnapshots: Registrar = (server, session, opts) => {
           .boolean()
           .default(true)
           .describe("Make the new computer this session's selected one."),
-        idempotency_key: idempotencyKeyArg,
+        idempotency_key: buildIdempotencyKeyArg,
       },
     },
     ({ snapshot_id, name, select, memory, inherit_secrets, idempotency_key }, extra) =>

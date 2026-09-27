@@ -468,25 +468,12 @@ export const PARAMETERS: ReadonlyMap<string, readonly string[]> = new Map([
  * would say nothing that route's own line does not.
  */
 export const UNIMPLEMENTED_PARAMETERS: ReadonlySet<string> = new Set([
-  // DECISION. start_computer requests a boot or resume. With resume_only=true,
-  // a stopped computer without a saved session returns 200 without starting.
-  // Keep that successful no-op out of the tool so a model cannot mistake the
-  // acknowledgement for a start; exposing it needs explicit result semantics.
-  'POST computers/:id/start  query:resume_only',
-  // DECISION. `keys: ['ctrl', 'c']` is sent instead. The chord-as-one-string
-  // form cannot express a key whose own name contains the separator.
-  'POST computers/:id/input  body:key',
   // DECISION. `scroll_direction` is sent instead — `button` is the flat
   // vocabulary's name for it, and on a route that also accepts a real mouse
   // button that is a word worth not overloading.
   'POST computers/:id/input  body:button',
   // DECISION. `amount` is sent instead. Same value, two names.
   'POST computers/:id/input  body:scroll_amount',
-  // DECISION. The model is the one this server was configured with, through
-  // MODEL_KEY_HEADER, and run_agent bills that key for every step. Offering a
-  // model argument would let the caller pick something the key may not be
-  // entitled to, and the failure would arrive several steps into a run.
-  'POST computers/:id/agent  body:model',
 ]);
 
 export const key = (route: Route) => `${route.method} ${route.pattern}`;
@@ -500,12 +487,6 @@ export const UNIMPLEMENTED = new Set<string>([
   // The account's secret store left this list in OPL-5026, reached by
   // list_secrets, get_secret, create_secret, replace_secret and delete_secret.
   // An operation left out on purpose goes here with its reason.
-  //
-  // The account's workspaces, read only (OPL-5057). Listed to stay in step
-  // with the surface; no tool reaches them yet.
-  'GET workspaces',
-  'GET workspaces/:id',
-  'GET workspaces/:id/members',
   // DECISION (OPL-5053). Minting answers a raw API key once, and a model's
   // context is the worst place for a long-lived credential; revoking is
   // irreversible and can cut off the person's CI or this session. People do

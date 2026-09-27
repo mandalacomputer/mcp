@@ -134,6 +134,42 @@ describe('screenshots', () => {
     expect(textOf(other)).not.toContain('1280x800x24');
   });
 
+  // OPL-5323: fresh: false on a suspended computer is its saved JPEG, which is
+  // downscaled and old. Labelling it with the screen size invites a click at
+  // coordinates that mean nothing.
+  it("labels a suspended computer's saved frame as one, with its own size", async () => {
+    // SOI, an APP0 segment, then SOF0 declaring 640x400, then EOI.
+    const jpeg = new Uint8Array([
+      0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46, 0x00, 0x01, 0x01, 0x00, 0x00,
+      0x01, 0x00, 0x01, 0x00, 0x00, 0xff, 0xc0, 0x00, 0x11, 0x08, 0x01, 0x90, 0x02, 0x80, 0x03,
+      0x01, 0x22, 0x00, 0x02, 0x11, 0x01, 0x03, 0x11, 0x01, 0xff, 0xd9,
+    ]);
+    const real = globalThis.fetch;
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      if (String(input).includes('/screenshot')) {
+        await real(input as never, init);
+        return new Response(jpeg, {
+          headers: { 'Content-Type': 'image/jpeg', 'X-GC-Frame': 'suspended' },
+        });
+      }
+      return real(input as never, init);
+    }) as typeof fetch;
+    try {
+      const { call, close } = await connect({ computerId: 'vm-1' });
+      await call('get_computer', {});
+      const res = await call('screenshot', { fresh: false });
+      await close();
+      expect(res.isError).toBeFalsy();
+      const text = textOf(res);
+      expect(text).toContain('A SAVED FRAME of suspended computer vm-1, 640x400 pixels');
+      expect(text).toContain('not the live screen, and not in the coordinates click takes');
+      expect(text).not.toContain('Screen is');
+      expect(res.content.find((c) => c.type === 'image')).toBeDefined();
+    } finally {
+      globalThis.fetch = real;
+    }
+  });
+
   it('skip the frame cache by default', async () => {
     const { call, close } = await connect();
     await call('screenshot', {});
@@ -589,6 +625,57 @@ describe('input bodies', () => {
     expect(lastInput()).toMatchObject({ action: 'double_click', x: 5, y: 6 });
   });
 
+  // OPL-5051: keys held for the whole drag, spelt as a click's are.
+  it('sends the modifiers of a drag as the held keys', async () => {
+    const { call, close } = await connect();
+    const res = await call('drag', {
+      from_x: 1,
+      from_y: 2,
+      to_x: 30,
+      to_y: 40,
+      modifiers: ['shift', 'ctrl'],
+    });
+    await close();
+    expect(res.isError).toBeFalsy();
+    expect(textOf(res)).toContain('holding shift+ctrl');
+    expect(lastInput()).toEqual({
+      action: 'left_click_drag',
+      coordinate: [30, 40],
+      start_coordinate: [1, 2],
+      text: 'shift+ctrl',
+    });
+  });
+
+  it("sends paste_text as the platform's paste action", async () => {
+    const { call, close } = await connect();
+    const plain = await call('paste_text', { text: 'Café — 東京 😀' });
+    expect(plain.isError).toBeFalsy();
+    expect(lastInput()).toEqual({ action: 'paste', text: 'Café — 東京 😀' });
+    await call('paste_text', { text: 'ls', shortcut: 'ctrl+shift+v' });
+    expect(lastInput()).toEqual({ action: 'paste', text: 'ls', key: 'ctrl+shift+v' });
+    const before = platform.calls.length;
+    for (const args of [
+      { text: '' },
+      { text: 'a\0b' },
+      { text: 'x'.repeat(8193) },
+      { text: '\u{1F600}'.repeat(2049) },
+      { text: 'x', shortcut: 'shift+insert' },
+    ]) {
+      const res = await call('paste_text', args);
+      expect(res.isError, `paste_text accepted ${JSON.stringify(args).slice(0, 40)}`).toBe(true);
+    }
+    expect(platform.calls.length).toBe(before);
+    expect((await call('paste_text', { text: 'x'.repeat(8192) })).isError).toBeFalsy();
+    await close();
+  });
+
+  it('points type_text at paste_text', async () => {
+    const { client, close } = await connect();
+    const tool = (await client.listTools()).tools.find((t) => t.name === 'type_text');
+    await close();
+    expect(tool?.description).toContain('paste_text');
+  });
+
   it('refuses half an origin on a drag rather than dropping it', async () => {
     const { call, close } = await connect();
     const res = await call('drag', { to_x: 9, to_y: 9, from_x: 1 });
@@ -905,13 +992,28 @@ describe('the clipboard', () => {
     // a shell truncates one at the first NUL.
     const { call, close } = await connect({ computerId: 'vm-1' });
     const before = platform.calls.length;
-    for (const text of ['', 'a\0b', 'x'.repeat(64 * 1024 + 1)]) {
+    for (const text of ['a\0b', 'x'.repeat(64 * 1024 + 1)]) {
       const res = await call('write_clipboard', { text });
       expect(res.isError, `write_clipboard accepted ${JSON.stringify(text.slice(0, 8))}`).toBe(
         true,
       );
     }
     expect(platform.calls.length).toBe(before);
+    await close();
+  });
+
+  // OPL-5323: "" is how the platform is told to CLEAR the clipboard, and the
+  // only way to — after pasting a secret, say.
+  it('sends empty text as a clear, and says so', async () => {
+    const { client, call, close } = await connect({ computerId: 'vm-1' });
+    const res = await call('write_clipboard', { text: '' });
+    expect(res.isError).toBeFalsy();
+    expect(textOf(res)).toContain('cleared');
+    const wrote = platform.calls.at(-1);
+    expect([wrote?.method, wrote?.path]).toEqual(['PUT', '/computers/vm-1/clipboard']);
+    expect(wrote?.body).toEqual({ text: '' });
+    const tool = (await client.listTools()).tools.find((t) => t.name === 'write_clipboard');
+    expect(tool?.description).toContain('Empty text ("") CLEARS the clipboard');
     await close();
   });
 

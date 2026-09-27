@@ -16,13 +16,13 @@ import { BASE, connect, fakeEvents, installFakePlatform } from './harness.js';
 // Independent expectations: changing the production mapping must change the
 // advertised contract deliberately, rather than making both sides agree silently.
 const GROUPS = {
-  account: 'get_account whoami list_api_keys',
+  account: 'get_account whoami list_api_keys list_workspaces get_workspace list_workspace_members',
   computers:
     'list_computers get_computer use_computer wait_for_computer get_desktop_url list_sizes',
   lifecycle:
     'create_computer start_computer stop_computer suspend_computer restart_computer update_computer clone_computer delete_computer move_computer list_moves get_operation list_operations wait_for_operation',
   input:
-    'screenshot click type_text press_key scroll drag move_mouse mouse_button cursor_position wait',
+    'screenshot click type_text paste_text press_key scroll drag move_mouse mouse_button cursor_position wait',
   guest:
     'exec exec_poll exec_kill open_url list_windows window_action read_clipboard write_clipboard',
   files: 'list_directory read_file write_file wait_for_file_change',
@@ -333,7 +333,10 @@ describe('tool registration filters over MCP', () => {
     });
     expect(names((await account.client.listTools()).tools)).toEqual([
       'get_account',
+      'get_workspace',
       'list_api_keys',
+      'list_workspace_members',
+      'list_workspaces',
       'whoami',
     ]);
     expect((await account.call('get_account')).isError).not.toBe(true);

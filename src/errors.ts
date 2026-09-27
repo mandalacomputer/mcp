@@ -235,9 +235,11 @@ export function idempotencyCode(err: APIError): string | undefined {
  * What to tell a model about the refusals a call's `idempotency_key` produces
  * (platform OPL-5127), or `undefined` for any other error. Ahead of the
  * `reason` advice, which for `idempotency_in_progress` says only "worth sending
- * again" and not with WHAT.
+ * again" and not with WHAT. `tool` is the lifecycle tool that was called, which
+ * decides the route after `idempotency_outcome_unknown` (see
+ * {@link resendAfterSpentKey}); without it the cautious route is given.
  */
-export function idempotencyAdvice(err: unknown): string | undefined {
+export function idempotencyAdvice(err: unknown, tool?: string): string | undefined {
   if (!(err instanceof APIError)) return undefined;
   const operation =
     record(err.body) && typeof err.body.operation_id === 'string'
@@ -247,7 +249,7 @@ export function idempotencyAdvice(err: unknown): string | undefined {
     case 'idempotency_in_progress':
       return `the same call with this idempotency_key is still running; wait and call again with the same idempotency_key for its answer${operation ? `, or read get_operation ${operation}` : ''}`;
     case 'idempotency_outcome_unknown':
-      return `the platform did not hear how the call with this idempotency_key ended. Read the computer to see whether it took effect${operation ? ` (get_operation ${operation} says what was recorded)` : ''}; do not send it again blindly, since the same key answers the same thing`;
+      return `the platform did not hear how the call with this idempotency_key ended; do not send it again with this key, since the same key answers the same thing. ${resendAfterSpentKey(tool, operation, undefined, tool ? `call ${tool} again` : undefined)}`;
     case 'idempotency_key_reused':
       return 'this idempotency_key was already used with a different request, so nothing was done; send this request with a new key, or none';
     default:
@@ -256,16 +258,183 @@ export function idempotencyAdvice(err: unknown): string | undefined {
 }
 
 /**
- * Whether a lifecycle call that failed with this may still have happened, so
- * that sending it again with its key — rather than without — is the safe retry:
- * a request that may have been received before the connection died, a `5xx`, or
- * the platform saying the keyed call is still running.
+ * The lifecycle tools whose resend after a spent key waits for the operation
+ * to be final: the ones that make a new computer or overwrite a disk. A second
+ * one is costly (a second computer, a second overwrite), and a read of the
+ * computer made straight away cannot see one that is still landing.
+ *
+ * Every other keyed tool but restart (start, stop, suspend, delete, move and
+ * update_computer) changes a computer a read shows, and doing it twice does no
+ * harm the read cannot catch, while the operation of a call whose key is spent
+ * stays `pending` for an hour however quickly the host gave up (platform
+ * OPL-5304). Holding those to the same gate would mean an hour before the start
+ * the user asked for could be sent again.
+ *
+ * restart_computer is neither: see {@link UNSEEN_BY_READ}.
+ */
+const WAITS_FOR_FINAL = new Set([
+  'create_computer',
+  'clone_computer',
+  'clone_snapshot',
+  'restore_snapshot',
+]);
+
+/**
+ * The keyed tools whose step a read of the computer cannot see: a restart is a
+ * guest reset, and the computer reads `running` before and after one, with no
+ * boot or reset time among its fields. "Read the computer, and resend if the
+ * step did not take effect" can then only ever read as "did not take effect",
+ * and a resend resets the guest a second time, losing whatever ran since the
+ * first. Nor does waiting for the operation settle it: a spent key's operation
+ * ends `failed` (`lost`) an hour later whether or not the host reset the guest.
+ * So the route is the operation's `succeeded` or `running` where it says one,
+ * and otherwise the user's say before a second restart
+ * ({@link resendAfterUnseenStep}).
+ */
+const UNSEEN_BY_READ = new Set(['restart_computer']);
+
+/** Whether a spent key's resend for `tool` is the user's call, since no read shows the step. */
+export function resendUnseenByRead(tool: string | undefined): boolean {
+  return tool !== undefined && UNSEEN_BY_READ.has(tool);
+}
+
+/** Whether a spent key's resend for `tool` waits for its operation; `true` when the tool is not known. */
+export function resendWaitsForFinal(tool: string | undefined): boolean {
+  return tool === undefined || WAITS_FOR_FINAL.has(tool);
+}
+
+/**
+ * The route to a new-key resend after a keyed call whose outcome is unknown and
+ * whose key is spent, chosen by the tool that was called: the wait for a final
+ * operation ({@link resendOnlyOnceFinal}) where a duplicate is costly and
+ * unseen, the operation and then the user ({@link resendAfterUnseenStep}) for a
+ * restart, which no read of the computer shows, and a read of the computer
+ * ({@link resendAfterRead}) everywhere else.
+ */
+export function resendAfterSpentKey(
+  tool: string | undefined,
+  operation?: string,
+  key?: string,
+  resend = 'send the call again',
+): string {
+  if (resendUnseenByRead(tool)) return resendAfterUnseenStep(operation, key, resend);
+  return resendWaitsForFinal(tool)
+    ? resendOnlyOnceFinal(operation, key, resend)
+    : resendAfterRead(operation, resend);
+}
+
+/**
+ * The route for a spent key on a restart (see {@link UNSEEN_BY_READ}). It never
+ * conditions a resend on get_computer, which reads `running` either way: the
+ * operation says the restart happened (`succeeded`) or is under way
+ * (`running`), and anything else leaves it possibly done, so a second restart
+ * is the user's call.
+ */
+export function resendAfterUnseenStep(
+  operation?: string,
+  key?: string,
+  resend = 'send the call again',
+): string {
+  const find = operation
+    ? `get_operation ${operation}`
+    : `the operation it recorded, found by list_operations with idempotency_key ${key ? `"${key}"` : 'set to this key'}`;
+  return (
+    `A restart cannot be seen in get_computer — it reads running before and after one — so do not read the computer to decide. Read ${find} instead. ` +
+    `If it succeeded, the restart happened; if it is running, it is under way, so wait_for_operation${operation ? ` ${operation}` : ''} rather than resending. ` +
+    `Otherwise (pending, failed, lost, or no operation found), treat the restart as possibly done: the guest may already have been reset. Ask the user before you ${resend} with a new idempotency_key, or none, since a second restart resets the guest again and loses whatever ran since the first`
+  );
+}
+
+/**
+ * The route for a spent key on a step a read of the computer shows: start,
+ * stop, suspend, delete, move, update_computer (not restart; see
+ * {@link UNSEEN_BY_READ}). Read, and resend with
+ * a new key or none if the step did not take effect. A named operation is read
+ * too, because `succeeded` and `running` do answer the question; `pending` does
+ * not, since a spent key's operation stays pending for an hour whatever
+ * happened, so it is named as no reason to wait.
+ */
+export function resendAfterRead(operation?: string, resend = 'send the call again'): string {
+  return (
+    `Read get_computer${operation ? ` and get_operation ${operation}` : ''} first. ` +
+    (operation
+      ? `If the operation succeeded, the step happened; if it is running, the step is under way, so wait_for_operation ${operation} rather than resending. Pending says only that the platform has not settled it yet, which can take an hour, and is no reason to wait. `
+      : '') +
+    `If get_computer shows the step did not take effect, ${resend} with a new idempotency_key, or none — there is no need to wait for the operation to be final first`
+  );
+}
+
+/**
+ * The route to a new-key resend for the tools that make a new computer or
+ * overwrite a disk (see {@link WAITS_FOR_FINAL}) after a keyed call whose
+ * outcome is unknown and whose key is spent: a `5xx` the platform answered, or
+ * `idempotency_outcome_unknown` (platform OPL-5304).
+ *
+ * The condition has to be one a read can decide. The platform keeps such a
+ * call's operation `pending` for up to an hour, because its host may still be
+ * carrying the call out, so a read of the computer made straight away can show
+ * no effect for a create, clone or restore that then lands; a resend with a new
+ * key at that moment is not deduplicated and does the step twice. So the first
+ * read is the operation, and a resend waits until it is final. `key`, when
+ * known, names how to find an operation the error did not name; `resend` is
+ * the verb phrase for the resend, e.g. `call start_computer again`.
+ */
+export function resendOnlyOnceFinal(
+  operation?: string,
+  key?: string,
+  resend = 'send the call again',
+): string {
+  const find = operation
+    ? `get_operation ${operation} (wait_for_operation ${operation} waits on it)`
+    : `the operation it recorded, found by list_operations with idempotency_key ${key ? `"${key}"` : 'set to this key'}`;
+  return (
+    `Read ${find} first. While it is pending or running the call may still be carried out, so wait for it to be final — wait_for_operation, again if that wait runs out — and do NOT resend it meanwhile, with any key. ` +
+    `If it succeeded, the step happened. Only once it is final as failed (error.code lost, for one) or no longer found, AND get_computer (list_computers after a create or a clone) shows the step did not take effect, ${resend} with a new idempotency_key, or none. ` +
+    'If no operation is found at all, a slow create or clone may still land: read the computer again after a few minutes before resending'
+  );
+}
+
+/**
+ * Whether a lifecycle call that failed with this may still have happened, and
+ * its key is still the safe way to send it again: a request that may have been
+ * received before the connection died, the platform saying the keyed call is
+ * still running, or a `5xx` that the platform itself never answered (see
+ * {@link platformAnsweredFailure}).
+ *
+ * NOT a `5xx` the platform answered. The platform settles a keyed call it
+ * answered outside `2xx` and `4xx` as lost (OPL-5304), so the same key sent
+ * again can only be answered `409 idempotency_outcome_unknown` for the rest of
+ * its 24 hours. Advising that resend is advising a retry that cannot succeed;
+ * `keyedFailure` in tools/operations.ts tells that caller to read first instead.
  */
 export function keyedOutcomeUnknown(err: unknown): boolean {
   return (
     err instanceof ConnectivityInterruptedError ||
     (err instanceof APIError &&
-      (err.status >= 500 || idempotencyCode(err) === 'idempotency_in_progress'))
+      (idempotencyCode(err) === 'idempotency_in_progress' ||
+        (err.status >= 500 && !platformAnsweredFailure(err))))
+  );
+}
+
+/**
+ * Whether a `5xx` came from the platform itself rather than from a hop in
+ * front of it.
+ *
+ * The platform answers every error with a JSON object. A proxy that gave up
+ * (a Cloudflare or nginx `502`/`504`, or an edge-only `520`-`526`) answers
+ * with an HTML page or nothing, which the code that settles the key did not
+ * write, so the same key sent again answers the call's own outcome or says it
+ * is still running. The `520`-`526` range is an edge's own vocabulary whatever
+ * its body says. Should one of these turn out to have been settled as lost
+ * after all, the resend is answered `idempotency_outcome_unknown`, whose own
+ * advice says what to do next; nothing is done twice either way.
+ */
+export function platformAnsweredFailure(err: unknown): boolean {
+  return (
+    err instanceof APIError &&
+    err.status >= 500 &&
+    !(err.status >= 520 && err.status <= 526) &&
+    record(err.body)
   );
 }
 

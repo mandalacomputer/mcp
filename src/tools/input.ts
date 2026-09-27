@@ -211,6 +211,43 @@ const shapeNote = (width: number | undefined, s: Shape): string | undefined => {
   return `(the region ${at} of the screen, scaled by ${f}: to click on something in this picture, divide its position by ${f}, then add ${r.x} to x and ${r.y} to y)`;
 };
 
+/**
+ * The pixel size a JPEG declares in its start-of-frame header, or undefined
+ * when none can be read. Walks the marker segments rather than trusting a
+ * fixed offset, since EXIF and JFIF headers vary in length.
+ */
+export function jpegSize(bytes: Uint8Array): { width: number; height: number } | undefined {
+  if (bytes.length < 4 || bytes[0] !== 0xff || bytes[1] !== 0xd8) return undefined;
+  let i = 2;
+  while (i + 4 <= bytes.length) {
+    if (bytes[i] !== 0xff) return undefined;
+    const marker = bytes[i + 1];
+    // Fill bytes before a marker.
+    if (marker === 0xff) {
+      i++;
+      continue;
+    }
+    // Markers with no length: TEM and RSTn.
+    if (marker === 0x01 || (marker >= 0xd0 && marker <= 0xd7)) {
+      i += 2;
+      continue;
+    }
+    const length = (bytes[i + 2] << 8) | bytes[i + 3];
+    if (length < 2) return undefined;
+    // SOF0-SOF15, less DHT (C4), JPG (C8) and DAC (CC).
+    if (marker >= 0xc0 && marker <= 0xcf && marker !== 0xc4 && marker !== 0xc8 && marker !== 0xcc) {
+      if (i + 9 > bytes.length) return undefined;
+      const height = (bytes[i + 5] << 8) | bytes[i + 6];
+      const width = (bytes[i + 7] << 8) | bytes[i + 8];
+      return width && height ? { width, height } : undefined;
+    }
+    // Start of scan: the frame header comes before it or not at all.
+    if (marker === 0xda) return undefined;
+    i += 2 + length;
+  }
+  return undefined;
+}
+
 /** The longest text one `type` takes, in characters. */
 export const TYPE_TEXT_MAX_CHARS = 400;
 
@@ -236,7 +273,7 @@ export const registerInput: Registrar = (server, session) => {
     {
       title: 'Screenshot the desktop',
       description:
-        'A picture of what is on the screen right now, returned as an image. Coordinates in this picture are the ones click, drag and scroll take.',
+        'A picture of what is on the screen right now, returned as an image. Coordinates in this picture are the ones click, drag and scroll take — except a saved frame of a suspended computer (served with fresh: false), which is labelled as one: a downscaled picture of the screen as it was, not in click coordinates.',
       inputSchema: {
         ...idArg,
         width: z
@@ -393,6 +430,19 @@ export const registerInput: Registrar = (server, session) => {
             `That screenshot came back as ${shot.contentType}, not one of the image types this can hand over (${[...INLINE_IMAGE_TYPES].join(', ')}) — ${shot.bytes.length} bytes. Something between here and the guest answered in place of the capture; nothing was returned rather than passing it off as a picture.`,
           );
         }
+        // A suspended computer answers fresh: false with the JPEG it saved
+        // when it suspended (OPL-5323), labelled X-GC-Frame: suspended. It is
+        // downscaled and old, so neither the screen size nor a shape note
+        // describes it, and saying "Screen is WxH" beside it invites a click
+        // at coordinates that mean nothing.
+        if (shot.frame === 'suspended') {
+          const size = jpegSize(shot.bytes);
+          return image(
+            shot.bytes,
+            shot.contentType,
+            `A SAVED FRAME of suspended computer ${id}${size ? `, ${size.width}x${size.height} pixels` : ''}: the screen as it was when it suspended, not the live screen, and not in the coordinates click takes. start_computer resumes it; screenshot again after that before pointing at anything.`,
+          );
+        }
         const shaped = shapeNote(width, shape);
         const scaled = shaped ? ` ${shaped}` : '';
         // Only for the bound computer. session.screen is definitionally the
@@ -445,7 +495,7 @@ export const registerInput: Registrar = (server, session) => {
     {
       title: 'Type text',
       description:
-        'Type a string into whatever has keyboard focus: literal text, 1 to 400 characters. For Enter, Tab or a shortcut, use press_key. Plain ASCII is typed as US-layout key events, about 12 ms a character, so 400 characters take about five seconds. Text containing any other character — accents, CJK, emoji — is typed WHOLE and in order by one guest helper: its ASCII as the same key presses and the rest by GTK Unicode composition. That works in Chromium (GTK3) and Xfce Terminal on a Linux X11 desktop; Firefox, GTK4 apps, native Wayland apps and Windows are unsupported for non-ASCII text, and such text is checked and refused before any key is pressed. Tab and newline are sent as keys and CRLF as one Return; a bare CR and other control characters are refused. The answer says which way it was typed. It confirms the keys were sent, not that the application accepted them: check with a screenshot before relying on it.',
+        'Type a string into whatever has keyboard focus: literal text, 1 to 400 characters. For Enter, Tab or a shortcut, use press_key. Plain ASCII is typed as US-layout key events, about 12 ms a character, so 400 characters take about five seconds. Text containing any other character — accents, CJK, emoji — is typed WHOLE and in order by one guest helper: its ASCII as the same key presses and the rest by GTK Unicode composition. That works in Chromium (GTK3) and Xfce Terminal on a Linux X11 desktop; Firefox, GTK4 apps, native Wayland apps and Windows are unsupported for non-ASCII text, and such text is checked and refused before any key is pressed. Tab and newline are sent as keys and CRLF as one Return; a bare CR and other control characters are refused. The answer says which way it was typed. It confirms the keys were sent, not that the application accepted them: check with a screenshot before relying on it. For longer text, or non-ASCII text in an application this cannot type into, paste_text puts it on the clipboard and pastes it in one step.',
       inputSchema: {
         ...idArg,
         text: z
@@ -483,6 +533,34 @@ export const registerInput: Registrar = (server, session) => {
             : '';
         return said(
           `Typed ${typed} character(s)${how}. That confirms the keys were sent, not that the application accepted the text: check with a screenshot before relying on it.`,
+        );
+      }),
+  );
+
+  server.registerTool(
+    'paste_text',
+    {
+      title: 'Paste text',
+      description: `Put text on the desktop clipboard and press the paste shortcut, as one step: the fast way to insert up to ${P.MAX_PASTE_BYTES} bytes of UTF-8, including accents, CJK and emoji, into whatever has focus. Linux desktops only; Windows and a guest without working clipboard support are refused. The paste REPLACES the clipboard and leaves the text there — after pasting a secret, clear it with write_clipboard and text "". A success means the clipboard write and the shortcut were delivered, not that the application inserted the text (a paste-disabled field ignores it): check with a screenshot. An interrupted call may already have pasted, so look before sending it again, and do not fall back to type_text without looking.`,
+      inputSchema: {
+        ...idArg,
+        text: z
+          .string()
+          .min(1, 'text must not be empty')
+          .describe(`The text to paste: 1 to ${P.MAX_PASTE_BYTES} bytes of UTF-8, no NUL.`),
+        shortcut: z
+          .enum(P.PASTE_SHORTCUTS)
+          .optional()
+          .describe(
+            '"ctrl+v" (the default) or "ctrl+shift+v", which terminals need. Shift+Insert is not offered: it can paste the separate primary selection instead.',
+          ),
+      },
+    },
+    ({ computer_id, text, shortcut }, extra) =>
+      guarded(async () => {
+        await post(computer_id, P.pasteBody(text, shortcut), extra.signal);
+        return said(
+          `Pasted ${[...text].length} character(s) with ${shortcut ?? 'ctrl+v'}. The text is still on the clipboard. That confirms the paste was sent, not that the application accepted it: check with a screenshot before relying on it.`,
         );
       }),
   );
@@ -548,7 +626,7 @@ export const registerInput: Registrar = (server, session) => {
     {
       title: 'Drag',
       description:
-        'Press, move and release as one gesture — for selecting text, moving a file, or dragging a slider. Not the same as two clicks.',
+        'Press, move and release as one gesture — for selecting text, moving a file, or dragging a slider. Not the same as two clicks. modifiers holds keys down for the whole gesture, e.g. ["shift"] to extend a selection.',
       inputSchema: {
         ...idArg,
         to_x: z.number().int(),
@@ -561,13 +639,15 @@ export const registerInput: Registrar = (server, session) => {
             'Where to start. Both from_x and from_y, or neither — half of an origin is refused rather than ignored.',
           ),
         from_y: z.number().int().optional(),
+        modifiers,
       },
     },
-    ({ computer_id, to_x, to_y, from_x, from_y }, extra) =>
+    ({ computer_id, to_x, to_y, from_x, from_y, modifiers: mods }, extra) =>
       guarded(async () => {
-        await post(computer_id, P.dragBody(to_x, to_y, from_x, from_y), extra.signal);
+        await post(computer_id, P.dragBody(to_x, to_y, from_x, from_y, mods ?? []), extra.signal);
         const from = from_x === undefined ? 'the pointer' : `${from_x},${from_y}`;
-        return said(`Dragged from ${from} to ${to_x},${to_y}.`);
+        const held = mods?.length ? ` holding ${mods.join('+')}` : '';
+        return said(`Dragged from ${from} to ${to_x},${to_y}${held}.`);
       }),
   );
 
