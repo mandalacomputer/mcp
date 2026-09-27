@@ -1001,3 +1001,16 @@ describe('what the codex adversarial review found', () => {
     await close();
   });
 });
+
+// OPL-5323: two publish-only refusals check_template cannot see.
+describe('check_template description', () => {
+  it('names the disk floor and the build-family refusals publish can still make', async () => {
+    const { client, close } = await connect();
+    const tool = (await client.listTools()).tools.find((t) => t.name === 'check_template');
+    await close();
+    expect(tool?.description).toContain(
+      'spec.hardware.disk_gb below the disk floor of its family or parent template (400)',
+    );
+    expect(tool?.description).toContain("build into a family that is not your account's (403)");
+  });
+});

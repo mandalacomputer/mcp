@@ -2,12 +2,14 @@ import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
 import { IDEMPOTENCY_KEY_PATTERN } from '../api.js';
 import {
+  type APIError,
   CancelledError,
   idempotencyAdvice,
   isTransientForPoll,
   keyedOutcomeUnknown,
+  platformAnsweredFailure,
 } from '../errors.js';
-import { failed, guarded, refused, said } from '../format.js';
+import { failed, guarded, operationIdOf, refused, said } from '../format.js';
 import * as P from '../paths.js';
 import { heartbeat, POLL_MS, pollDelay, sleep } from '../poll.js';
 import { label, metadata, metadataCall } from './directory.js';
@@ -54,15 +56,22 @@ export const idempotencyKeyArg = z
   )
   .optional()
   .describe(
-    "Optional. Omit it on a first attempt: a fresh key is sent for you, and an answer that is lost names it. Pass the key such an answer named to send the SAME call again without it being done twice — the platform answers with the first call's result, or says it is still running. Keys last 24 hours; the same key with different arguments is refused.",
+    "Optional. Omit it on a first attempt: a fresh key is sent for you, and an answer that is lost names it. Pass the key such an answer named to send the SAME call again without it being done twice — the platform answers with the first call's result, or says it is still running. After a 5xx the platform answered, or idempotency_outcome_unknown, the key is spent: read get_computer or get_operation first, since resending with that key answers idempotency_outcome_unknown, and send the call with a new key (or none) only if the step did not happen. Keys last 24 hours; the same key with different arguments is refused.",
   );
 
 /**
  * The answer to a lifecycle tool call that failed, with what its key means.
  *
  * The platform's own `idempotency_*` refusals get their sentence instead of the
- * generic `reason` advice, and a failure whose outcome is unknown ENDS with the
- * one retry that cannot do the step twice — the same tool, with the same key.
+ * generic `reason` advice. A failure whose outcome is unknown ENDS with the
+ * retry that cannot do the step twice, and which one depends on who answered:
+ *
+ * - The answer never arrived, the keyed call is still running, or a proxy in
+ *   front of the platform answered: the same tool, with the same key.
+ * - The platform itself answered a `5xx`: it has settled that key as lost
+ *   (OPL-5304), so the same key can only be answered
+ *   `idempotency_outcome_unknown`. Read first, then resend with a new key or
+ *   none, and only if the step did not happen.
  */
 export function keyedFailure(
   err: unknown,
@@ -78,6 +87,11 @@ export function keyedFailure(
   if (advice) text += `\n\nAbout its idempotency_key: ${advice}.`;
   if (keyedOutcomeUnknown(err)) {
     text += `\n\nTo retry without risking a second ${what}, call ${tool} again with idempotency_key "${key}".`;
+  } else if (platformAnsweredFailure(err)) {
+    const op = operationIdOf((err as APIError).body);
+    text +=
+      `\n\nThe platform answered this itself, so whether it took effect is unknown, and it has settled idempotency_key "${key}": resending with that key will answer idempotency_outcome_unknown, not do it. ` +
+      `Read first — get_computer (list_computers after a create or a clone)${op ? `, or get_operation ${op}` : ''} — and only if it did not take effect, call ${tool} again with a new idempotency_key, or none, so there is no second ${what}.`;
   }
   return { ...result, content: [{ ...first, text }, ...rest] };
 }

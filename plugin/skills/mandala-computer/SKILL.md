@@ -367,9 +367,16 @@ says what to do. The judgement it cannot make for you:
   restart or a reboot inside the guest. It clears; send the call again in a
   moment. A guest agent still silent after that window answers 502 instead.
 - **502, 504 and a dropped connection mean the outcome is unknown, not that
-  the request never left.** Never replay a *create* on one of those — the
-  computer may exist and be billable. `list_computers` first, and bind what
-  you find. A read, a `wait_for_computer`, a `screenshot` can simply be sent
+  the request never left.** A lifecycle tool's answer then names the
+  `idempotency_key` the call went with, and says which of two cases it is.
+  After a dropped connection, a proxy that gave up, or
+  `idempotency_in_progress`: send the same call again with that key — the
+  platform answers with the first call's result, so a create cannot build a
+  second computer. After a `5xx` the platform answered itself, or
+  `idempotency_outcome_unknown`: the key is spent, so read the computer
+  (`get_computer`, or `list_computers` after a create) or `get_operation`
+  first, and only if the step did not happen send it again with a new key, or
+  none. A read, a `wait_for_computer`, a `screenshot` can simply be sent
   again.
 - **A 503 on a change is the same: it may or may not have happened.** A read
   answered 503 can be sent again shortly. A create, a command, a clone or a

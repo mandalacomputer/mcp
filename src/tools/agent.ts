@@ -35,6 +35,13 @@ export const registerAgent: Registrar = (server, session) => {
           .describe('Which computer. Defaults to the one selected with use_computer.'),
         prompt: z.string().describe('The task, in plain language.'),
         system: z.string().optional().describe('Standing instructions carried into the run.'),
+        model: z
+          .string()
+          .refine((v) => v.trim().length > 0, 'model must not be blank')
+          .optional()
+          .describe(
+            'An Anthropic model id to run with. Omit it for the one the platform picks. The configured key must be able to use it; a model it cannot use fails the run.',
+          ),
         max_steps: z
           .number()
           .int()
@@ -47,7 +54,7 @@ export const registerAgent: Registrar = (server, session) => {
       },
       annotations: { openWorldHint: true },
     },
-    ({ computer_id, prompt, system, max_steps }, extra) =>
+    ({ computer_id, prompt, system, model, max_steps }, extra) =>
       guarded(async () => {
         const id = session.resolve(computer_id);
         const steps: string[] = [];
@@ -58,7 +65,7 @@ export const registerAgent: Registrar = (server, session) => {
         const progressToken = extra._meta?.progressToken;
 
         for await (const ev of session.api.sse('POST', P.computerAction(id, 'agent'), {
-          body: P.agentBody({ prompt, system, max_steps, stream: true }),
+          body: P.agentBody({ prompt, system, model, max_steps, stream: true }),
           headers: { [MODEL_KEY_HEADER]: session.modelKey as string },
           signal: extra.signal,
         })) {

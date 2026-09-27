@@ -226,6 +226,40 @@ describe('create_computer with browser_proxy', () => {
   });
 });
 
+// OPL-5145: null on a create is how to decline a template's default proxy.
+describe('create_computer with browser_proxy: null', () => {
+  it('sends null, rather than refusing it or leaving it out', async () => {
+    await platform(
+      () => [201, box()],
+      async (seen) => {
+        const { call, close } = await connect();
+        const r = await call('create_computer', {
+          template: 'acc-1/devbox@1.0.0',
+          browser_proxy: null,
+        });
+        await close();
+        expect(r.isError).toBeFalsy();
+        expect(seen[0]).toMatchObject({ method: 'POST', path: '/computers' });
+        expect(seen[0]?.body).toEqual({
+          template: 'acc-1/devbox@1.0.0',
+          browser_proxy: null,
+          start: true,
+        });
+      },
+    );
+  });
+
+  it("says a template's default proxy is inherited unless null or another is sent", async () => {
+    const { client, close } = await connect();
+    const tool = (await client.listTools()).tools.find((t) => t.name === 'create_computer');
+    await close();
+    const properties = (tool?.inputSchema.properties ?? {}) as Record<string, unknown>;
+    const proxy = JSON.stringify(properties.browser_proxy);
+    expect(proxy).toContain('null to create the computer with none');
+    expect(proxy).toContain('"null"');
+  });
+});
+
 describe('wait_for_computer on a computer whose browser proxy is being applied', () => {
   it('waits, with "guest", until its browsers have it', async () => {
     let gets = 0;

@@ -247,7 +247,7 @@ export function idempotencyAdvice(err: unknown): string | undefined {
     case 'idempotency_in_progress':
       return `the same call with this idempotency_key is still running; wait and call again with the same idempotency_key for its answer${operation ? `, or read get_operation ${operation}` : ''}`;
     case 'idempotency_outcome_unknown':
-      return `the platform did not hear how the call with this idempotency_key ended. Read the computer to see whether it took effect${operation ? ` (get_operation ${operation} says what was recorded)` : ''}; do not send it again blindly, since the same key answers the same thing`;
+      return `the platform did not hear how the call with this idempotency_key ended. Read the computer to see whether it took effect${operation ? ` (get_operation ${operation} says what was recorded)` : ''}; do not send it again with this key, since the same key answers the same thing. If that read shows the step did not happen, send the call again with a new idempotency_key, or none`;
     case 'idempotency_key_reused':
       return 'this idempotency_key was already used with a different request, so nothing was done; send this request with a new key, or none';
     default:
@@ -256,16 +256,46 @@ export function idempotencyAdvice(err: unknown): string | undefined {
 }
 
 /**
- * Whether a lifecycle call that failed with this may still have happened, so
- * that sending it again with its key — rather than without — is the safe retry:
- * a request that may have been received before the connection died, a `5xx`, or
- * the platform saying the keyed call is still running.
+ * Whether a lifecycle call that failed with this may still have happened, and
+ * its key is still the safe way to send it again: a request that may have been
+ * received before the connection died, the platform saying the keyed call is
+ * still running, or a `5xx` that the platform itself never answered (see
+ * {@link platformAnsweredFailure}).
+ *
+ * NOT a `5xx` the platform answered. The platform settles a keyed call it
+ * answered outside `2xx` and `4xx` as lost (OPL-5304), so the same key sent
+ * again can only be answered `409 idempotency_outcome_unknown` for the rest of
+ * its 24 hours. Advising that resend is advising a retry that cannot succeed;
+ * `keyedFailure` in tools/operations.ts tells that caller to read first instead.
  */
 export function keyedOutcomeUnknown(err: unknown): boolean {
   return (
     err instanceof ConnectivityInterruptedError ||
     (err instanceof APIError &&
-      (err.status >= 500 || idempotencyCode(err) === 'idempotency_in_progress'))
+      (idempotencyCode(err) === 'idempotency_in_progress' ||
+        (err.status >= 500 && !platformAnsweredFailure(err))))
+  );
+}
+
+/**
+ * Whether a `5xx` came from the platform itself rather than from a hop in
+ * front of it.
+ *
+ * The platform answers every error with a JSON object. A proxy that gave up
+ * (a Cloudflare or nginx `502`/`504`, or an edge-only `520`-`526`) answers
+ * with an HTML page or nothing, which the code that settles the key did not
+ * write, so the same key sent again answers the call's own outcome or says it
+ * is still running. The `520`-`526` range is an edge's own vocabulary whatever
+ * its body says. Should one of these turn out to have been settled as lost
+ * after all, the resend is answered `idempotency_outcome_unknown`, whose own
+ * advice says what to do next; nothing is done twice either way.
+ */
+export function platformAnsweredFailure(err: unknown): boolean {
+  return (
+    err instanceof APIError &&
+    err.status >= 500 &&
+    !(err.status >= 520 && err.status <= 526) &&
+    record(err.body)
   );
 }
 

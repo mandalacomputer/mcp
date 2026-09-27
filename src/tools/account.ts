@@ -91,6 +91,9 @@ const apiKey = z.object({
   workspace_id: z.string().nullable(),
   workspace_name: z.string().nullable(),
   manage_keys: z.boolean(),
+  // The key that minted this one over the API, or null for a key minted from
+  // the dashboard (OPL-5261). Kept after that key is revoked.
+  minted_by_key_id: z.string().nullable(),
 });
 // email and plan are null, and both names too, when the key is confined to a
 // workspace: the platform does not tell a key that may be in an end customer's
@@ -107,6 +110,23 @@ const whoami = z.object({
   workspace: z.object({ id: label, name: z.string(), created_at: z.string() }).nullable(),
   key: apiKey.nullable(),
 });
+
+// The account's workspaces and who reaches them (platform OPL-5057), read
+// only, projected to the public fields.
+const workspace = z.object({ id: label, name: z.string(), created_at: z.string() });
+const workspaceMember = z.object({
+  user_id: label,
+  email: z.string(),
+  name: z.string().nullable(),
+  role: label,
+  accepted_at: z.string(),
+  suspended: z.boolean(),
+});
+
+const workspaceIdArg = z
+  .string()
+  .min(1)
+  .describe("The workspace id (wsp-…), from list_workspaces or a computer's workspace_id.");
 
 /**
  * Minting and revoking keys are deliberately NOT tools (OPL-5053), though the
@@ -156,7 +176,7 @@ export const registerAccount: Registrar = (server, session) => {
     {
       title: 'List your API keys',
       description:
-        'The API keys of the person this server\'s key belongs to, on the account it acts on, newest first: id, name, prefix (display only), scope, when last used, and manage_keys. Never a raw key. Needs this server\'s key to have the "Manage keys" permission, which only a person can turn on, in the dashboard; without it the answer is a 403 that says so — relay it rather than retrying. A key confined to a workspace sees only keys confined to that workspace. Minting and revoking keys are not available here: they are done in the dashboard or with the mandala CLI.',
+        'The API keys of the person this server\'s key belongs to, on the account it acts on, newest first: id, name, prefix (display only), scope, when last used, manage_keys, and minted_by_key_id: the key that minted this one (null for a key minted from the dashboard); revoking a key does not revoke the keys it minted. Never a raw key. Needs this server\'s key to have the "Manage keys" permission, which only a person can turn on, in the dashboard; without it the answer is a 403 that says so — relay it rather than retrying. A key confined to a workspace sees only keys confined to that workspace. Minting and revoking keys are not available here: they are done in the dashboard or with the mandala CLI.',
       inputSchema: z.object({}).strict(),
       annotations: readAnnotations,
     },
@@ -170,6 +190,75 @@ export const registerAccount: Registrar = (server, session) => {
           data.length
             ? `${data.length} API key${data.length === 1 ? '' : 's'} this key can reach, newest first. None of them is shown in full; revoking one is done by a person, in the dashboard or with the mandala CLI.`
             : 'No API keys this key can reach.',
+          data,
+        );
+      }),
+  );
+
+  server.registerTool(
+    'list_workspaces',
+    {
+      title: 'List workspaces',
+      description:
+        "The account's workspaces, oldest first: id, name and created_at. A workspace partitions the account's computers: a key confined to one reaches that workspace's computers only, and a computer's workspace_id names the one it is in. A key confined to a workspace lists only that one. Read only: workspaces are created, renamed and deleted in the dashboard. No arguments.",
+      inputSchema: z.object({}).strict(),
+      annotations: readAnnotations,
+    },
+    (_args, extra) =>
+      metadataCall(async () => {
+        const data = metadata(
+          z.array(workspace),
+          await session.api.json('GET', P.WORKSPACES, { signal: extra.signal }),
+        );
+        return said(
+          data.length
+            ? `${data.length} workspace${data.length === 1 ? '' : 's'}, oldest first.`
+            : 'No workspaces.',
+          data,
+        );
+      }),
+  );
+
+  server.registerTool(
+    'get_workspace',
+    {
+      title: 'Read a workspace',
+      description:
+        "One workspace: id, name and created_at. An id this key cannot see is not found, the same as one that does not exist — another account's, any workspace but its own for a key confined to one, and a deleted workspace a computer's workspace_id can still name.",
+      inputSchema: z.object({ workspace_id: workspaceIdArg }).strict(),
+      annotations: readAnnotations,
+    },
+    ({ workspace_id }, extra) =>
+      metadataCall(async () => {
+        const data = metadata(
+          workspace,
+          await session.api.json('GET', P.workspace(workspace_id), { signal: extra.signal }),
+        );
+        return said(`Workspace ${data.name} (${data.id}).`, data);
+      }),
+  );
+
+  server.registerTool(
+    'list_workspace_members',
+    {
+      title: "List a workspace's members",
+      description:
+        "The people who reach a workspace, oldest member first: user_id, email, name (null when unset), role, accepted_at and suspended. Workspaces do not divide people — everybody on the account reaches every workspace at their account role — so this is the account's accepted members; invitations not yet accepted are left out. A key confined to a workspace is refused with 403, because the list is the whole account's: relay that rather than retrying, and use an account-wide key.",
+      inputSchema: z.object({ workspace_id: workspaceIdArg }).strict(),
+      annotations: readAnnotations,
+    },
+    ({ workspace_id }, extra) =>
+      metadataCall(async () => {
+        const data = metadata(
+          z.array(workspaceMember),
+          await session.api.json('GET', P.workspaceMembers(workspace_id), {
+            signal: extra.signal,
+          }),
+        );
+        return said(
+          data.length
+            ? `${data.length} member${data.length === 1 ? '' : 's'} reach this workspace, oldest first.`
+            : 'No members reach this workspace.',
           data,
         );
       }),

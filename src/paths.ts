@@ -78,11 +78,20 @@ export const API_KEYS = 'api-keys';
  * ended. Read only.
  */
 export const OPERATIONS = 'operations';
+/**
+ * The account's workspaces (platform OPL-5057), read only: they are created,
+ * renamed and deleted in the dashboard.
+ */
+export const WORKSPACES = 'workspaces';
 
 /** One SSH key. The id is `sshk-`-shaped. */
 export const sshKey = (id: string) => `${SSH_KEYS}/${segment('key_id', id)}`;
 /** One lifecycle operation. The id is `op_`-shaped. */
 export const operation = (id: string) => `${OPERATIONS}/${segment('operation_id', id)}`;
+/** One workspace. The id is `wsp-`-shaped. */
+export const workspace = (id: string) => `${WORKSPACES}/${segment('workspace_id', id)}`;
+/** The people who reach a workspace: the account's accepted members. */
+export const workspaceMembers = (id: string) => `${workspace(id)}/members`;
 
 /**
  * The account's secret store (OPL-4984). Account-scoped, or one workspace's
@@ -297,8 +306,16 @@ export function createBody(args: {
   start?: boolean;
   /** Already in the wire spelling, and checked by the tool's schema. */
   secrets?: { secret_id: string; env?: string; file?: string }[];
-  /** Checked for shape by the tool's schema; the rules on values are the platform's. */
-  browser_proxy?: { server: string; bypass?: string[]; credentials_secret_id?: string | null };
+  /**
+   * Checked for shape by the tool's schema; the rules on values are the platform's.
+   * `null` is sent as `null`: a create from a template that carries a default
+   * proxy gets none, rather than the template's.
+   */
+  browser_proxy?: {
+    server: string;
+    bypass?: string[];
+    credentials_secret_id?: string | null;
+  } | null;
   /** Checked for shape by the tool's schema; the rules on values are the platform's. */
   egress_proxy?: { server: string; credentials_secret_id?: string | null };
 }): Json {
@@ -557,12 +574,20 @@ export function clickBody(
  * different region: the worst shape a mistake can take, because nothing reports
  * it.
  */
-export function dragBody(toX: number, toY: number, fromX?: number, fromY?: number): Json {
+export function dragBody(
+  toX: number,
+  toY: number,
+  fromX?: number,
+  fromY?: number,
+  modifiers: string[] = [],
+): Json {
   if ((fromX === undefined) !== (fromY === undefined)) {
     throw new Error('give both from_x and from_y, or neither');
   }
   const body: Json = { action: 'left_click_drag', coordinate: [toX, toY] };
   if (fromX !== undefined && fromY !== undefined) body.start_coordinate = [fromX, fromY];
+  // The held keys, spelt as a click's are: shift-drag extends a selection.
+  if (modifiers.length) body.text = modifiers.join(MODIFIER_JOIN);
   return body;
 }
 
@@ -792,9 +817,11 @@ export function hasUnpairedSurrogate(text: string): boolean {
  * The cap is counted in UTF-8 BYTES rather than characters. An emoji is four of
  * them, so a `text.length` check would pass four times the legal payload to an
  * execve that answers E2BIG.
+ *
+ * EMPTY text is sent, not refused: the platform reads `""` as "clear the
+ * clipboard", and it is the only way to say that — after pasting a secret, say.
  */
 export function clipboardBody(text: string): Json {
-  if (!text) throw new Error('there is no text to put on the clipboard');
   if (text.includes('\0')) {
     throw new Error('that text has a NUL byte in it, which a clipboard cannot carry');
   }
@@ -806,6 +833,34 @@ export function clipboardBody(text: string): Json {
     );
   }
   return { text };
+}
+
+/** The most text one `paste` takes, in UTF-8 bytes (the platform's own cap). */
+export const MAX_PASTE_BYTES = 8192;
+
+/** The two shortcuts a paste may send; Shift+Insert is the platform's refusal. */
+export const PASTE_SHORTCUTS = ['ctrl+v', 'ctrl+shift+v'] as const;
+
+/**
+ * The body for a paste: the text goes on the clipboard and the shortcut is
+ * pressed. Checked the way a clipboard write is, against the paste's own cap,
+ * and never empty — an empty paste is a 400, not a clear.
+ */
+export function pasteBody(text: string, shortcut?: (typeof PASTE_SHORTCUTS)[number]): Json {
+  if (!text) throw new Error('there is no text to paste');
+  if (text.includes('\0')) {
+    throw new Error('that text has a NUL byte in it, which a clipboard cannot carry');
+  }
+  if (hasUnpairedSurrogate(text)) throw new Error(surrogateRefusal);
+  const bytes = new TextEncoder().encode(text).length;
+  if (bytes > MAX_PASTE_BYTES) {
+    throw new Error(
+      `that is ${bytes} bytes of text; a paste takes at most ${MAX_PASTE_BYTES}. Paste it in pieces, or use write_file`,
+    );
+  }
+  return shortcut === undefined
+    ? { action: 'paste', text }
+    : { action: 'paste', text, key: shortcut };
 }
 
 /**
@@ -844,6 +899,8 @@ export function agentBody(args: {
   prompt: string;
   max_steps?: number;
   system?: string;
+  /** An Anthropic model id; the platform picks one when it is left out. */
+  model?: string;
   stream: boolean;
 }): Json {
   return omitUndefined({ ...args } as Json);

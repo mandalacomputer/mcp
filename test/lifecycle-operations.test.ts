@@ -294,3 +294,69 @@ describe('operation_id on the lifecycle tools', () => {
     });
   });
 });
+
+// OPL-5323: delete records an operation (kind `delete`) like the others.
+describe('delete_computer and its operation', () => {
+  it('says the operation its answer carried, and keeps it in the structured answer', async () => {
+    answer((m, p) => m === 'DELETE' && p === '/computers/vm-1', {
+      ok: true,
+      operation_id: 'op_delete000000000000000000',
+    });
+    const result = await (await open()).call('delete_computer', {
+      computer_id: 'vm-1',
+      confirm: true,
+    });
+    expect(result.isError).not.toBe(true);
+    expect(text(result)).toMatch(/^Deleted vm-1 \(operation op_delete000000000000000000\)\./);
+    expect(data(result)).toEqual({
+      computer_id: 'vm-1',
+      operation_id: 'op_delete000000000000000000',
+    });
+  });
+
+  it('says nothing about an operation when the answer carried none', async () => {
+    answer((m, p) => m === 'DELETE' && p === '/computers/vm-1', { ok: true });
+    const result = await (await open()).call('delete_computer', {
+      computer_id: 'vm-1',
+      confirm: true,
+    });
+    expect(text(result)).toMatch(/^Deleted vm-1\. Its disk is gone/);
+    expect(text(result)).not.toContain('operation');
+  });
+});
+
+// OPL-5323: resume_only, which succeeds without booting a stopped computer
+// with no saved session.
+describe('start_computer with resume_only', () => {
+  it('sends resume_only=true and says the answer does not mean it is running', async () => {
+    const connection = await open();
+    const result = await connection.call('start_computer', {
+      computer_id: 'vm-1',
+      resume_only: true,
+    });
+    expect(result.isError).not.toBe(true);
+    const start = platform.calls.find((c) => c.path === '/computers/vm-1/start');
+    expect(start?.query.get('resume_only')).toBe('true');
+    expect(text(result)).toContain('without being booted');
+  });
+
+  it('omits it otherwise, and only start_computer takes it', async () => {
+    const connection = await open();
+    await connection.call('start_computer', { computer_id: 'vm-1', resume_only: false });
+    await connection.call('start_computer', { computer_id: 'vm-1' });
+    const starts = platform.calls.filter((c) => c.path === '/computers/vm-1/start');
+    expect(starts.map((c) => c.query.has('resume_only'))).toEqual([false, false]);
+    const tools = (await connection.client.listTools()).tools;
+    const props = (name: string) =>
+      Object.keys(
+        (tools.find((t) => t.name === name)?.inputSchema.properties ?? {}) as Record<
+          string,
+          unknown
+        >,
+      );
+    expect(props('start_computer')).toContain('resume_only');
+    for (const other of ['suspend_computer', 'restart_computer', 'stop_computer']) {
+      expect(props(other)).not.toContain('resume_only');
+    }
+  });
+});

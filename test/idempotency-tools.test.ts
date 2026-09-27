@@ -93,31 +93,79 @@ describe('a lifecycle tool', () => {
 });
 
 describe('an unknown outcome', () => {
-  it('ends with the retry that cannot do it twice, naming the key', async () => {
+  // The platform settles a keyed call it answered with a 5xx as lost
+  // (OPL-5304), so the same key sent again can only be answered
+  // idempotency_outcome_unknown. The advice is to read first, then resend with
+  // a new key or none — never the same key.
+  it('after a 5xx the platform answered, says to read first and not to resend with the key', async () => {
     answer(
       (method, path) => method === 'POST' && path === '/computers/vm-1/start',
-      () => Response.json({ error: 'No hypervisor could answer that right now.' }, { status: 503 }),
+      () =>
+        Response.json(
+          {
+            error: 'No hypervisor could answer that right now.',
+            reason: 'contention',
+            operation_id: OPERATION.id,
+          },
+          { status: 503 },
+        ),
     );
     const result = await (await open()).call('start_computer', { idempotency_key: 'k-503' });
     expect(result.isError).toBe(true);
-    expect(text(result).trimEnd()).toMatch(
-      /To retry without risking a second start, call start_computer again with idempotency_key "k-503"\.$/,
+    const said = text(result);
+    expect(said).not.toContain('To retry without risking');
+    expect(said).toContain(
+      'resending with that key will answer idempotency_outcome_unknown, not do it',
     );
+    expect(said).toContain(`get_operation ${OPERATION.id}`);
+    expect(said).toContain('call start_computer again with a new idempotency_key, or none');
   });
 
-  it('names the key the server made when the caller gave none', async () => {
+  it('says the same after a platform 500 on a create, naming the key the server made', async () => {
     answer(
       (method, path) => method === 'POST' && path === '/computers',
       () => Response.json({ error: 'boom' }, { status: 500 }),
     );
     const result = await (await open()).call('create_computer', { template: 'base' });
     const sent = keyed()[0];
+    expect(text(result)).toContain(`settled idempotency_key "${sent}"`);
+    expect(text(result)).toContain('list_computers after a create');
+    expect(text(result)).not.toContain('To retry without risking');
+  });
+
+  it('ends with the same-key retry when the connection died after the request went out', async () => {
+    const record = globalThis.fetch;
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      await record(input as never, init);
+      if ((init?.method ?? 'GET').toUpperCase() === 'POST') throw new Error('socket hang up');
+      return record(input as never, init);
+    }) as typeof fetch;
+    const result = await (await open()).call('start_computer', { idempotency_key: 'k-lost' });
+    expect(result.isError).toBe(true);
     expect(text(result).trimEnd()).toMatch(
-      new RegExp(
-        `To retry without risking a second computer, call create_computer again with idempotency_key "${sent}"\\.$`,
-      ),
+      /To retry without risking a second start, call start_computer again with idempotency_key "k-lost"\.$/,
     );
   });
+
+  it.each([
+    [502, 'text/html', '<html><body>502 Bad Gateway</body></html>'],
+    [504, 'text/html', '<html><body>504 Gateway Time-out</body></html>'],
+    [520, 'application/json', '{"error":"origin said nothing readable"}'],
+  ])(
+    'ends with the same-key retry on an edge %i the platform never wrote',
+    async (status, type, body) => {
+      answer(
+        (method, path) => method === 'POST' && path === '/computers/vm-1/start',
+        () => new Response(body, { status, headers: { 'Content-Type': type } }),
+      );
+      const result = await (await open()).call('start_computer', { idempotency_key: 'k-edge' });
+      expect(result.isError).toBe(true);
+      expect(text(result).trimEnd()).toMatch(
+        /To retry without risking a second start, call start_computer again with idempotency_key "k-edge"\.$/,
+      );
+      expect(text(result)).not.toContain('settled idempotency_key');
+    },
+  );
 
   it('says a keyed call still running is worth waiting on, and how', async () => {
     answer(
@@ -139,7 +187,7 @@ describe('an unknown outcome', () => {
     expect(text(result)).toContain('idempotency_key "k-busy"');
   });
 
-  it('says an outcome the platform never heard is not to be resent blindly', async () => {
+  it('says an outcome the platform never heard is read first, then resent with a new key', async () => {
     answer(
       (method, path) => method === 'DELETE' && path === '/computers/vm-1',
       () =>
@@ -153,7 +201,10 @@ describe('an unknown outcome', () => {
       confirm: true,
       idempotency_key: 'k-lost',
     });
-    expect(text(result)).toContain('do not send it again blindly');
+    expect(text(result)).toContain('do not send it again with this key');
+    expect(text(result)).toContain(
+      'If that read shows the step did not happen, send the call again with a new idempotency_key, or none',
+    );
     expect(text(result)).not.toContain('To retry without risking');
   });
 

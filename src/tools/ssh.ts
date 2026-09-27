@@ -47,6 +47,12 @@ type Setting = {
   available: boolean | null;
   pending: boolean;
   key_count: number;
+  /**
+   * How many of those the computer is given: fewer than `key_count` only when
+   * the account holds more keys than one computer accepts (200). Absent from a
+   * platform that predates it.
+   */
+  keys_pushed?: number;
   /** Why the hypervisor refused the current setting, when it did. */
   error: string | null;
 };
@@ -66,7 +72,24 @@ function settingOf(body: unknown): Setting | undefined {
   const raw = body.error ?? null;
   if (raw !== null && typeof raw !== 'string') return undefined;
   const error = raw?.trim() ? raw.trim() : null;
-  return { computer, enabled, available, pending, key_count, error };
+  const pushed = body.keys_pushed;
+  if (
+    pushed !== undefined &&
+    (typeof pushed !== 'number' ||
+      !Number.isSafeInteger(pushed) ||
+      pushed < 0 ||
+      pushed > key_count)
+  )
+    return undefined;
+  return {
+    computer,
+    enabled,
+    available,
+    pending,
+    key_count,
+    ...(pushed === undefined ? {} : { keys_pushed: pushed }),
+    error,
+  };
 }
 
 /** The sentence in front of a setting: whether SSH will work, and if not, why. */
@@ -85,7 +108,9 @@ function settingLine(s: Setting): string {
   const keys =
     s.key_count === 0
       ? 'No keys can log in yet — add one with add_ssh_key.'
-      : `${s.key_count} key${s.key_count === 1 ? '' : 's'} (every owner's and member's) can log in.`;
+      : s.keys_pushed !== undefined && s.keys_pushed < s.key_count
+        ? `Only ${s.keys_pushed} of the account's ${s.key_count} keys are on this computer (one computer accepts at most 200); connecting with any of the rest is refused. The keys left out are those of the members who joined most recently, and each person's newest keys.`
+        : `${s.key_count} key${s.key_count === 1 ? '' : 's'} (every owner's and member's) can log in.`;
   const unknown =
     s.available === null
       ? ' Whether the computer can run SSH is not known until it next starts.'

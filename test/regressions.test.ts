@@ -3008,7 +3008,13 @@ describe('a guest that will not shut down', () => {
       'force',
       'idempotency_key',
     ]);
-    for (const other of ['start_computer', 'suspend_computer', 'restart_computer']) {
+    // start_computer's own second argument since OPL-5323: resume_only.
+    expect(Object.keys(tools.get('start_computer')?.inputSchema.properties ?? {}).sort()).toEqual([
+      'computer_id',
+      'idempotency_key',
+      'resume_only',
+    ]);
+    for (const other of ['suspend_computer', 'restart_computer']) {
       expect(Object.keys(tools.get(other)?.inputSchema.properties ?? {}).sort()).toEqual([
         'computer_id',
         'idempotency_key',
@@ -3614,6 +3620,15 @@ describe('the tools our own prose tells a model to call', () => {
     // missing a change to its secrets.
     'restore_available',
     'secrets_pending',
+    // OPL-5323: the key that minted a key (list_api_keys), a workspace
+    // member's fields (list_workspace_members), and the platform's refusal code
+    // a spent or still-running idempotency key answers with. Response fields
+    // and codes.
+    'minted_by_key_id',
+    'user_id',
+    'accepted_at',
+    'idempotency_outcome_unknown',
+    'idempotency_in_progress',
   ]);
 
   it('names only tools that exist', async () => {
@@ -5257,6 +5272,10 @@ describe('the event tools and what their annotations claim', () => {
           'wait_for_operation',
           // Reads only (OPL-5053).
           'whoami',
+          // Reads only (OPL-5057, exposed by OPL-5323).
+          'get_workspace',
+          'list_workspace_members',
+          'list_workspaces',
         ].sort(),
       );
     } finally {

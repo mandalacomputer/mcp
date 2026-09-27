@@ -78,7 +78,8 @@ export const EXERCISE: Record<string, Record<string, unknown>[]> = {
   list_computers: [{}, { allow_partial: true }, { state: 'deleted' }],
   get_computer: [{}],
   use_computer: [{ computer_id: 'vm-1' }],
-  start_computer: [{}],
+  // resume_only is the one parameter only start sends (OPL-5323).
+  start_computer: [{}, { resume_only: true }],
   // The force is the whole of OPL-3748: without it this route is reachable and
   // a guest that will not shut down cleanly still has no second move.
   stop_computer: [{}, { force: true }],
@@ -149,6 +150,10 @@ export const EXERCISE: Record<string, Record<string, unknown>[]> = {
   // Who the credential is, and the holder's keys (OPL-5053). No arguments.
   whoami: [{}],
   list_api_keys: [{}],
+  // The account's workspaces, read only (OPL-5057).
+  list_workspaces: [{}],
+  get_workspace: [{ workspace_id: 'wsp-0123456789ab' }],
+  list_workspace_members: [{ workspace_id: 'wsp-0123456789ab' }],
   // Lifecycle operations (OPL-5055): every listing parameter on one variant,
   // because the parameter sweep is what proves each can be sent.
   get_operation: [{ operation_id: 'op_0123456789abcdef01234567' }],
@@ -258,9 +263,11 @@ export const EXERCISE: Record<string, Record<string, unknown>[]> = {
   ],
   click: [{ x: 10, y: 20 }],
   type_text: [{ text: 'hi' }],
+  // Both spellings, so the held key the paste sends is exercised (OPL-5323).
+  paste_text: [{ text: 'hi' }, { text: 'hi', shortcut: 'ctrl+shift+v' }],
   press_key: [{ keys: ['ctrl', 'c'] }],
   scroll: [{ direction: 'down' }],
-  drag: [{ to_x: 5, to_y: 6, from_x: 1, from_y: 2 }],
+  drag: [{ to_x: 5, to_y: 6, from_x: 1, from_y: 2, modifiers: ['shift'] }],
   move_mouse: [{ x: 3, y: 4 }],
   mouse_button: [{ state: 'down', x: 1, y: 1 }],
   cursor_position: [{}],
@@ -367,7 +374,7 @@ export const EXERCISE: Record<string, Record<string, unknown>[]> = {
   ],
   run_agent: [
     { prompt: 'open firefox' },
-    { prompt: 'open firefox', system: 'be brief', max_steps: 3 },
+    { prompt: 'open firefox', system: 'be brief', max_steps: 3, model: 'claude-test' },
   ],
 };
 

@@ -92,3 +92,19 @@ describe('clone_snapshot and a memory snapshot', () => {
     expect(wrapped).toContain('It is selected');
   });
 });
+
+// OPL-5323: since OPL-4968 a resumed copy is given its own identity, so it
+// runs beside its source. The description said the opposite.
+describe('clone_snapshot description', () => {
+  it('says a resumed copy gets its own identity and runs beside its source', async () => {
+    const { client, close } = await connect();
+    const tool = (await client.listTools()).tools.find((t) => t.name === 'clone_snapshot');
+    await close();
+    expect(tool?.description).toContain(
+      'given its own MAC, address, hostname, machine ID, SSH host keys and desktop password',
+    );
+    expect(tool?.description).toContain('runs beside its source');
+    expect(tool?.description).toContain('left stopped, and starting it cold-boots its disk');
+    expect(tool?.description).not.toContain("sharing its source's network identity");
+  });
+});

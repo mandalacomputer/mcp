@@ -119,6 +119,25 @@ it('list_api_keys lists the keys, and never a raw key', async () => {
   expect(platform.calls.map((c) => [c.method, c.path])).toEqual([['GET', '/api-keys']]);
 });
 
+// OPL-5261: the key that minted a key, which the platform always sends.
+it('list_api_keys and whoami keep minted_by_key_id', async () => {
+  const minted = { ...API_KEY, id: 'key-0a0b0c0d0e0f', minted_by_key_id: 'key-a1b2c3d4e5f6' };
+  respond([minted, API_KEY]);
+  const listed = await (await open()).call('list_api_keys');
+  expect(listed.isError).not.toBe(true);
+  expect(data(listed)).toEqual([minted, API_KEY]);
+  respond({ ...WHOAMI, key: { ...WHOAMI.key, minted_by_key_id: 'key-a1b2c3d4e5f6' } });
+  const who = await (await open()).call('whoami');
+  expect(data(who).key.minted_by_key_id).toBe('key-a1b2c3d4e5f6');
+});
+
+it('list_api_keys says what minted_by_key_id means', async () => {
+  const tool = (await (await open()).client.listTools()).tools.find(
+    (t) => t.name === 'list_api_keys',
+  );
+  expect(tool?.description).toContain('revoking a key does not revoke the keys it minted');
+});
+
 it('list_api_keys says so when there are none', async () => {
   respond([]);
   const result = await (await open()).call('list_api_keys');

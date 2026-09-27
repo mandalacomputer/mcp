@@ -214,12 +214,32 @@ describe('the SSH tools over answers they cannot trust', () => {
     expect(text).not.toContain('Nothing here assumes which is true');
   });
 
+  // OPL-5323: past 200 keys a computer is given only some of them, and the
+  // rest are refused at connection time.
+  it('says when only some of the keys are on the computer', async () => {
+    const res = await over(
+      { ...SSH_SETTING, key_count: 205, keys_pushed: 200 },
+      200,
+      'get_computer_ssh',
+      {
+        computer_id: 'vm-1',
+      },
+    );
+    expect(res.isError).toBeFalsy();
+    const text = textOf(res);
+    expect(text).toContain("Only 200 of the account's 205 keys are on this computer");
+    expect(text).toContain('connecting with any of the rest is refused');
+    expect(text).not.toContain('can log in');
+  });
+
   it('refuses a setting it cannot read, or one that contradicts the request', async () => {
     for (const body of [
       {},
       { ...SSH_SETTING, key_count: -1 },
       { ...SSH_SETTING, available: 'yes' },
       { ...SSH_SETTING, error: 5 },
+      { ...SSH_SETTING, keys_pushed: 2 },
+      { ...SSH_SETTING, keys_pushed: '1' },
     ]) {
       const res = await over(body, 200, 'get_computer_ssh', { computer_id: 'vm-1' });
       expect(res.isError).toBe(true);
