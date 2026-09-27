@@ -41,9 +41,10 @@ export class APIError extends MandalaError {
   /**
    * The platform's own word for what KIND of refusal this is, where it sent
    * one: `contention`, `starting`, `unavailable` or `unsupported` (OPL-3898),
-   * or `revoked` (OPL-4801) — the one word about the caller rather than the
-   * computer. `undefined` for most errors, and always will be — the platform is
-   * explicit that an absent value means unclassified rather than "none of these".
+   * `revoked` (OPL-4801) — the one word about the caller rather than the
+   * computer — `exists` (OPL-4994), or `running` (OPL-5050). `undefined` for
+   * most errors, and always will be — the platform is explicit that an absent
+   * value means unclassified rather than "none of these".
    *
    * Read on the base class rather than on the one 409 it was filed for, because
    * the platform keys it on the ERROR and not on the route: the same sentinel is
@@ -109,11 +110,21 @@ const REASON_CLEARS: ReadonlySet<string> = new Set(['contention', 'starting']);
  * {@link isTransient} calls worth sending again. {@link FileExistsError} is the
  * class it arrives as.
  */
+/**
+ * `running` is a computer that IS running, asked for something only a stopped one
+ * can have: a resize, today (platform OPL-5050). The mirror of `unavailable`, and
+ * kept apart from it for that reason: nothing clears either by waiting and both
+ * are fixed by an action on the computer, but the action is the opposite one.
+ * Stopping the computer is the fix. Without it here this would be an ordinary
+ * {@link ConflictError}, which {@link isTransient} calls worth sending again, and
+ * a caller looping on that would resend the same resize until it gave up.
+ */
 const REASON_PERMANENT: ReadonlySet<string> = new Set([
   'unavailable',
   'unsupported',
   'revoked',
   'exists',
+  'running',
 ]);
 
 /** Whether waiting can change a classified refusal's answer. */
@@ -193,6 +204,11 @@ export function reasonAdvice(reason: string | undefined): string | undefined {
       // write whose earlier attempt lost its answer may have written the file
       // itself, and the retry meets that file here.
       return 'something is already at that path and this attempt wrote nothing. This does not clear by waiting. If an earlier attempt\u2019s outcome was unknown, the file may be yours: read it and compare before choosing another path or overwriting (without overwrite: false, a write replaces it)';
+    case 'running':
+      // The mirror of `unavailable`, with the opposite fix. The last clause is
+      // there because stop_computer is a thing a model can do on its own
+      // initiative, and a stop the user did not ask for ends whatever was open.
+      return 'the computer is running and this needs it stopped (a resize, today). This does not clear by waiting: stop_computer first, then send it again \u2014 and say so rather than stopping a computer the user did not ask you to stop';
     case 'revoked':
       // Reached only on a status statusAdvice has no sentence for, because the
       // formatter asks that one first and the platform sends this word on 401 and

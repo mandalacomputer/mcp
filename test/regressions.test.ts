@@ -1015,6 +1015,9 @@ describe('the classification of a refusal, for whoever is embedding this (OPL-45
     // the point of naming it is that a future status for this refusal cannot
     // quietly make it look replayable.
     expect(reasonKind('revoked')).toBe('permanent');
+    // A resize of a running computer (platform OPL-5050): stopping it is the
+    // fix, and waiting never is.
+    expect(reasonKind('running')).toBe('permanent');
   });
 
   it('tells a model the refusal is about the caller when the status has no sentence', () => {
@@ -1041,7 +1044,14 @@ describe('the classification of a refusal, for whoever is embedding this (OPL-45
     // One source of truth: `isTransient` reads this classifier rather than the
     // sets directly, so what an embedder is told and what this server does
     // cannot drift into two answers.
-    for (const reason of ['contention', 'starting', 'unavailable', 'unsupported', 'revoked']) {
+    for (const reason of [
+      'contention',
+      'starting',
+      'unavailable',
+      'unsupported',
+      'revoked',
+      'running',
+    ]) {
       const err = errorForStatus(409, 'refused', { reason });
       expect(err.reason, reason).toBe(reason);
       expect(isTransient(err), reason).toBe(reasonKind(reason) === 'clears');

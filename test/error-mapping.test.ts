@@ -14,6 +14,7 @@ import {
   reasonAdvice,
   reasonKind,
 } from '../src/errors.js';
+import { failed } from '../src/format.js';
 import * as publicApi from '../src/index.js';
 
 const originalFetch = globalThis.fetch;
@@ -388,6 +389,40 @@ describe('special constructors and transport branches', () => {
       .catch((error: unknown) => error);
     expect(error).toBeInstanceOf(CancelledError);
     expect(error).not.toHaveProperty('requestId');
+  });
+});
+
+describe('a resize refused because the computer is running (OPL-5050)', () => {
+  it('is a ConflictError that is not transient', async () => {
+    const body = { error: 'stop the computer before resizing it', reason: 'running' };
+    let calls = 0;
+    globalThis.fetch = async () => {
+      calls += 1;
+      return Response.json(body, { status: 409 });
+    };
+    const error = await api()
+      .json('PATCH', 'computers/vm-1', { body: { ram_mb: 8192 } })
+      .catch((error: unknown) => error);
+    expect(calls).toBe(1);
+    expect(error).toBeInstanceOf(ConflictError);
+    expect(error).toMatchObject({ status: 409, reason: 'running' });
+    expect(isTransient(error)).toBe(false);
+  });
+
+  it('classifies the word as permanent and tells a model to stop the computer first', () => {
+    expect(reasonKind('running')).toBe('permanent');
+    const advice = reasonAdvice('running');
+    expect(advice).toContain('does not clear by waiting');
+    expect(advice).toContain('stop_computer first');
+    expect(advice).toContain('did not ask you to stop');
+    const text = failed(
+      errorForStatus(409, 'stop the computer before resizing it', {
+        error: 'stop the computer before resizing it',
+        reason: 'running',
+      }),
+    ).content[0];
+    expect(text).toMatchObject({ type: 'text' });
+    expect((text as { text: string }).text).toContain('stop_computer first');
   });
 });
 
