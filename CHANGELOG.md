@@ -112,6 +112,13 @@ are wording changes, and they are behaviour changes in the way that matters.
   hands. The tool refused that answer as malformed; it now accepts it, and its
   one-line summary names the user id where it named the email. The tool's
   description says which fields are `null` and why.
+- **A 409 whose `reason` is `running` is permanent.** It is the platform's
+  refusal of something only a stopped computer can have, a resize today, and
+  nothing clears it by waiting. `isTransient` called it worth sending again, as
+  it does any other `ConflictError`, and `reasonKind` had no answer for it; now
+  `isTransient` answers `false`, `reasonKind` answers `'permanent'`, and a
+  refused `update_computer` tells the model to stop the computer first, and to
+  say so rather than stop one the user did not ask it to stop.
 
 ## [0.6.0] — 2026-09-25
 
