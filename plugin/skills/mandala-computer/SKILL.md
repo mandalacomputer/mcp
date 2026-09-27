@@ -374,11 +374,16 @@ says what to do. The judgement it cannot make for you:
   platform answers with the first call's result, so a create cannot build a
   second computer. After a `5xx` the platform answered itself, or
   `idempotency_outcome_unknown`: the key is spent, and the call may still be
-  under way on its host. For a start, stop, suspend, restart, delete, move or
+  under way on its host. For a start, stop, suspend, delete, move or
   `update_computer`, read `get_computer` (and `get_operation` if the error
   named one; a `pending` operation alone is no reason to wait, since it stays
   pending for an hour), and if the step did not take effect, send it again
-  with a new key, or none. For a create, a clone or a snapshot restore, read
+  with a new key, or none. A restart is the exception: `get_computer` reads
+  `running` before and after one, so it cannot say whether the reset happened.
+  Read the operation (`get_operation`, or `list_operations` with the key):
+  `succeeded` means it happened, `running` means wait on it, and anything else
+  leaves it possibly done — ask the user before restarting again with a new
+  key, or none, since a second restart resets the guest again. For a create, a clone or a snapshot restore, read
   its operation first (`get_operation` with the `operation_id` the error
   named, or `list_operations` with the key); while it is `pending` or
   `running`, wait with `wait_for_operation` and do not resend with any key.

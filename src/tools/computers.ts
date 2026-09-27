@@ -25,7 +25,12 @@ import {
 } from '../format.js';
 import * as P from '../paths.js';
 import { heartbeat, POLL_MS, pollDelay, sleep } from '../poll.js';
-import { buildIdempotencyKeyArg, idempotencyKeyArg, keyedFailure } from './operations.js';
+import {
+  buildIdempotencyKeyArg,
+  idempotencyKeyArg,
+  keyedFailure,
+  restartIdempotencyKeyArg,
+} from './operations.js';
 import { FILES_DIR, secretBindingsSchema } from './secrets.js';
 import type { Registrar } from './types.js';
 
@@ -744,7 +749,12 @@ export const registerComputers: Registrar = (server, session, opts) => {
       {
         title: `${action[0].toUpperCase()}${action.slice(1)} a computer`,
         description: POWER_DESCRIPTIONS[action],
-        inputSchema: { ...idArg, idempotency_key: idempotencyKeyArg },
+        inputSchema: {
+          ...idArg,
+          // A restart reads running before and after, so its spent-key route
+          // is not "read get_computer" (see resendAfterSpentKey).
+          idempotency_key: action === 'restart' ? restartIdempotencyKeyArg : idempotencyKeyArg,
+        },
       },
       ({ computer_id, idempotency_key }, extra) =>
         power(action, computer_id, extra, { key: idempotency_key }),

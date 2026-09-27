@@ -355,12 +355,19 @@ with. What to do next depends on who answered:
   The platform then keeps the call's operation `pending` for up to an hour,
   whatever happened, while its host may be carrying it out. What to read
   depends on the tool:
-  - `start_computer`, `stop_computer`, `suspend_computer`, `restart_computer`,
+  - `start_computer`, `stop_computer`, `suspend_computer`,
     `delete_computer`, `move_computer` and `update_computer`: read
     `get_computer` (and `get_operation` with the `operation_id` the error
     named: `succeeded` means the step happened, `running` means wait on it,
     and `pending` alone is no reason to wait). If the step did not take
     effect, send the call again with a new key, or none.
+  - `restart_computer`, which `get_computer` cannot show: a computer reads
+    `running` before and after a reset. Read the operation instead
+    (`get_operation` with the `operation_id` the error named, or
+    `list_operations` with the key): `succeeded` means the restart happened,
+    `running` means wait on it. Anything else leaves the restart possibly
+    done, so ask the user before sending it again with a new key, or none; a
+    second restart resets the guest again.
   - `create_computer`, `clone_computer`, `clone_snapshot` and
     `restore_snapshot`, where a read of the computer made straight away can
     show no effect for a build or restore that then lands, and a second one

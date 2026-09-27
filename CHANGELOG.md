@@ -67,11 +67,16 @@ are wording changes, and they are behaviour changes in the way that matters.
   `idempotency_outcome_unknown`, and the call may still be under way on its
   host (its operation stays `pending` for up to an hour, whatever happened).
   For `start_computer`, `stop_computer`, `suspend_computer`,
-  `restart_computer`, `delete_computer`, `move_computer` and
-  `update_computer`, the answer says to read `get_computer` (and
-  `get_operation` when the error named one: `succeeded` means it happened,
-  `running` means wait, `pending` alone is no reason to wait) and, if the step
-  did not take effect, to call the tool again with a new key, or none. For
+  `delete_computer`, `move_computer` and `update_computer`, the answer says to
+  read `get_computer` (and `get_operation` when the error named one:
+  `succeeded` means it happened, `running` means wait, `pending` alone is no
+  reason to wait) and, if the step did not take effect, to call the tool again
+  with a new key, or none. For `restart_computer`, which `get_computer` cannot
+  show (a computer reads `running` before and after a reset), it says to read
+  the operation instead (`get_operation`, or `list_operations` with the key):
+  `succeeded` means the restart happened, `running` means wait, and anything
+  else leaves it possibly done, so the user is asked before a second restart
+  with a new key, or none. For
   `create_computer`, `clone_computer`, `clone_snapshot` and `restore_snapshot`,
   where a read made straight away cannot see a build or restore still landing,
   it says to read the operation first (`get_operation` with the `operation_id`

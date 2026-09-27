@@ -263,12 +263,14 @@ export function idempotencyAdvice(err: unknown, tool?: string): string | undefin
  * one is costly (a second computer, a second overwrite), and a read of the
  * computer made straight away cannot see one that is still landing.
  *
- * Every other keyed tool (start, stop, suspend, restart, delete, move and
+ * Every other keyed tool but restart (start, stop, suspend, delete, move and
  * update_computer) changes a computer a read shows, and doing it twice does no
  * harm the read cannot catch, while the operation of a call whose key is spent
  * stays `pending` for an hour however quickly the host gave up (platform
  * OPL-5304). Holding those to the same gate would mean an hour before the start
  * the user asked for could be sent again.
+ *
+ * restart_computer is neither: see {@link UNSEEN_BY_READ}.
  */
 const WAITS_FOR_FINAL = new Set([
   'create_computer',
@@ -276,6 +278,25 @@ const WAITS_FOR_FINAL = new Set([
   'clone_snapshot',
   'restore_snapshot',
 ]);
+
+/**
+ * The keyed tools whose step a read of the computer cannot see: a restart is a
+ * guest reset, and the computer reads `running` before and after one, with no
+ * boot or reset time among its fields. "Read the computer, and resend if the
+ * step did not take effect" can then only ever read as "did not take effect",
+ * and a resend resets the guest a second time, losing whatever ran since the
+ * first. Nor does waiting for the operation settle it: a spent key's operation
+ * ends `failed` (`lost`) an hour later whether or not the host reset the guest.
+ * So the route is the operation's `succeeded` or `running` where it says one,
+ * and otherwise the user's say before a second restart
+ * ({@link resendAfterUnseenStep}).
+ */
+const UNSEEN_BY_READ = new Set(['restart_computer']);
+
+/** Whether a spent key's resend for `tool` is the user's call, since no read shows the step. */
+export function resendUnseenByRead(tool: string | undefined): boolean {
+  return tool !== undefined && UNSEEN_BY_READ.has(tool);
+}
 
 /** Whether a spent key's resend for `tool` waits for its operation; `true` when the tool is not known. */
 export function resendWaitsForFinal(tool: string | undefined): boolean {
@@ -286,7 +307,9 @@ export function resendWaitsForFinal(tool: string | undefined): boolean {
  * The route to a new-key resend after a keyed call whose outcome is unknown and
  * whose key is spent, chosen by the tool that was called: the wait for a final
  * operation ({@link resendOnlyOnceFinal}) where a duplicate is costly and
- * unseen, a read of the computer ({@link resendAfterRead}) everywhere else.
+ * unseen, the operation and then the user ({@link resendAfterUnseenStep}) for a
+ * restart, which no read of the computer shows, and a read of the computer
+ * ({@link resendAfterRead}) everywhere else.
  */
 export function resendAfterSpentKey(
   tool: string | undefined,
@@ -294,14 +317,38 @@ export function resendAfterSpentKey(
   key?: string,
   resend = 'send the call again',
 ): string {
+  if (resendUnseenByRead(tool)) return resendAfterUnseenStep(operation, key, resend);
   return resendWaitsForFinal(tool)
     ? resendOnlyOnceFinal(operation, key, resend)
     : resendAfterRead(operation, resend);
 }
 
 /**
+ * The route for a spent key on a restart (see {@link UNSEEN_BY_READ}). It never
+ * conditions a resend on get_computer, which reads `running` either way: the
+ * operation says the restart happened (`succeeded`) or is under way
+ * (`running`), and anything else leaves it possibly done, so a second restart
+ * is the user's call.
+ */
+export function resendAfterUnseenStep(
+  operation?: string,
+  key?: string,
+  resend = 'send the call again',
+): string {
+  const find = operation
+    ? `get_operation ${operation}`
+    : `the operation it recorded, found by list_operations with idempotency_key ${key ? `"${key}"` : 'set to this key'}`;
+  return (
+    `A restart cannot be seen in get_computer — it reads running before and after one — so do not read the computer to decide. Read ${find} instead. ` +
+    `If it succeeded, the restart happened; if it is running, it is under way, so wait_for_operation${operation ? ` ${operation}` : ''} rather than resending. ` +
+    `Otherwise (pending, failed, lost, or no operation found), treat the restart as possibly done: the guest may already have been reset. Ask the user before you ${resend} with a new idempotency_key, or none, since a second restart resets the guest again and loses whatever ran since the first`
+  );
+}
+
+/**
  * The route for a spent key on a step a read of the computer shows: start,
- * stop, suspend, restart, delete, move, update_computer. Read, and resend with
+ * stop, suspend, delete, move, update_computer (not restart; see
+ * {@link UNSEEN_BY_READ}). Read, and resend with
  * a new key or none if the step did not take effect. A named operation is read
  * too, because `succeeded` and `running` do answer the question; `pending` does
  * not, since a spent key's operation stays pending for an hour whatever

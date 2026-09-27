@@ -9,6 +9,7 @@ import {
   keyedOutcomeUnknown,
   platformAnsweredFailure,
   resendAfterSpentKey,
+  resendUnseenByRead,
 } from '../errors.js';
 import { failed, guarded, operationIdOf, refused, said } from '../format.js';
 import * as P from '../paths.js';
@@ -63,10 +64,20 @@ const KEY_LAST = ' Keys last 24 hours; the same key with different arguments is 
 
 /**
  * The key on a step a read of the computer shows: start, stop, suspend,
- * restart, delete, move, update_computer. See {@link resendAfterSpentKey}.
+ * delete, move, update_computer (not restart: see
+ * {@link restartIdempotencyKeyArg}). See {@link resendAfterSpentKey}.
  */
 export const idempotencyKeyArg = keyArg.describe(
   `${KEY_FIRST}: read get_computer (and get_operation when the error named an operation_id: succeeded means it happened, running means wait on it, pending alone is no reason to wait), and if the step did not take effect, send the call again with a new key, or none.${KEY_LAST}`,
+);
+
+/**
+ * The key on restart_computer, whose step no read of the computer shows: it
+ * reads running before and after a reset. So the route never conditions a
+ * resend on get_computer; see {@link resendAfterSpentKey}.
+ */
+export const restartIdempotencyKeyArg = keyArg.describe(
+  `${KEY_FIRST}. A restart cannot be seen in get_computer (it reads running before and after one), so do not read the computer to decide: read get_operation with the operation_id the error named, or list_operations with the key. Succeeded means the restart happened; running means wait on it. Anything else leaves it possibly done, so ask the user before sending it again with a new key, or none — a second restart resets the guest again.${KEY_LAST}`,
 );
 
 /**
@@ -93,8 +104,10 @@ export const buildIdempotencyKeyArg = keyArg.describe(
  *   with a new key or none if the step did not happen. Which read depends on
  *   the tool (see {@link resendAfterSpentKey}): a create, clone or restore
  *   waits for its operation to be final, since a read of the computer made
- *   at once cannot see one still landing; every other step is read off the
- *   computer, since its operation stays `pending` for an hour regardless.
+ *   at once cannot see one still landing; a restart, which no read of the
+ *   computer shows, is read off its operation and otherwise left to the user;
+ *   every other step is read off the computer, since its operation stays
+ *   `pending` for an hour regardless.
  */
 export function keyedFailure(
   err: unknown,
@@ -114,7 +127,8 @@ export function keyedFailure(
     const op = operationIdOf((err as APIError).body);
     text +=
       `\n\nThe platform answered this itself, so whether it took effect is unknown — its host may still be carrying out the ${what} — and it has settled idempotency_key "${key}": resending with that key will answer idempotency_outcome_unknown, not do it. ` +
-      `${resendAfterSpentKey(tool, op, key, `call ${tool} again`)}. That way there is no second ${what}.`;
+      `${resendAfterSpentKey(tool, op, key, `call ${tool} again`)}.` +
+      (resendUnseenByRead(tool) ? '' : ` That way there is no second ${what}.`);
   }
   return { ...result, content: [{ ...first, text }, ...rest] };
 }

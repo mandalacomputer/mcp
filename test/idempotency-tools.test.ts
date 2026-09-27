@@ -46,6 +46,9 @@ function answer(match: (method: string, path: string) => boolean, response: () =
 /** The lifecycle tools that make a new computer or overwrite a disk. */
 const BUILDS = new Set(['create_computer', 'clone_computer', 'restore_snapshot', 'clone_snapshot']);
 
+/** The lifecycle tools whose step no read of the computer shows. */
+const UNSEEN = new Set(['restart_computer']);
+
 /** Every lifecycle tool, once each. */
 const LIFECYCLE: [string, Record<string, unknown>][] = [
   ['create_computer', { template: 'base' }],
@@ -89,7 +92,7 @@ describe('a lifecycle tool', () => {
   // A spent key's operation stays pending for an hour however quickly the host
   // gave up (platform OPL-5304), so a step a read of the computer shows is read
   // off the computer and resent, not held to that hour.
-  it.each(LIFECYCLE.filter(([tool]) => !BUILDS.has(tool)))(
+  it.each(LIFECYCLE.filter(([tool]) => !BUILDS.has(tool) && !UNSEEN.has(tool)))(
     '%s describes the spent-key route as read the computer, then resend',
     async (tool) => {
       const { client } = await open();
@@ -102,6 +105,21 @@ describe('a lifecycle tool', () => {
       expect(said).not.toContain('do not resend meanwhile');
     },
   );
+
+  // A restart reads running before and after one, so "read get_computer and
+  // resend if the step did not take effect" can only ever say resend, and a
+  // resend resets the guest a second time.
+  it('restart_computer describes the spent-key route as the operation, then the user', async () => {
+    const { client } = await open();
+    const found = (await client.listTools()).tools.find((t) => t.name === 'restart_computer');
+    const props = found?.inputSchema.properties as Record<string, { description?: string }>;
+    const said = props.idempotency_key?.description ?? '';
+    expect(said).toContain('A restart cannot be seen in get_computer');
+    expect(said).toContain('do not read the computer to decide');
+    expect(said).toContain('ask the user before sending it again with a new key');
+    expect(said).not.toContain('read get_computer');
+    expect(said).not.toContain('if the step did not take effect');
+  });
 
   it('sends a different key on each call', async () => {
     const connection = await open();
@@ -160,6 +178,46 @@ describe('an unknown outcome', () => {
     );
     expect(said).not.toContain('do NOT resend it meanwhile, with any key');
     expect(said).not.toContain('a slow create or clone may still land');
+  });
+
+  it('after a 5xx the platform answered on a restart, never makes get_computer the resend condition', async () => {
+    // get_computer reads running whether or not the reset happened, so the
+    // read-then-resend route would reset the guest a second time.
+    answer(
+      (method, path) => method === 'POST' && path === '/computers/vm-1/restart',
+      () =>
+        Response.json(
+          { error: 'The host did not answer.', reason: 'contention', operation_id: OPERATION.id },
+          { status: 503 },
+        ),
+    );
+    const result = await (await open()).call('restart_computer', { idempotency_key: 'k-503' });
+    expect(result.isError).toBe(true);
+    const said = text(result);
+    expect(said).toContain(
+      'resending with that key will answer idempotency_outcome_unknown, not do it',
+    );
+    expect(said).not.toContain('If get_computer shows the step did not take effect');
+    expect(said).not.toContain('Read get_computer');
+    expect(said).not.toContain('To retry without risking');
+    expect(said).toContain('A restart cannot be seen in get_computer');
+    expect(said).toContain(`Read get_operation ${OPERATION.id} instead`);
+    expect(said).toContain(`wait_for_operation ${OPERATION.id} rather than resending`);
+    expect(said).toContain('treat the restart as possibly done');
+    expect(said).toContain(
+      'Ask the user before you call restart_computer again with a new idempotency_key, or none',
+    );
+  });
+
+  it('after a 5xx on a restart with no operation named, finds it by the key', async () => {
+    answer(
+      (method, path) => method === 'POST' && path === '/computers/vm-1/restart',
+      () => Response.json({ error: 'boom' }, { status: 500 }),
+    );
+    const said = text(await (await open()).call('restart_computer', { idempotency_key: 'k-500' }));
+    expect(said).toContain('list_operations with idempotency_key "k-500"');
+    expect(said).not.toContain('If get_computer shows the step did not take effect');
+    expect(said).toContain('Ask the user before you call restart_computer again');
   });
 
   it('after a 5xx the platform answered on a create, waits for the operation to be final', async () => {
@@ -288,6 +346,25 @@ describe('an unknown outcome', () => {
     );
     expect(text(result)).not.toContain('do NOT resend it meanwhile, with any key');
     expect(text(result)).not.toContain('To retry without risking');
+  });
+
+  it('says an unheard outcome on a restart is read off its operation, then left to the user', async () => {
+    answer(
+      (method, path) => method === 'POST' && path === '/computers/vm-1/restart',
+      () =>
+        Response.json(
+          { error: 'The platform did not hear how it ended.', code: 'idempotency_outcome_unknown' },
+          { status: 409 },
+        ),
+    );
+    const result = await (await open()).call('restart_computer', { idempotency_key: 'k-lost' });
+    const said = text(result);
+    expect(said).toContain('do not send it again with this key');
+    expect(said).toContain('A restart cannot be seen in get_computer');
+    expect(said).toContain('list_operations with idempotency_key set to this key');
+    expect(said).toContain('Ask the user before you call restart_computer again');
+    expect(said).not.toContain('If get_computer shows the step did not take effect');
+    expect(said).not.toContain('To retry without risking');
   });
 
   it('says an unheard outcome on a clone waits for the operation before a new key', async () => {
