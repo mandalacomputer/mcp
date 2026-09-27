@@ -44,6 +44,7 @@ async function platform<T>(
 
 const SERVER = 'http://proxy.example.com:3128';
 const PROXY = { server: SERVER, bypass: ['<local>'] };
+const CREDS = 'csec-0123456789abcdef';
 const box = (extra: Record<string, unknown> = {}) => ({
   id: 'vm-1',
   name: 'box',
@@ -107,11 +108,68 @@ describe('update_computer with browser_proxy', () => {
     expect(textOf(res)).toContain(sentence);
   });
 
+  it('keeps the credentials id copied from get_computer', async () => {
+    // The documented way to change one part: read, edit, send back. The
+    // setting is replaced whole, so an id the schema refused or dropped is
+    // credentials removed, and every browser is then answered 407.
+    const read = { ...PROXY, credentials_secret_id: CREDS };
+    const res = await platform(
+      (seen) => [200, box({ browser_proxy: seen.method === 'GET' ? read : seen.body })],
+      async (seen) => {
+        const { call, close } = await connect();
+        const got = await call('get_computer', {});
+        // What a model sees: a line, then the computer as JSON.
+        const text = textOf(got);
+        const copied = (
+          JSON.parse(text.slice(text.indexOf('\n\n') + 2)) as { browser_proxy: typeof read }
+        ).browser_proxy;
+        expect(copied).toEqual(read);
+        const r = await call('update_computer', {
+          browser_proxy: { ...copied, bypass: ['<local>', '*.example.com'] },
+        });
+        await close();
+        expect(seen[1]).toEqual({
+          method: 'PATCH',
+          path: '/computers/vm-1',
+          body: {
+            browser_proxy: {
+              server: SERVER,
+              bypass: ['<local>', '*.example.com'],
+              credentials_secret_id: CREDS,
+            },
+          },
+        });
+        return r;
+      },
+    );
+    expect(res.isError).toBeFalsy();
+  });
+
+  it('tells a model to keep credentials only for the same server', async () => {
+    // The credentials are sent to the proxy on every request, so guidance to
+    // copy the id on any change would send one proxy's user:password to another.
+    const { client, close } = await connect();
+    const tool = (await client.listTools()).tools.find((t) => t.name === 'update_computer');
+    await close();
+    // The nullable setting and field may wrap their descriptions; read the text.
+    expect(tool).toBeDefined();
+    const properties = tool!.inputSchema.properties as Record<string, unknown>;
+    const proxy = JSON.stringify(properties.browser_proxy);
+    expect(proxy).toContain('To change the bypass of the same proxy');
+    expect(proxy).toContain('Do not carry credentials_secret_id to a different server');
+    expect(proxy).not.toContain('To change one part');
+    expect(proxy).toContain("The secret's user:password is sent to the proxy named in server");
+  });
+
   it.each([
     [{ server: '  ' }],
     [{ server: SERVER, bypass: [''] }],
     [{ server: SERVER, bypas: ['a.com'] }],
     [SERVER],
+    [{ server: SERVER, credentials_secret_id: 'csec-0123' }],
+    [{ server: SERVER, credentials_secret_id: 'csec-0123456789ABCDEF' }],
+    [{ server: SERVER, credentials_secret_id: 'my-secret' }],
+    [{ server: SERVER, credentials_secret_id: 7 }],
   ])('refuses %j before any request', async (value) => {
     await platform(
       () => [200, box()],
@@ -139,6 +197,29 @@ describe('create_computer with browser_proxy', () => {
           method: 'POST',
           path: '/computers',
           body: { template: 'base', browser_proxy: PROXY, start: true },
+        });
+      },
+    );
+  });
+
+  it('sends its credentials id', async () => {
+    const proxy = { server: SERVER, credentials_secret_id: CREDS };
+    const secrets = [{ secret_id: CREDS, file: 'proxy-auth' }];
+    await platform(
+      () => [201, box({ browser_proxy: proxy })],
+      async (seen) => {
+        const { call, close } = await connect();
+        const r = await call('create_computer', {
+          template: 'base',
+          secrets,
+          browser_proxy: proxy,
+        });
+        await close();
+        expect(r.isError).toBeFalsy();
+        expect(seen[0]).toMatchObject({
+          method: 'POST',
+          path: '/computers',
+          body: { template: 'base', secrets, browser_proxy: proxy, start: true },
         });
       },
     );
@@ -194,5 +275,11 @@ describe('describe', () => {
       `box · vm-1 · running · browsers via ${SERVER}`,
     );
     expect(describeComputer(box())).toBe('box · vm-1 · running');
+  });
+
+  it('names the credentials secret, since a change that leaves it out removes it', () => {
+    expect(
+      describeComputer(box({ browser_proxy: { ...PROXY, credentials_secret_id: CREDS } })),
+    ).toBe(`box · vm-1 · running · browsers via ${SERVER} (with credentials ${CREDS})`);
   });
 });

@@ -384,9 +384,10 @@ export type Computer = {
   secrets_applied?: unknown;
   /**
    * The proxy this computer's browsers are sent through (platform OPL-5056):
-   * the server URL and the hosts they reach directly. Absent when none is set.
+   * the server URL, the hosts they reach directly, and the id of the secret
+   * holding its `user:password` when it asks for one. Absent when none is set.
    */
-  browser_proxy?: { server?: string; bypass?: string[] };
+  browser_proxy?: { server?: string; bypass?: string[]; credentials_secret_id?: string };
   /**
    * `true` while a running computer's guest does not have its browser proxy
    * yet, or still holds the files of one just removed. Absent otherwise, and
@@ -554,10 +555,18 @@ export function describe(c: Computer): string {
     bits.push('whether its secrets are current is unknown until it restarts');
   if (typeof c.secrets_error === 'string' && c.secrets_error.trim())
     bits.push(`secrets not delivered: ${c.secrets_error.trim()}`);
-  // The proxy by its server alone: the bypass list rides in the structured
-  // result, and a line naming sixty hosts says nothing a model can act on.
+  // The proxy by its server, and its credentials secret when it has one: the
+  // bypass list rides in the structured result, and a line naming sixty hosts
+  // says nothing a model can act on. The id is said because a change that
+  // leaves it out removes the credentials.
   const proxy = c.browser_proxy?.server;
-  if (typeof proxy === 'string' && proxy) bits.push(`browsers via ${proxy}`);
+  const creds = c.browser_proxy?.credentials_secret_id;
+  if (typeof proxy === 'string' && proxy)
+    bits.push(
+      typeof creds === 'string' && creds
+        ? `browsers via ${proxy} (with credentials ${creds})`
+        : `browsers via ${proxy}`,
+    );
   if (c.browser_proxy_pending === true) bits.push('its browser proxy is still being applied');
   return bits.join(' · ');
 }

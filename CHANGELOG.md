@@ -58,6 +58,19 @@ are wording changes, and they are behaviour changes in the way that matters.
   already had. A conflict between its read and its write is read again up to
   three times; a 503 is never sent again, and the value is never shown back.
   In the `secrets` tag.
+- **`browser_proxy.credentials_secret_id` on `create_computer` and
+  `update_computer`**: the id of a secret whose value is `user:password`, for
+  a proxy that asks for one. Before this the schema refused the field, so the
+  setting `get_computer` returns could not be sent back as it was, and an
+  update without it removed the proxy's credentials, leaving every browser on
+  the computer answered 407 by its upstream. The secret must be bound to the
+  computer as a file; `update_computer` replaces the setting whole, so copy
+  the id from `get_computer` to keep it for the same proxy. The descriptions
+  say not to carry the id to a different server, since the credentials are
+  sent to the proxy on every request and belong to the one they were set for.
+  A value that is not a secret's id is
+  refused before any request, and a computer's one-line summary names the
+  secret: `browsers via <server> (with credentials <id>)`.
 
 ### Changed
 
