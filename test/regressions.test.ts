@@ -3524,6 +3524,11 @@ describe('the tools our own prose tells a model to call', () => {
     // set_computer_secrets names it: an entry keeps its current pin only by
     // naming it. A field of one entry in `secrets`, not a tool.
     'revision_id',
+    // update_computer names both: a browser proxy's credentials are kept only
+    // by copying the id from get_computer's browser_proxy. A parameter and its
+    // field, not tools.
+    'browser_proxy',
+    'credentials_secret_id',
     // Chat agent.stop terminal value, not a callable tool.
     'end_turn',
     // whoami and list_api_keys name it: the field saying whether a key may

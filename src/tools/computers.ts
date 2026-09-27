@@ -40,7 +40,9 @@ const idArg = {
  * so a value it refuses comes back as its own 400 sentence rather than a copy
  * of the rule here that would refuse what it has since learned to accept.
  * Strict, as a secret binding is: a misspelt `bypass` dropped would send the
- * browsers through the proxy for every host the caller meant to exempt.
+ * browsers through the proxy for every host the caller meant to exempt. The
+ * credentials id is checked here because its form is an id's, not a rule that
+ * grows, and because a setting replaced whole without it loses the credentials.
  */
 const browserProxySchema = z.strictObject({
   server: z
@@ -54,6 +56,14 @@ const browserProxySchema = z.strictObject({
     .optional()
     .describe(
       'Hosts the browsers reach directly: "example.com", "*.example.com", an address or a range such as "192.0.2.0/24", or "<local>" for names with no dot.',
+    ),
+  credentials_secret_id: z
+    .string()
+    .regex(/^csec-[0-9a-f]{16}$/, 'credentials_secret_id must be a secret id: csec- and 16 hex')
+    .nullable()
+    .optional()
+    .describe(
+      'For a proxy that asks for a username and password: the id (csec-…, from list_secrets) of a secret whose value is "user:password". The secret must be bound to the computer as a FILE ({secret_id, file} in its secrets, at create or with set_computer_secrets), or the platform refuses the setting; a computer\'s first secrets are bound while it is stopped, and while the proxy names the secret a rebind that drops that binding is refused. Only with an http:// proxy for now. Leaving it out (or null) means no credentials.',
     ),
 });
 
@@ -739,7 +749,7 @@ export const registerComputers: Registrar = (server, session, opts) => {
           .nullable()
           .optional()
           .describe(
-            `${BROWSER_PROXY_ABOUT} Replaces the setting whole; null removes it. Send this on its own. A running computer has it within seconds — wait_for_computer with until="guest" before opening a browser that must use it — and a stopped or suspended one is given it as it starts. A browser already open picks it up at its next start.`,
+            `${BROWSER_PROXY_ABOUT} Replaces the setting whole; null removes it. To change one part, start from get_computer's browser_proxy and copy its credentials_secret_id to keep it: leaving it out removes the credentials, and the proxy then refuses the browsers. Send this on its own. A running computer has it within seconds — wait_for_computer with until="guest" before opening a browser that must use it — and a stopped or suspended one is given it as it starts. A browser already open picks it up at its next start.`,
           ),
       },
     },
@@ -1542,7 +1552,7 @@ export const registerComputers: Registrar = (server, session, opts) => {
         browser_proxy: browserProxySchema
           .optional()
           .describe(
-            `${BROWSER_PROXY_ABOUT} A create carrying one is always a cold boot. wait_for_computer with until="guest" waits until its browsers have it; update_computer changes or removes it later.`,
+            `${BROWSER_PROXY_ABOUT} A create carrying one is always a cold boot. A credentials_secret_id must name a secret bound as a file in this create's secrets. wait_for_computer with until="guest" waits until its browsers have it; update_computer changes or removes it later.`,
           ),
       },
       annotations: { destructiveHint: false, openWorldHint: true },
