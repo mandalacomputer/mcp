@@ -65,6 +65,25 @@ it('whoami says when the account is suspended, and names a workspace', async () 
   expect(text(result)).toContain('SUSPENDED');
 });
 
+// The platform withholds the holder's email and name and the account's name
+// and plan from a workspace-scoped key: the answer is still an answer.
+it('whoami renders a workspace-scoped key the platform withholds the email and plan from', async () => {
+  const scoped = {
+    ...WHOAMI,
+    user: { ...WHOAMI.user, email: null, name: null },
+    account: { ...WHOAMI.account, name: null, plan: null },
+    workspace: { id: 'wsp-1', name: 'ci', created_at: '2026-09-01T00:00:00Z' },
+  };
+  respond(scoped);
+  const result = await (await open()).call('whoami');
+  expect(result.isError).not.toBe(true);
+  expect(text(result)).toMatch(
+    /^usr-1 as owner on acc-1 \(active\), confined to workspace ci \(wsp-1\)\./,
+  );
+  expect(text(result).split('\n\n')[0]).not.toContain('null');
+  expect(data(result)).toEqual(scoped);
+});
+
 it('whoami projects only the public fields', async () => {
   respond({ ...WHOAMI, extra: 'UNEXPECTED', key: { ...WHOAMI.key, raw: 'com_secret' } });
   const result = await (await open()).call('whoami');

@@ -104,6 +104,15 @@ are wording changes, and they are behaviour changes in the way that matters.
   sent too many refused tokens now says "tokens" rather than "initializes",
   since it counts both.
 
+### Fixed
+
+- **`whoami` answers for a key confined to a workspace.** The platform now
+  withholds the holder's email and name, and the account's name and plan, from
+  such a key, answering `null` for each, because it may be in an end customer's
+  hands. The tool refused that answer as malformed; it now accepts it, and its
+  one-line summary names the user id where it named the email. The tool's
+  description says which fields are `null` and why.
+
 ## [0.6.0] — 2026-09-25
 
 Read before upgrading. The model gains five secret store tools, including
