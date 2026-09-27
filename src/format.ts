@@ -394,6 +394,17 @@ export type Computer = {
    * never present on a computer that is not running.
    */
   browser_proxy_pending?: boolean;
+  /**
+   * The proxy ALL of this computer's outbound TCP is sent through: the server
+   * URL, and the id of the secret holding its `user:password` when it asks for
+   * one. Absent when none is set.
+   */
+  egress_proxy?: { server?: string; credentials_secret_id?: string };
+  /**
+   * `true` while a running computer's egress proxy names credentials its host
+   * does not hold yet; every connection is closed meanwhile. Absent otherwise.
+   */
+  egress_proxy_pending?: boolean;
   vnc?: Record<string, unknown>;
 };
 
@@ -568,5 +579,17 @@ export function describe(c: Computer): string {
         : `browsers via ${proxy}`,
     );
   if (c.browser_proxy_pending === true) bits.push('its browser proxy is still being applied');
+  const egress = c.egress_proxy?.server;
+  const egressCreds = c.egress_proxy?.credentials_secret_id;
+  if (typeof egress === 'string' && egress)
+    bits.push(
+      typeof egressCreds === 'string' && egressCreds
+        ? `all outbound traffic via ${egress} (with credentials ${egressCreds})`
+        : `all outbound traffic via ${egress}`,
+    );
+  if (c.egress_proxy_pending === true)
+    bits.push(
+      'its egress proxy is waiting for credentials; connections are closed until they arrive',
+    );
   return bits.join(' · ');
 }

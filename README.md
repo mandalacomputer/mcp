@@ -236,6 +236,22 @@ comes back as it is. A running computer has a change within seconds:
 `wait_for_computer(until="guest")` waits until its browsers have it, and
 `get_computer` shows the gap as "its browser proxy is still being applied".
 
+**A proxy for all outbound traffic** — `egress_proxy: {server,
+credentials_secret_id}` on `create_computer` and `update_computer` sends ALL of
+a computer's outbound TCP (`exec`, terminals, package managers and browsers
+alike) through a proxy, taken on its host so nothing inside the computer can
+opt out. The server is `http://`, `https://` or `socks5://` with an explicit
+port; there is no bypass list. `credentials_secret_id` names a secret holding
+`user:password` that is not bound to the computer and never reaches it: the
+computer's host signs in to the proxy with it. It fails closed (proxy down or
+refusing, or credentials not on the host yet: the connection fails, nothing goes
+direct), drops UDP to the internet and ICMP, and does not proxy DNS lookups.
+On `update_computer` it goes alone — beside any other field it is refused
+before a request is sent — replaces the setting whole, and `null` removes it.
+`get_computer` names the proxy and, while the host waits for its credentials,
+says "its egress proxy is waiting for credentials; connections are closed until
+they arrive".
+
 **Delegating** — `run_agent`, `run_agent_chat`, registered only when a model key is present:
 `MANDALA_MODEL_KEY` on stdio, or the caller's own `X-Model-Key` header over HTTP.
 Both must also survive the configured filters.

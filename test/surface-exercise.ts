@@ -93,6 +93,14 @@ export const EXERCISE: Record<string, Record<string, unknown>[]> = {
     // A browser proxy, and the null that removes it (OPL-5144).
     { browser_proxy: { server: 'http://proxy.example.com:3128', bypass: ['<local>'] } },
     { browser_proxy: null },
+    // An egress proxy with its credentials, and the null that removes it (OPL-5246).
+    {
+      egress_proxy: {
+        server: 'https://proxy.example.com:3128',
+        credentials_secret_id: 'csec-0123456789abcdef',
+      },
+    },
+    { egress_proxy: null },
   ],
   // All three sizing fields in one call, because the platform reads exactly
   // these three off a move and the parameter sweep below is what proves it. A
@@ -229,6 +237,8 @@ export const EXERCISE: Record<string, Record<string, unknown>[]> = {
     },
     // A browser proxy at create (OPL-5144).
     { template: 'base', browser_proxy: { server: 'socks5://127.0.0.1:1080' } },
+    // An egress proxy at create (OPL-5246).
+    { template: 'base', egress_proxy: { server: 'socks5://proxy.example.com:1080' } },
   ],
   clone_computer: [{ name: 'copy' }],
   delete_computer: [

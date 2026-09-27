@@ -299,6 +299,8 @@ export function createBody(args: {
   secrets?: { secret_id: string; env?: string; file?: string }[];
   /** Checked for shape by the tool's schema; the rules on values are the platform's. */
   browser_proxy?: { server: string; bypass?: string[]; credentials_secret_id?: string | null };
+  /** Checked for shape by the tool's schema; the rules on values are the platform's. */
+  egress_proxy?: { server: string; credentials_secret_id?: string | null };
 }): Json {
   if (args.template_transfer !== undefined) {
     if (typeof args.template_transfer !== 'string' || !args.template_transfer.trim()) {
@@ -313,8 +315,27 @@ export function createBody(args: {
       );
     }
   }
-  const { start = true, ...rest } = args;
-  return { ...omitUndefined(rest as Json), start };
+  const { start = true, egress_proxy, ...rest } = args;
+  return {
+    ...omitUndefined({
+      ...(rest as Json),
+      egress_proxy: egress_proxy === undefined ? undefined : egressProxyBody(egress_proxy),
+    }),
+    start,
+  };
+}
+
+/**
+ * An egress proxy as the wire takes it: a `null` credentials id means none and
+ * is left out, so the setting goes as `{server}` exactly.
+ */
+export function egressProxyBody(p: {
+  server: string;
+  credentials_secret_id?: string | null;
+}): Json {
+  return p.credentials_secret_id == null
+    ? { server: p.server }
+    : { server: p.server, credentials_secret_id: p.credentials_secret_id };
 }
 
 /**

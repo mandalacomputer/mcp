@@ -16,6 +16,17 @@ are wording changes, and they are behaviour changes in the way that matters.
 
 ### Added
 
+- **`egress_proxy` on `create_computer` and `update_computer`:** `{server,
+  credentials_secret_id?}` sends ALL of a computer's outbound TCP through a
+  proxy (`http://`, `https://` or `socks5://`, explicit port, no bypass list);
+  on `update_computer` it travels alone and `null` removes it. Its description
+  tells the model that it fails closed, drops UDP to the internet and ICMP,
+  does not proxy DNS, closes open connections when it changes, and that the
+  credentials secret is not bound to the computer. A key it does not have
+  (such as `bypass`), or `egress_proxy` beside any other field, is refused
+  before a request is sent. A computer's summary line names the proxy, its
+  credentials id, and `egress_proxy_pending`.
+
 - **`idempotency_key` on every lifecycle tool:** `create_computer`,
   `clone_computer`, `start_computer`, `stop_computer`, `suspend_computer`,
   `restart_computer`, `update_computer`, `move_computer`, `delete_computer`,
