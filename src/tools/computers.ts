@@ -25,7 +25,7 @@ import {
 } from '../format.js';
 import * as P from '../paths.js';
 import { heartbeat, POLL_MS, pollDelay, sleep } from '../poll.js';
-import { idempotencyKeyArg, keyedFailure } from './operations.js';
+import { buildIdempotencyKeyArg, idempotencyKeyArg, keyedFailure } from './operations.js';
 import { FILES_DIR, secretBindingsSchema } from './secrets.js';
 import type { Registrar } from './types.js';
 
@@ -823,7 +823,7 @@ export const registerComputers: Registrar = (server, session, opts) => {
           .nullable()
           .optional()
           .describe(
-            `${EGRESS_PROXY_ABOUT} Replaces the setting whole; null removes it and the computer's traffic goes directly again. To change the server of the same proxy, start from the egress proxy get_computer returns and copy its credentials_secret_id to keep it: leaving it out removes the credentials, and the proxy then refuses every connection. Do not carry credentials_secret_id to a different server unless the user says those credentials are for that server. Send this ON ITS OWN — never beside name, a resize, idle_suspend_min or browser_proxy. A running computer has it when the answer arrives; a stopped or suspended one is given it before it starts. After any other 5xx, or no answer, it may or may not have taken effect: call get_computer, and if its egress proxy names credentials and is still waiting for them after a few seconds, send the setting again.`,
+            `${EGRESS_PROXY_ABOUT} Replaces the setting whole; null removes it and the computer's traffic goes directly again. To change the server of the same proxy, start from the egress proxy get_computer returns and copy its credentials_secret_id to keep it: leaving it out removes the credentials, and the proxy then refuses every connection. Do not carry credentials_secret_id to a different server unless the user says those credentials are for that server. Send this ON ITS OWN — never beside name, a resize, idle_suspend_min or browser_proxy. A running computer has it when the answer arrives; a stopped or suspended one is given it before it starts. After any other 5xx, or no answer, it may or may not have taken effect: call get_computer, and if it does not show the setting you sent, or its egress proxy names credentials and is still waiting for them after a few seconds, send the setting again — with a new idempotency_key, or none, after a 5xx; with the key the answer named after no answer at all.`,
           ),
         idempotency_key: idempotencyKeyArg,
       },
@@ -1202,11 +1202,12 @@ export const registerComputers: Registrar = (server, session, opts) => {
           // that the status was never seen.
           let blocked: string | undefined;
           // Which proxy flag, if any, held the last status read, so the give-up
-          // can name it. egress_proxy_pending does not always clear by itself:
-          // a deleted credentials secret, or an update whose answer was lost,
-          // holds it until the setting is sent again, and "call again to keep
-          // waiting" would send the model round a wait that cannot end.
-          // browser_proxy_pending is named too, so a wait held on it does not
+          // can name it. Only the last read counts, so a wait that ran out on
+          // egress_proxy_pending may have met an ordinary delivery: the give-up
+          // invites another wait first, and names what clears a flag that
+          // persists (a deleted credentials secret, an update whose answer was
+          // lost) as the fallback. browser_proxy_pending is named too, so a
+          // wait held on it does not
           // end saying only "last seen running".
           let heldOn: 'egress' | 'browser' | undefined;
           while (!untilDeadline.aborted) {
@@ -1365,7 +1366,7 @@ export const registerComputers: Registrar = (server, session, opts) => {
               if (c.egress_proxy_pending === true) {
                 heldOn = 'egress';
                 await beat(
-                  `Waiting for ${id} — running; waiting for the egress proxy's credentials (egress_proxy_pending). If its credentials secret was deleted, or an update_computer egress_proxy change went unanswered, this does not clear until the setting is sent again.`,
+                  `Waiting for ${id} — running; waiting for the egress proxy's credentials (egress_proxy_pending), which usually arrive within seconds.`,
                 );
                 await sleep(POLL_MS, signal);
                 continue;
@@ -1436,14 +1437,18 @@ export const registerComputers: Registrar = (server, session, opts) => {
           // as success. The message still says to call again, because the state
           // it was waiting on may yet arrive.
           //
-          // Except behind an egress proxy still waiting for its credentials,
-          // which may never arrive by themselves: that answer names the state
-          // and what clears it, and does not advise waiting again.
+          // Behind an egress proxy still waiting for its credentials, the
+          // answer names that state. It still says to call again first: the
+          // flag is read afresh on every poll, so a wait that ran out on it may
+          // have met an ordinary delivery a few seconds long. Only a flag that
+          // persists across waits points at something the caller has to fix,
+          // and even then removing the proxy is the user's call, not a fix: it
+          // sends every connection directly.
           return refused(
             blocked
               ? `Gave up after ${timeout_s}s; the platform could not be asked about ${id} for the whole wait — the last attempt said: ${blocked}. Nothing was changed — call again to keep waiting.`
               : heldOn === 'egress'
-                ? `Gave up after ${timeout_s}s; ${id} is running, but its egress proxy's credentials never reached its host (egress_proxy_pending), so every connection it opens is closed. This does not always clear by itself: if the secret its egress_proxy.credentials_secret_id names was deleted, or an earlier update_computer egress_proxy change got a 5xx or no answer, send the egress_proxy setting again with update_computer, naming a secret that exists (list_secrets), or remove it with null. Nothing was changed.`
+                ? `Gave up after ${timeout_s}s; ${id} is running, but its egress proxy's credentials have not reached its host yet (egress_proxy_pending), so every connection it opens is closed until they do. Nothing was changed — call again to keep waiting. If it persists across waits, the secret its egress_proxy.credentials_secret_id names may have been deleted, or an earlier update_computer egress_proxy change may have got a 5xx or no answer: send the egress_proxy setting again with update_computer, naming a secret that exists (list_secrets). Removing the proxy with null is for the user to decide, not a fix: it sends all of the computer's traffic directly.`
                 : heldOn === 'browser'
                   ? `Gave up after ${timeout_s}s; ${id} is running, but its browser proxy was still being applied in the guest (browser_proxy_pending), so a browser opened now may not use it. Nothing was changed — call again to keep waiting; if it persists, send the browser_proxy setting again with update_computer.`
                   : `Gave up after ${timeout_s}s; ${id} was last seen ${last}. Nothing was changed — call again to keep waiting.`,
@@ -1688,7 +1693,7 @@ export const registerComputers: Registrar = (server, session, opts) => {
           .describe(
             `${EGRESS_PROXY_ABOUT} It is in effect from the first packet the computer sends: until a proxy's credentials reach its host, connections are closed, not sent directly (wait_for_computer with until="guest" waits for them). A create carrying one is never answered from the warm pool, and a clone does not inherit it. A credentials_secret_id naming no secret, or one whose value is not user:password, is refused with 400 before anything is created. update_computer changes or removes it later.`,
           ),
-        idempotency_key: idempotencyKeyArg,
+        idempotency_key: buildIdempotencyKeyArg,
       },
       annotations: { destructiveHint: false, openWorldHint: true },
     },
@@ -1799,7 +1804,7 @@ export const registerComputers: Registrar = (server, session, opts) => {
       inputSchema: {
         ...idArg,
         name: z.string().optional().describe('A name for the copy.'),
-        idempotency_key: idempotencyKeyArg,
+        idempotency_key: buildIdempotencyKeyArg,
       },
     },
     ({ computer_id, name, idempotency_key }, extra) =>

@@ -65,17 +65,25 @@ are wording changes, and they are behaviour changes in the way that matters.
   a `5xx` the platform answered itself, it is not: the platform has settled
   that key as lost, so resending with it can only answer
   `idempotency_outcome_unknown`, and the call may still be under way on its
-  host (its operation stays `pending` for up to an hour). The answer says to
-  read the operation first (`get_operation` with the `operation_id` the error
-  named, or `list_operations` with the key), to wait with `wait_for_operation`
-  and not resend with any key while it is `pending` or `running`, and to send
-  the call with a new key, or none, only once the operation is final as
-  `failed` or not found AND `get_computer` (or `list_computers` after a create
-  or a clone) shows the step did not happen. The platform's
-  `idempotency_in_progress`, `idempotency_outcome_unknown` and
+  host (its operation stays `pending` for up to an hour, whatever happened).
+  For `start_computer`, `stop_computer`, `suspend_computer`,
+  `restart_computer`, `delete_computer`, `move_computer` and
+  `update_computer`, the answer says to read `get_computer` (and
+  `get_operation` when the error named one: `succeeded` means it happened,
+  `running` means wait, `pending` alone is no reason to wait) and, if the step
+  did not take effect, to call the tool again with a new key, or none. For
+  `create_computer`, `clone_computer`, `clone_snapshot` and `restore_snapshot`,
+  where a read made straight away cannot see a build or restore still landing,
+  it says to read the operation first (`get_operation` with the `operation_id`
+  the error named, or `list_operations` with the key), to wait with
+  `wait_for_operation` and not resend with any key while it is `pending` or
+  `running`, and to send the call with a new key, or none, only once the
+  operation is final as `failed` or not found AND `get_computer` (or
+  `list_computers` after a create or a clone) shows the step did not happen.
+  The `idempotency_key` input's description says the same, per tool. The
+  platform's `idempotency_in_progress`, `idempotency_outcome_unknown` and
   `idempotency_key_reused` refusals each get a sentence of their own
-  (`idempotency_outcome_unknown` ends with the same wait-then-new-key route),
-  and
+  (`idempotency_outcome_unknown` ends with the same per-tool route), and
   `isTransient` is false for `idempotency_outcome_unknown`. `list_operations`
   takes `idempotency_key`, an operation carries the key it was started with,
   and `delete` is a documented kind.
@@ -149,12 +157,14 @@ are wording changes, and they are behaviour changes in the way that matters.
   credentials.** While `egress_proxy_pending` is true every connection the
   computer opens is closed, so the wait holds until it clears, as it does for
   `browser_proxy_pending`. The tool and `until` descriptions say so. Because
-  that flag can hold until the caller acts (the credentials secret was
-  deleted, or an `update_computer` egress change got a `5xx` or no answer), a
-  wait that times out on it names `egress_proxy_pending` and says to send the
-  `egress_proxy` setting again with `update_computer`, or remove it, rather
-  than to call again. A wait that times out held on `browser_proxy_pending`
-  names that flag too.
+  a wait can time out on an ordinary delivery, one that times out on it names
+  `egress_proxy_pending` and says to call again to keep waiting; only if it
+  persists across waits (the credentials secret was deleted, or an
+  `update_computer` egress change got a `5xx` or no answer) does it say to
+  send the `egress_proxy` setting again with `update_computer`, naming a
+  secret that exists. Removing the proxy is named as the user's decision, since
+  it sends all traffic directly. A wait that times out held on
+  `browser_proxy_pending` names that flag too.
 - **`screenshot` labels a suspended computer's saved frame.** A response marked
   `X-GC-Frame: suspended` (`fresh: false` on a suspended computer) is labelled
   as a saved frame with its own pixel size, not the live screen and not in

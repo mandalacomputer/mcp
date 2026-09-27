@@ -15,7 +15,7 @@ import {
 } from '../format.js';
 import * as P from '../paths.js';
 import { heartbeat, POLL_MS, pollDelay, sleep } from '../poll.js';
-import { idempotencyKeyArg, keyedFailure } from './operations.js';
+import { buildIdempotencyKeyArg, keyedFailure } from './operations.js';
 import type { Registrar } from './types.js';
 
 const idArg = {
@@ -671,7 +671,7 @@ export const registerSnapshots: Registrar = (server, session, opts) => {
         confirm: z
           .literal(true)
           .describe("Must be true. This overwrites the source computer's current disk."),
-        idempotency_key: idempotencyKeyArg,
+        idempotency_key: buildIdempotencyKeyArg,
       },
       annotations: { destructiveHint: true },
     },
@@ -815,7 +815,7 @@ export const registerSnapshots: Registrar = (server, session, opts) => {
           .boolean()
           .default(true)
           .describe("Make the new computer this session's selected one."),
-        idempotency_key: idempotencyKeyArg,
+        idempotency_key: buildIdempotencyKeyArg,
       },
     },
     ({ snapshot_id, name, select, memory, inherit_secrets, idempotency_key }, extra) =>

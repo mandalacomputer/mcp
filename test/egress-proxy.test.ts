@@ -285,11 +285,13 @@ describe('wait_for_computer on a computer whose egress proxy waits for credentia
     expect(textOf(res)).toContain('Guest is answering');
   });
 
-  it('gives up naming egress_proxy_pending and what clears it, not "call again"', async () => {
-    // egress_proxy_pending can hold until the caller acts (a deleted
-    // credentials secret, an update whose answer was lost), so a give-up that
-    // said only "last seen running … call again to keep waiting" sent the
-    // model round a wait that cannot end.
+  it('gives up naming egress_proxy_pending, inviting another wait first', async () => {
+    // The flag is read afresh on every poll, so a wait that ran out on it may
+    // have met an ordinary few-second delivery: the answer invites another
+    // wait first, and names update_computer only for a flag that persists
+    // (a deleted credentials secret, an update whose answer was lost). It
+    // never offers removing the fail-closed proxy as a fix: that sends every
+    // connection directly, and is the user's decision.
     const res = await platform(
       (seen) => {
         if (seen.path.endsWith('/exec'))
@@ -308,7 +310,15 @@ describe('wait_for_computer on a computer whose egress proxy waits for credentia
     expect(textOf(res)).toMatch(/Gave up after 5s/);
     expect(textOf(res)).toMatch(/egress_proxy_pending/);
     expect(textOf(res)).toMatch(/update_computer/);
-    expect(textOf(res)).not.toMatch(/call again to keep waiting/);
+    expect(textOf(res)).toMatch(/call again to keep waiting/);
+    expect(textOf(res)).not.toMatch(/never reached/);
+    expect(textOf(res)).toMatch(/If it persists across waits/);
+    expect(textOf(res).indexOf('call again to keep waiting')).toBeLessThan(
+      textOf(res).indexOf('update_computer'),
+    );
+    expect(textOf(res)).not.toMatch(/or remove it with null/);
+    expect(textOf(res)).toMatch(/null is for the user to decide/);
+    expect(textOf(res)).toMatch(/sends all of the computer's traffic directly/);
   }, 30_000);
 
   it('gives up naming browser_proxy_pending when that held the wait', async () => {

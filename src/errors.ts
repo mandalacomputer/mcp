@@ -235,9 +235,11 @@ export function idempotencyCode(err: APIError): string | undefined {
  * What to tell a model about the refusals a call's `idempotency_key` produces
  * (platform OPL-5127), or `undefined` for any other error. Ahead of the
  * `reason` advice, which for `idempotency_in_progress` says only "worth sending
- * again" and not with WHAT.
+ * again" and not with WHAT. `tool` is the lifecycle tool that was called, which
+ * decides the route after `idempotency_outcome_unknown` (see
+ * {@link resendAfterSpentKey}); without it the cautious route is given.
  */
-export function idempotencyAdvice(err: unknown): string | undefined {
+export function idempotencyAdvice(err: unknown, tool?: string): string | undefined {
   if (!(err instanceof APIError)) return undefined;
   const operation =
     record(err.body) && typeof err.body.operation_id === 'string'
@@ -247,7 +249,7 @@ export function idempotencyAdvice(err: unknown): string | undefined {
     case 'idempotency_in_progress':
       return `the same call with this idempotency_key is still running; wait and call again with the same idempotency_key for its answer${operation ? `, or read get_operation ${operation}` : ''}`;
     case 'idempotency_outcome_unknown':
-      return `the platform did not hear how the call with this idempotency_key ended; do not send it again with this key, since the same key answers the same thing. ${resendOnlyOnceFinal(operation)}`;
+      return `the platform did not hear how the call with this idempotency_key ended; do not send it again with this key, since the same key answers the same thing. ${resendAfterSpentKey(tool, operation, undefined, tool ? `call ${tool} again` : undefined)}`;
     case 'idempotency_key_reused':
       return 'this idempotency_key was already used with a different request, so nothing was done; send this request with a new key, or none';
     default:
@@ -256,8 +258,69 @@ export function idempotencyAdvice(err: unknown): string | undefined {
 }
 
 /**
+ * The lifecycle tools whose resend after a spent key waits for the operation
+ * to be final: the ones that make a new computer or overwrite a disk. A second
+ * one is costly (a second computer, a second overwrite), and a read of the
+ * computer made straight away cannot see one that is still landing.
+ *
+ * Every other keyed tool (start, stop, suspend, restart, delete, move and
+ * update_computer) changes a computer a read shows, and doing it twice does no
+ * harm the read cannot catch, while the operation of a call whose key is spent
+ * stays `pending` for an hour however quickly the host gave up (platform
+ * OPL-5304). Holding those to the same gate would mean an hour before the start
+ * the user asked for could be sent again.
+ */
+const WAITS_FOR_FINAL = new Set([
+  'create_computer',
+  'clone_computer',
+  'clone_snapshot',
+  'restore_snapshot',
+]);
+
+/** Whether a spent key's resend for `tool` waits for its operation; `true` when the tool is not known. */
+export function resendWaitsForFinal(tool: string | undefined): boolean {
+  return tool === undefined || WAITS_FOR_FINAL.has(tool);
+}
+
+/**
  * The route to a new-key resend after a keyed call whose outcome is unknown and
- * whose key is spent: a `5xx` the platform answered, or
+ * whose key is spent, chosen by the tool that was called: the wait for a final
+ * operation ({@link resendOnlyOnceFinal}) where a duplicate is costly and
+ * unseen, a read of the computer ({@link resendAfterRead}) everywhere else.
+ */
+export function resendAfterSpentKey(
+  tool: string | undefined,
+  operation?: string,
+  key?: string,
+  resend = 'send the call again',
+): string {
+  return resendWaitsForFinal(tool)
+    ? resendOnlyOnceFinal(operation, key, resend)
+    : resendAfterRead(operation, resend);
+}
+
+/**
+ * The route for a spent key on a step a read of the computer shows: start,
+ * stop, suspend, restart, delete, move, update_computer. Read, and resend with
+ * a new key or none if the step did not take effect. A named operation is read
+ * too, because `succeeded` and `running` do answer the question; `pending` does
+ * not, since a spent key's operation stays pending for an hour whatever
+ * happened, so it is named as no reason to wait.
+ */
+export function resendAfterRead(operation?: string, resend = 'send the call again'): string {
+  return (
+    `Read get_computer${operation ? ` and get_operation ${operation}` : ''} first. ` +
+    (operation
+      ? `If the operation succeeded, the step happened; if it is running, the step is under way, so wait_for_operation ${operation} rather than resending. Pending says only that the platform has not settled it yet, which can take an hour, and is no reason to wait. `
+      : '') +
+    `If get_computer shows the step did not take effect, ${resend} with a new idempotency_key, or none — there is no need to wait for the operation to be final first`
+  );
+}
+
+/**
+ * The route to a new-key resend for the tools that make a new computer or
+ * overwrite a disk (see {@link WAITS_FOR_FINAL}) after a keyed call whose
+ * outcome is unknown and whose key is spent: a `5xx` the platform answered, or
  * `idempotency_outcome_unknown` (platform OPL-5304).
  *
  * The condition has to be one a read can decide. The platform keeps such a

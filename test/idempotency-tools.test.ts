@@ -43,6 +43,9 @@ function answer(match: (method: string, path: string) => boolean, response: () =
   }) as typeof fetch;
 }
 
+/** The lifecycle tools that make a new computer or overwrite a disk. */
+const BUILDS = new Set(['create_computer', 'clone_computer', 'restore_snapshot', 'clone_snapshot']);
+
 /** Every lifecycle tool, once each. */
 const LIFECYCLE: [string, Record<string, unknown>][] = [
   ['create_computer', { template: 'base' }],
@@ -71,7 +74,7 @@ describe('a lifecycle tool', () => {
     expect(keyed()[0]).toBe('order-4711:step');
   });
 
-  it.each(LIFECYCLE)(
+  it.each(LIFECYCLE.filter(([tool]) => BUILDS.has(tool)))(
     '%s describes the spent-key route as wait-for-the-operation first',
     async (tool) => {
       const { client } = await open();
@@ -80,6 +83,23 @@ describe('a lifecycle tool', () => {
       const said = props.idempotency_key?.description ?? '';
       expect(said).toContain('wait while it is pending or running and do not resend meanwhile');
       expect(said).toContain('only once the operation is final as failed or not found AND');
+    },
+  );
+
+  // A spent key's operation stays pending for an hour however quickly the host
+  // gave up (platform OPL-5304), so a step a read of the computer shows is read
+  // off the computer and resent, not held to that hour.
+  it.each(LIFECYCLE.filter(([tool]) => !BUILDS.has(tool)))(
+    '%s describes the spent-key route as read the computer, then resend',
+    async (tool) => {
+      const { client } = await open();
+      const found = (await client.listTools()).tools.find((t) => t.name === tool);
+      const props = found?.inputSchema.properties as Record<string, { description?: string }>;
+      const said = props.idempotency_key?.description ?? '';
+      expect(said).toContain('read get_computer');
+      expect(said).toContain('pending alone is no reason to wait');
+      expect(said).toContain('if the step did not take effect, send the call again with a new key');
+      expect(said).not.toContain('do not resend meanwhile');
     },
   );
 
@@ -109,7 +129,7 @@ describe('an unknown outcome', () => {
   // (OPL-5304), so the same key sent again can only be answered
   // idempotency_outcome_unknown. The advice is to read first, then resend with
   // a new key or none — never the same key.
-  it('after a 5xx the platform answered, says to read first and not to resend with the key', async () => {
+  it('after a 5xx the platform answered on a start, says to read the computer, then resend with a new key', async () => {
     answer(
       (method, path) => method === 'POST' && path === '/computers/vm-1/start',
       () =>
@@ -130,17 +150,50 @@ describe('an unknown outcome', () => {
       'resending with that key will answer idempotency_outcome_unknown, not do it',
     );
     expect(said).toContain(`get_operation ${OPERATION.id}`);
-    expect(said).toContain('call start_computer again with a new idempotency_key, or none');
-    // The operation stays pending for up to an hour while the host may still be
-    // carrying the call out, and a read of the computer made straight away can
-    // show no effect: a new-key resend then does the step twice. So the first
-    // read is the operation, and nothing is resent while it is live.
+    // The operation of a spent key stays pending for an hour whatever
+    // happened, and a start a read of the computer shows: so the route is that
+    // read, then a new key, not an hour of waiting on the operation.
+    expect(said).toContain(`Read get_computer and get_operation ${OPERATION.id} first`);
+    expect(said).toContain('is no reason to wait');
+    expect(said).toContain(
+      'If get_computer shows the step did not take effect, call start_computer again with a new idempotency_key, or none',
+    );
+    expect(said).not.toContain('do NOT resend it meanwhile, with any key');
+    expect(said).not.toContain('a slow create or clone may still land');
+  });
+
+  it('after a 5xx the platform answered on a create, waits for the operation to be final', async () => {
+    // A create a read made at once cannot see may still land, and a second
+    // one is a second computer: the resend waits for the operation.
+    answer(
+      (method, path) => method === 'POST' && path === '/computers',
+      () => Response.json({ error: 'boom', operation_id: OPERATION.id }, { status: 500 }),
+    );
+    const said = text(await (await open()).call('create_computer', { template: 'base' }));
     expect(said).toMatch(new RegExp(`Read get_operation ${OPERATION.id} .*first`));
     expect(said).toContain(`wait_for_operation ${OPERATION.id}`);
     expect(said).toContain('While it is pending or running the call may still be carried out');
     expect(said).toContain('do NOT resend it meanwhile, with any key');
     expect(said).toMatch(/Only once it is final as failed .* AND get_computer/);
     expect(said.indexOf('do NOT resend')).toBeLessThan(said.indexOf('with a new idempotency_key'));
+    expect(said).toContain('call create_computer again with a new idempotency_key, or none');
+  });
+
+  it('after a 5xx on an egress update, reads the computer and does not talk of a slow create', async () => {
+    answer(
+      (method, path) => method === 'PATCH' && path === '/computers/vm-1',
+      () => Response.json({ error: 'boom' }, { status: 500 }),
+    );
+    const said = text(
+      await (await open()).call('update_computer', {
+        egress_proxy: null,
+        idempotency_key: 'k-patch',
+      }),
+    );
+    expect(said).toContain('Read get_computer first');
+    expect(said).toContain('call update_computer again with a new idempotency_key, or none');
+    expect(said).not.toContain('a slow create or clone may still land');
+    expect(said).not.toContain('do NOT resend it meanwhile');
   });
 
   it('says the same after a platform 500 on a create, naming the key the server made', async () => {
@@ -229,12 +282,29 @@ describe('an unknown outcome', () => {
       idempotency_key: 'k-lost',
     });
     expect(text(result)).toContain('do not send it again with this key');
+    expect(text(result)).toContain('Read get_computer first');
+    expect(text(result)).toContain(
+      'If get_computer shows the step did not take effect, call delete_computer again with a new idempotency_key, or none',
+    );
+    expect(text(result)).not.toContain('do NOT resend it meanwhile, with any key');
+    expect(text(result)).not.toContain('To retry without risking');
+  });
+
+  it('says an unheard outcome on a clone waits for the operation before a new key', async () => {
+    answer(
+      (method, path) => method === 'POST' && path === '/computers/vm-1/clone',
+      () =>
+        Response.json(
+          { error: 'The platform did not hear how it ended.', code: 'idempotency_outcome_unknown' },
+          { status: 409 },
+        ),
+    );
+    const result = await (await open()).call('clone_computer', { idempotency_key: 'k-lost' });
     expect(text(result)).toContain('list_operations with idempotency_key set to this key');
     expect(text(result)).toContain('do NOT resend it meanwhile, with any key');
     expect(text(result)).toMatch(
-      /Only once it is final as failed .* AND get_computer .* shows the step did not take effect, send the call again with a new idempotency_key, or none/,
+      /Only once it is final as failed .* AND get_computer .* shows the step did not take effect, call clone_computer again with a new idempotency_key, or none/,
     );
-    expect(text(result)).not.toContain('To retry without risking');
   });
 
   it('does not offer the key on a refusal that released it', async () => {

@@ -8,7 +8,7 @@ import {
   isTransientForPoll,
   keyedOutcomeUnknown,
   platformAnsweredFailure,
-  resendOnlyOnceFinal,
+  resendAfterSpentKey,
 } from '../errors.js';
 import { failed, guarded, operationIdOf, refused, said } from '../format.js';
 import * as P from '../paths.js';
@@ -46,19 +46,37 @@ const page = z.object({
 });
 
 /**
- * The `idempotency_key` every lifecycle tool takes (platform OPL-5127), checked
+ * The `idempotency_key` a lifecycle tool takes (platform OPL-5127), checked
  * against the platform's rule here so a key it would refuse never leaves.
  */
-export const idempotencyKeyArg = z
+const keyArg = z
   .string()
   .regex(
     IDEMPOTENCY_KEY_PATTERN,
     'idempotency_key must be 1 to 255 characters, each printable ASCII other than a space',
   )
-  .optional()
-  .describe(
-    "Optional. Omit it on a first attempt: a fresh key is sent for you, and an answer that is lost names it. Pass the key such an answer named to send the SAME call again without it being done twice — the platform answers with the first call's result, or says it is still running. After a 5xx the platform answered, or idempotency_outcome_unknown, the key is spent (resending with it answers idempotency_outcome_unknown) and the call may still be under way: read its operation first (get_operation with the operation_id the error named, or list_operations with the key), wait while it is pending or running and do not resend meanwhile, and send the call with a new key (or none) only once the operation is final as failed or not found AND get_computer shows the step did not happen. Keys last 24 hours; the same key with different arguments is refused.",
-  );
+  .optional();
+
+const KEY_FIRST =
+  "Optional. Omit it on a first attempt: a fresh key is sent for you, and an answer that is lost names it. Pass the key such an answer named to send the SAME call again without it being done twice — the platform answers with the first call's result, or says it is still running. After a 5xx the platform answered, or idempotency_outcome_unknown, the key is spent (resending with it answers idempotency_outcome_unknown)";
+const KEY_LAST = ' Keys last 24 hours; the same key with different arguments is refused.';
+
+/**
+ * The key on a step a read of the computer shows: start, stop, suspend,
+ * restart, delete, move, update_computer. See {@link resendAfterSpentKey}.
+ */
+export const idempotencyKeyArg = keyArg.describe(
+  `${KEY_FIRST}: read get_computer (and get_operation when the error named an operation_id: succeeded means it happened, running means wait on it, pending alone is no reason to wait), and if the step did not take effect, send the call again with a new key, or none.${KEY_LAST}`,
+);
+
+/**
+ * The key on a call that makes a new computer or overwrites a disk: create,
+ * clone, clone_snapshot, restore_snapshot. A resend after a spent key waits for
+ * the operation to be final. See {@link resendAfterSpentKey}.
+ */
+export const buildIdempotencyKeyArg = keyArg.describe(
+  `${KEY_FIRST} and the call may still be under way: read its operation first (get_operation with the operation_id the error named, or list_operations with the key), wait while it is pending or running and do not resend meanwhile, and send the call with a new key (or none) only once the operation is final as failed or not found AND get_computer shows the step did not happen.${KEY_LAST}`,
+);
 
 /**
  * The answer to a lifecycle tool call that failed, with what its key means.
@@ -71,10 +89,12 @@ export const idempotencyKeyArg = z
  *   front of the platform answered: the same tool, with the same key.
  * - The platform itself answered a `5xx`: it has settled that key as lost
  *   (OPL-5304), so the same key can only be answered
- *   `idempotency_outcome_unknown`. Its operation stays `pending` while the
- *   host may still be carrying it out, so the first read is that operation,
- *   and a resend with a new key or none waits until it is final and the
- *   computer shows the step did not happen (see {@link resendOnlyOnceFinal}).
+ *   `idempotency_outcome_unknown`. The next step is a read, then a resend
+ *   with a new key or none if the step did not happen. Which read depends on
+ *   the tool (see {@link resendAfterSpentKey}): a create, clone or restore
+ *   waits for its operation to be final, since a read of the computer made
+ *   at once cannot see one still landing; every other step is read off the
+ *   computer, since its operation stays `pending` for an hour regardless.
  */
 export function keyedFailure(
   err: unknown,
@@ -82,7 +102,7 @@ export function keyedFailure(
   what: string,
   key: string,
 ): CallToolResult {
-  const advice = idempotencyAdvice(err);
+  const advice = idempotencyAdvice(err, tool);
   const result = failed(err, advice === undefined);
   const [first, ...rest] = result.content;
   if (first?.type !== 'text') return result;
@@ -94,7 +114,7 @@ export function keyedFailure(
     const op = operationIdOf((err as APIError).body);
     text +=
       `\n\nThe platform answered this itself, so whether it took effect is unknown — its host may still be carrying out the ${what} — and it has settled idempotency_key "${key}": resending with that key will answer idempotency_outcome_unknown, not do it. ` +
-      `${resendOnlyOnceFinal(op, key, `call ${tool} again`)}. That way there is no second ${what}.`;
+      `${resendAfterSpentKey(tool, op, key, `call ${tool} again`)}. That way there is no second ${what}.`;
   }
   return { ...result, content: [{ ...first, text }, ...rest] };
 }
