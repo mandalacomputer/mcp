@@ -65,7 +65,10 @@ are wording changes, and they are behaviour changes in the way that matters.
   update without it removed the proxy's credentials, leaving every browser on
   the computer answered 407 by its upstream. The secret must be bound to the
   computer as a file; `update_computer` replaces the setting whole, so copy
-  the id from `get_computer` to keep it. A value that is not a secret's id is
+  the id from `get_computer` to keep it for the same proxy. The descriptions
+  say not to carry the id to a different server, since the credentials are
+  sent to the proxy on every request and belong to the one they were set for.
+  A value that is not a secret's id is
   refused before any request, and a computer's one-line summary names the
   secret: `browsers via <server> (with credentials <id>)`.
 

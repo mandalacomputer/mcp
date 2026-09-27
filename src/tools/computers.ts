@@ -63,7 +63,7 @@ const browserProxySchema = z.strictObject({
     .nullable()
     .optional()
     .describe(
-      'For a proxy that asks for a username and password: the id (csec-…, from list_secrets) of a secret whose value is "user:password". The secret must be bound to the computer as a FILE ({secret_id, file} in its secrets, at create or with set_computer_secrets), or the platform refuses the setting; a computer\'s first secrets are bound while it is stopped, and while the proxy names the secret a rebind that drops that binding is refused. Only with an http:// proxy for now. Leaving it out (or null) means no credentials.',
+      'For a proxy that asks for a username and password: the id (csec-…, from list_secrets) of a secret whose value is "user:password". The secret must be bound to the computer as a FILE ({secret_id, file} in its secrets, at create or with set_computer_secrets), or the platform refuses the setting; a computer\'s first secrets are bound while it is stopped, and while the proxy names the secret a rebind that drops that binding is refused. Only with an http:// proxy for now. The secret\'s user:password is sent to the proxy named in server, on every request the browsers make. Leaving it out (or null) means no credentials.',
     ),
 });
 
@@ -749,7 +749,7 @@ export const registerComputers: Registrar = (server, session, opts) => {
           .nullable()
           .optional()
           .describe(
-            `${BROWSER_PROXY_ABOUT} Replaces the setting whole; null removes it. To change one part, start from get_computer's browser_proxy and copy its credentials_secret_id to keep it: leaving it out removes the credentials, and the proxy then refuses the browsers. Send this on its own. A running computer has it within seconds — wait_for_computer with until="guest" before opening a browser that must use it — and a stopped or suspended one is given it as it starts. A browser already open picks it up at its next start.`,
+            `${BROWSER_PROXY_ABOUT} Replaces the setting whole; null removes it. To change the bypass of the same proxy, start from get_computer's browser_proxy and copy its credentials_secret_id to keep it: leaving it out removes the credentials, and the proxy then refuses the browsers. Do not carry credentials_secret_id to a different server: those credentials belong to the proxy they were set for; send a new server without it unless the user says those credentials are for that server. Send this on its own. A running computer has it within seconds — wait_for_computer with until="guest" before opening a browser that must use it — and a stopped or suspended one is given it as it starts. A browser already open picks it up at its next start.`,
           ),
       },
     },

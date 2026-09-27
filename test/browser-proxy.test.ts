@@ -145,6 +145,22 @@ describe('update_computer with browser_proxy', () => {
     expect(res.isError).toBeFalsy();
   });
 
+  it('tells a model to keep credentials only for the same server', async () => {
+    // The credentials are sent to the proxy on every request, so guidance to
+    // copy the id on any change would send one proxy's user:password to another.
+    const { client, close } = await connect();
+    const tool = (await client.listTools()).tools.find((t) => t.name === 'update_computer');
+    await close();
+    // The nullable setting and field may wrap their descriptions; read the text.
+    expect(tool).toBeDefined();
+    const properties = tool!.inputSchema.properties as Record<string, unknown>;
+    const proxy = JSON.stringify(properties.browser_proxy);
+    expect(proxy).toContain('To change the bypass of the same proxy');
+    expect(proxy).toContain('Do not carry credentials_secret_id to a different server');
+    expect(proxy).not.toContain('To change one part');
+    expect(proxy).toContain("The secret's user:password is sent to the proxy named in server");
+  });
+
   it.each([
     [{ server: '  ' }],
     [{ server: SERVER, bypass: [''] }],
