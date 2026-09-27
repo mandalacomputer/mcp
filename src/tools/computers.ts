@@ -73,6 +73,32 @@ const BROWSER_PROXY_ABOUT =
   "Sends the computer's browsers (Chromium, Chrome, Firefox) through a proxy; nothing else on it uses the proxy, so exec and a terminal go out directly. Linux only.";
 
 /**
+ * An egress proxy as the tools take it, checked for shape only, as the browser
+ * proxy is. Strict: `bypass` copied over from a browser proxy has no meaning
+ * here, and a proxy that silently covered the hosts a caller meant to leave out
+ * is worse than a refusal naming the key.
+ */
+const egressProxySchema = z.strictObject({
+  server: z
+    .string()
+    .refine((v) => v.trim().length > 0, 'server must not be blank')
+    .describe(
+      'The proxy URL with an explicit port: "http://host:port" (a proxy that takes CONNECT), "https://host:port" (the same, spoken to over TLS) or "socks5://host:port". Never a username or password in it — name a secret in credentials_secret_id instead. The platform says which hosts it accepts, and refuses anything else with a sentence naming why.',
+    ),
+  credentials_secret_id: z
+    .string()
+    .regex(/^csec-[0-9a-f]{16}$/, 'credentials_secret_id must be a secret id: csec- and 16 hex')
+    .nullable()
+    .optional()
+    .describe(
+      'For a proxy that asks for a username and password: the id (csec-…, from list_secrets) of a secret whose value is "user:password". It is NOT bound to the computer and the computer never receives it — do not add it to the computer\'s secrets: the computer\'s host holds the value and signs in to the proxy for it. With http:// and socks5:// the credentials cross the network in clear text, so prefer https:// when naming them. Leaving it out (or null) means no credentials.',
+    ),
+});
+
+const EGRESS_PROXY_ABOUT =
+  "Sends ALL of the computer's outbound TCP through a proxy — exec, terminals, package managers and browsers alike — taken on its host, so nothing inside the computer can opt out. There is no bypass list. It FAILS CLOSED: when the proxy is down or refuses, or its credentials have not reached the host yet (get_computer then says its egress proxy is waiting for credentials), the connection fails and nothing is sent directly. UDP to the internet and ICMP are dropped (QUIC falls back to TCP; NTP and other UDP stop working). DNS lookups are NOT proxied; they go to the platform's resolver. Connections open through the proxy are closed when the setting changes. A host that cannot take it yet — or cannot take an https:// one, or one naming credentials — answers 409 with reason unsupported; one that cannot put it into effect now answers 503, and nothing is changed unless that error says the new setting was stored.";
+
+/**
  * The answer to a wait the caller ended.
  *
  * `refused`, not `said`: the wait never reached what it was told to wait for,
@@ -737,7 +763,7 @@ export const registerComputers: Registrar = (server, session, opts) => {
     {
       title: 'Rename or resize a computer',
       description:
-        "Change a computer's name, its size, its idle window, or its browser proxy. The platform refuses these in combination on purpose — a resize needs the computer stopped and the others do not, so one request cannot honour both without applying half of it. A SUSPENDED computer counts as stopped for a resize, and its saved desktop cannot survive one: the vCPU count and the memory size are part of the saved state, so it is discarded and the next start is a cold boot. Resume it and finish what is open before resizing, or say so before you do it.",
+        "Change a computer's name, its size, its idle window, its browser proxy, or its egress proxy. The platform refuses these in combination on purpose — a resize needs the computer stopped and the others do not, so one request cannot honour both without applying half of it. A SUSPENDED computer counts as stopped for a resize, and its saved desktop cannot survive one: the vCPU count and the memory size are part of the saved state, so it is discarded and the next start is a cold boot. Resume it and finish what is open before resizing, or say so before you do it.",
       inputSchema: {
         ...idArg,
         name: z.string().optional(),
@@ -765,19 +791,36 @@ export const registerComputers: Registrar = (server, session, opts) => {
           .describe(
             `${BROWSER_PROXY_ABOUT} Replaces the setting whole; null removes it. To change the bypass of the same proxy, start from get_computer's browser_proxy and copy its credentials_secret_id to keep it: leaving it out removes the credentials, and the proxy then refuses the browsers. Do not carry credentials_secret_id to a different server: those credentials belong to the proxy they were set for; send a new server without it unless the user says those credentials are for that server. Send this on its own. A running computer has it within seconds — wait_for_computer with until="guest" before opening a browser that must use it — and a stopped or suspended one is given it as it starts. A browser already open picks it up at its next start.`,
           ),
+        egress_proxy: egressProxySchema
+          .nullable()
+          .optional()
+          .describe(
+            `${EGRESS_PROXY_ABOUT} Replaces the setting whole; null removes it and the computer's traffic goes directly again. To change the server of the same proxy, start from the egress proxy get_computer returns and copy its credentials_secret_id to keep it: leaving it out removes the credentials, and the proxy then refuses every connection. Do not carry credentials_secret_id to a different server unless the user says those credentials are for that server. Send this ON ITS OWN — never beside name, a resize, idle_suspend_min or browser_proxy. A running computer has it when the answer arrives; a stopped or suspended one is given it before it starts. After any other 5xx, or no answer, it may or may not have taken effect: call get_computer, and if its egress proxy names credentials and is still waiting for them after a few seconds, send the setting again.`,
+          ),
         idempotency_key: idempotencyKeyArg,
       },
     },
     ({ computer_id, idempotency_key, ...fields }, extra) =>
       guarded(async () => {
         const id = session.resolve(computer_id);
-        // `null` is meaningful for idle_suspend_min and browser_proxy and must
-        // survive the filter; every other absent field is dropped so the
-        // platform leaves it alone.
-        const body = Object.fromEntries(Object.entries(fields).filter(([, v]) => v !== undefined));
+        // `null` is meaningful for idle_suspend_min, browser_proxy and
+        // egress_proxy and must survive the filter; every other absent field is
+        // dropped so the platform leaves it alone.
+        const body: Record<string, unknown> = Object.fromEntries(
+          Object.entries(fields).filter(([, v]) => v !== undefined),
+        );
+        if (fields.egress_proxy) body.egress_proxy = P.egressProxyBody(fields.egress_proxy);
         if (!Object.keys(body).length) {
           return refused(
-            'Nothing to change — give at least one of name, cpu, ram_mb, disk_gb, idle_suspend_min, browser_proxy.',
+            'Nothing to change — give at least one of name, cpu, ram_mb, disk_gb, idle_suspend_min, browser_proxy, egress_proxy.',
+          );
+        }
+        // The platform refuses it beside anything else; said here, before a
+        // request, since nothing about it depends on the computer's state.
+        if ('egress_proxy' in body && Object.keys(body).length > 1) {
+          const beside = Object.keys(body).filter((k) => k !== 'egress_proxy');
+          return refused(
+            `egress_proxy must be sent on its own, not beside ${beside.join(', ')}. Send it in an update_computer call of its own. Nothing was changed.`,
           );
         }
         const key = idempotencyKeyFor(idempotency_key);
@@ -1581,6 +1624,11 @@ export const registerComputers: Registrar = (server, session, opts) => {
           .optional()
           .describe(
             `${BROWSER_PROXY_ABOUT} A create carrying one is always a cold boot. A credentials_secret_id must name a secret bound as a file in this create's secrets. wait_for_computer with until="guest" waits until its browsers have it; update_computer changes or removes it later.`,
+          ),
+        egress_proxy: egressProxySchema
+          .optional()
+          .describe(
+            `${EGRESS_PROXY_ABOUT} It is in effect from the first packet the computer sends. A create carrying one is always a cold boot (never a pre-booted computer), and a clone does not inherit it. A credentials_secret_id naming no secret, or one whose value is not user:password, is refused with 400 before anything is created. update_computer changes or removes it later.`,
           ),
         idempotency_key: idempotencyKeyArg,
       },
