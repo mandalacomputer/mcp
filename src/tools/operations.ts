@@ -1,6 +1,13 @@
+import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
-import { CancelledError, isTransientForPoll } from '../errors.js';
-import { guarded, refused, said } from '../format.js';
+import { IDEMPOTENCY_KEY_PATTERN } from '../api.js';
+import {
+  CancelledError,
+  idempotencyAdvice,
+  isTransientForPoll,
+  keyedOutcomeUnknown,
+} from '../errors.js';
+import { failed, guarded, refused, said } from '../format.js';
 import * as P from '../paths.js';
 import { heartbeat, POLL_MS, pollDelay, sleep } from '../poll.js';
 import { label, metadata, metadataCall } from './directory.js';
@@ -21,6 +28,9 @@ const operation = z.object({
   computer_id: z.string().nullable(),
   state: label,
   error: z.object({ code: z.string(), message: z.string() }).nullable(),
+  // The key the call that started it was sent with (OPL-5127): null for one
+  // sent without, and absent from a platform that predates the field.
+  idempotency_key: z.string().nullable().optional(),
   created_at: z.string(),
   updated_at: z.string(),
   finished_at: z.string().nullable(),
@@ -32,6 +42,46 @@ const page = z.object({
   next_cursor: z.string().min(1).nullable(),
 });
 
+/**
+ * The `idempotency_key` every lifecycle tool takes (platform OPL-5127), checked
+ * against the platform's rule here so a key it would refuse never leaves.
+ */
+export const idempotencyKeyArg = z
+  .string()
+  .regex(
+    IDEMPOTENCY_KEY_PATTERN,
+    'idempotency_key must be 1 to 255 characters, each printable ASCII other than a space',
+  )
+  .optional()
+  .describe(
+    "Optional. Omit it on a first attempt: a fresh key is sent for you, and an answer that is lost names it. Pass the key such an answer named to send the SAME call again without it being done twice — the platform answers with the first call's result, or says it is still running. Keys last 24 hours; the same key with different arguments is refused.",
+  );
+
+/**
+ * The answer to a lifecycle tool call that failed, with what its key means.
+ *
+ * The platform's own `idempotency_*` refusals get their sentence instead of the
+ * generic `reason` advice, and a failure whose outcome is unknown ENDS with the
+ * one retry that cannot do the step twice — the same tool, with the same key.
+ */
+export function keyedFailure(
+  err: unknown,
+  tool: string,
+  what: string,
+  key: string,
+): CallToolResult {
+  const advice = idempotencyAdvice(err);
+  const result = failed(err, advice === undefined);
+  const [first, ...rest] = result.content;
+  if (first?.type !== 'text') return result;
+  let text = first.text;
+  if (advice) text += `\n\nAbout its idempotency_key: ${advice}.`;
+  if (keyedOutcomeUnknown(err)) {
+    text += `\n\nTo retry without risking a second ${what}, call ${tool} again with idempotency_key "${key}".`;
+  }
+  return { ...result, content: [{ ...first, text }, ...rest] };
+}
+
 const operationIdArg = z
   .string()
   .min(1)
@@ -42,7 +92,8 @@ const operationIdArg = z
 /** The sentence every answer about an operation starts with. */
 const line = (op: Operation): string =>
   `${op.id}: ${op.kind}${op.computer_id ? ` of ${op.computer_id}` : ''} — ${op.state}` +
-  (op.error ? ` (${op.error.code}: ${op.error.message})` : '');
+  (op.error ? ` (${op.error.code}: ${op.error.message})` : '') +
+  (op.idempotency_key ? ` [idempotency_key ${JSON.stringify(op.idempotency_key)}]` : '');
 
 /**
  * Said beside every `succeeded`, because it is the misreading that costs the
@@ -57,7 +108,7 @@ export const registerOperations: Registrar = (server, session) => {
     'get_operation',
     {
       title: 'Read a lifecycle operation',
-      description: `One lifecycle operation: what an accepted create, clone, start, stop, suspend, restart, snapshot restore, resize or move started, and where it got to. state is pending or running while live, and succeeded or failed once final; a failed one carries error.code (start_failed, build_failed, computer_gone, move_failed, resize_not_applied, lost, and more may be added) and a sentence. Most are already succeeded when the call that started them answered; a clone is running until its disk is copied, and a move until it lands. ${NOT_BOOTED} An id this key cannot see, or one that has expired, is not found.`,
+      description: `One lifecycle operation: what an accepted create, clone, start, stop, suspend, restart, snapshot restore, resize, move or delete started, and where it got to. A call made with an idempotency_key is recorded pending before it is carried out, so it can be found even when its answer was lost; one the platform never heard end is failed with error.code lost. state is pending or running while live, and succeeded or failed once final; a failed one carries error.code (start_failed, build_failed, computer_gone, move_failed, resize_not_applied, lost, and more may be added) and a sentence. Most are already succeeded when the call that started them answered; a clone is running until its disk is copied, and a move until it lands. ${NOT_BOOTED} An id this key cannot see, or one that has expired, is not found.`,
       inputSchema: { operation_id: operationIdArg },
       annotations: readAnnotations,
     },
@@ -85,15 +136,25 @@ export const registerOperations: Registrar = (server, session) => {
           .describe("Only this computer's operations. Not defaulted to the selected computer."),
         limit: z.number().int().min(1).max(100).optional().describe('Page size; default 20.'),
         cursor: z.string().min(1).optional().describe('The next_cursor of the page before.'),
+        idempotency_key: z
+          .string()
+          .regex(
+            IDEMPOTENCY_KEY_PATTERN,
+            'idempotency_key must be 1 to 255 characters, each printable ASCII other than a space',
+          )
+          .optional()
+          .describe(
+            "Only the operation the lifecycle call sent with this idempotency_key recorded — found even when that call's answer was lost — within the key's 24 hours.",
+          ),
       },
       annotations: readAnnotations,
     },
-    ({ computer_id, limit, cursor }, extra) =>
+    ({ computer_id, limit, cursor, idempotency_key }, extra) =>
       metadataCall(async () => {
         const data = metadata(
           page,
           await session.api.json('GET', P.OPERATIONS, {
-            query: { computer_id, limit, cursor },
+            query: { computer_id, limit, cursor, idempotency_key },
             signal: extra.signal,
           }),
         );
