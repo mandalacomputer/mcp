@@ -373,10 +373,13 @@ says what to do. The judgement it cannot make for you:
   `idempotency_in_progress`: send the same call again with that key — the
   platform answers with the first call's result, so a create cannot build a
   second computer. After a `5xx` the platform answered itself, or
-  `idempotency_outcome_unknown`: the key is spent, so read the computer
-  (`get_computer`, or `list_computers` after a create) or `get_operation`
-  first, and only if the step did not happen send it again with a new key, or
-  none. A read, a `wait_for_computer`, a `screenshot` can simply be sent
+  `idempotency_outcome_unknown`: the key is spent, and the call may still be
+  under way on its host. Read its operation first (`get_operation` with the
+  `operation_id` the error named, or `list_operations` with the key); while it
+  is `pending` or `running`, wait with `wait_for_operation` and do not resend
+  with any key. Only once it is final as `failed` or no longer found, AND the
+  computer (`get_computer`, or `list_computers` after a create) shows the step
+  did not happen, send it again with a new key, or none. A read, a `wait_for_computer`, a `screenshot` can simply be sent
   again.
 - **A 503 on a change is the same: it may or may not have happened.** A read
   answered 503 can be sent again shortly. A create, a command, a clone or a

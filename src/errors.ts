@@ -247,12 +247,41 @@ export function idempotencyAdvice(err: unknown): string | undefined {
     case 'idempotency_in_progress':
       return `the same call with this idempotency_key is still running; wait and call again with the same idempotency_key for its answer${operation ? `, or read get_operation ${operation}` : ''}`;
     case 'idempotency_outcome_unknown':
-      return `the platform did not hear how the call with this idempotency_key ended. Read the computer to see whether it took effect${operation ? ` (get_operation ${operation} says what was recorded)` : ''}; do not send it again with this key, since the same key answers the same thing. If that read shows the step did not happen, send the call again with a new idempotency_key, or none`;
+      return `the platform did not hear how the call with this idempotency_key ended; do not send it again with this key, since the same key answers the same thing. ${resendOnlyOnceFinal(operation)}`;
     case 'idempotency_key_reused':
       return 'this idempotency_key was already used with a different request, so nothing was done; send this request with a new key, or none';
     default:
       return undefined;
   }
+}
+
+/**
+ * The route to a new-key resend after a keyed call whose outcome is unknown and
+ * whose key is spent: a `5xx` the platform answered, or
+ * `idempotency_outcome_unknown` (platform OPL-5304).
+ *
+ * The condition has to be one a read can decide. The platform keeps such a
+ * call's operation `pending` for up to an hour, because its host may still be
+ * carrying the call out, so a read of the computer made straight away can show
+ * no effect for a create, clone or restore that then lands; a resend with a new
+ * key at that moment is not deduplicated and does the step twice. So the first
+ * read is the operation, and a resend waits until it is final. `key`, when
+ * known, names how to find an operation the error did not name; `resend` is
+ * the verb phrase for the resend, e.g. `call start_computer again`.
+ */
+export function resendOnlyOnceFinal(
+  operation?: string,
+  key?: string,
+  resend = 'send the call again',
+): string {
+  const find = operation
+    ? `get_operation ${operation} (wait_for_operation ${operation} waits on it)`
+    : `the operation it recorded, found by list_operations with idempotency_key ${key ? `"${key}"` : 'set to this key'}`;
+  return (
+    `Read ${find} first. While it is pending or running the call may still be carried out, so wait for it to be final — wait_for_operation, again if that wait runs out — and do NOT resend it meanwhile, with any key. ` +
+    `If it succeeded, the step happened. Only once it is final as failed (error.code lost, for one) or no longer found, AND get_computer (list_computers after a create or a clone) shows the step did not take effect, ${resend} with a new idempotency_key, or none. ` +
+    'If no operation is found at all, a slow create or clone may still land: read the computer again after a few minutes before resending'
+  );
 }
 
 /**

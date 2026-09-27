@@ -8,6 +8,7 @@ import {
   isTransientForPoll,
   keyedOutcomeUnknown,
   platformAnsweredFailure,
+  resendOnlyOnceFinal,
 } from '../errors.js';
 import { failed, guarded, operationIdOf, refused, said } from '../format.js';
 import * as P from '../paths.js';
@@ -56,7 +57,7 @@ export const idempotencyKeyArg = z
   )
   .optional()
   .describe(
-    "Optional. Omit it on a first attempt: a fresh key is sent for you, and an answer that is lost names it. Pass the key such an answer named to send the SAME call again without it being done twice — the platform answers with the first call's result, or says it is still running. After a 5xx the platform answered, or idempotency_outcome_unknown, the key is spent: read get_computer or get_operation first, since resending with that key answers idempotency_outcome_unknown, and send the call with a new key (or none) only if the step did not happen. Keys last 24 hours; the same key with different arguments is refused.",
+    "Optional. Omit it on a first attempt: a fresh key is sent for you, and an answer that is lost names it. Pass the key such an answer named to send the SAME call again without it being done twice — the platform answers with the first call's result, or says it is still running. After a 5xx the platform answered, or idempotency_outcome_unknown, the key is spent (resending with it answers idempotency_outcome_unknown) and the call may still be under way: read its operation first (get_operation with the operation_id the error named, or list_operations with the key), wait while it is pending or running and do not resend meanwhile, and send the call with a new key (or none) only once the operation is final as failed or not found AND get_computer shows the step did not happen. Keys last 24 hours; the same key with different arguments is refused.",
   );
 
 /**
@@ -70,8 +71,10 @@ export const idempotencyKeyArg = z
  *   front of the platform answered: the same tool, with the same key.
  * - The platform itself answered a `5xx`: it has settled that key as lost
  *   (OPL-5304), so the same key can only be answered
- *   `idempotency_outcome_unknown`. Read first, then resend with a new key or
- *   none, and only if the step did not happen.
+ *   `idempotency_outcome_unknown`. Its operation stays `pending` while the
+ *   host may still be carrying it out, so the first read is that operation,
+ *   and a resend with a new key or none waits until it is final and the
+ *   computer shows the step did not happen (see {@link resendOnlyOnceFinal}).
  */
 export function keyedFailure(
   err: unknown,
@@ -90,8 +93,8 @@ export function keyedFailure(
   } else if (platformAnsweredFailure(err)) {
     const op = operationIdOf((err as APIError).body);
     text +=
-      `\n\nThe platform answered this itself, so whether it took effect is unknown, and it has settled idempotency_key "${key}": resending with that key will answer idempotency_outcome_unknown, not do it. ` +
-      `Read first — get_computer (list_computers after a create or a clone)${op ? `, or get_operation ${op}` : ''} — and only if it did not take effect, call ${tool} again with a new idempotency_key, or none, so there is no second ${what}.`;
+      `\n\nThe platform answered this itself, so whether it took effect is unknown — its host may still be carrying out the ${what} — and it has settled idempotency_key "${key}": resending with that key will answer idempotency_outcome_unknown, not do it. ` +
+      `${resendOnlyOnceFinal(op, key, `call ${tool} again`)}. That way there is no second ${what}.`;
   }
   return { ...result, content: [{ ...first, text }, ...rest] };
 }

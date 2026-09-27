@@ -71,6 +71,18 @@ describe('a lifecycle tool', () => {
     expect(keyed()[0]).toBe('order-4711:step');
   });
 
+  it.each(LIFECYCLE)(
+    '%s describes the spent-key route as wait-for-the-operation first',
+    async (tool) => {
+      const { client } = await open();
+      const found = (await client.listTools()).tools.find((t) => t.name === tool);
+      const props = found?.inputSchema.properties as Record<string, { description?: string }>;
+      const said = props.idempotency_key?.description ?? '';
+      expect(said).toContain('wait while it is pending or running and do not resend meanwhile');
+      expect(said).toContain('only once the operation is final as failed or not found AND');
+    },
+  );
+
   it('sends a different key on each call', async () => {
     const connection = await open();
     await connection.call('start_computer', {});
@@ -119,6 +131,16 @@ describe('an unknown outcome', () => {
     );
     expect(said).toContain(`get_operation ${OPERATION.id}`);
     expect(said).toContain('call start_computer again with a new idempotency_key, or none');
+    // The operation stays pending for up to an hour while the host may still be
+    // carrying the call out, and a read of the computer made straight away can
+    // show no effect: a new-key resend then does the step twice. So the first
+    // read is the operation, and nothing is resent while it is live.
+    expect(said).toMatch(new RegExp(`Read get_operation ${OPERATION.id} .*first`));
+    expect(said).toContain(`wait_for_operation ${OPERATION.id}`);
+    expect(said).toContain('While it is pending or running the call may still be carried out');
+    expect(said).toContain('do NOT resend it meanwhile, with any key');
+    expect(said).toMatch(/Only once it is final as failed .* AND get_computer/);
+    expect(said.indexOf('do NOT resend')).toBeLessThan(said.indexOf('with a new idempotency_key'));
   });
 
   it('says the same after a platform 500 on a create, naming the key the server made', async () => {
@@ -131,6 +153,11 @@ describe('an unknown outcome', () => {
     expect(text(result)).toContain(`settled idempotency_key "${sent}"`);
     expect(text(result)).toContain('list_computers after a create');
     expect(text(result)).not.toContain('To retry without risking');
+    // No operation_id in the body: the operation is found by the key, and a
+    // slow create may still land, so nothing is resent on a first read alone.
+    expect(text(result)).toContain(`list_operations with idempotency_key "${sent}"`);
+    expect(text(result)).toContain('do NOT resend it meanwhile');
+    expect(text(result)).toContain('a slow create or clone may still land');
   });
 
   it('ends with the same-key retry when the connection died after the request went out', async () => {
@@ -202,8 +229,10 @@ describe('an unknown outcome', () => {
       idempotency_key: 'k-lost',
     });
     expect(text(result)).toContain('do not send it again with this key');
-    expect(text(result)).toContain(
-      'If that read shows the step did not happen, send the call again with a new idempotency_key, or none',
+    expect(text(result)).toContain('list_operations with idempotency_key set to this key');
+    expect(text(result)).toContain('do NOT resend it meanwhile, with any key');
+    expect(text(result)).toMatch(
+      /Only once it is final as failed .* AND get_computer .* shows the step did not take effect, send the call again with a new idempotency_key, or none/,
     );
     expect(text(result)).not.toContain('To retry without risking');
   });

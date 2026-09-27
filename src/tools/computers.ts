@@ -1201,6 +1201,14 @@ export const registerComputers: Registrar = (server, session, opts) => {
           // report, and swallowing every transient would end the wait saying only
           // that the status was never seen.
           let blocked: string | undefined;
+          // Which proxy flag, if any, held the last status read, so the give-up
+          // can name it. egress_proxy_pending does not always clear by itself:
+          // a deleted credentials secret, or an update whose answer was lost,
+          // holds it until the setting is sent again, and "call again to keep
+          // waiting" would send the model round a wait that cannot end.
+          // browser_proxy_pending is named too, so a wait held on it does not
+          // end saying only "last seen running".
+          let heldOn: 'egress' | 'browser' | undefined;
           while (!untilDeadline.aborted) {
             // The caller giving up ends the wait. The signal aborts the request
             // in flight, but nothing about an aborted request stops the next
@@ -1241,6 +1249,7 @@ export const registerComputers: Registrar = (server, session, opts) => {
               continue;
             }
             blocked = undefined;
+            heldOn = undefined;
             session.noteResolution(id, c.resolution);
             last = c.status ?? 'unknown';
             // ONE beat per turn, and this is not it when a guest probe is about to
@@ -1343,6 +1352,7 @@ export const registerComputers: Registrar = (server, session, opts) => {
               // directly. Never pending on a computer that is not running, so
               // this is the only place it can be waited on.
               if (c.browser_proxy_pending === true) {
+                heldOn = 'browser';
                 await beat(
                   `Waiting for ${id} — running; its browser proxy is still being applied.`,
                 );
@@ -1353,8 +1363,9 @@ export const registerComputers: Registrar = (server, session, opts) => {
               // host: the guest answers, but every connection it opens is
               // closed until they do, so a command run next cannot reach out.
               if (c.egress_proxy_pending === true) {
+                heldOn = 'egress';
                 await beat(
-                  `Waiting for ${id} — running; waiting for the egress proxy's credentials.`,
+                  `Waiting for ${id} — running; waiting for the egress proxy's credentials (egress_proxy_pending). If its credentials secret was deleted, or an update_computer egress_proxy change went unanswered, this does not clear until the setting is sent again.`,
                 );
                 await sleep(POLL_MS, signal);
                 continue;
@@ -1424,10 +1435,18 @@ export const registerComputers: Registrar = (server, session, opts) => {
           // which is the same shape of answer as a cancellation and not the same
           // as success. The message still says to call again, because the state
           // it was waiting on may yet arrive.
+          //
+          // Except behind an egress proxy still waiting for its credentials,
+          // which may never arrive by themselves: that answer names the state
+          // and what clears it, and does not advise waiting again.
           return refused(
             blocked
               ? `Gave up after ${timeout_s}s; the platform could not be asked about ${id} for the whole wait — the last attempt said: ${blocked}. Nothing was changed — call again to keep waiting.`
-              : `Gave up after ${timeout_s}s; ${id} was last seen ${last}. Nothing was changed — call again to keep waiting.`,
+              : heldOn === 'egress'
+                ? `Gave up after ${timeout_s}s; ${id} is running, but its egress proxy's credentials never reached its host (egress_proxy_pending), so every connection it opens is closed. This does not always clear by itself: if the secret its egress_proxy.credentials_secret_id names was deleted, or an earlier update_computer egress_proxy change got a 5xx or no answer, send the egress_proxy setting again with update_computer, naming a secret that exists (list_secrets), or remove it with null. Nothing was changed.`
+                : heldOn === 'browser'
+                  ? `Gave up after ${timeout_s}s; ${id} is running, but its browser proxy was still being applied in the guest (browser_proxy_pending), so a browser opened now may not use it. Nothing was changed — call again to keep waiting; if it persists, send the browser_proxy setting again with update_computer.`
+                  : `Gave up after ${timeout_s}s; ${id} was last seen ${last}. Nothing was changed — call again to keep waiting.`,
           );
         } finally {
           await beat.stop();

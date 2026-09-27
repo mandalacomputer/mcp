@@ -285,6 +285,74 @@ describe('wait_for_computer on a computer whose egress proxy waits for credentia
     expect(textOf(res)).toContain('Guest is answering');
   });
 
+  it('gives up naming egress_proxy_pending and what clears it, not "call again"', async () => {
+    // egress_proxy_pending can hold until the caller acts (a deleted
+    // credentials secret, an update whose answer was lost), so a give-up that
+    // said only "last seen running … call again to keep waiting" sent the
+    // model round a wait that cannot end.
+    const res = await platform(
+      (seen) => {
+        if (seen.path.endsWith('/exec'))
+          return [200, { exit_code: 0, stdout_b64: '', stderr_b64: '' }];
+        return [200, box({ egress_proxy: PROXY, egress_proxy_pending: true })];
+      },
+      async (seen) => {
+        const { call, close } = await connect();
+        const r = await call('wait_for_computer', { until: 'guest', timeout_s: 5 });
+        await close();
+        expect(seen.some((c) => c.method === 'POST')).toBe(false);
+        return r;
+      },
+    );
+    expect(res.isError).toBe(true);
+    expect(textOf(res)).toMatch(/Gave up after 5s/);
+    expect(textOf(res)).toMatch(/egress_proxy_pending/);
+    expect(textOf(res)).toMatch(/update_computer/);
+    expect(textOf(res)).not.toMatch(/call again to keep waiting/);
+  }, 30_000);
+
+  it('gives up naming browser_proxy_pending when that held the wait', async () => {
+    const res = await platform(
+      () => [200, box({ browser_proxy_pending: true })],
+      async () => {
+        const { call, close } = await connect();
+        const r = await call('wait_for_computer', { until: 'guest', timeout_s: 5 });
+        await close();
+        return r;
+      },
+    );
+    expect(res.isError).toBe(true);
+    expect(textOf(res)).toMatch(/browser_proxy_pending/);
+    expect(textOf(res)).toMatch(/update_computer/);
+    expect(textOf(res)).not.toMatch(/egress_proxy_pending/);
+  }, 30_000);
+
+  it('gives up the ordinary way once the credentials have arrived', async () => {
+    // The flag is the LAST read's, not any read's: a computer that was pending
+    // once and then kept refusing the guest probe is not blamed on the proxy.
+    let gets = 0;
+    const res = await platform(
+      (seen) => {
+        if (seen.path.endsWith('/exec'))
+          return [409, { error: 'guest agent not running', code: 'conflict' }];
+        gets++;
+        return [
+          200,
+          box({ egress_proxy: PROXY, ...(gets === 1 ? { egress_proxy_pending: true } : {}) }),
+        ];
+      },
+      async () => {
+        const { call, close } = await connect();
+        const r = await call('wait_for_computer', { until: 'guest', timeout_s: 5 });
+        await close();
+        return r;
+      },
+    );
+    expect(res.isError).toBe(true);
+    expect(textOf(res)).toMatch(/last seen running/);
+    expect(textOf(res)).not.toMatch(/egress_proxy_pending/);
+  }, 30_000);
+
   it('says so in its description, and create_computer says connections are closed meanwhile', async () => {
     const { client, close } = await connect();
     const tools = (await client.listTools()).tools;

@@ -352,9 +352,17 @@ with. What to do next depends on who answered:
   it is still running; the step is not done twice.
 - **The platform answered a `5xx`**, or `idempotency_outcome_unknown`: the key
   is spent, and resending with it only answers `idempotency_outcome_unknown`.
-  Read `get_computer` (`list_computers` after a create or a clone), or
-  `get_operation` with the `operation_id` the error named, and only if the step
-  did not happen send the call again with a new key, or none.
+  The call may still be under way: the platform keeps its operation `pending`
+  for up to an hour while its host may be carrying it out, so a read of the
+  computer made straight away can show no effect for a create, clone or
+  restore that then lands. Read the operation first — `get_operation` with the
+  `operation_id` the error named, or `list_operations` with the key — and while
+  it is `pending` or `running`, wait (`wait_for_operation`) and do not resend
+  with any key. Only once it is final as `failed` (`error.code` `lost`, for
+  one) or no longer found, AND `get_computer` (`list_computers` after a create
+  or a clone) shows the step did not happen, send the call again with a new
+  key, or none. If no operation is found at all, read the computer again after
+  a few minutes before resending.
 - **`idempotency_key_reused`**: a different call already used that key, and
   nothing was done. Send this one with a new key, or none.
 

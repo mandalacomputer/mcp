@@ -64,13 +64,17 @@ are wording changes, and they are behaviour changes in the way that matters.
   risking a second <what>, call <tool> again with idempotency_key "<K>".` After
   a `5xx` the platform answered itself, it is not: the platform has settled
   that key as lost, so resending with it can only answer
-  `idempotency_outcome_unknown`, and the answer says to read `get_computer`
-  (or `list_computers` after a create or a clone) or `get_operation` with the
-  `operation_id` the error named first, then send the call with a new key, or
-  none, only if the step did not happen. The platform's
+  `idempotency_outcome_unknown`, and the call may still be under way on its
+  host (its operation stays `pending` for up to an hour). The answer says to
+  read the operation first (`get_operation` with the `operation_id` the error
+  named, or `list_operations` with the key), to wait with `wait_for_operation`
+  and not resend with any key while it is `pending` or `running`, and to send
+  the call with a new key, or none, only once the operation is final as
+  `failed` or not found AND `get_computer` (or `list_computers` after a create
+  or a clone) shows the step did not happen. The platform's
   `idempotency_in_progress`, `idempotency_outcome_unknown` and
   `idempotency_key_reused` refusals each get a sentence of their own
-  (`idempotency_outcome_unknown` ends with the same read-then-new-key route),
+  (`idempotency_outcome_unknown` ends with the same wait-then-new-key route),
   and
   `isTransient` is false for `idempotency_outcome_unknown`. `list_operations`
   takes `idempotency_key`, an operation carries the key it was started with,
@@ -144,7 +148,13 @@ are wording changes, and they are behaviour changes in the way that matters.
 - **`wait_for_computer(until="guest")` waits for an egress proxy's
   credentials.** While `egress_proxy_pending` is true every connection the
   computer opens is closed, so the wait holds until it clears, as it does for
-  `browser_proxy_pending`. The tool and `until` descriptions say so.
+  `browser_proxy_pending`. The tool and `until` descriptions say so. Because
+  that flag can hold until the caller acts (the credentials secret was
+  deleted, or an `update_computer` egress change got a `5xx` or no answer), a
+  wait that times out on it names `egress_proxy_pending` and says to send the
+  `egress_proxy` setting again with `update_computer`, or remove it, rather
+  than to call again. A wait that times out held on `browser_proxy_pending`
+  names that flag too.
 - **`screenshot` labels a suspended computer's saved frame.** A response marked
   `X-GC-Frame: suspended` (`fresh: false` on a suspended computer) is labelled
   as a saved frame with its own pixel size, not the live screen and not in
