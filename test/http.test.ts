@@ -941,6 +941,106 @@ describe('the per-bearer session cap', () => {
       }
     });
 
+    // At admission the requester's own session is not yet anybody's, so a tie
+    // on count goes by the oldest idle session. Landing must choose the same
+    // way when nothing changed in between: counting the new session toward
+    // its own account there would make alice, who has nothing idle, the one
+    // holding the most, and drop a session nobody raced.
+    it('lands on the room its admission chose when nothing changed in between', async () => {
+      const t = await setup({ maxSessionsPerBearer: 16, maxSessions: 4 });
+      try {
+        const b1 = await t.open('com_bob');
+        await pause();
+        const b2 = await t.open('com_bob');
+        await pause();
+        const a1 = await t.open('com_alice');
+        const a2 = await t.open('com_alice');
+        const calls = [await t.busy('com_alice', a1), await t.busy('com_alice', a2)];
+
+        const a3 = await t.send(INIT, t.as('com_alice'));
+        expect(a3.status).toBe(200);
+        await a3.text();
+        expect(await t.count()).toBe(4);
+        expect(await status(t, 'com_bob', b1)).toBe(404);
+        expect(await status(t, 'com_bob', b2)).toBe(200);
+
+        t.release();
+        for (const call of calls) await (await call).text();
+      } finally {
+        await t.teardown();
+      }
+    });
+
+    // Another initialize, admitted after this one and counting it as
+    // pending, can land first and take the room this one planned. Re-planned
+    // at landing, the account holding the most may then have nothing idle.
+    // The admission already let this session in, so its own idle session
+    // makes the room rather than the initialize failing with a 404 that no
+    // session being put to work caused.
+    it('makes the room from the requester’s own idle session when another landing took its plan', async () => {
+      const t = await setup({ maxSessionsPerBearer: 16, maxSessions: 4 });
+      let hold: ReturnType<typeof holdInitializes> | undefined;
+      try {
+        const b1 = await t.open('com_bob');
+        const b2 = await t.open('com_bob');
+        await pause();
+        const a1 = await t.open('com_alice');
+        await pause();
+        const a2 = await t.open('com_alice');
+        const calls = [await t.busy('com_bob', b1), await t.busy('com_bob', b2)];
+
+        // Tie at two each, and only alice has anything idle: a1 is planned.
+        hold = holdInitializes(1);
+        const h = hold;
+        const alice3 = t.send(INIT, t.as('com_alice'));
+        await until(() => h.state.held === 1, 'the initialize never reached the transport');
+
+        // Carol counts alice's in flight, so alice holds the most, and lands
+        // first, closing a1.
+        const carol = await t.open('com_carol');
+        expect(await status(t, 'com_alice', a1)).toBe(404);
+
+        h.open();
+        const landed = await alice3;
+        expect(landed.status).toBe(200);
+        expect(landed.headers.get('mcp-session-id')).not.toBeNull();
+        await landed.text();
+        expect(await t.count()).toBe(4);
+        expect(await status(t, 'com_alice', a2)).toBe(404);
+        expect(await status(t, 'com_carol', carol)).toBe(200);
+
+        t.release();
+        for (const call of calls) await (await call).text();
+      } finally {
+        hold?.restore();
+        await t.teardown();
+      }
+    });
+
+    // That fallback is for a landing only. Admitted fresh, the rule is the
+    // one above: the account holding the most has nothing idle, so the pool
+    // is full, even for a caller with an idle session of its own.
+    it('does not make room from the requester’s own idle session at admission', async () => {
+      const t = await setup({ maxSessionsPerBearer: 16, maxSessions: 3 });
+      try {
+        const b1 = await t.open('com_bob');
+        const b2 = await t.open('com_bob');
+        const a1 = await t.open('com_alice');
+        const calls = [await t.busy('com_bob', b1), await t.busy('com_bob', b2)];
+
+        const a2 = await t.send(INIT, t.as('com_alice'));
+        expect(a2.status).toBe(503);
+        await a2.text();
+        expect(await t.count()).toBe(3);
+        expect(await status(t, 'com_alice', a1)).toBe(200);
+
+        t.release();
+        for (const call of calls) await (await call).text();
+      } finally {
+        await t.teardown();
+      }
+    });
+
     it('sets no account ceiling by default, and holds each token to one that is set', async () => {
       const open = await setup({ maxSessionsPerBearer: 16, maxSessions: 4 });
       try {

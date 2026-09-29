@@ -1177,7 +1177,9 @@ address.
   which may be the caller's own; if that account has nothing idle, the answer
   is `503` with `Retry-After`, and nothing is taken from a smaller account instead. A session
   with a request in flight is never closed, and the same `404` race as above
-  applies. `runHttp` takes the ceiling as `maxSessionsPerAccount`, and the CLI
+  applies. If another initialize lands first and takes the room this one
+  planned, the caller's own least recently used idle session makes it
+  instead, and the `404` comes only when the caller has none idle. `runHttp` takes the ceiling as `maxSessionsPerAccount`, and the CLI
   reads it from `MANDALA_MCP_MAX_SESSIONS_PER_ACCOUNT`. A self-hosted server
   verifies no account, so there each token is its own account: the pool is
   shared out between tokens the same way, and there is no ceiling beyond the

@@ -126,8 +126,10 @@ are wording changes, and they are behaviour changes in the way that matters.
   A session with a request in flight is never closed, concurrent initializes
   are counted before either lands so they cannot pass the ceiling or the
   pool together, and a session planned for closing that is put to work first
-  drops the new one (`404`) as before. A suspended account is held to one
-  session across all its tokens. A self-hosted server verifies no account,
+  drops the new one (`404`) as before. If another initialize lands first and
+  takes the room an initialize planned, the caller's own idle session makes
+  it instead, and the new session is dropped only when the caller has none
+  idle. A suspended account is held to one session across all its tokens. A self-hosted server verifies no account,
   so there each token is its own: its full pool is shared out between tokens
   the same way (it used to answer `503`), with no ceiling unless one is set.
 

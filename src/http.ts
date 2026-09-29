@@ -856,6 +856,15 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
    * birth (`onsessioninitialized`) only the map counts: each initialize makes
    * the room its own session needs as it lands, so the map never passes a
    * limit, and one still in flight will make its own when it lands.
+   *
+   * Neither counts the requester's own session toward its account in the
+   * fair-share tally: at admission it is not pending yet, and at birth it is
+   * not in the map yet, so both choose the same way when nothing changed in
+   * between. Other admissions do count it, as pending, so one of them can land
+   * first and take the room this one planned; re-planned at birth, the account
+   * holding the most may then have nothing idle. Only there, the requester's
+   * own idle session makes the room instead of the session being dropped: its
+   * admission already let it in, and that takes nothing from anybody else.
    */
   const planRoom = (
     seat: Seat,
@@ -920,7 +929,14 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
           top = t;
         }
       }
-      const victim = top?.idle.shift();
+      let victim = top?.idle.shift();
+      if (!victim && !countPending) {
+        // Landing, and the account holding the most has nothing idle. The
+        // admission already let this session in, so its own account's idle
+        // session makes the room: that takes nothing from anybody else.
+        top = held.get(seat.account);
+        victim = top?.idle.shift();
+      }
       if (!top || !victim) return { refuse: 'pool' };
       top.count--;
       take([victim]);
@@ -1345,7 +1361,10 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
           // The room the check above planned, made now that there is a session
           // to make it for. Chosen again from what is here NOW, by the same
           // rules: a session closed or put to work since then is not a
-          // candidate. Should the room no longer be there, nothing is closed
+          // candidate. Where another initialize landed first and took the
+          // room this one planned, and the account holding the most now has
+          // nothing idle, the requester's own idle session makes it (see
+          // `planRoom`). Should the room no longer be there, nothing is closed
           // and this session is dropped instead of admitted over a limit. The
           // transport closes before the SDK answers, so the SDK answers this
           // initialize itself, with its 404 -32001 'Session not found' and no
