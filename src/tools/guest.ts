@@ -461,6 +461,16 @@ export const registerGuest: Registrar = (server, session) => {
         // A launch that did not happen is an error. The browser itself is
         // backgrounded and reports nothing; what exits non-zero is the lookup
         // for one, or the shell never starting.
+        // A timed-out exec is not a failed launch: the platform reports it as
+        // exit -1 with `timed_out` set, and it kills nothing — the command is
+        // still running in the guest and may yet put the browser up. Saying
+        // "nothing was opened" would invite a retry and a second window.
+        if (res?.timed_out === true) {
+          return said(
+            `The launch for ${url} had not finished when the 30-second wait ran out, so whether it opened is unknown: the command is still running in the guest and the browser may still appear. Screenshot (or list_windows) before trying again, so a retry does not open it twice.${note}`,
+            body,
+          );
+        }
         const exit = res?.exit_code;
         if (typeof exit === 'number' && exit !== 0) {
           const stderr =

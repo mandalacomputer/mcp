@@ -125,6 +125,21 @@ describe('the open_url tool', () => {
     );
   });
 
+  it('reports a timed-out launch as unknown, not as nothing opened', async () => {
+    // The platform answers a timeout with exit -1 and timed_out set, and kills
+    // nothing: the launch may still put the browser up.
+    execAnswers({ exit_code: -1, timed_out: true, pid: 4242, stdout_b64: '', stderr_b64: '' });
+    const { call, close } = await connect();
+    const res = await call('open_url', { url: 'https://example.com' });
+    await close();
+    const text = JSON.stringify(res.content);
+    expect(res.isError).not.toBe(true);
+    expect(text).not.toContain('Nothing was opened');
+    expect(text).not.toContain('Could not open');
+    expect(text).toContain('whether it opened is unknown');
+    expect(text).toContain('Screenshot');
+  });
+
   it('reports a launch that exited 0 as asked for', async () => {
     execAnswers({ exit_code: 0, stdout_b64: '', stderr_b64: '' });
     const { call, close } = await connect();

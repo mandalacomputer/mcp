@@ -34,7 +34,8 @@ are wording changes, and they are behaviour changes in the way that matters.
   backgrounded it, so it reported success either way, including on Omarchy,
   which ships only `chromium`. It now opens the first of `firefox-esr`,
   `firefox` or `chromium`, and an image with none is an error (exit 127)
-  rather than a success.
+  rather than a success. A launch still running when the 30-second wait runs
+  out is reported as unknown (screenshot before retrying), not as a failure.
 - **A lifecycle tool's platform `5xx` that names no `operation_id` is resent
   with the same `idempotency_key`.** Such an answer is usually a refusal given
   before the call was sent anywhere (another launch in progress, no host, an

@@ -1272,7 +1272,11 @@ caller is a `401` or `403` carrying `reason: "revoked"`, and only that gets
 account advice. A `402`, `504` or `529` is the model provider's own status for
 the configured model key (its billing, timeout or overloaded error), so the
 advice is to check the model-provider account, not the Mandala plan; a `403`
-without `revoked` may be the provider's permission error for that key.
+without `revoked` may be the provider's permission error for that key. The
+exception is a refusal `run_agent_chat` is given before any run started — a flat
+`{error: string}` body, from the role gate, a bad body, a suspension or the
+meter: nothing ran, and it keeps the usual role and plan advice every other tool
+gets.
 
 ## Development
 

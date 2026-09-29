@@ -315,8 +315,8 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
   /**
    * `ok`: the probe answered 2xx, and only that — the one answer that says the
    * platform authenticated this credential AND let it act. `refused`: a 401.
-   * `unknown`: anything else — a 403 (a suspended account or a lost
-   * membership), a 404 (the route moved), a 429, a 5xx, a timeout, or this
+   * `unknown`: anything else — a 403 (a lost membership, say; a suspended
+   * account is answered 2xx on whoami and admitted), a 404 (the route moved), a 429, a 5xx, a timeout, or this
    * server already asking about as many bearers as it will at once. Only `ok`
    * is cached.
    */

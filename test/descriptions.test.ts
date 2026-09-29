@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { connect, installFakePlatform } from './harness.js';
 
@@ -69,5 +70,36 @@ describe('descriptions corrected for 0.8.0', () => {
         'After a 5xx that names no operation_id, send the same call again with the same key',
       );
     }
+  });
+
+  it("agrees with update_computer's own error on the key to resend egress_proxy with", () => {
+    // keyedFailure answers a 5xx that names no operation_id with "the SAME
+    // idempotency_key ... Do not switch to a new key or none"; the argument
+    // description must not tell the model the opposite for the same answer.
+    const said = arg('update_computer', 'egress_proxy');
+    expect(said).toContain(
+      'After any other 5xx that names no operation_id, send the setting again with the SAME idempotency_key (not a new one or none)',
+    );
+    expect(said).toContain(
+      'with a new idempotency_key, or none, after a 5xx that names an operation_id',
+    );
+    expect(said).not.toContain('with a new idempotency_key, or none, after a 5xx;');
+  });
+});
+
+describe('the docs agree with the agent tools on what a failure status means', () => {
+  const read = (path: string) => readFileSync(new URL(`../${path}`, import.meta.url), 'utf8');
+
+  it("does not tell the skill's reader a mid-run stop may be the Mandala plan", () => {
+    const skill = read('plugin/skills/mandala-computer/SKILL.md');
+    expect(skill).not.toContain('a plan that no longer covers the work');
+    expect(skill).toContain('a `401` or `403` carrying `reason: "revoked"`');
+    expect(skill).toContain("the model provider's own\n  status for the model key");
+  });
+
+  it("keeps run_agent_chat's pre-run refusals on the usual advice in the README", () => {
+    const readme = read('README.md');
+    expect(readme).toContain('before any run started — a flat\n`{error: string}` body');
+    expect(readme).toContain('it keeps the usual role and plan advice');
   });
 });
