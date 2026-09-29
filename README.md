@@ -1141,6 +1141,21 @@ address.
   carrying a request is checked again before it is dispatched, with an
   acceptance cached for 60 s under the token's digest, so an expired or
   revoked token is a clean `401` before any stream opens.
+- **One bearer holds at most 16 sessions**, and a suspended account's bearer
+  one (enough to ask `whoami`), so no single token can fill the pool. At that
+  limit, an initialize closes the bearer's least recently used idle session to
+  make room, once its own session exists (a refused initialize closes
+  nothing), and a client whose old session is gone initializes again; if none
+  is idle, the answer is `429` with `Retry-After`. One race differs: if the
+  idle session it planned to close is put to work before the new session is
+  made, the new one is dropped instead and the initialize is answered `404`
+  (`Session not found`, no `Retry-After`), which an SDK client reports as a
+  failed connect. Other bearers' sessions are never touched. `runHttp` takes
+  the 16 as `maxSessionsPerBearer`. A self-hosted `--http` server applies it
+  too, but checks no bearer with the platform, so there any string is its own
+  bucket: the per-bearer cap spreads one key's clients, and what bounds an
+  untrusted caller is the process-wide cap (256), and the default loopback
+  bind until you expose the port.
 - **A token the platform refuses during a call comes back as that same
   `401`**, not as a tool error, so the client refreshes or authorizes again —
   the answer is held until its first byte for this. The one case that cannot

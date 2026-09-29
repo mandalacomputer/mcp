@@ -3,7 +3,7 @@ import type { AddressInfo } from 'node:net';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { Api, SERVICE_HEADER } from '../src/api.js';
 import { bearerChallenge, runHttp } from '../src/http.js';
-import { BASE, installFakePlatform } from './harness.js';
+import { BASE, installFakePlatform, WHOAMI } from './harness.js';
 
 // The hosted install (OPL-4982): an HTTP server in front of the platform whose
 // callers are OAuth clients. What is pinned here is what those clients act on —
@@ -103,6 +103,13 @@ function platformWithRefusals() {
         status: 401,
         headers: { 'Content-Type': 'application/json' },
       });
+    }
+    // A suspended account's whoami says so, as the platform's does.
+    if (state.suspended && url.pathname.endsWith('/whoami')) {
+      return new Response(
+        JSON.stringify({ ...WHOAMI, account: { ...WHOAMI.account, status: 'suspended' } }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      );
     }
     return fake(input as never, init);
   }) as typeof fetch;
@@ -564,6 +571,127 @@ describe('hosted: checking a bearer before it gets anything', () => {
       expect(session).toBeTruthy();
       expect(await sessions(url)).toBe(1);
     } finally {
+      await stop(server);
+    }
+  });
+
+  // OPL-5443: admitted, a suspended account's bearer is held to one session,
+  // so it cannot fill the pool the way any accepted bearer once could.
+  it('holds a suspended account’s bearer to one session, which still reaches whoami', async () => {
+    platform = platformWithRefusals();
+    platform.state.suspended = true;
+    const { server, url } = await start({ resourceMetadataUrl: METADATA, serviceSecret: SECRET });
+    const as = (token: string, session?: string) => ({
+      Authorization: `Bearer ${token}`,
+      ...(session ? { 'mcp-session-id': session } : {}),
+    });
+    let release = () => {};
+    try {
+      const c = client(url);
+      const first = await c.open('mcpat_suspended');
+
+      // Busy: its whoami call is held at the platform. The next initialize's
+      // probe is not, because the acceptance is cached.
+      platform.state.probeGate = new Promise<void>((r) => {
+        release = r;
+      });
+      const before = probes();
+      const call = c.send(
+        { jsonrpc: '2.0', id: 4, method: 'tools/call', params: { name: 'whoami', arguments: {} } },
+        as('mcpat_suspended', first),
+      );
+      const deadline = Date.now() + 5000;
+      while (probes() === before) {
+        if (Date.now() > deadline) throw new Error('the whoami call never reached the platform');
+        await new Promise((r) => setTimeout(r, 5));
+      }
+      const second = await c.send(INIT, as('mcpat_suspended'));
+      expect(second.status).toBe(429);
+      expect(second.headers.get('retry-after')).toBe('30');
+      expect(((await second.json()) as { error: { message: string } }).error.message).toContain(
+        'This token already holds its maximum of 1 session on this server',
+      );
+      expect(await sessions(url)).toBe(1);
+
+      platform.state.probeGate = undefined;
+      release();
+      const answer = JSON.stringify(await messages(await call));
+      expect(answer).toContain('SUSPENDED');
+
+      // Idle now: the next initialize closes it rather than being refused, and
+      // the bearer still holds exactly one.
+      const third = await c.open('mcpat_suspended');
+      expect(await sessions(url)).toBe(1);
+      const gone = await c.send(LIST, as('mcpat_suspended', first));
+      expect(gone.status).toBe(404);
+      await gone.text();
+      const kept = await c.send(LIST, as('mcpat_suspended', third));
+      expect(kept.status).toBe(200);
+      await kept.text();
+
+      // An active account is not held to one.
+      platform.state.suspended = false;
+      await c.open('mcpat_active');
+      await c.open('mcpat_active');
+      expect(await sessions(url)).toBe(3);
+    } finally {
+      platform.state.probeGate = undefined;
+      release();
+      await stop(server);
+    }
+  });
+
+  // Review round 1: a request already routed to a session waits on its bearer
+  // probe before it is dispatched, and the session looked idle all that time,
+  // so an initialize on the same bearer at its cap closed it and the request
+  // was answered 404.
+  it('never closes a session to make room while a request on it waits for its probe', async () => {
+    platform = platformWithRefusals();
+    const { server, url } = await start({
+      resourceMetadataUrl: METADATA,
+      serviceSecret: SECRET,
+      maxSessionsPerBearer: 1,
+      // Every request probes, so the one below waits on the platform.
+      bearerCheckTtlMs: 0,
+    });
+    const as = (session?: string) => ({
+      Authorization: 'Bearer mcpat_one',
+      ...(session ? { 'mcp-session-id': session } : {}),
+    });
+    let release = () => {};
+    try {
+      const c = client(url);
+      const first = await c.open('mcpat_one');
+
+      platform.state.probeGate = new Promise<void>((r) => {
+        release = r;
+      });
+      const before = probes();
+      const call = c.send(LIST, as(first));
+      const deadline = Date.now() + 5000;
+      while (probes() === before) {
+        if (Date.now() > deadline) throw new Error('the request never reached its probe');
+        await new Promise((r) => setTimeout(r, 5));
+      }
+      // Only that probe is held; the initialize's own goes straight through.
+      platform.state.probeGate = undefined;
+
+      const second = await c.send(INIT, as());
+      expect(second.status).toBe(429);
+      expect(second.headers.get('mcp-session-id')).toBeNull();
+      await second.text();
+
+      release();
+      const answered = await call;
+      expect(answered.status).toBe(200);
+      await answered.text();
+      expect(await sessions(url)).toBe(1);
+      const kept = await c.send(LIST, as(first));
+      expect(kept.status).toBe(200);
+      await kept.text();
+    } finally {
+      platform.state.probeGate = undefined;
+      release();
       await stop(server);
     }
   });
