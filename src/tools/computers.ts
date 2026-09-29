@@ -1449,11 +1449,13 @@ export const registerComputers: Registrar = (server, session, opts) => {
               if (c.os !== 'linux' || desktop === '') {
                 return said(`Guest is answering: ${describe(c)}`, withoutCredentials(c));
               }
+              let probe: { timed_out?: unknown; exit_code?: unknown } | undefined;
               try {
-                await api.send('POST', P.computerAction(id, 'exec'), {
-                  body: P.execBody({ command: 'true', timeout_s: 5, desktop: true }),
-                });
-                return said(`Guest is answering: ${describe(c)}`, withoutCredentials(c));
+                probe = await api.send<{ timed_out?: unknown; exit_code?: unknown }>(
+                  'POST',
+                  P.computerAction(id, 'exec'),
+                  { body: P.execBody({ command: 'true', timeout_s: 5, desktop: true }) },
+                );
               } catch (err) {
                 // The guest probe's rules, in the same order.
                 if (extra.signal?.aborted) return cancelled(id, last);
@@ -1485,6 +1487,20 @@ export const registerComputers: Registrar = (server, session, opts) => {
                 await sleep(pollDelay(err), signal);
                 continue;
               }
+              // Only a `true` that FINISHED with 0 is evidence of a session. The
+              // platform refuses a missing session only once its in-guest lookup
+              // completes: a lookup still running at the probe's five seconds
+              // answers 200 with `timed_out` set, which says nothing either way,
+              // and neither does an empty or non-zero answer. Polled through.
+              if (probe?.timed_out !== true && probe?.exit_code === 0) {
+                return said(`Guest is answering: ${describe(c)}`, withoutCredentials(c));
+              }
+              heldOn = 'desktop';
+              await beat(
+                `Waiting for ${id} — running; the guest answers, and its desktop session is not active yet.`,
+              );
+              await sleep(POLL_MS, signal);
+              continue;
             }
             await sleep(POLL_MS, signal);
           }

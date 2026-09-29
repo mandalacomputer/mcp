@@ -169,6 +169,62 @@ describe('wait_for_computer until "guest" waits for the desktop session', () => 
     expect(textOf(res)).toMatch(/call again to keep waiting/);
   }, 30_000);
 
+  // A probe whose in-guest session lookup outlived its five seconds answers 200
+  // with `timed_out` set: no evidence of a session, and neither is a non-zero
+  // exit. Both are polled through rather than read as a ready desktop.
+  const UNFINISHED = { exit_code: -1, timed_out: true, stdout_b64: '', stderr_b64: '' };
+  const FAILED = { exit_code: 1, stdout_b64: '', stderr_b64: '' };
+
+  it.each([
+    ['timed out in the guest', UNFINISHED],
+    ['exited non-zero', FAILED],
+  ])(
+    'polls through a desktop probe that %s',
+    async (_label, first) => {
+      let probes = 0;
+      const res = await platform(
+        (seen) => {
+          if (isDesktopProbe(seen)) {
+            probes++;
+            return probes <= 1 ? [200, first] : [200, OK];
+          }
+          if (seen.path.endsWith('/exec')) return [200, OK];
+          return [200, box()];
+        },
+        async (seen) => {
+          const { call, close } = await connect();
+          const r = await call('wait_for_computer', { until: 'guest', timeout_s: 30 });
+          await close();
+          expect(seen.filter(isDesktopProbe)).toHaveLength(2);
+          return r;
+        },
+      );
+      expect(res.isError).toBeFalsy();
+      expect(textOf(res)).toContain('Guest is answering');
+    },
+    30_000,
+  );
+
+  it('gives up naming the desktop session when every probe times out', async () => {
+    const res = await platform(
+      (seen) => {
+        if (isDesktopProbe(seen)) return [200, UNFINISHED];
+        if (seen.path.endsWith('/exec')) return [200, OK];
+        return [200, box()];
+      },
+      async () => {
+        const { call, close } = await connect();
+        const r = await call('wait_for_computer', { until: 'guest', timeout_s: 5 });
+        await close();
+        return r;
+      },
+    );
+    expect(res.isError).toBe(true);
+    expect(textOf(res)).not.toMatch(/Guest is answering/);
+    expect(textOf(res)).toMatch(/Gave up after 5s/);
+    expect(textOf(res)).toMatch(/desktop session is not active yet/);
+  }, 30_000);
+
   it('says so in its description', async () => {
     const { client, close } = await connect();
     const tools = (await client.listTools()).tools;
