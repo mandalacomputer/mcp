@@ -405,6 +405,46 @@ describe('flat and nested chat failures', () => {
     expect(text(result)).toContain('use run_agent, which streams');
   });
   it.each([
+    { kind: 'bodiless', response: () => new Response('', { status: 524 }) },
+    {
+      kind: 'HTML',
+      response: () =>
+        new Response('<html><body>A timeout occurred</body></html>', {
+          status: 524,
+          headers: { 'content-type': 'text/html' },
+        }),
+    },
+  ])(
+    'says one thing about a $kind 524: the edge cut it and the run stopped',
+    async ({ response }) => {
+      const previous = globalThis.fetch;
+      globalThis.fetch = async (...args) => {
+        await previous(...args);
+        return response();
+      };
+      const result = await connection.call('run_agent_chat', task);
+      expect(result.isError).toBe(true);
+      const said = text(result);
+      expect(said).toContain('about 120 seconds');
+      expect(said).toContain('the run was stopped');
+      expect(said).toContain('use run_agent, which streams');
+      expect(said).toContain('Do not call run_agent_chat again with the same task');
+      expect(said).toContain('(HTTP 524)');
+      // The shared gateway text says the work carries on; this route stops it.
+      for (const contradiction of [
+        'carries on',
+        'Nothing was cancelled',
+        'still working',
+        'foreground exec',
+      ]) {
+        expect(said).not.toContain(contradiction);
+      }
+      expect(said.split('about 120 seconds').length - 1).toBe(1);
+      expect(said.split('the run was stopped').length - 1).toBe(1);
+      expect(said).toContain('Chat refusal metadata');
+    },
+  );
+  it.each([
     { read: 80, write: 10 },
     { read: 0, write: 0 },
   ])(

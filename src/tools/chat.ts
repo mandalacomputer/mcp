@@ -105,18 +105,30 @@ function runAdvice(error: APIError): string | undefined {
       ? agentRunAdvice(error.status, error.reason, 'run_agent_chat')
       : undefined;
   }
-  if (error.status === 524) return EDGE_CUT;
+  if (edgeCut(error)) return EDGE_CUT.advice;
   return undefined;
 }
 
 /**
  * The hosted edge cuts a request that is not streaming after about 120 seconds
- * with a bodiless 524, and this tool's request never streams. The platform ties
- * the run to the request, so the cut stops the run where it was and loses its
- * result, usage and steps.
+ * with a 524 that carries no JSON body (none at all, or the edge's own page),
+ * and this tool's request never streams. The platform ties the run to the
+ * request, so the cut stops the run where it was and loses its result, usage
+ * and steps.
+ *
+ * `detail` stands in for the message, not beside it: the shared gateway text
+ * for a 524 says the work carries on without the request, which is true of a
+ * foreground exec and false here, and one answer cannot say both (OPL-5445).
+ * `advice` is the rest of the account, given in place of the status advice.
  */
-const EDGE_CUT =
-  'the hosted edge cut this request after about 120 seconds, because it does not stream; the run was stopped where it was, and its result, usage and steps were lost with it. Steps it took were still billed and may have changed the computer, so take a screenshot before deciding what is left, and use run_agent, which streams, for a task that can take longer. Do not call run_agent_chat again with the same task';
+const EDGE_CUT = {
+  detail: 'The hosted edge cut this request after about 120 seconds, because it does not stream',
+  advice:
+    'the run was stopped where it was, and its result, usage and steps were lost with it. Steps it took were still billed and may have changed the computer, so take a screenshot before deciding what is left, and use run_agent, which streams, for a task that can take longer. Do not call run_agent_chat again with the same task',
+} as const;
+
+/** A 524 with no JSON record body is the edge's cut, not the platform's answer. */
+const edgeCut = (error: APIError): boolean => error.status === 524 && !isRecord(error.body);
 
 function chatFailure(error: unknown): CallToolResult {
   if (!(error instanceof APIError)) return failed(error);
@@ -133,7 +145,9 @@ function chatFailure(error: unknown): CallToolResult {
   const incompleteNative = nested?.agent !== undefined && !boundedNative;
   const detail = isRecord(error.body)
     ? (platformSaid(error.body) ?? 'Chat request failed without a usable error message')
-    : apiErrorMessage(error);
+    : edgeCut(error)
+      ? EDGE_CUT.detail
+      : apiErrorMessage(error);
   const result = failed(
     new APIError(detail, error.status, { ...projected, error: detail }, error.retryAfterMs, error),
     nested === undefined,

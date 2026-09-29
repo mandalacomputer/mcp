@@ -30,6 +30,12 @@ are wording changes, and they are behaviour changes in the way that matters.
   which stops the run and loses its result; the description and README say so
   and point long tasks to `run_agent`, and a `524` is answered with that
   explanation.
+- **`run_agent_chat`'s answer to the edge's `524` says one thing.** A `524`
+  with no JSON body (none at all, or the edge's HTML page) also carried the
+  generic gateway text, which says the work carries on and is usually still
+  going, beside the advice that the run was stopped. The answer now says only
+  that the edge cut the request after about 120 seconds and the run stopped
+  with it.
 - **`open_url` opens the browser the image has.** It named `firefox` and
   backgrounded it, so it reported success either way, including on Omarchy,
   which ships only `chromium`. It now opens the first of `firefox-esr`,
