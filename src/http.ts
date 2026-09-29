@@ -89,9 +89,10 @@ type Live = {
   active: number;
   /**
    * POSTs naming this session whose body has not all arrived yet (see
-   * `pinBeforeBody`). Busy for fair-share room-making only: the idle sweep and
-   * a suspended account's trim do not wait on them, since how long a body
-   * takes to arrive is the sender's to choose.
+   * `pinBeforeBody`). Busy for fair-share room-making only, and only while
+   * the bearer is not `refused`: the idle sweep and a suspended account's
+   * trim do not wait on them, since how long a body takes to arrive is the
+   * sender's to choose.
    */
   uploading: number;
   /**
@@ -883,10 +884,13 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
    * Whether an initialize making room must pass this session over: a request
    * is being served on it, or one naming it is still uploading its body. Only
    * room-making waits on an upload; the sweeper and `trimIdle` test `active`
-   * alone (see `pinBeforeBody`).
+   * alone (see `pinBeforeBody`). Nor does it wait on one once the platform has
+   * refused the session's bearer: `pinBeforeBody` places no mark then, and a
+   * mark placed before the refusal no longer counts either, since that upload
+   * can only be answered with the challenge.
    */
   const busyForRoom = (live: Live | undefined): boolean =>
-    live !== undefined && (live.active > 0 || live.uploading > 0);
+    live !== undefined && (live.active > 0 || (!live.refused && live.uploading > 0));
 
   /**
    * Which sessions must close for one more to be admitted for `seat`, or
@@ -1067,7 +1071,8 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
    * still uploading counted as idle, so an initialize making room closed it
    * under that request, which then met a 404. Marked here instead, for a
    * request whose bearer matches the session it names, the test the route
-   * applies first, and never on a session whose bearer the platform refused.
+   * applies first, and never on a session whose bearer the platform refused
+   * (a mark placed before the refusal stops counting then: `busyForRoom`).
    *
    * Only room-making honours the mark (`busyForRoom`). The idle sweep and a
    * suspended account's trim do not: nothing about the bearer has been

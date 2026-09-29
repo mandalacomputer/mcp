@@ -1291,6 +1291,48 @@ describe('hosted: checking a bearer before it gets anything', () => {
       }
     });
 
+    // An upload that began before the platform refused the token was still
+    // counted once it had: the refused account's sessions were all spared,
+    // so its largest share had nothing idle and the pool 503'd a newcomer.
+    it('stops sparing a session for an upload once its token is refused mid-upload', async () => {
+      platform = platformWithRefusals();
+      platform.state.accounts = { r1: 'acc-r', x1: 'acc-x', y1: 'acc-y', z1: 'acc-z' };
+      const { server, url } = await start({
+        resourceMetadataUrl: METADATA,
+        serviceSecret: SECRET,
+        maxSessions: 4,
+        bearerCheckTtlMs: 0,
+      });
+      const calls: Array<Awaited<ReturnType<typeof post>>> = [];
+      try {
+        const c = client(url);
+        const r = [await c.open('r1')];
+        await pause();
+        r.push(await c.open('r1'));
+        await pause();
+        const x = await c.open('x1');
+        await pause();
+        const z = await c.open('z1');
+        expect(await sessions(url)).toBe(4);
+        // Marked while the token was still good.
+        for (const session of r) calls.push(await post(server, url, 'r1', session));
+        platform.refused.add('r1');
+        for (const session of r) expect(await status(url, 'r1', session)).toBe(401);
+
+        // acc-r holds the most; its uploads no longer spare its sessions.
+        const y = await c.open('y1');
+        expect(await sessions(url)).toBe(4);
+        expect(await status(url, 'x1', x)).toBe(200);
+        expect(await status(url, 'z1', z)).toBe(200);
+        expect(await status(url, 'y1', y)).toBe(200);
+        for (const call of calls) call.finish();
+        expect(await Promise.all(calls.map((call) => call.done))).toContain(404);
+      } finally {
+        for (const call of calls) call.abandon();
+        await stop(server);
+      }
+    });
+
     // Once the route has taken a request over, releasing its pin is the
     // route's job, whenever the response closes: a client that went away
     // while its bearer was being checked left the session looking idle to

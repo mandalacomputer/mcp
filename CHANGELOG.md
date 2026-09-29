@@ -126,8 +126,9 @@ are wording changes, and they are behaviour changes in the way that matters.
   A session with a request in flight is never closed to make room, counted
   as such from the moment the request arrives, before its body is read; a
   body still arriving does not, however, keep a session from the idle sweep
-  or from a suspended account's trim, or mark a refused token's session at
-  all, since how long a body takes is its sender's choice. Concurrent initializes
+  or from a suspended account's trim, or keep a refused token's session from
+  being closed to make room at all, even one that started before the token
+  was refused, since how long a body takes is its sender's choice. Concurrent initializes
   are counted before either lands so they cannot pass the ceiling or the
   pool together, and a session planned for closing that is put to work first
   drops the new one (`404`) as before. If another initialize lands first and

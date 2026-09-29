@@ -1274,6 +1274,47 @@ describe('the per-bearer session cap', () => {
       });
     }
 
+    // A planned victim put to work by an upload, not only by a routed
+    // request, is the older race too: the new session drops, and the
+    // requester's own idle session is not closed in the victim's place.
+    it('drops a new session rather than close its own idle one when the planned victim began an upload', async () => {
+      const t = await setup({ maxSessionsPerBearer: 16, maxSessions: 3 });
+      let hold: ReturnType<typeof holdInitializes> | undefined;
+      let call: ReturnType<typeof uploading> | undefined;
+      try {
+        const a1 = await t.open('com_alice');
+        await pause();
+        const b1 = await t.open('com_bob');
+        await pause();
+        const b2 = await t.open('com_bob');
+        const busyB2 = await t.busy('com_bob', b2);
+
+        // Bob holds the most, and b1 is his idle session: it is planned.
+        hold = holdInitializes();
+        const h = hold;
+        const alice2 = t.send(INIT, t.as('com_alice'));
+        await until(() => h.state.held === 1, 'the initialize never reached the transport');
+        call = await uploadingSeen(t, 'com_bob', b1);
+        h.open();
+        const late = await alice2;
+        expect(late.status).toBe(404);
+        expect(late.headers.get('mcp-session-id')).toBeNull();
+        await late.text();
+        expect(await t.count()).toBe(3);
+        expect(await status(t, 'com_alice', a1)).toBe(200);
+
+        call.finish();
+        expect(await call.done).toBe(200);
+        t.release();
+        await (await busyB2).text();
+        expect(await status(t, 'com_bob', b1)).toBe(200);
+      } finally {
+        call?.abandon();
+        hold?.restore();
+        await t.teardown();
+      }
+    });
+
     // A body can take as long to arrive as its sender likes. Counted as a
     // request in flight, one that never finished (or a fresh one started as
     // each timed out) kept its session past the idle TTL indefinitely.
