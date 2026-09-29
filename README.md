@@ -1175,7 +1175,7 @@ address.
   initialize closes the least recently used idle session of the account
   holding the most sessions (on a tie, the one whose idle session is oldest),
   which may be the caller's own; if that account has nothing idle, the answer
-  is `503`, and nothing is taken from a smaller account instead. A session
+  is `503` with `Retry-After`, and nothing is taken from a smaller account instead. A session
   with a request in flight is never closed, and the same `404` race as above
   applies. `runHttp` takes the ceiling as `maxSessionsPerAccount`, and the CLI
   reads it from `MANDALA_MCP_MAX_SESSIONS_PER_ACCOUNT`. A self-hosted server

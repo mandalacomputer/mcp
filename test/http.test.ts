@@ -695,8 +695,11 @@ describe('the per-bearer session cap', () => {
       await res.text();
       return res.status;
     };
-    /** Hold every initialize at the transport until `open`, counting them. */
-    function holdInitializes() {
+    /**
+     * Hold initializes at the transport until `open`, counting them: every
+     * one, or only the first `limit`, the rest going straight through.
+     */
+    function holdInitializes(limit = Number.POSITIVE_INFINITY) {
       const original = StreamableHTTPServerTransport.prototype.handleRequest;
       let open = () => {};
       const gate = new Promise<void>((r) => {
@@ -704,7 +707,7 @@ describe('the per-bearer session cap', () => {
       });
       const state = { held: 0 };
       StreamableHTTPServerTransport.prototype.handleRequest = async function (...args) {
-        if (!this.sessionId) {
+        if (!this.sessionId && state.held < limit) {
           state.held++;
           await gate;
         }
@@ -793,6 +796,9 @@ describe('the per-bearer session cap', () => {
         // full, and bob's and carol's idle sessions are not taken instead.
         const dave = await t.send(INIT, t.as('com_dave'));
         expect(dave.status).toBe(503);
+        // A backoff hint, as the 429s give: under fair share a busy pool is
+        // an ordinary answer, and a client must not hot-loop its initialize.
+        expect(dave.headers.get('retry-after')).toBe('30');
         expect(dave.headers.get('mcp-session-id')).toBeNull();
         await dave.text();
         expect(await t.count()).toBe(4);
@@ -806,6 +812,63 @@ describe('the per-bearer session cap', () => {
           await res.text();
         }
       } finally {
+        await t.teardown();
+      }
+    });
+
+    it('breaks a tie on count by the oldest idle session, not by who came first', async () => {
+      const t = await setup({ maxSessionsPerBearer: 16, maxSessions: 2 });
+      try {
+        // Alice is first in the pool, but her one session is the more
+        // recently used; bob's, opened after hers, has sat idle longer.
+        const alice = await t.open('com_alice');
+        await pause();
+        const bob = await t.open('com_bob');
+        await pause();
+        expect(await status(t, 'com_alice', alice)).toBe(200);
+        await pause();
+
+        const carol = await t.open('com_carol');
+        expect(await t.count()).toBe(2);
+        expect(await status(t, 'com_bob', bob)).toBe(404);
+        expect(await status(t, 'com_alice', alice)).toBe(200);
+        expect(await status(t, 'com_carol', carol)).toBe(200);
+      } finally {
+        await t.teardown();
+      }
+    });
+
+    it('counts an initialize still in flight toward the account holding the most', async () => {
+      const t = await setup({ maxSessionsPerBearer: 16, maxSessions: 3 });
+      let hold: ReturnType<typeof holdInitializes> | undefined;
+      try {
+        // Live, alice and bob hold one each, and only alice's is idle. Bob's
+        // initialize in flight makes him the one holding the most, and he has
+        // nothing idle: the pool is full, not alice's session to take.
+        const alice = await t.open('com_alice');
+        await pause();
+        const bob = await t.open('com_bob');
+        const call = await t.busy('com_bob', bob);
+        hold = holdInitializes(1);
+        const h = hold;
+        const bob2 = t.send(INIT, t.as('com_bob'));
+        await until(() => h.state.held === 1, 'the initialize never reached the transport');
+
+        const carol = await t.send(INIT, t.as('com_carol'));
+        expect(carol.status).toBe(503);
+        expect(carol.headers.get('retry-after')).toBe('30');
+        await carol.text();
+
+        h.open();
+        const landed = await bob2;
+        expect(landed.status).toBe(200);
+        await landed.text();
+        expect(await t.count()).toBe(3);
+        expect(await status(t, 'com_alice', alice)).toBe(200);
+        t.release();
+        await (await call).text();
+      } finally {
+        hold?.restore();
         await t.teardown();
       }
     });

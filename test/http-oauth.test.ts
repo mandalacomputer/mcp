@@ -1053,6 +1053,49 @@ describe('hosted: checking a bearer before it gets anything', () => {
         await stop(server);
       }
     });
+
+    it('trims a suspended account at a new token’s initialize, before any request on the rest', async () => {
+      platform = platformWithRefusals();
+      platform.state.accounts = accounts(['s1', 's2', 's3', 's4']);
+      const { server, url } = await start({
+        resourceMetadataUrl: METADATA,
+        serviceSecret: SECRET,
+        bearerCheckTtlMs: 0,
+      });
+      let release = () => {};
+      try {
+        const c = client(url);
+        const a = await c.open('s1');
+        await pause();
+        const b = await c.open('s2');
+        await pause();
+        const d = await c.open('s3');
+        // One of the three is serving a request, so an initialize cannot make
+        // room by closing the account's sessions: only the trim closes any.
+        const held = await holdAtProbe(url, [['s1', a]]);
+        release = held.release;
+        platform.state.suspended = true;
+
+        const over = await c.send(INIT, as('s4'));
+        expect(over.status).toBe(429);
+        expect(((await over.json()) as { error: { message: string } }).error.message).toContain(
+          'This account, across all its tokens, already holds its maximum of 1 session',
+        );
+        // Closed at that initialize: nothing has been asked of them since.
+        expect(await sessions(url)).toBe(1);
+        expect(await status(url, 's2', b)).toBe(404);
+        expect(await status(url, 's3', d)).toBe(404);
+
+        release();
+        const [answer] = await Promise.all(held.calls);
+        expect(answer.status).toBe(200);
+        await answer.text();
+      } finally {
+        platform.state.probeGate = undefined;
+        release();
+        await stop(server);
+      }
+    });
   });
 
   // OPL-5050: a refused bearer on a sessionless request that is not an

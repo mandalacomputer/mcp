@@ -194,6 +194,13 @@ const DEFAULT_MAX_SESSIONS_PER_BEARER = 16;
 const MAX_SESSIONS_SUSPENDED = 1;
 /** How long a caller whose bearer holds its maximum is asked to wait, in s. */
 const BEARER_FULL_RETRY_AFTER_S = 30;
+/**
+ * How long a caller is asked to wait when the pool is full and the account
+ * holding the most has nothing idle to close (OPL-5447). Under fair share that
+ * is the routine answer for a busy pool, so it carries a backoff hint like the
+ * 429s rather than inviting a client to retry at once.
+ */
+const POOL_FULL_RETRY_AFTER_S = 30;
 const DEFAULT_MAX_LARGE_BODY_PARSES = 4;
 const SMALL_BODY_BYTES = 256 * 1024;
 
@@ -1259,6 +1266,7 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
         // Swept sessions free their slot on the timer; this is the backstop
         // for the case the timer cannot help with, which is arrivals faster
         // than the TTL while every session that could be shared out is busy.
+        res.set('Retry-After', String(POOL_FULL_RETRY_AFTER_S));
         return unavailable(
           res,
           `This server is holding its maximum of ${maxSessions} sessions. Retry shortly.`,

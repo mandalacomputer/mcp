@@ -121,7 +121,8 @@ are wording changes, and they are behaviour changes in the way that matters.
   with `Retry-After`. While the pool has room nobody is limited beyond that;
   when it is full, a new initialize closes the least recently used idle
   session of the account holding the most sessions (the caller's own, if it
-  is that account), and is answered `503` if that account has nothing idle.
+  is that account), and is answered `503` with `Retry-After` if that account
+  has nothing idle.
   A session with a request in flight is never closed, concurrent initializes
   are counted before either lands so they cannot pass the ceiling or the
   pool together, and a session planned for closing that is put to work first

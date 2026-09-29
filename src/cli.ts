@@ -73,7 +73,8 @@ Environment
                        number from 1 to ${DEFAULT_MAX_SESSIONS}; anything else is refused at
                        startup. When the pool is full, a new session closes the
                        least recently used idle session of the account holding
-                       the most, and is refused 503 if that account has none.
+                       the most, and is refused 503 with Retry-After if that
+                       account has none.
 
 Flags override the environment.`;
 
