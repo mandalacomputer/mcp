@@ -268,6 +268,254 @@ describe('the session cap', () => {
   });
 });
 
+// OPL-5443: the process-wide cap alone let one bearer hold every session, and
+// every other caller's initialize was 503'd until the sweep.
+describe('the per-bearer session cap', () => {
+  const ACCOUNT_CALL = {
+    jsonrpc: '2.0',
+    id: 3,
+    method: 'tools/call',
+    params: { name: 'get_account', arguments: {} },
+  };
+  const LIST = { jsonrpc: '2.0', id: 2, method: 'tools/list' };
+
+  /**
+   * A server whose platform holds every `GET account` until released, so a
+   * `get_account` call keeps its session busy for as long as a test needs.
+   */
+  async function setup(extra: { maxSessionsPerBearer: number; maxSessions?: number }) {
+    const platform = installFakePlatform();
+    const inner = globalThis.fetch;
+    let open = () => {};
+    const gate = new Promise<void>((r) => {
+      open = r;
+    });
+    const held = { count: 0 };
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const u = new URL(typeof input === 'string' ? input : input.toString());
+      if (u.host === new URL(BASE).host && u.pathname.endsWith('/account')) {
+        held.count++;
+        await gate;
+      }
+      return inner(input as never, init);
+    }) as typeof fetch;
+    const server = await runHttp({
+      port: 0,
+      host: '127.0.0.1',
+      baseUrl: BASE,
+      maxSessions: 10,
+      ...extra,
+    });
+    const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    const send = (
+      body: unknown,
+      headers: Record<string, string>,
+      method: 'POST' | 'DELETE' = 'POST',
+    ) =>
+      fetch(`${base}/mcp`, {
+        method,
+        headers: {
+          'Content-Type': 'application/json',
+          Accept: 'application/json, text/event-stream',
+          ...headers,
+        },
+        body: method === 'POST' ? JSON.stringify(body) : undefined,
+      });
+    const as = (token: string, session?: string) => ({
+      Authorization: `Bearer ${token}`,
+      ...(session ? { 'mcp-session-id': session } : {}),
+    });
+    const open1 = async (token: string) => {
+      const res = await send(INIT, as(token));
+      expect(res.status).toBe(200);
+      await res.text();
+      return res.headers.get('mcp-session-id') as string;
+    };
+    /** Start a call that stays in flight until `release`, and wait for it to be held. */
+    const busy = async (token: string, session: string) => {
+      const before = held.count;
+      const call = send(ACCOUNT_CALL, as(token, session));
+      const deadline = Date.now() + 5000;
+      while (held.count === before) {
+        if (Date.now() > deadline) throw new Error('the call never reached the platform');
+        await new Promise((r) => setTimeout(r, 5));
+      }
+      return call;
+    };
+    const count = async () =>
+      ((await (await fetch(`${base}/healthz`)).json()) as { sessions: number }).sessions;
+    const teardown = async () => {
+      open();
+      globalThis.fetch = inner;
+      platform.restore();
+      await new Promise<void>((r) => server.close(() => r()));
+    };
+    return {
+      url: `${base}/mcp`,
+      send,
+      as,
+      open: open1,
+      busy,
+      count,
+      release: () => open(),
+      teardown,
+    };
+  }
+
+  it('refuses a bearer whose sessions are all busy 429, and still serves another bearer', async () => {
+    const t = await setup({ maxSessionsPerBearer: 2 });
+    try {
+      const a = await t.open('com_alice');
+      const b = await t.open('com_alice');
+      const calls = [await t.busy('com_alice', a), await t.busy('com_alice', b)];
+
+      const third = await t.send(INIT, t.as('com_alice'));
+      expect(third.status).toBe(429);
+      expect(third.headers.get('retry-after')).toBe('30');
+      expect(third.headers.get('mcp-session-id')).toBeNull();
+      const body = (await third.json()) as { id: unknown; error: { message: string } };
+      expect(body.id).toBe(INIT.id);
+      expect(body.error.message).toContain('This token already holds its maximum of 2 sessions');
+      expect(await t.count()).toBe(2);
+
+      // The pool is not full, only this bearer's share of it.
+      await t.open('com_bob');
+      expect(await t.count()).toBe(3);
+
+      t.release();
+      for (const call of calls) {
+        const res = await call;
+        expect(res.status).toBe(200);
+        await res.text();
+      }
+    } finally {
+      await t.teardown();
+    }
+  });
+
+  it('makes room by closing the bearer’s least recently seen idle session', async () => {
+    const t = await setup({ maxSessionsPerBearer: 2 });
+    try {
+      const older = await t.open('com_alice');
+      const newer = await t.open('com_alice');
+      const bob = await t.open('com_bob');
+      await new Promise((r) => setTimeout(r, 5));
+      // Heard from after `newer`, so `newer` is now the least recently seen.
+      const touched = await t.send(LIST, t.as('com_alice', older));
+      expect(touched.status).toBe(200);
+      await touched.text();
+
+      const third = await t.open('com_alice');
+      expect(third).toBeTruthy();
+      expect(await t.count()).toBe(3);
+
+      const gone = await t.send(LIST, t.as('com_alice', newer));
+      expect(gone.status).toBe(404);
+      await gone.text();
+      for (const [token, session] of [
+        ['com_alice', older],
+        ['com_alice', third],
+        ['com_bob', bob],
+      ] as const) {
+        const res = await t.send(LIST, t.as(token, session));
+        expect(res.status).toBe(200);
+        await res.text();
+      }
+    } finally {
+      await t.teardown();
+    }
+  });
+
+  it('admits at most its cap from a burst of one bearer’s initializes', async () => {
+    // Held before the transport answers, so every reservation is still pending
+    // and none is a session yet: nothing can be evicted, and only the
+    // per-bearer reservation count stands between the burst and the cap.
+    const original = StreamableHTTPServerTransport.prototype.handleRequest;
+    let open = () => {};
+    const hold = new Promise<void>((r) => {
+      open = r;
+    });
+    let held = 0;
+    StreamableHTTPServerTransport.prototype.handleRequest = async function (...args) {
+      if (!this.sessionId) {
+        held++;
+        await hold;
+      }
+      return original.apply(this, args);
+    };
+    const t = await setup({ maxSessionsPerBearer: 2 });
+    try {
+      const answered: number[] = [];
+      const burst = Array.from({ length: 5 }, () =>
+        t.send(INIT, t.as('com_alice')).then(async (r) => {
+          answered.push(r.status);
+          await r.text();
+          return r.status;
+        }),
+      );
+      const deadline = Date.now() + 5000;
+      while (held + answered.length < 5 && Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 5));
+      }
+      expect(held).toBe(2);
+      expect(answered).toEqual([429, 429, 429]);
+
+      open();
+      expect((await Promise.all(burst)).sort()).toEqual([200, 200, 429, 429, 429]);
+      expect(await t.count()).toBe(2);
+    } finally {
+      open();
+      StreamableHTTPServerTransport.prototype.handleRequest = original;
+      await t.teardown();
+    }
+  });
+
+  it('gives a slot back when a session is deleted', async () => {
+    const t = await setup({ maxSessionsPerBearer: 1 });
+    try {
+      const a = await t.open('com_alice');
+      const call = await t.busy('com_alice', a);
+      const full = await t.send(INIT, t.as('com_alice'));
+      expect(full.status).toBe(429);
+      await full.text();
+
+      const del = await t.send(undefined, t.as('com_alice', a), 'DELETE');
+      expect(del.status).toBe(200);
+      await del.text();
+      await t.open('com_alice');
+      expect(await t.count()).toBe(1);
+
+      t.release();
+      await (await call).text();
+    } finally {
+      await t.teardown();
+    }
+  });
+
+  it('gives a reservation back when an initialize fails before it has a session', async () => {
+    const t = await setup({ maxSessionsPerBearer: 1 });
+    try {
+      // No `text/event-stream` in Accept: the SDK answers 406 and never makes
+      // the session this initialize had reserved a slot for.
+      const refused = await fetch(t.url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Accept: 'application/json',
+          Authorization: 'Bearer com_alice',
+        },
+        body: JSON.stringify(INIT),
+      });
+      expect(refused.status).toBe(406);
+      await refused.text();
+      await t.open('com_alice');
+      expect(await t.count()).toBe(1);
+    } finally {
+      await t.teardown();
+    }
+  });
+});
+
 describe('a session whose client walked away', () => {
   let server: Server;
   let url: string;

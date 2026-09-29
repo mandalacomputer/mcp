@@ -60,6 +60,19 @@ are wording changes, and they are behaviour changes in the way that matters.
   plain or desktop, is said to see bound environment variables on an image
   that supports it; `create_webhook` says eight attempts (seven retries).
 
+### Security
+
+- **One bearer can no longer fill the HTTP server's session pool.** The only
+  limit was the process-wide one (256 sessions), so a single accepted token,
+  a suspended account's included, could hold every session and every other
+  caller's initialize was answered `503` until the idle sweep. A bearer now
+  holds at most 16 live sessions (`maxSessionsPerBearer` for embedders of
+  `runHttp`), and a suspended account's bearer at most one, which is still
+  enough to reach `whoami`. At its limit, an initialize closes that bearer's
+  least recently used idle session to make room; when none is idle it is
+  answered `429` with `Retry-After`. Another bearer's sessions are never
+  touched.
+
 ## [0.7.0] — 2026-09-27
 
 ### Added

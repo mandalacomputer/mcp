@@ -1141,6 +1141,13 @@ address.
   carrying a request is checked again before it is dispatched, with an
   acceptance cached for 60 s under the token's digest, so an expired or
   revoked token is a clean `401` before any stream opens.
+- **One bearer holds at most 16 sessions**, and a suspended account's bearer
+  one (enough to ask `whoami`), so no single token can fill the pool. At that
+  limit, an initialize closes the bearer's least recently used idle session to
+  make room, and a client whose old session is gone initializes again; if none
+  is idle, the answer is `429` with `Retry-After`. Other bearers' sessions are
+  never touched. The 16 applies to a self-hosted `--http` server too, and
+  `runHttp` takes it as `maxSessionsPerBearer`.
 - **A token the platform refuses during a call comes back as that same
   `401`**, not as a tool error, so the client refreshes or authorizes again —
   the answer is held until its first byte for this. The one case that cannot
