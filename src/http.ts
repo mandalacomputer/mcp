@@ -347,8 +347,9 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
   const checkTtl = cfg.bearerCheckTtlMs ?? DEFAULT_BEARER_CHECK_TTL_MS;
   // What the platform said, per digest: until when it is taken on trust,
   // whether the account behind it is suspended, which sets its session cap,
-  // and the account id whoami named, which the account ceiling counts by.
-  type Acceptance = { until: number; suspended: boolean; account?: string };
+  // the account id whoami named, which the account ceiling counts by, and
+  // the `standingClock` tick its probe started at (see `confirmedAccounts`).
+  type Acceptance = { until: number; suspended: boolean; account?: string; startedAt: number };
   const accepted = new Map<string, Acceptance>();
   let checksInFlight = 0;
 
@@ -373,6 +374,37 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
   // suspension and answers late says nothing about the account now.
   const suspendedAccounts = new Map<string, { until: number; at: number }>();
   let standingClock = 0;
+  // Accounts a probe found active, by account key: the tick the latest such
+  // probe started at, and until when that matters. A bearer's cached
+  // `suspended` answer counts only if its probe started after this: one
+  // asked before the account was reinstated would otherwise outlive the
+  // `ok` that said so, and a request on that bearer would trim the account's
+  // other bearers' sessions for the rest of its window (review round 3). It
+  // never clears a mark, which a probe that started after it must do.
+  const confirmedAccounts = new Map<string, { until: number; at: number }>();
+  const confirmedAt = (account: string, now: number): number => {
+    const ok = confirmedAccounts.get(account);
+    if (ok === undefined) return 0;
+    if (ok.until > now) return ok.at;
+    confirmedAccounts.delete(account);
+    return 0;
+  };
+  const noteConfirmed = (account: string, startedAt: number, now: number) => {
+    const at = Math.max(startedAt, confirmedAt(account, now));
+    confirmedAccounts.delete(account);
+    if (confirmedAccounts.size >= MAX_ACCEPTED_BEARERS) {
+      for (const [k, m] of confirmedAccounts) if (m.until <= now) confirmedAccounts.delete(k);
+      // Still full: drop the oldest, which Map iteration yields first. What
+      // that costs is only the old behaviour: a stale cached `suspended`
+      // answer is believed again until it expires.
+      if (confirmedAccounts.size >= MAX_ACCEPTED_BEARERS) {
+        confirmedAccounts.delete(confirmedAccounts.keys().next().value as string);
+      }
+    }
+    // As long as any answer from a probe that started before it can still
+    // be cached: one stored up to a probe timeout from now, for `checkTtl`.
+    confirmedAccounts.set(account, { until: now + checkTtl + BEARER_CHECK_TIMEOUT_MS, at });
+  };
   const accountSuspended = (account: string): boolean => {
     const mark = suspendedAccounts.get(account);
     if (mark === undefined) return false;
@@ -427,7 +459,10 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
     const cached = acceptance(key);
     if (cached) {
       const account = accountKey(id, cached.account);
-      const suspended = cached.suspended || accountSuspended(account);
+      // A cached `suspended` that a later-started probe found active is
+      // stale; a mark still standing is not, whatever this bearer's answer.
+      const current = cached.startedAt > confirmedAt(account, Date.now());
+      const suspended = (cached.suspended && current) || accountSuspended(account);
       return { verdict: suspended ? 'suspended' : 'ok', account };
     }
     if (checksInFlight >= MAX_BEARER_CHECKS_IN_FLIGHT) return { verdict: 'unknown' };
@@ -468,10 +503,11 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
     }
     const account = accountKey(id, confirmed);
     noteStanding(account, suspended, startedAt, now);
+    if (!suspended) noteConfirmed(account, startedAt, now);
     // A mark this probe could not clear stands over its answer, and is cached
     // with it, so the answer does not outlive the mark as an `ok`.
     const standing = suspended || accountSuspended(account);
-    accepted.set(id, { until: now + checkTtl, suspended: standing, account: confirmed });
+    accepted.set(id, { until: now + checkTtl, suspended: standing, account: confirmed, startedAt });
     return { verdict: standing ? 'suspended' : 'ok', account };
   };
 
@@ -915,8 +951,13 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
   };
 
   /**
-   * Close some of `own`'s idle sessions, least recently seen first, until it
-   * holds no more than `cap` or none idle is left. Never `keep`, and never one
+   * Close some of `own`'s idle sessions, those whose token the platform has
+   * refused first and then least recently seen first, until it holds no more
+   * than `cap` or none idle is left. Refused ones first, since nothing is
+   * served on them any more: keeping one while closing a live one would hand
+   * the survivor to `planRoom`, which closes it for the next initialize, so
+   * another token's live session would have been closed for it (review
+   * round 3). Never `keep`, and never one
    * with a request in flight: the same test the sweeper and an initialize's
    * room-making apply. Only a cap that has fallen needs this — an account
    * suspended after its bearers opened sessions (OPL-5448, OPL-5447) — since
@@ -926,7 +967,7 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
     const excess = own.length - cap;
     if (excess <= 0) return;
     const idle = own.filter(([id, live]) => id !== keep && live.active === 0);
-    idle.sort((a, b) => a[1].lastSeen - b[1].lastSeen);
+    idle.sort((a, b) => Number(b[1].refused) - Number(a[1].refused) || leastRecentFirst(a, b));
     for (const [id, gone] of idle.slice(0, excess)) {
       sessions.delete(id);
       void gone.transport.close().catch(() => {});

@@ -1871,6 +1871,79 @@ describe('hosted: one account, however many bearers', () => {
     }
   });
 
+  // Review round 3: a key's cached `suspended` answer outlived a newer `ok`
+  // for its account, so once the account was reinstated a request on that
+  // key closed the account's other keys' idle sessions until its cache ran
+  // out. A cached answer counts only if its probe started after the
+  // account's latest confirmed `ok`.
+  it('does not let a key’s cached suspended answer, older than the account’s reinstatement, trim its other keys', async () => {
+    platform = platformWithRefusals();
+    platform.state.accounts = { mcpat_s1: suspended('acc-v'), mcpat_s2: active('acc-v') };
+    // The default window: mcpat_s1's suspended answer stays cached below.
+    const { server, url } = await start({ resourceMetadataUrl: METADATA, serviceSecret: SECRET });
+    try {
+      const c = client(url);
+      const a1 = await c.open('mcpat_s1');
+      // Reinstated. mcpat_s2's probe starts after the suspension was seen,
+      // and says the account is active.
+      platform.state.accounts.mcpat_s1 = active('acc-v');
+      const c1 = await c.open('mcpat_s2');
+      const c2 = await c.open('mcpat_s2');
+      expect(await sessions(url)).toBe(3);
+
+      expect(await status(await c.send(LIST, as('mcpat_s1', a1)))).toBe(200);
+      expect(await sessions(url)).toBe(3);
+      for (const s of [c1, c2])
+        expect(await status(await c.send(LIST, as('mcpat_s2', s)))).toBe(200);
+      // Nor at an initialize on that key.
+      await c.open('mcpat_s1');
+      expect(await sessions(url)).toBe(4);
+      for (const s of [c1, c2])
+        expect(await status(await c.send(LIST, as('mcpat_s2', s)))).toBe(200);
+    } finally {
+      await stop(server);
+    }
+  });
+
+  // Review round 3: trimming a suspended account kept the most recently seen
+  // idle session even when its token had been refused, and closed a live one
+  // older than it; room was then made from the refused one, so another token
+  // was admitted in place of the live session.
+  it('closes a suspended account’s refused sessions before its live ones, and still refuses another token', async () => {
+    platform = platformWithRefusals();
+    platform.state.accounts = {
+      mcpat_la: active('acc-s'),
+      mcpat_lr: active('acc-s'),
+      mcpat_lb: active('acc-s'),
+    };
+    const { server, url } = await start({
+      resourceMetadataUrl: METADATA,
+      serviceSecret: SECRET,
+      bearerCheckTtlMs: 0,
+    });
+    try {
+      const c = client(url);
+      const a = await c.open('mcpat_la');
+      await new Promise((r) => setTimeout(r, 5));
+      const r = await c.open('mcpat_lr');
+      delete platform.state.accounts.mcpat_lr;
+      platform.refused.add('mcpat_lr');
+      expect(await status(await c.send(LIST, as('mcpat_lr', r)))).toBe(401);
+
+      platform.state.accounts.mcpat_lb = suspended('acc-s');
+      const refused = await c.send(INIT, as('mcpat_lb'));
+      expect(refused.status).toBe(429);
+      expect(await message(refused)).toContain(
+        'This account has reached its maximum of 1 session on this server, across all its tokens.',
+      );
+      expect(await sessions(url)).toBe(1);
+      expect(await status(await c.send(LIST, as('mcpat_la', a)))).toBe(200);
+      expect(await status(await c.send(NOTE, as('mcpat_lr', r)))).toBe(404);
+    } finally {
+      await stop(server);
+    }
+  });
+
   // Review round 2: the stream's GET awaits the bearer check before the SDK
   // sees it. A client that hung up during that wait had its stream registered
   // against the dead response, and every later GET on the session was 409.
