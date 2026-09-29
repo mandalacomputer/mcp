@@ -23,8 +23,10 @@ export type HttpConfig = Omit<ServerConfig, 'apiKey' | 'activity'> & {
   /** How many live sessions this server will hold at once. */
   maxSessions?: number;
   /**
-   * How many live sessions one bearer may hold at once. Default 16. A
-   * suspended account's bearer (hosted mode) is held to one, whatever this is.
+   * How many live sessions one bearer may hold at once. Default 16, which is
+   * also what anything but a number of at least one (NaN, 0) means; Infinity
+   * leaves only `maxSessions`. A suspended account's bearer (hosted mode) is
+   * held to one, whatever this is.
    */
   maxSessionsPerBearer?: number;
   /** How many requests may retain a parsed body above 256 KiB at once. */
@@ -477,7 +479,16 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
   // otherwise all count the same sessions and all pass. An entry is deleted
   // when it reaches zero, so the map holds only bearers mid-initialize.
   const pendingByDigest = new Map<string, number>();
-  const maxPerBearer = cfg.maxSessionsPerBearer ?? DEFAULT_MAX_SESSIONS_PER_BEARER;
+  // Normalised, because the cap is also arithmetic against the process-wide
+  // one: a NaN here (`Number(process.env.X)` with X unset) made every
+  // comparison below false and switched off BOTH caps, the 256 backstop
+  // included. Anything that is not a number of at least one is the default;
+  // Infinity is let through, and leaves only the process-wide cap.
+  const perBearer = cfg.maxSessionsPerBearer;
+  const maxPerBearer =
+    typeof perBearer === 'number' && perBearer >= 1
+      ? Math.floor(perBearer)
+      : DEFAULT_MAX_SESSIONS_PER_BEARER;
 
   // Two parsers, chosen by whether this server has already checked who is
   // asking.
@@ -1129,9 +1140,13 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
           // to make it for. Chosen again from what is here NOW: a session
           // closed or put to work since then is not a candidate. Should too
           // few still be idle, nothing is closed and this session is dropped
-          // instead of admitted over the cap — the transport closes before the
-          // SDK answers, which it then does with a 404, and the client
-          // initializes again to be refused or fitted on what is idle then.
+          // instead of admitted over the cap. The transport closes before the
+          // SDK answers, so the SDK answers this initialize itself, with its
+          // 404 -32001 'Session not found' and no Retry-After — not the 429
+          // the refusal above gives, which cannot be written from here. An
+          // SDK client surfaces that as a failed connect; it does not retry
+          // on its own. Only a race reaches this: a request landing on the
+          // planned session between the check above and this callback.
           const needed = sessionsOf(keyDigest).length + 1 - bearerCap;
           if (needed > 0) {
             const idle = sessionsOf(keyDigest).filter(([, other]) => other.active === 0);

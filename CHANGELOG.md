@@ -73,7 +73,12 @@ are wording changes, and they are behaviour changes in the way that matters.
   session exists, so an initialize that is refused or fails closes nothing;
   a session with a request in flight, including one still waiting on its
   token check, is never the one closed. When none is idle it is answered
-  `429` with `Retry-After`. Another bearer's sessions are never touched.
+  `429` with `Retry-After`; if the one it planned to close is put to work
+  before the new session is made, the new one is dropped and answered `404`
+  instead. Another bearer's sessions are never touched. A self-hosted server
+  checks no bearer, so there the per-bearer cap only spreads one key's
+  clients, and the process-wide cap still bounds an untrusted caller, even
+  when `maxSessionsPerBearer` is not a usable number.
 
 ## [0.7.0] — 2026-09-27
 

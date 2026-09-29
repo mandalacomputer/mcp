@@ -572,6 +572,39 @@ describe('the per-bearer session cap', () => {
     }
   });
 
+  // The per-bearer cap is subtracted from the process-wide count, so a NaN
+  // (`Number(process.env.X)` with X unset) once switched off both caps.
+  it('keeps both caps when maxSessionsPerBearer is not a usable number', async () => {
+    for (const bad of [Number.NaN, 0, -3]) {
+      const t = await setup({ maxSessionsPerBearer: bad, maxSessions: 2 });
+      try {
+        await t.open('com_alice');
+        await t.open('com_bob');
+        const carol = await t.send(INIT, t.as('com_carol'));
+        expect(carol.status).toBe(503);
+        await carol.text();
+        expect(await t.count()).toBe(2);
+      } finally {
+        await t.teardown();
+      }
+    }
+    // And the default per-bearer 16 applies, not the unusable value.
+    const t = await setup({ maxSessionsPerBearer: Number.NaN, maxSessions: 40 });
+    try {
+      const mine: string[] = [];
+      for (let i = 0; i < 16; i++) mine.push(await t.open('com_alice'));
+      const calls: Response[] = [];
+      for (const s of mine) calls.push(await t.busy('com_alice', s));
+      const over = await t.send(INIT, t.as('com_alice'));
+      expect(over.status).toBe(429);
+      await over.text();
+      t.release();
+      for (const c of calls) await c.text();
+    } finally {
+      await t.teardown();
+    }
+  });
+
   // The room is chosen when the initialize arrives but made only once its
   // session exists. A session put to work in between is not closed under its
   // request, and the bearer is not let over its cap either.
@@ -602,9 +635,12 @@ describe('the per-bearer session cap', () => {
       const call = await t.busy('com_alice', first);
       open();
       const late = await second;
-      expect(late.status).not.toBe(200);
+      // The SDK answers it, not the 429 path: the transport was closed before
+      // it replied. README and CHANGELOG say 404 for this race; pin it.
+      expect(late.status).toBe(404);
       expect(late.headers.get('mcp-session-id')).toBeNull();
-      await late.text();
+      expect(late.headers.get('retry-after')).toBeNull();
+      expect(((await late.json()) as { error: { code: number } }).error.code).toBe(-32001);
       expect(await t.count()).toBe(1);
 
       t.release();
