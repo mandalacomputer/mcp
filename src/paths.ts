@@ -355,15 +355,21 @@ export function egressProxyBody(p: {
     : { server: p.server, credentials_secret_id: p.credentials_secret_id };
 }
 
+/** What {@link openUrlCommand} prints, and exits 127 with, when no browser it knows is installed. */
+export const NO_BROWSER = 'no browser (firefox-esr, firefox or chromium) on this image';
+
 /**
  * The shell command that puts a URL on the guest's screen.
  *
- * The browser is named rather than asked for, and the reasoning is the platform
- * SDK's: Firefox by name, not `xdg-open` or one of the other portable wrappers.
- * Naming it keeps the choice in one place — this function is the only thing that
- * decides which browser the guest opens, so a change of image, or of which
- * browser we want, is a change here rather than in every prompt that ever asked
- * for a browser.
+ * The browser is named rather than asked for, not `xdg-open` or one of the
+ * other portable wrappers, so this function is the only thing that decides
+ * which browser the guest opens. Named as a short list rather than one name,
+ * because the images differ (OPL-3705, OPL-5437): the Debian desktops ship
+ * `firefox-esr` and `chromium`, and Omarchy ships only `chromium`. A bare
+ * `nohup firefox …&` is backgrounded, so it exited 0 whatever happened, and on
+ * an image without `firefox` the tool reported a page it never opened. The lookup runs first and in the
+ * foreground: no browser is an exit 127 with {@link NO_BROWSER} on stderr, which
+ * the tool reports as an error.
  */
 export function openUrlCommand(url: string): string {
   const trimmed = url.trim();
@@ -384,7 +390,11 @@ export function openUrlCommand(url: string): string {
         'address other than the one you sent.',
     );
   }
-  return `nohup firefox ${shellQuote(trimmed)} >/dev/null 2>&1 &`;
+  return (
+    `b=$(command -v firefox-esr || command -v firefox || command -v chromium) || ` +
+    `{ echo ${shellQuote(NO_BROWSER)} >&2; exit 127; }; ` +
+    `nohup "$b" ${shellQuote(trimmed)} >/dev/null 2>&1 &`
+  );
 }
 
 /** POSIX single-quoting: the only characters that survive are the ones inside. */

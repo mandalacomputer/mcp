@@ -44,8 +44,10 @@ function platformWithRefusals() {
   const state: {
     providerRefuses: boolean;
     onlyAccept?: string;
-    /** What `GET ssh-keys`, the bearer probe, answers instead of its list. */
+    /** What `GET whoami`, the bearer probe, answers instead of its record. */
     probeStatus?: number;
+    /** A suspended account: every route but `whoami` answers 403 (OPL-5437). */
+    suspended?: boolean;
     probeDelayMs?: number;
     /** When set, every probe waits on this before answering. */
     probeGate?: Promise<void>;
@@ -63,11 +65,17 @@ function platformWithRefusals() {
     });
     seen.push(headers);
     const token = (headers.authorization ?? '').replace(/^Bearer /, '');
-    if (url.pathname.endsWith('/ssh-keys') && state.probeGate) await state.probeGate;
-    if (url.pathname.endsWith('/ssh-keys') && state.probeDelayMs) {
+    if (url.pathname.endsWith('/whoami') && state.probeGate) await state.probeGate;
+    if (url.pathname.endsWith('/whoami') && state.probeDelayMs) {
       await new Promise((r) => setTimeout(r, state.probeDelayMs));
     }
-    if (url.pathname.endsWith('/ssh-keys') && state.probeStatus !== undefined) {
+    if (state.suspended && !url.pathname.endsWith('/whoami')) {
+      return new Response(JSON.stringify({ error: 'account suspended', reason: 'revoked' }), {
+        status: 403,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+    if (url.pathname.endsWith('/whoami') && state.probeStatus !== undefined) {
       return new Response(JSON.stringify({ error: 'refused' }), {
         status: state.probeStatus,
         headers: { 'Content-Type': 'application/json' },
@@ -543,6 +551,22 @@ describe('hosted: checking a bearer before it gets anything', () => {
       }
     });
   }
+
+  // OPL-5437: the probe was `GET ssh-keys`, which a suspended account is
+  // refused (403), so its holder could never open a session to ask whoami —
+  // the one route the platform answers a suspended account on.
+  it('admits a suspended account, whose whoami is answered and nothing else is', async () => {
+    platform = platformWithRefusals();
+    platform.state.suspended = true;
+    const { server, url } = await start({ resourceMetadataUrl: METADATA, serviceSecret: SECRET });
+    try {
+      const session = await client(url).open('mcpat_suspended');
+      expect(session).toBeTruthy();
+      expect(await sessions(url)).toBe(1);
+    } finally {
+      await stop(server);
+    }
+  });
 
   // OPL-5050: a refused bearer on a sessionless request that is not an
   // initialize was answered 400 "No session id", which sent the client to its

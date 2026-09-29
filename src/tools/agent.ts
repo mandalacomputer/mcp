@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { MODEL_KEY_HEADER } from '../api.js';
-import { APIError, authenticationAdvice, platformSaid } from '../errors.js';
+import { APIError, agentRunAdvice, authenticationAdvice, platformSaid } from '../errors.js';
 import { errorMetadata, guarded, refused, said, withErrorMetadata } from '../format.js';
 import * as P from '../paths.js';
 import { safeResult } from './chat.js';
@@ -141,7 +141,7 @@ export const registerAgent: Registrar = (server, session) => {
             // And it has to say WHY in words, because this is the one place a
             // status cannot be read off the response: the platform answered 200
             // before the first step, so a run stopped by the credential, the role
-            // or the plan arrives as a frame in a successful stream. A model
+            // or the model provider arrives as a frame in a successful stream. A model
             // handed "the run failed" and a JSON blob does the natural thing,
             // which is to call this tool again with the same prompt — paying for
             // every completed step a second time to be refused the same way.
@@ -210,14 +210,13 @@ export const registerAgent: Registrar = (server, session) => {
 /**
  * What an `error` frame says about whether calling this tool again can work.
  *
- * Three of the statuses a run can stop on are about the CALLER rather than the
- * computer — the credential stopped being accepted, the role or the account
- * changed, the plan does not cover the work — and every one of them answers a
- * second run the same way. They are also the three that can arrive with steps
- * already completed and billed, which is what makes a retry expensive as well as
- * useless. Each gets its own clause rather than one shared "auth" sentence: only
- * the first is fixed by authenticating again, and telling the other two to try
- * that is telling them to spend another run finding out it did not help.
+ * Two kinds of stop are about the CALLER rather than the computer, and both
+ * answer a second run the same way after it has paid for its steps again. The
+ * platform's own authority re-check is a 401 or 403 carrying `reason:
+ * 'revoked'`; the 401 gets the credential sentence, and the 403 says the account
+ * no longer permits the run. Everything else with a status here is the model
+ * provider's, relayed for the configured model key — a 402 is its billing error,
+ * not the Mandala plan (OPL-5437) — and {@link agentRunAdvice} words those.
  *
  * Anything else is left as the platform's own sentence. A run can fail for
  * reasons that are worth another attempt, and inventing a verdict for a status
@@ -230,33 +229,19 @@ function stopReason(data: unknown): string {
   const status = typeof frame?.status === 'number' ? frame.status : undefined;
   const said = platformSaid(frame);
   const why = said ? ` ${said}` : '';
+  const reason = new APIError('', status ?? 0, frame).reason;
   // 401 and 403 are split, because the recovery is not the same one. A shared
   // clause told a caller whose ROLE had been taken away to re-authenticate,
   // which restores nothing and sends it round the same refusal with another
   // prompt's worth of billed steps behind it (Codex review).
   if (status === 401) {
-    const reason = new APIError('', status, frame).reason;
     return (
       ` HTTP ${status}: ${authenticationAdvice(reason)}.${why} Do NOT call run_agent again with the same` +
       ` prompt. Read what the steps below already did before deciding what is left to do.`
     );
   }
-  if (status === 403) {
-    return (
-      ` It was stopped because this account does not permit the run (HTTP ${status}) — a role that` +
-      ` changed or an account suspended, not anything wrong with the computer.${why} Nothing you` +
-      ` can send changes that, and a new credential does not either: say what was refused and` +
-      ` stop, rather than calling run_agent again.`
-    );
-  }
-  if (status === 402) {
-    return (
-      ` It was stopped by the plan on this account as it stands now (HTTP ${status}), not by` +
-      ` anything wrong with the computer.${why} Calling run_agent again does not change that;` +
-      ` say what was refused, and note that the steps below were still billed.`
-    );
-  }
-  return why;
+  const advice = agentRunAdvice(status, reason, 'run_agent');
+  return advice ? ` HTTP ${status}: ${advice}.${why}` : why;
 }
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>

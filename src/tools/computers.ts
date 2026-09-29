@@ -396,7 +396,7 @@ export const registerComputers: Registrar = (server, session, opts) => {
     {
       title: 'List templates',
       description:
-        'The base images a computer can be created from — name, OS, and the default CPU, RAM and disk each one implies. For the templates the platform publishes, `name` is what a create takes as `template`; for one you published yourself, pass its `ref` (namespace/name@version) — a short name is not resolved to your own templates and falls back to the default.',
+        'The base images a computer can be created from — name, OS, the default CPU and RAM each one implies, and its minimum disk (a smaller disk_gb is raised to it and charged at it). For the templates the platform publishes, `name` is what a create takes as `template`; for one you published yourself, pass its `ref` (namespace/name@version) — a short name is not resolved to your own templates. A short name that is none of the published templates falls back to base, except while this list is INCOMPLETE (a host did not answer): then the create is refused with a retryable 503 that changed nothing, so send it again shortly with the same idempotency_key, or pass a ref to avoid the guess.',
       inputSchema: {},
       annotations: { readOnlyHint: true },
     },
@@ -1661,7 +1661,7 @@ export const registerComputers: Registrar = (server, session, opts) => {
           .string()
           .optional()
           .describe(
-            'From list_templates: the short name of a template the platform publishes, e.g. "base" for Linux/Xfce, or a pinned ref (namespace/name@version) — which a template you published must be named by. A short name the host lacks falls back to the default template; a ref that names nothing is refused. Defaults to base.',
+            'From list_templates: the short name of a template the platform publishes, e.g. "base" for Linux/Xfce, or a pinned ref (namespace/name@version) — which a template you published must be named by. A short name that is none of the published templates falls back to base — except while list_templates is INCOMPLETE (a host did not answer), when the create is refused with a retryable 503 that changed nothing; send it again shortly with the same idempotency_key, or pass a ref to avoid the guess. A ref that names nothing is refused. Defaults to base.',
           ),
         template_transfer: z
           .string()
@@ -1690,7 +1690,7 @@ export const registerComputers: Registrar = (server, session, opts) => {
         secrets: secretBindingsSchema(false)
           .optional()
           .describe(
-            `Secrets from the account to deliver into the desktop session each time the computer starts, each as an environment variable (\`env\`) or as a file under ${FILES_DIR} (\`file\`). Only ids and names are sent — never a value. Secret ids come from list_secrets (create_secret stores a new one). Linux only, and only on a template whose image can receive them. A value replaced later reaches the running computer live when bound as a file, and as a variable on an image that supports it reaches new shells and exec with desktop: true. get_computer_secrets and set_computer_secrets read and change the bindings later.`,
+            `Secrets from the account to deliver into the desktop session each time the computer starts, each as an environment variable (\`env\`) or as a file under ${FILES_DIR} (\`file\`). Only ids and names are sent — never a value. Secret ids come from list_secrets (create_secret stores a new one). Linux only, and only on a template whose image can receive them. A value replaced later reaches the running computer live when bound as a file, and as a variable on an image that supports it reaches new shells and every exec, plain or with desktop: true. get_computer_secrets and set_computer_secrets read and change the bindings later.`,
           ),
         browser_proxy: browserProxySchema
           .nullable()
@@ -1902,21 +1902,17 @@ export const registerComputers: Registrar = (server, session, opts) => {
           );
         }
         const key = idempotencyKeyFor(idempotency_key);
-        let res: { snapshots_deleted?: number; operation_id?: unknown } | undefined;
+        let res: DeleteAnswer | undefined;
         try {
           res = await session.api
             .with(extra.signal)
-            .send<{ snapshots_deleted?: number; operation_id?: unknown }>(
-              'DELETE',
-              P.computer(computer_id),
-              {
-                query: {
-                  snapshots: delete_snapshots ? 'delete' : undefined,
-                  expect: delete_snapshots ? fingerprint : undefined,
-                },
-                headers: idempotencyHeaders(key),
+            .send<DeleteAnswer>('DELETE', P.computer(computer_id), {
+              query: {
+                snapshots: delete_snapshots ? 'delete' : undefined,
+                expect: delete_snapshots ? fingerprint : undefined,
               },
-            );
+              headers: idempotencyHeaders(key),
+            });
         } catch (err) {
           // A 404 means the computer is not there, which is the state this call
           // was asking for. The platform answers it for an id it cannot scope,
@@ -1990,6 +1986,36 @@ export const registerComputers: Registrar = (server, session, opts) => {
         // structured answer so a caller can read it back with get_operation.
         const op = operationIdOf(res);
         const done = `Deleted ${computer_id}${operationClause(res)}`;
+        // A purge the platform could not finish in the call (OPL-5437): it
+        // answers 202 with ok:false, the computer deleted, and a count of the
+        // copies still queued, refused or unknown. Reported as done-and-
+        // incomplete, never as a clean purge, and kept whole in the answer.
+        if (delete_snapshots && res?.ok === false) {
+          const purge = isPlainRecord(res.purge) ? res.purge : {};
+          const counts = ['queued', 'failed', 'unknown', 'remaining']
+            .filter((k) => typeof purge[k] === 'number')
+            .map((k) => `${k} ${purge[k]}`)
+            .join(', ');
+          const why =
+            typeof res.error === 'string' && res.error.trim() ? res.error.trim() : undefined;
+          return said(
+            `${done}, but the snapshot purge is INCOMPLETE${counts ? ` (${counts})` : ''}${why ? `: "${why}"` : ''}. ` +
+              `The computer is deleted; some of its snapshot copies may still exist. Read snapshot_holdings for ${computer_id} before retrying anything.`,
+            {
+              computer_id,
+              ok: false,
+              ...(op ? { operation_id: op } : {}),
+              ...(res.computer_deleted !== undefined
+                ? { computer_deleted: res.computer_deleted }
+                : {}),
+              ...(res.snapshots_deleted === undefined
+                ? {}
+                : { snapshots_deleted: res.snapshots_deleted }),
+              ...(res.purge !== undefined ? { purge: res.purge } : {}),
+              ...(why ? { error: why } : {}),
+            },
+          );
+        }
         return said(
           delete_snapshots
             ? `${done} and ${purged}.`
@@ -2007,3 +2033,16 @@ export const registerComputers: Registrar = (server, session, opts) => {
       }),
   );
 };
+
+/** What `DELETE computers/{id}` answers on a 2xx, as far as this tool reads it. */
+type DeleteAnswer = {
+  snapshots_deleted?: number;
+  operation_id?: unknown;
+  ok?: boolean;
+  computer_deleted?: boolean | null;
+  purge?: unknown;
+  error?: unknown;
+};
+
+const isPlainRecord = (v: unknown): v is Record<string, unknown> =>
+  v !== null && typeof v === 'object' && !Array.isArray(v);

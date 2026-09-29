@@ -372,9 +372,13 @@ says what to do. The judgement it cannot make for you:
   After a dropped connection, a proxy that gave up, or
   `idempotency_in_progress`: send the same call again with that key — the
   platform answers with the first call's result, so a create cannot build a
-  second computer. After a `5xx` the platform answered itself, or
-  `idempotency_outcome_unknown`: the key is spent, and the call may still be
-  under way on its host. For a start, stop, suspend, delete, move or
+  second computer. After a `5xx` the platform answered itself that names no
+  `operation_id`: nothing may have been done (usually it was refused before
+  being sent anywhere, which releases the key), so send the same call again with the SAME
+  key — the platform carries it out, or answers `idempotency_outcome_unknown`,
+  and only then does the next case apply. After a `5xx` that names an
+  `operation_id`, or `idempotency_outcome_unknown`: the key is spent, and the
+  call may still be under way on its host. For a start, stop, suspend, delete, move or
   `update_computer`, read `get_computer` (and `get_operation` if the error
   named one; a `pending` operation alone is no reason to wait, since it stays
   pending for an hour), and if the step did not take effect, send it again
@@ -394,7 +398,9 @@ says what to do. The judgement it cannot make for you:
 - **A 503 on a change is the same: it may or may not have happened.** A read
   answered 503 can be sent again shortly. A create, a command, a clone or a
   snapshot answered 503 is read back first — the sentence says so — because
-  repeating it blind can do it twice.
+  repeating it blind can do it twice. The exception is a lifecycle tool's 503
+  that names no `operation_id`: resend it with the same key, as above, which
+  cannot do it twice.
 - **A refused resize with an offer** ("another host could run it") does not
   clear by retrying. `move_computer` takes the offer up; it copies the disk,
   so say what that costs before calling it.

@@ -191,14 +191,12 @@ const TIMING =
 /**
  * What reaches a running computer without a restart: a replaced VALUE.
  *
- * Worded to hold whichever way the platform answers a plain exec. Today a plain
- * exec runs as root and is never given bound secrets; platform work under way
- * (OPL-5028) gives it the bound environment too. `desktop: true` sees them
- * either way, so that is the instruction, and the plain-exec case is stated as
- * something not to rely on rather than as a fact that is about to change.
+ * Every exec, plain (as root) or with `desktop: true`, runs with the bound
+ * environment variables as they are at that moment on an image that supports
+ * it (platform OPL-5028, shipped).
  */
 const LIVE_VALUES =
-  "Every start and restart delivers each secret's latest value. Separately, when a secret's value is replaced on a running computer: a secret bound as a FILE has that file rewritten in place within seconds; one bound as an ENVIRONMENT VARIABLE, on an image that supports it, reaches new shells and exec commands run with desktop: true within seconds, while programs already running — the desktop session among them — keep the value they started with until a restart (older images wait for the restart). A command that needs a bound secret should run with desktop: true; do not rely on a plain exec seeing it. A file newly bound or renamed waits for the restart either way.";
+  "Every start and restart delivers each secret's latest value. Separately, when a secret's value is replaced on a running computer: a secret bound as a FILE has that file rewritten in place within seconds; one bound as an ENVIRONMENT VARIABLE, on an image that supports it, reaches new shells within seconds, and every exec — plain or with desktop: true — runs with the bound variables as they are at that moment, so the next exec sees the new value; programs already running — the desktop session among them — keep the value they started with until a restart (older images wait for the restart). A file newly bound or renamed waits for the restart either way.";
 
 /** A secret in a line: what a model recognises it by, and the revision a change needs. Never a value. */
 const secretLine = (s: Secret): string =>

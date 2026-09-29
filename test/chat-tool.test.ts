@@ -76,6 +76,8 @@ describe('BYOK JSON chat request and response contract', () => {
     expect(tool?.annotations?.readOnlyHint).not.toBe(true);
     expect(tool?.description).toContain('last user');
     expect(tool?.description).toContain('resetTimeoutOnProgress');
+    expect(tool?.description).toContain('about 120 seconds');
+    expect(tool?.description).toContain('Use run_agent, which streams');
   });
   it('omits unspecified model and preserves completion, usage and underlying stop metadata', async () => {
     const result = await connection.call('run_agent_chat', task);
@@ -333,10 +335,50 @@ describe('flat and nested chat failures', () => {
         expect(text(result)).toContain('account key or model key');
         expect(text(result)).not.toContain('credential this server is using stopped');
       }
-      if (status === 403) expect(text(result)).toContain('Retrying does not help');
-      if (status === 402) expect(text(result)).toContain('not something waiting fixes');
+      if (status === 403) expect(text(result)).toContain('permission_error');
+      if (status === 402) expect(text(result)).toContain('billing_error');
     },
   );
+  // OPL-5437: on this route a 402 and an unrevoked 403 are the model
+  // provider's statuses for the configured model key. Advice that blamed the
+  // Mandala plan or role sent the user to fix the wrong account.
+  it.each([
+    { status: 402, word: 'billing_error' },
+    { status: 504, word: 'timeout_error' },
+    { status: 529, word: 'overloaded_error' },
+  ])('reads a provider $status as the model key, not the plan', async ({ status, word }) => {
+    answer({ error: { message: 'model API: error', code: status } }, status);
+    const result = await connection.call('run_agent_chat', task);
+    expect(result.isError).toBe(true);
+    expect(text(result)).toContain(word);
+    expect(text(result)).toContain('model-provider account');
+    expect(text(result)).toContain('not the Mandala plan');
+    expect(text(result)).not.toContain('plan on this account');
+    expect(text(result)).not.toContain('not something waiting fixes');
+  });
+  it('reads an unrevoked 403 as a possible model-key permission error, not the role', async () => {
+    answer({ error: { message: 'model API: permission denied', code: 403 } }, 403);
+    const result = await connection.call('run_agent_chat', task);
+    expect(text(result)).toContain('permission_error');
+    expect(text(result)).not.toContain('a role that changed');
+  });
+  it('keeps account advice for a 403 the platform marked revoked', async () => {
+    answer({ error: { message: 'account suspended', code: 403, reason: 'revoked' } }, 403);
+    const result = await connection.call('run_agent_chat', task);
+    expect(text(result)).toContain('a role that changed or an account suspended');
+    expect(text(result)).not.toContain('permission_error');
+  });
+  it('says a bodiless 524 is the edge cutting a request that does not stream', async () => {
+    const previous = globalThis.fetch;
+    globalThis.fetch = async (...args) => {
+      await previous(...args);
+      return new Response('', { status: 524 });
+    };
+    const result = await connection.call('run_agent_chat', task);
+    expect(result.isError).toBe(true);
+    expect(text(result)).toContain('about 120 seconds');
+    expect(text(result)).toContain('use run_agent, which streams');
+  });
   it.each([
     { read: 80, write: 10 },
     { read: 0, write: 0 },
@@ -387,7 +429,7 @@ describe('flat and nested chat failures', () => {
       expect(metadata.retry_after_ms).toBe(2000);
       expect(text(result)).toContain('prompt_tokens');
       expect(text(result)).toContain('already recorded work');
-      expect(text(result)).toContain('Retrying does not help');
+      expect(text(result)).toContain('no longer permits the run');
       expect(text(result)).not.toContain('DO-NOT-ECHO');
       expect(text(result)).not.toContain(ACCOUNT);
       expect(text(result)).not.toContain(MODEL);

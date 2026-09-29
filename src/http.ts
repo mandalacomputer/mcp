@@ -8,7 +8,7 @@ import express, { type Request, type Response } from 'express';
 import { Api, MODEL_KEY_HEADER } from './api.js';
 import { APIError } from './errors.js';
 import { MeteredBody } from './http-body.js';
-import { SSH_KEYS } from './paths.js';
+import { WHOAMI } from './paths.js';
 import { createServer, SERVER_NAME, SERVER_VERSION, type ServerConfig } from './server.js';
 import { toolFilter } from './tool-filters.js';
 
@@ -336,17 +336,17 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
       const api = new Api(key, cfg.baseUrl, AbortSignal.timeout(BEARER_CHECK_TIMEOUT_MS), {
         serviceSecret,
       });
-      // `GET ssh-keys`, chosen because it is the cheapest read that every
-      // valid credential is answered 2xx on. The platform's route table
-      // gives it the lowest role there is (viewer), a workspace-scoped key is
-      // refused only the key WRITES, and the handler lists the caller's own
-      // keys from the control plane without asking any host — so no role a
-      // grant can carry, and no host being down, turns it into a refusal.
-      // `account` is the alternative and costs two fleet inventories. The one
-      // valid credential it does not admit is a suspended account's (403),
-      // which is answered as unconfirmed. It takes no parameters, so none are
-      // sent.
-      await api.json('GET', SSH_KEYS);
+      // `GET whoami`, chosen because every valid credential is answered 2xx
+      // on it, a suspended account's included. The platform's route table
+      // gives it the lowest role there is (viewer) and marks it readable by a
+      // suspended account, and the handler answers from the control plane's
+      // own tables without asking any host — so no role a grant can carry, no
+      // workspace scope, no account standing and no host being down turns it
+      // into a refusal. It was `GET ssh-keys`, which a suspended account is
+      // refused (403): its holder was answered 503 on every initialize and so
+      // could never reach whoami, the one tool that would say it is suspended
+      // (OPL-5437). It takes no parameters, so none are sent.
+      await api.json('GET', WHOAMI);
     } catch (err) {
       return err instanceof APIError && err.status === 401 ? 'refused' : 'unknown';
     } finally {

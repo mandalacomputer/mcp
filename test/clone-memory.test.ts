@@ -76,7 +76,26 @@ describe('clone_snapshot and a memory snapshot', () => {
     expect(unrecorded).toContain('NOT resumed');
     expect(unrecorded).toContain("before copies could be given its computer's secrets");
     expect(kept).not.toContain('NOT resumed');
-    expect(kept).toContain('Forked snap-1');
+    // OPL-5437: nothing in the answer says a fork resumed, and a disk
+    // snapshot's clone ends its build stopped.
+    expect(kept).toContain('Built snap-1');
+    expect(kept).not.toContain('Forked');
+    expect(kept).toContain('if it is a disk snapshot, the copy ends its build STOPPED');
+    expect(secrets).toContain('ends its build STOPPED');
+    expect(secrets).not.toContain('booting fresh');
+  });
+
+  it('says a memory: false clone must be started once built (OPL-5437)', async () => {
+    const { call, close } = await connect();
+    answer = { id: 'vm-9', name: 'copy', status: 'building' };
+    const built = textOf(
+      await call('clone_snapshot', { snapshot_id: 'snap-1', memory: false, select: false }),
+    );
+    await close();
+    expect(built).toContain('Built snap-1 into');
+    expect(built).toContain('from its disk');
+    expect(built).toContain('ends its build STOPPED');
+    expect(built).toContain('start_computer');
   });
 
   it('reads the drop beside an envelope too, and says the copy is selected when it is', async () => {
@@ -106,5 +125,7 @@ describe('clone_snapshot description', () => {
     expect(tool?.description).toContain('runs beside its source');
     expect(tool?.description).toContain('left stopped, and starting it cold-boots its disk');
     expect(tool?.description).not.toContain("sharing its source's network identity");
+    expect(tool?.description).not.toContain('fresh boot');
+    expect(tool?.description).toContain('ends its build STOPPED');
   });
 });

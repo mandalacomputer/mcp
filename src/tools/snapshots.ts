@@ -18,6 +18,14 @@ import { heartbeat, POLL_MS, pollDelay, sleep } from '../poll.js';
 import { buildIdempotencyKeyArg, keyedFailure } from './operations.js';
 import type { Registrar } from './types.js';
 
+/**
+ * What a clone built from a disk does next: the platform leaves it building
+ * and then STOPPED, never booted (OPL-5437).
+ */
+const DISK_BUILD_NEXT =
+  'ends its build STOPPED: once the build finishes (wait_for_operation on its operation), read get_computer and start it with start_computer.';
+const DISK_BUILD = `A clone built from a disk comes back building and ${DISK_BUILD_NEXT}`;
+
 const idArg = {
   computer_id: z
     .string()
@@ -407,7 +415,7 @@ export const registerSnapshots: Registrar = (server, session, opts) => {
           .boolean()
           .default(false)
           .describe(
-            'Include the running session. A memory snapshot is a saved machine, so it only loads back into the shape it came off: resize the computer afterwards and the restore is refused, because the vCPU count and the memory size are part of the state rather than decoration around it. Clone it with memory: false instead in that case, which restores the disk and boots fresh.',
+            'Include the running session. A memory snapshot is a saved machine, so it only loads back into the shape it came off: resize the computer afterwards and the restore is refused, because the vCPU count and the memory size are part of the state rather than decoration around it. Clone it with memory: false instead in that case, which builds a new computer from the disk alone; it ends its build stopped, to be started with start_computer.',
           ),
         wait: z
           .boolean()
@@ -795,7 +803,7 @@ export const registerSnapshots: Registrar = (server, session, opts) => {
     {
       title: 'Fork a snapshot into a new computer',
       description:
-        'Build a new computer from a snapshot, leaving the original untouched. This is the fork half of snapshot-and-fork, and the only thing that works on an orphaned snapshot. A MEMORY snapshot is resumed: the copy comes up running the captured session, and is given its own MAC, address, hostname, machine ID, SSH host keys and desktop password before its network comes up, so it runs beside its source; if that fails it is left stopped, and starting it cold-boots its disk. Pass memory: false to build it from the disk alone instead, as a fresh boot. A memory snapshot of a computer that held SECRETS is resumed only with inherit_secrets: true, and then the copy HOLDS THE SAME CREDENTIALS as the computer it came from; without it the clone is built from the disk and this tool says so.',
+        'Build a new computer from a snapshot, leaving the original untouched. This is the fork half of snapshot-and-fork, and the only thing that works on an orphaned snapshot. A MEMORY snapshot is resumed: the copy comes up running the captured session, and is given its own MAC, address, hostname, machine ID, SSH host keys and desktop password before its network comes up, so it runs beside its source; if that fails it is left stopped, and starting it cold-boots its disk. Pass memory: false to build it from the disk alone instead. A clone built from a DISK — a disk snapshot, memory: false, or a memory snapshot the platform did not resume — comes back building and ends its build STOPPED: start it with start_computer once the build finishes (wait_for_operation on its operation). A memory snapshot of a computer that held SECRETS is resumed only with inherit_secrets: true, and then the copy HOLDS THE SAME CREDENTIALS as the computer it came from; without it the clone is built from the disk and this tool says so.',
       inputSchema: {
         snapshot_id: z.string(),
         name: z.string().optional().describe('A name for the new computer.'),
@@ -803,7 +811,7 @@ export const registerSnapshots: Registrar = (server, session, opts) => {
           .boolean()
           .optional()
           .describe(
-            'Memory snapshots only. false builds the new computer from the disk alone and boots it fresh; omitted or true resumes the captured session.',
+            'Memory snapshots only. false builds the new computer from the disk alone, and it ends its build stopped, to be started with start_computer; omitted or true resumes the captured session.',
           ),
         inherit_secrets: z
           .boolean()
@@ -848,14 +856,14 @@ export const registerSnapshots: Registrar = (server, session, opts) => {
         if (select && c.id) session.bind(c.id, c.resolution);
         // The platform built it from the disk when the session could not come
         // across (platform OPL-4964). Said first and in words, because a model
-        // that asked for a live fork and got a fresh boot would otherwise go on
+        // that asked for a live fork and got a disk build would otherwise go on
         // as if the session — its open windows, its running programs — were
-        // there.
+        // there. A disk build ends STOPPED, not booted (OPL-5437).
         //
         // Read off the ANSWER as well as the computer: the platform sends the
         // two fields beside the computer's own, flat, and unwrapComputer keeps
         // only start_error from an envelope — so a future envelope carrying
-        // them would otherwise report a live fork for a fresh boot.
+        // them would otherwise report a live fork for a disk build.
         const outer = (answer && typeof answer === 'object' ? answer : {}) as Record<
           string,
           unknown
@@ -875,12 +883,19 @@ export const registerSnapshots: Registrar = (server, session, opts) => {
                       `the platform did not resume it (reason given: "${raw.memory_dropped_reason.trim().slice(0, 200)}")`
                     : 'the platform did not resume it';
           return said(
-            `Built ${describe(c)} from ${snapshot_id}'s DISK, booting fresh — its saved session was NOT resumed, because ${why}. No secrets are bound to it${select && c.id ? '. It is selected' : ''}.`,
+            `Built ${describe(c)} from ${snapshot_id}'s DISK — its saved session was NOT resumed, because ${why}. ${DISK_BUILD} No secrets are bound to it${select && c.id ? '. It is selected' : ''}.`,
             withoutCredentials(c),
           );
         }
+        // 'Built' either way: nothing in the answer says a memory fork resumed
+        // (it comes back building like any other clone), and a plain disk
+        // snapshot's clone, which this tool cannot tell from a memory one
+        // without another read, ends its build stopped (OPL-5437).
         return said(
-          `${memory === false ? 'Built' : 'Forked'} ${snapshot_id} into ${describe(c)}${memory === false ? ' from its disk' : ''}${select && c.id ? ', and selected it' : ''}${operationClause(c)}.`,
+          `Built ${snapshot_id} into ${describe(c)}${memory === false ? ' from its disk' : ''}${select && c.id ? ', and selected it' : ''}${operationClause(c)}. ` +
+            (memory === false
+              ? DISK_BUILD
+              : `If ${snapshot_id} is a memory snapshot the copy resumes its captured session when the build finishes; if it is a disk snapshot, the copy ${DISK_BUILD_NEXT}`),
           withoutCredentials(c),
         );
       }),

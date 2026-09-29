@@ -169,8 +169,18 @@ export function unavailableAdvice(err: APIError): string | undefined {
     : 'something this depends on could not answer right now; the same request can be sent again shortly';
 }
 
-/** A model-visible refusal. A projected run failure must withhold reason-based replay advice. */
-export function failed(err: unknown, includeReasonAdvice = true): CallToolResult {
+/**
+ * A model-visible refusal. A projected run failure must withhold reason-based replay advice.
+ *
+ * `override`, when given, replaces the status and reason advice below: an agent
+ * run's 402 and 403 mean the model provider, not the plan or the role that
+ * {@link statusAdvice} names for every other tool (see `agentRunAdvice`).
+ */
+export function failed(
+  err: unknown,
+  includeReasonAdvice = true,
+  override?: string,
+): CallToolResult {
   const message =
     err instanceof APIError
       ? apiErrorMessage(err)
@@ -207,7 +217,8 @@ export function failed(err: unknown, includeReasonAdvice = true): CallToolResult
   // command that the platform's own docs warn against (OPL-5026).
   const advice =
     err instanceof APIError
-      ? (unavailableAdvice(err) ??
+      ? (override ??
+        unavailableAdvice(err) ??
         statusAdvice(err.status, err.reason) ??
         (includeReasonAdvice &&
         ![404, 405].includes(err.status) &&
