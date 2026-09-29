@@ -20,8 +20,13 @@ are wording changes, and they are behaviour changes in the way that matters.
   of a `--http` server (default 16), so 17 or more agents on one key need not
   evict each other's sessions and lose their `use_computer` bindings. It takes
   a whole number from 1 to 256, the server's whole session pool; anything
-  else is refused at startup, and at 256 one token can hold every session. A
-  suspended account's bearer is still held to one.
+  else is refused at startup. A suspended account's bearer is still held to
+  one, and a token is also held to its account's limit, below.
+- **`MANDALA_MCP_MAX_SESSIONS_PER_ACCOUNT`** (`maxSessionsPerAccount` for
+  embedders of `runHttp`) sets how many sessions one account may hold across
+  all its tokens: default 128, half the pool. Read by the same rules as the
+  per-token variable. On a self-hosted server each token is an account of its
+  own, so a token that should hold more than 128 needs both raised.
 
 ### Fixed
 
@@ -104,6 +109,26 @@ are wording changes, and they are behaviour changes in the way that matters.
   with a request in flight are kept, and go on a later request once idle. A
   `429` for a bearer still over its limit says how many it holds and to wait
   for the busy ones.
+- **One account can no longer fill the hosted server's session pool by
+  holding many keys.** The limit was per bearer, so an account with 16 keys
+  held all 256 sessions and every other tenant's initialize was answered
+  `503`. Sessions now also count against the account the platform's
+  `whoami` names for each token (a token whose `whoami` names none is an
+  account of its own), and an account holds at most 128, half the pool.
+  Initializes in flight are counted per account, so a burst across its keys
+  cannot pass the ceiling together. At the ceiling an initialize closes an
+  idle session to make room only if it is the requesting token's own (least
+  recently used first, as at its own cap, and even while it is under that
+  cap) or one of the same account whose token the platform has already
+  refused; otherwise it is answered `429` with `Retry-After`, naming only
+  the account's limit. A live session of another token, or any session of
+  another account, is never closed for it. A refused session counts until it
+  is closed, so an account cannot pass its ceiling by revoking its own keys.
+  A session left behind by an OAuth refresh keeps counting too, until the
+  client closes it (`DELETE /mcp` with the old token) or it idles out after
+  30 minutes, so an account above half its ceiling when its clients refresh
+  can be answered `429` for that long. Suspension is unchanged and still held per token. A full pool is still a
+  `503`, now with `Retry-After`, and nothing is closed to make room in it.
 
 ## [0.7.0] — 2026-09-27
 

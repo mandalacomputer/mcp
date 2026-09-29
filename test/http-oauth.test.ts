@@ -1,5 +1,6 @@
 import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
+import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { Api, SERVICE_HEADER } from '../src/api.js';
 import { bearerChallenge, runHttp } from '../src/http.js';
@@ -51,6 +52,14 @@ function platformWithRefusals() {
     probeDelayMs?: number;
     /** When set, every probe waits on this before answering. */
     probeGate?: Promise<void>;
+    /**
+     * Per token: the `account` its whoami names (OPL-5447). Read when the
+     * probe ARRIVES, before any gate, so a gated probe answers with what was
+     * true when it was sent.
+     */
+    accounts?: Record<string, Record<string, unknown>>;
+    /** Per token: a gate that token's probes wait on. */
+    probeGates?: Map<string, Promise<void>>;
   } = { providerRefuses: false };
   /** Tokens refused on `GET account` only, after a delay in ms. */
   const slowRefusals = new Map<string, number>();
@@ -65,6 +74,16 @@ function platformWithRefusals() {
     });
     seen.push(headers);
     const token = (headers.authorization ?? '').replace(/^Bearer /, '');
+    const named = url.pathname.endsWith('/whoami') ? state.accounts?.[token] : undefined;
+    const record = named ? { ...WHOAMI, account: { ...named } } : undefined;
+    const gate = url.pathname.endsWith('/whoami') ? state.probeGates?.get(token) : undefined;
+    if (gate) await gate;
+    if (record) {
+      return new Response(JSON.stringify(record), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
     if (url.pathname.endsWith('/whoami') && state.probeGate) await state.probeGate;
     if (url.pathname.endsWith('/whoami') && state.probeDelayMs) {
       await new Promise((r) => setTimeout(r, state.probeDelayMs));
@@ -1117,6 +1136,529 @@ describe('hosted: checking a bearer before it gets anything', () => {
       expect(next.headers.get('www-authenticate')).toBe(CHALLENGE);
       await next.text();
       expect(platform.seen).toHaveLength(0);
+    } finally {
+      await stop(server);
+    }
+  });
+});
+
+// OPL-5447: the session cap was per bearer, so one account holding many keys
+// held one bearer's share on each of them, and could fill the whole pool.
+// Sessions now also count against the account the platform's whoami names
+// for each bearer. Suspension is still held per bearer (OPL-5443, OPL-5448).
+describe('hosted: one account, however many bearers', () => {
+  let platform: ReturnType<typeof platformWithRefusals>;
+  afterEach(() => platform.restore());
+
+  const sessions = async (url: string) =>
+    ((await (await fetch(url.replace(/\/mcp$/, '/healthz'))).json()) as { sessions: number })
+      .sessions;
+  const as = (token: string, session?: string) => ({
+    Authorization: `Bearer ${token}`,
+    ...(session ? { 'mcp-session-id': session } : {}),
+  });
+  const active = (id: string) => ({ id, name: id, plan: 'team', status: 'active' });
+  /** Resolve once the platform has seen `n` more requests than `before`. */
+  const reached = async (before: number, n = 1) => {
+    const deadline = Date.now() + 5000;
+    while (platform.seen.length < before + n) {
+      if (Date.now() > deadline) throw new Error('a probe never reached the platform');
+      await new Promise((r) => setTimeout(r, 5));
+    }
+  };
+  const status = async (res: Response) => {
+    await res.text();
+    return res.status;
+  };
+  const message = async (res: Response) =>
+    ((await res.json()) as { error: { message: string } }).error.message;
+
+  it('refuses an account at its ceiling 429 with Retry-After, whichever key asks, and leaves another account alone', async () => {
+    platform = platformWithRefusals();
+    platform.state.accounts = {};
+    for (let i = 0; i < 6; i++) platform.state.accounts[`mcpat_a${i}`] = active('acc-a');
+    platform.state.accounts.mcpat_b = active('acc-b');
+    // The default ceiling is half the pool: 4 of 8.
+    const { server, url } = await start({
+      resourceMetadataUrl: METADATA,
+      serviceSecret: SECRET,
+      maxSessions: 8,
+    });
+    try {
+      const c = client(url);
+      const held: Array<[string, string]> = [];
+      for (let i = 0; i < 4; i++) held.push([`mcpat_a${i}`, await c.open(`mcpat_a${i}`)]);
+
+      for (const token of ['mcpat_a4', 'mcpat_a5']) {
+        const over = await c.send(INIT, as(token));
+        expect(over.status).toBe(429);
+        expect(over.headers.get('retry-after')).toBe('30');
+        expect(over.headers.get('mcp-session-id')).toBeNull();
+        const said = await message(over);
+        expect(said).toBe(
+          'This account has reached its maximum of 4 sessions on this server, across all its tokens. Close one (DELETE /mcp) or retry shortly.',
+        );
+      }
+      // Refused, never made room for: every session the account held is kept.
+      expect(await sessions(url)).toBe(4);
+      for (const [token, session] of held) {
+        expect(await status(await c.send(LIST, as(token, session)))).toBe(200);
+      }
+
+      // Another account is not held to the first one's ceiling.
+      await c.open('mcpat_b');
+      await c.open('mcpat_b');
+      expect(await sessions(url)).toBe(6);
+
+      // A slot the account gives back is its own again.
+      const del = await c.send(undefined, as(...held[0]), 'DELETE');
+      expect(del.status).toBe(200);
+      await del.text();
+      await c.open('mcpat_a5');
+      expect(await sessions(url)).toBe(6);
+
+      // A key under its own cap whose account is at the ceiling makes room
+      // from its own idle session, as it would at its own cap (review round 1:
+      // it was refused until the sweep). Nothing of another key's is closed.
+      const again = await c.open('mcpat_a1');
+      expect(await sessions(url)).toBe(6);
+      expect(await status(await c.send(LIST, as(...held[1])))).toBe(404);
+      expect(await status(await c.send(LIST, as('mcpat_a1', again)))).toBe(200);
+      for (const [token, session] of held.slice(2)) {
+        expect(await status(await c.send(LIST, as(token, session)))).toBe(200);
+      }
+    } finally {
+      await stop(server);
+    }
+  });
+
+  it('still admits at the ceiling when the bearer makes room from its own idle session', async () => {
+    platform = platformWithRefusals();
+    platform.state.accounts = {
+      mcpat_one: active('acc-a'),
+      mcpat_two: active('acc-a'),
+      mcpat_three: active('acc-a'),
+    };
+    const { server, url } = await start({
+      resourceMetadataUrl: METADATA,
+      serviceSecret: SECRET,
+      maxSessionsPerBearer: 1,
+      maxSessionsPerAccount: 2,
+    });
+    try {
+      const c = client(url);
+      const first = await c.open('mcpat_one');
+      const second = await c.open('mcpat_two');
+      // At the ceiling, but the bearer's own idle session makes the room.
+      const again = await c.open('mcpat_one');
+      expect(await sessions(url)).toBe(2);
+      expect(await status(await c.send(LIST, as('mcpat_one', first)))).toBe(404);
+      expect(await status(await c.send(LIST, as('mcpat_one', again)))).toBe(200);
+      expect(await status(await c.send(LIST, as('mcpat_two', second)))).toBe(200);
+      // A third key has nothing of its own to give back.
+      const third = await c.send(INIT, as('mcpat_three'));
+      expect(third.status).toBe(429);
+      expect(await message(third)).toContain('This account has reached its maximum of 2 sessions');
+      expect(await sessions(url)).toBe(2);
+    } finally {
+      await stop(server);
+    }
+  });
+
+  it('never lets concurrent initializes across an account’s keys pass its ceiling', async () => {
+    platform = platformWithRefusals();
+    platform.state.accounts = {};
+    for (let i = 0; i < 5; i++) platform.state.accounts[`mcpat_c${i}`] = active('acc-c');
+    // Held before the transport answers, so every admission is still pending
+    // and none is a session yet: only the per-account reservations stand
+    // between the burst and the ceiling.
+    const original = StreamableHTTPServerTransport.prototype.handleRequest;
+    let open = () => {};
+    const hold = new Promise<void>((r) => {
+      open = r;
+    });
+    let held = 0;
+    StreamableHTTPServerTransport.prototype.handleRequest = async function (...args) {
+      if (!this.sessionId) {
+        held++;
+        await hold;
+      }
+      return original.apply(this, args);
+    };
+    const { server, url } = await start({
+      resourceMetadataUrl: METADATA,
+      serviceSecret: SECRET,
+      maxSessionsPerAccount: 2,
+    });
+    try {
+      const c = client(url);
+      const answered: number[] = [];
+      const burst = Array.from({ length: 5 }, (_, i) =>
+        c.send(INIT, as(`mcpat_c${i}`)).then(async (r) => {
+          answered.push(r.status);
+          await r.text();
+          return r.status;
+        }),
+      );
+      const deadline = Date.now() + 5000;
+      while (held + answered.length < 5 && Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 5));
+      }
+      expect(held).toBe(2);
+      expect(answered).toEqual([429, 429, 429]);
+      open();
+      expect((await Promise.all(burst)).sort()).toEqual([200, 200, 429, 429, 429]);
+      expect(await sessions(url)).toBe(2);
+    } finally {
+      open();
+      StreamableHTTPServerTransport.prototype.handleRequest = original;
+      await stop(server);
+    }
+  });
+
+  /**
+   * Hold every initialize before its session exists, until `open`. Returns
+   * the count of those held so far, and a restore for `finally`.
+   */
+  const holdInitializes = () => {
+    const original = StreamableHTTPServerTransport.prototype.handleRequest;
+    let open = () => {};
+    const hold = new Promise<void>((r) => {
+      open = r;
+    });
+    const held = { count: 0 };
+    StreamableHTTPServerTransport.prototype.handleRequest = async function (...args) {
+      if (!this.sessionId) {
+        held.count++;
+        await hold;
+      }
+      return original.apply(this, args);
+    };
+    const waitHeld = async () => {
+      const deadline = Date.now() + 5000;
+      while (held.count === 0) {
+        if (Date.now() > deadline) throw new Error('the initialize never reached the transport');
+        await new Promise((r) => setTimeout(r, 5));
+      }
+    };
+    return {
+      open: () => open(),
+      waitHeld,
+      restore: () => {
+        open();
+        StreamableHTTPServerTransport.prototype.handleRequest = original;
+      },
+    };
+  };
+
+  // The room an initialize plans is made only once its session exists. When
+  // the account's ceiling is the limit that binds and the idle session it
+  // planned to close is put to work in between, the new one is dropped at
+  // birth (404) rather than admitted over the ceiling, and nothing is closed.
+  it('drops at birth an initialize whose planned room under the ceiling was put to work', async () => {
+    platform = platformWithRefusals();
+    platform.state.accounts = { mcpat_l1: active('acc-l'), mcpat_l2: active('acc-l') };
+    const { server, url } = await start({
+      resourceMetadataUrl: METADATA,
+      serviceSecret: SECRET,
+      maxSessionsPerAccount: 2,
+      bearerCheckTtlMs: 0,
+    });
+    let hold: ReturnType<typeof holdInitializes> | undefined;
+    let release = () => {};
+    try {
+      const c = client(url);
+      const first = await c.open('mcpat_l1');
+      const other = await c.open('mcpat_l2');
+      hold = holdInitializes();
+      // Under its own cap, at the account's ceiling: admitted to replace its
+      // own idle session, and held before its session exists.
+      const late = c.send(INIT, as('mcpat_l1'));
+      await hold.waitHeld();
+      // The planned session is put to work: its request waits on its probe.
+      platform.state.probeGates = new Map([
+        [
+          'mcpat_l1',
+          new Promise<void>((r) => {
+            release = r;
+          }),
+        ],
+      ]);
+      const before = platform.seen.length;
+      const busy = c.send(LIST, as('mcpat_l1', first));
+      await reached(before);
+
+      hold.open();
+      const dropped = await late;
+      expect(dropped.status).toBe(404);
+      expect(dropped.headers.get('mcp-session-id')).toBeNull();
+      await dropped.text();
+      expect(await sessions(url)).toBe(2);
+      release();
+      expect(await status(await busy)).toBe(200);
+      expect(await status(await c.send(LIST, as('mcpat_l1', first)))).toBe(200);
+      expect(await status(await c.send(LIST, as('mcpat_l2', other)))).toBe(200);
+    } finally {
+      release();
+      hold?.restore();
+      await stop(server);
+    }
+  });
+
+  // Review round 1: a revoked key's sessions held its account's ceiling
+  // against its other keys until the sweep, since the ceiling never closes
+  // another key's live session. Once the platform has refused a session's
+  // token, nothing more is served on it, so an idle one is closed to make
+  // room for the account's other keys; one of another account never is.
+  it('makes room from a revoked key’s idle sessions once they are found refused, and only its own account’s', async () => {
+    platform = platformWithRefusals();
+    platform.state.accounts = {
+      mcpat_bad: active('acc-x'),
+      mcpat_owner: active('acc-x'),
+      mcpat_else: active('acc-y'),
+    };
+    const { server, url } = await start({
+      resourceMetadataUrl: METADATA,
+      serviceSecret: SECRET,
+      maxSessionsPerAccount: 2,
+      bearerCheckTtlMs: 100,
+    });
+    try {
+      const c = client(url);
+      // Another account's session, refused first and oldest of all.
+      const elsewhere = await c.open('mcpat_else');
+      const one = await c.open('mcpat_bad');
+      const two = await c.open('mcpat_bad');
+      for (const token of ['mcpat_else', 'mcpat_bad']) {
+        delete platform.state.accounts[token];
+        platform.refused.add(token);
+      }
+      // Past the cached acceptances.
+      await new Promise((r) => setTimeout(r, 150));
+      expect(await status(await c.send(LIST, as('mcpat_else', elsewhere)))).toBe(401);
+      // Not yet found refused, so still the account's live sessions: refused,
+      // never made room for.
+      const blocked = await c.send(INIT, as('mcpat_owner'));
+      expect(blocked.status).toBe(429);
+      await blocked.text();
+
+      for (const s of [one, two]) {
+        const res = await c.send(LIST, as('mcpat_bad', s));
+        expect(res.status).toBe(401);
+        expect(res.headers.get('www-authenticate')).toBe(CHALLENGE);
+        await res.text();
+      }
+      // Neither holds the ceiling against its account's other key now, well
+      // before any sweep: each is closed to make room for one of the owner's.
+      await c.open('mcpat_owner');
+      await c.open('mcpat_owner');
+      expect(await sessions(url)).toBe(3);
+      for (const s of [one, two]) {
+        expect(await status(await c.send(LIST, as('mcpat_bad', s)))).toBe(404);
+      }
+      // The other account's refused session was never a candidate.
+      expect(await status(await c.send(LIST, as('mcpat_else', elsewhere)))).toBe(401);
+    } finally {
+      await stop(server);
+    }
+  });
+
+  // Review round 3: a refused session was kept while a live one older than
+  // it was closed. Nothing more is served on a refused one, so it goes first.
+  it('closes the account’s refused session before the token’s own older live one', async () => {
+    platform = platformWithRefusals();
+    platform.state.accounts = { mcpat_live: active('acc-q'), mcpat_dead: active('acc-q') };
+    const { server, url } = await start({
+      resourceMetadataUrl: METADATA,
+      serviceSecret: SECRET,
+      maxSessionsPerAccount: 2,
+      bearerCheckTtlMs: 0,
+    });
+    try {
+      const c = client(url);
+      const older = await c.open('mcpat_live');
+      await new Promise((r) => setTimeout(r, 5));
+      const dead = await c.open('mcpat_dead');
+      delete platform.state.accounts.mcpat_dead;
+      platform.refused.add('mcpat_dead');
+      expect(await status(await c.send(LIST, as('mcpat_dead', dead)))).toBe(401);
+      const fresh = await c.open('mcpat_live');
+      expect(await sessions(url)).toBe(2);
+      expect(await status(await c.send(LIST, as('mcpat_dead', dead)))).toBe(404);
+      expect(await status(await c.send(LIST, as('mcpat_live', older)))).toBe(200);
+      expect(await status(await c.send(LIST, as('mcpat_live', fresh)))).toBe(200);
+    } finally {
+      await stop(server);
+    }
+  });
+
+  // Review round 2: sessions whose token was refused stopped counting against
+  // their account, but kept their slot in the pool until the sweep, so an
+  // account that revoked and re-minted its keys held more than its ceiling,
+  // up to the whole pool, and every other account was answered 503.
+  it('never lets an account pass its ceiling by revoking its own keys', async () => {
+    platform = platformWithRefusals();
+    platform.state.accounts = {
+      mcpat_k1: active('acc-r'),
+      mcpat_k2: active('acc-r'),
+      mcpat_other: active('acc-o'),
+    };
+    const { server, url } = await start({
+      resourceMetadataUrl: METADATA,
+      serviceSecret: SECRET,
+      maxSessions: 4,
+      maxSessionsPerAccount: 2,
+      bearerCheckTtlMs: 0,
+    });
+    try {
+      const c = client(url);
+      const k1 = [await c.open('mcpat_k1'), await c.open('mcpat_k1')];
+      delete platform.state.accounts.mcpat_k1;
+      platform.refused.add('mcpat_k1');
+      for (const s of k1) expect(await status(await c.send(LIST, as('mcpat_k1', s)))).toBe(401);
+
+      await c.open('mcpat_k2');
+      await c.open('mcpat_k2');
+      expect(await sessions(url)).toBe(2);
+      for (const s of k1) expect(await status(await c.send(LIST, as('mcpat_k1', s)))).toBe(404);
+      // At its ceiling with nothing refused left to give back, it only
+      // replaces its own idle session.
+      const k2 = await c.open('mcpat_k2');
+      expect(await sessions(url)).toBe(2);
+
+      // Another account is not locked out of the pool.
+      const other = await c.send(INIT, as('mcpat_other'));
+      expect(other.status).toBe(200);
+      await other.text();
+      expect(await sessions(url)).toBe(3);
+      expect(await status(await c.send(LIST, as('mcpat_k2', k2)))).toBe(200);
+    } finally {
+      await stop(server);
+    }
+  });
+
+  // Only a victim that counts against the requester's account makes room
+  // under its ceiling. A token whose whoami named no account when it opened
+  // a session, and names one now, does not free that account by closing it.
+  it('does not credit the ceiling with an own session that counts against another account', async () => {
+    platform = platformWithRefusals();
+    platform.state.accounts = {
+      mcpat_m: { name: 'nameless', status: 'active' },
+      mcpat_z: active('acc-z'),
+    };
+    const { server, url } = await start({
+      resourceMetadataUrl: METADATA,
+      serviceSecret: SECRET,
+      maxSessionsPerAccount: 1,
+      bearerCheckTtlMs: 0,
+    });
+    try {
+      const c = client(url);
+      const mine = await c.open('mcpat_m');
+      const theirs = await c.open('mcpat_z');
+      platform.state.accounts.mcpat_m = active('acc-z');
+      const over = await c.send(INIT, as('mcpat_m'));
+      expect(over.status).toBe(429);
+      expect(await message(over)).toBe(
+        'This account has reached its maximum of 1 session on this server, across all its tokens. Close one (DELETE /mcp) or retry shortly.',
+      );
+      expect(await sessions(url)).toBe(2);
+      expect(await status(await c.send(LIST, as('mcpat_m', mine)))).toBe(200);
+      expect(await status(await c.send(LIST, as('mcpat_z', theirs)))).toBe(200);
+    } finally {
+      await stop(server);
+    }
+  });
+
+  it('counts a bearer whose whoami names no account as an account of its own', async () => {
+    platform = platformWithRefusals();
+    platform.state.accounts = {
+      mcpat_noid1: { name: 'nameless', status: 'active' },
+      mcpat_noid2: { id: '', name: 'blank', status: 'active' },
+      mcpat_id: active('acc-1'),
+    };
+    const { server, url } = await start({
+      resourceMetadataUrl: METADATA,
+      serviceSecret: SECRET,
+      maxSessionsPerAccount: 1,
+    });
+    let release = () => {};
+    try {
+      const c = client(url);
+      const first = await c.open('mcpat_noid1');
+      // Busy (a whoami call held at the platform), so it cannot make room.
+      platform.state.probeGates = new Map([
+        [
+          'mcpat_noid1',
+          new Promise<void>((r) => {
+            release = r;
+          }),
+        ],
+      ]);
+      const before = platform.seen.length;
+      const call = c.send(
+        { jsonrpc: '2.0', id: 4, method: 'tools/call', params: { name: 'whoami', arguments: {} } },
+        as('mcpat_noid1', first),
+      );
+      await reached(before);
+      const again = await c.send(INIT, as('mcpat_noid1'));
+      expect(again.status).toBe(429);
+      expect(await message(again)).toBe(
+        'This token has reached the per-account maximum of 1 session on this server, as an account of its own. Close one (DELETE /mcp) or retry shortly.',
+      );
+      release();
+      expect(await status(await call)).toBe(200);
+      // Neither lumped with the other nameless bearer nor with a named account.
+      await c.open('mcpat_noid2');
+      await c.open('mcpat_id');
+      expect(await sessions(url)).toBe(3);
+    } finally {
+      release();
+      await stop(server);
+    }
+  });
+  // Review round 1 (docs): a refresh leaves the old token's session behind,
+  // and it counts against the account until it is closed or idles out. The
+  // README and CHANGELOG say so and name the way out, which this pins: a
+  // DELETE under the old token, honoured on its digest alone, even once the
+  // platform refuses that token.
+  it('counts the session a refresh left behind until the old token closes it', async () => {
+    platform = platformWithRefusals();
+    platform.state.accounts = {
+      mcpat_old1: active('acc-r'),
+      mcpat_old2: active('acc-r'),
+      mcpat_new1: active('acc-r'),
+    };
+    const { server, url } = await start({
+      resourceMetadataUrl: METADATA,
+      serviceSecret: SECRET,
+      maxSessionsPerAccount: 2,
+      // No acceptance cached, so the DELETE below cannot lean on one.
+      bearerCheckTtlMs: 0,
+    });
+    try {
+      const c = client(url);
+      const first = await c.open('mcpat_old1');
+      await c.open('mcpat_old2');
+      // The first client refreshes: its old token is no longer accepted, and
+      // its old session answers the new one as unknown.
+      delete platform.state.accounts.mcpat_old1;
+      platform.refused.add('mcpat_old1');
+      expect(await status(await c.send(LIST, as('mcpat_new1', first)))).toBe(404);
+      // Its re-initialize is held to the ceiling the old session still fills.
+      const over = await c.send(INIT, as('mcpat_new1'));
+      expect(over.status).toBe(429);
+      expect(await message(over)).toBe(
+        'This account has reached its maximum of 2 sessions on this server, across all its tokens. Close one (DELETE /mcp) or retry shortly.',
+      );
+      expect(await sessions(url)).toBe(2);
+      // The old token closes it without the platform being asked.
+      const seen = platform.seen.length;
+      expect(await status(await c.send(undefined, as('mcpat_old1', first), 'DELETE'))).toBe(200);
+      expect(platform.seen).toHaveLength(seen);
+      expect(await sessions(url)).toBe(1);
+      await c.open('mcpat_new1');
+      expect(await sessions(url)).toBe(2);
     } finally {
       await stop(server);
     }

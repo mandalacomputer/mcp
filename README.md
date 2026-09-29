@@ -1159,12 +1159,42 @@ address.
   wait for its busy sessions rather than to close one. `runHttp` takes the 16
   as `maxSessionsPerBearer`, and the CLI reads it from
   `MANDALA_MCP_MAX_SESSIONS_PER_TOKEN` (a whole number from 1 to 256, the
-  whole pool; anything else is refused at startup, and at 256 one token can
-  hold every session). A self-hosted `--http` server applies it
+  whole pool; anything else is refused at startup; a token is also held to
+  its account's ceiling, below). A self-hosted `--http` server applies it
   too, but checks no bearer with the platform, so there any string is its own
   bucket: the per-bearer cap spreads one key's clients, and what bounds an
   untrusted caller is the process-wide cap (256), and the default loopback
   bind until you expose the port.
+- **One account holds at most 128 sessions, half the pool, across all its
+  tokens.** Sessions are counted by the account id the platform's `whoami`
+  names for each token, so an account with many keys or grants counts once;
+  a token whose `whoami` names no account counts as an account of its own.
+  Initializes in flight are counted too, so a burst across one account's keys
+  cannot pass the ceiling together. At the ceiling, an initialize makes room
+  by closing idle sessions of two kinds only: the account's sessions whose
+  token the platform has already refused on a request made there, first,
+  and then the requesting token's own least recently used,
+  as at its own cap and even while it is under that cap. When that is not
+  enough the answer is `429` with `Retry-After`, saying it is the account's
+  limit and naming only that number. A live session of another token is
+  never closed for the ceiling, nor any session of another account, and the
+  race above applies here too (`404`). A refused session counts until it is
+  closed, so revoking keys never lets an account past its ceiling; a session
+  whose token was revoked but never sent a request again is not known to be
+  refused, and counts until it idles out. So does the session a token
+  leaves behind when the client refreshes it (see below): it is neither the
+  new token's own nor refused, so an account that holds more than half its
+  ceiling when its clients refresh can be answered `429` for up to the
+  session idle timeout (30 minutes), longer than its `Retry-After` suggests,
+  unless those clients close their old sessions. Suspension is held per
+  token, as above, not per account. A full pool (256) is answered `503` with
+  `Retry-After`, whoever holds it, and nothing is closed to make room in it.
+  `runHttp` takes the ceiling as `maxSessionsPerAccount`, and the CLI reads
+  it from `MANDALA_MCP_MAX_SESSIONS_PER_ACCOUNT` (a whole number from 1 to
+  256; anything else is refused at startup). A self-hosted server verifies
+  no account, so there each token is an account of its own, held to the
+  ceiling as well as to its own cap; to let one token hold more than 128
+  sessions, raise both.
 - **A token the platform refuses during a call comes back as that same
   `401`**, not as a tool error, so the client refreshes or authorizes again —
   the answer is held until its first byte for this. The one case that cannot
@@ -1177,7 +1207,11 @@ address.
   `404 Unknown session`, the MCP spec's signal to initialize again. An access
   token says nothing this server can check about which grant it came from, so
   rebinding would let any valid credential that learned a session id take over
-  its bound computer, buffered events and retained results.
+  its bound computer, buffered events and retained results. The old session
+  is not closed by the refresh: it still counts against the token's account
+  ceiling (above) until the client closes it with `DELETE /mcp` under the old
+  token (only the token's digest is compared, so an expired one still works)
+  or it idles out after 30 minutes.
 - `X-Mandala-MCP-Service` carries `MANDALA_MCP_SERVICE_SECRET` on every
   platform request, only ever to `MANDALA_BASE_URL`, so a token cannot be
   replayed at the API directly by the app it was issued to. A client's own
@@ -1199,9 +1233,10 @@ address.
 | `MANDALA_ALLOWED_HOSTS`, `MANDALA_ALLOWED_ORIGINS` | Comma-separated. Which `Host` and `Origin` values this server answers to. On a loopback bind the host list defaults to the address it was given, so DNS-rebinding protection is on without configuration; set this when serving under a name. |
 | `MANDALA_MCP_RESOURCE_METADATA_URL` | `--http` only. The OAuth protected-resource metadata URL this server is published under. Set, it answers OAuth clients as described under Hosted, with OAuth; unset, callers bring an API key. |
 | `MANDALA_MCP_SERVICE_SECRET` | `--http` only. Sent as `X-Mandala-MCP-Service` on every platform request, to `MANDALA_BASE_URL` only. Never logged. |
-| `MANDALA_MCP_MAX_SESSIONS_PER_TOKEN` | `--http` only. How many live sessions one bearer token may hold. Default 16; a whole number from 1 to 256 (the server's whole session pool), and anything else is refused at startup. A suspended account's token is held to one whatever this says. |
+| `MANDALA_MCP_MAX_SESSIONS_PER_TOKEN` | `--http` only. How many live sessions one bearer token may hold. Default 16; a whole number from 1 to 256 (the server's whole session pool), and anything else is refused at startup. A suspended account's token is held to one whatever this says. A token is also held to its account's limit, below. |
+| `MANDALA_MCP_MAX_SESSIONS_PER_ACCOUNT` | `--http` only. How many live sessions one account may hold across all its tokens. Default 128, half the pool; a whole number from 1 to 256, and anything else is refused at startup. Hosted (the metadata URL set), the account is the one the platform's `whoami` names for the token; self-hosted, or when `whoami` names none, each token is an account of its own. Past it an initialize is refused `429`, after closing only the token's own idle sessions or the account's refused ones. Suspension is not counted here; it holds each token to one. |
 
-Every one of these but the model key, the two tool filters, the two OAuth settings and the per-token session limit has a flag as well, and a flag overrides
+Every one of these but the model key, the two tool filters, the two OAuth settings and the two session limits has a flag as well, and a flag overrides
 the environment: `--http`, `--port`, `--host`, `--base-url`, `--computer`,
 `--allowed-hosts`, `--allowed-origins`, `--no-lifecycle`, local `--profile`, plus `--help` and
 `--version`. `--key` exists for a caller launching several servers under
