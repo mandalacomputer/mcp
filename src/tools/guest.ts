@@ -261,7 +261,7 @@ export const registerGuest: Registrar = (server, session) => {
           .boolean()
           .default(false)
           .describe(
-            'Run inside the logged-in desktop session instead of as root with no display. Required for anything with a window: the guest agent has no DISPLAY, so a GUI app started without this cannot draw. Also the way to reach secrets bound to this computer as environment variables (set_computer_secrets): they live in the desktop session, and on an image that supports it a value replaced while the computer runs is seen by new desktop-session commands within seconds. Whether a plain root exec sees bound secrets depends on the platform version, so a command that needs one should use this. Linux only.',
+            'Run inside the logged-in desktop session instead of as root with no display. Required for anything with a window: the guest agent has no DISPLAY, so a GUI app started without this cannot draw. Not needed for secrets bound as environment variables (set_computer_secrets): on an image that supports it, every exec, plain or desktop, runs with the bound variables as they are at that moment. Linux only.',
           ),
         background: z
           .boolean()
@@ -443,7 +443,7 @@ export const registerGuest: Registrar = (server, session) => {
     {
       title: 'Open a URL on the desktop',
       description:
-        "Put a web page on the screen in the guest's browser. The command returns before the window draws — on a cold browser that gap has been as long as ten seconds — so screenshot until the screen changes rather than concluding from one frame that nothing launched.",
+        "Put a web page on the screen in the guest's browser: the first of firefox-esr, firefox or chromium the image has (the Debian desktops open firefox-esr, Omarchy opens chromium). An image with none of them is an error, not a silent success. The command returns before the window draws — on a cold browser that gap has been as long as ten seconds — so screenshot until the screen changes rather than concluding from one frame that nothing launched.",
       inputSchema: { ...idArg, url: z.string().url() },
     },
     ({ computer_id, url }, extra) =>
@@ -458,6 +458,32 @@ export const registerGuest: Registrar = (server, session) => {
         // browser prints nothing worth reading: left raw they would put a
         // base64 field in front of a model for no reason at all.
         const { body, note } = decodeExec(res, false);
+        // A launch that did not happen is an error. The browser itself is
+        // backgrounded and reports nothing; what exits non-zero is the lookup
+        // for one, or the shell never starting.
+        // A timed-out exec is not a failed launch: the platform reports it as
+        // exit -1 with `timed_out` set, and it kills nothing — the command is
+        // still running in the guest and may yet put the browser up. Saying
+        // "nothing was opened" would invite a retry and a second window.
+        if (res?.timed_out === true) {
+          return said(
+            `The launch for ${url} had not finished when the 30-second wait ran out, so whether it opened is unknown: the command is still running in the guest and the browser may still appear. Screenshot (or list_windows) before trying again, so a retry does not open it twice.${note}`,
+            body,
+          );
+        }
+        const exit = res?.exit_code;
+        if (typeof exit === 'number' && exit !== 0) {
+          const stderr =
+            body &&
+            typeof body === 'object' &&
+            typeof (body as { stderr?: unknown }).stderr === 'string'
+              ? (body as { stderr: string }).stderr.trim() || undefined
+              : undefined;
+          return refused(
+            `Could not open ${url}: the launch exited ${exit}${stderr ? ` (${stderr})` : ''}. Nothing was opened.${exit === 127 ? ' This image has no browser this tool knows (firefox-esr, firefox or chromium); install one with exec, or open the page some other way.' : ''}${note}`,
+            body,
+          );
+        }
         return said(
           `Asked the desktop to open ${url}. Give it a few seconds, then screenshot — the browser draws after the command returns.${note}`,
           body,

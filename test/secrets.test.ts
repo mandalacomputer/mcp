@@ -232,10 +232,10 @@ describe('the secret-binding tools', () => {
     for (const d of [set?.description, get?.description]) {
       expect(d).toContain('/run/mandala-secrets/user/files');
       expect(d).toContain('rewritten in place within seconds');
-      // The env live apply, and the one instruction that holds either side of
-      // the platform's plain-exec change (OPL-5028).
-      expect(d).toContain('desktop: true');
-      expect(d).toContain('do not rely on a plain exec');
+      // The env live apply: since the platform's OPL-5028 shipped, every exec
+      // sees the bound variables, plain or desktop (OPL-5437).
+      expect(d).toContain('every exec — plain or with desktop: true');
+      expect(d).not.toContain('do not rely on a plain exec');
     }
     expect(set?.description).toContain('exactly one of `env`');
     expect(set?.description).toContain('at most 32 secrets, 8 of them as files');

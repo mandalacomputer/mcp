@@ -1,7 +1,7 @@
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
 import { MODEL_KEY_HEADER } from '../api.js';
-import { APIError, platformSaid } from '../errors.js';
+import { APIError, agentRunAdvice, platformSaid } from '../errors.js';
 import { apiErrorMessage, errorMetadata, failed, refused, said } from '../format.js';
 import * as P from '../paths.js';
 import { heartbeat } from '../poll.js';
@@ -87,6 +87,37 @@ const failedAgent = z.object({
   }),
   steps,
 });
+/**
+ * The advice for a failed chat run, in place of the status advice every other
+ * tool gets (OPL-5437). A run that started and failed comes back in OpenAI's
+ * nested shape, `{error: {message, ...}}`, and there its 402, 504, 529 and
+ * unrevoked 403 are the model provider's statuses for the configured model key
+ * rather than the Mandala plan or role — see `agentRunAdvice`. A flat
+ * `{error: string}` is the platform refusing before any run started (the role
+ * gate, a bad body, a suspension, the meter), so it keeps the status advice
+ * every other tool gets: nothing ran, nothing was billed, and a viewer's 403 is
+ * the role. Without a JSON body the status is a proxy's, and the one this route
+ * meets by design is the hosted edge's cut on a request that is not streaming.
+ */
+function runAdvice(error: APIError): string | undefined {
+  if (isRecord(error.body)) {
+    return isRecord(error.body.error)
+      ? agentRunAdvice(error.status, error.reason, 'run_agent_chat')
+      : undefined;
+  }
+  if (error.status === 524) return EDGE_CUT;
+  return undefined;
+}
+
+/**
+ * The hosted edge cuts a request that is not streaming after about 120 seconds
+ * with a bodiless 524, and this tool's request never streams. The platform ties
+ * the run to the request, so the cut stops the run where it was and loses its
+ * result, usage and steps.
+ */
+const EDGE_CUT =
+  'the hosted edge cut this request after about 120 seconds, because it does not stream; the run was stopped where it was, and its result, usage and steps were lost with it. Steps it took were still billed and may have changed the computer, so take a screenshot before deciding what is left, and use run_agent, which streams, for a task that can take longer. Do not call run_agent_chat again with the same task';
+
 function chatFailure(error: unknown): CallToolResult {
   if (!(error instanceof APIError)) return failed(error);
   const nested = isRecord(error.body) && isRecord(error.body.error) ? error.body.error : undefined;
@@ -106,6 +137,7 @@ function chatFailure(error: unknown): CallToolResult {
   const result = failed(
     new APIError(detail, error.status, { ...projected, error: detail }, error.retryAfterMs, error),
     nested === undefined,
+    runAdvice(error),
   );
   const diagnostics = errorMetadata(error);
   result.content.push(
@@ -147,7 +179,7 @@ export const registerChat: Registrar = (server, session) => {
     {
       title: 'Drive the computer with BYOK textual chat',
       description:
-        "Run the same Anthropic computer agent using OpenAI-shaped textual messages and JSON-only results (stream:false). The last user message is the task; system messages provide standing instructions. Previous user/assistant conversation is not replayed. This is BYOK computer control, not hosted inference or a chat UI. The computer must already be running. Bills the caller's Anthropic key. A supplied model must be an Anthropic model name. Progress counts waiting heartbeats, not completed actions. For long runs the client needs progressToken plus resetTimeoutOnProgress; otherwise choose a smaller max_steps, which is not a time or spend cap. Never automatically replay a failed run.",
+        "Run the same Anthropic computer agent using OpenAI-shaped textual messages and JSON-only results (stream:false). The last user message is the task; system messages provide standing instructions. Previous user/assistant conversation is not replayed. This is BYOK computer control, not hosted inference or a chat UI. The computer must already be running. Bills the caller's Anthropic key. A supplied model must be an Anthropic model name. SHORT TASKS ONLY: on the hosted API a request that does not stream is cut at the edge after about 120 seconds (HTTP 524), which stops the run and loses its result, usage and steps, and the default 20 steps can take longer than that. Use run_agent, which streams, for anything longer. Progress counts waiting heartbeats, not completed actions; progressToken plus resetTimeoutOnProgress keeps only the MCP client waiting, not the edge. Never automatically replay a failed run.",
       inputSchema: {
         computer_id: computerSchema,
         messages: z

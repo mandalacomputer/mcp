@@ -11,7 +11,7 @@ import {
   resendAfterSpentKey,
   resendUnseenByRead,
 } from '../errors.js';
-import { failed, guarded, operationIdOf, refused, said } from '../format.js';
+import { failed, guarded, operationIdOf, refused, said, unavailableAdvice } from '../format.js';
 import * as P from '../paths.js';
 import { heartbeat, POLL_MS, pollDelay, sleep } from '../poll.js';
 import { label, metadata, metadataCall } from './directory.js';
@@ -59,7 +59,7 @@ const keyArg = z
   .optional();
 
 const KEY_FIRST =
-  "Optional. Omit it on a first attempt: a fresh key is sent for you, and an answer that is lost names it. Pass the key such an answer named to send the SAME call again without it being done twice — the platform answers with the first call's result, or says it is still running. After a 5xx the platform answered, or idempotency_outcome_unknown, the key is spent (resending with it answers idempotency_outcome_unknown)";
+  "Optional. Omit it on a first attempt: a fresh key is sent for you, and an answer that is lost names it. Pass the key such an answer named to send the SAME call again without it being done twice — the platform answers with the first call's result, or says it is still running. After a 5xx that names no operation_id, send the same call again with the same key: nothing may have been done, and the platform either carries it out (the key was released) or answers idempotency_outcome_unknown. After idempotency_outcome_unknown, or a 5xx that names an operation_id, the key is spent (resending with it answers idempotency_outcome_unknown)";
 const KEY_LAST = ' Keys last 24 hours; the same key with different arguments is refused.';
 
 /**
@@ -86,8 +86,12 @@ export const restartIdempotencyKeyArg = keyArg.describe(
  * the operation to be final. See {@link resendAfterSpentKey}.
  */
 export const buildIdempotencyKeyArg = keyArg.describe(
-  `${KEY_FIRST} and the call may still be under way: read its operation first (get_operation with the operation_id the error named, or list_operations with the key), wait while it is pending or running and do not resend meanwhile, and send the call with a new key (or none) only once the operation is final as failed or not found AND get_computer shows the step did not happen.${KEY_LAST}`,
+  `${KEY_FIRST}, and the call may still be under way: read its operation first (get_operation with the operation_id the error named, or list_operations with the key), wait while it is pending or running and do not resend meanwhile, and send the call with a new key (or none) only once the operation is final as failed or not found AND get_computer shows the step did not happen.${KEY_LAST}`,
 );
+
+/** The status line's advice beside the unsent-refusal resend paragraph. */
+const UNSENT_REFUSAL_ADVICE =
+  'the platform could not carry this out right now; see below for how to resend it';
 
 /**
  * The answer to a lifecycle tool call that failed, with what its key means.
@@ -98,8 +102,13 @@ export const buildIdempotencyKeyArg = keyArg.describe(
  *
  * - The answer never arrived, the keyed call is still running, or a proxy in
  *   front of the platform answered: the same tool, with the same key.
- * - The platform itself answered a `5xx`: it has settled that key as lost
- *   (OPL-5304), so the same key can only be answered
+ * - The platform itself answered a `5xx` naming no `operation_id`: a refusal
+ *   given before the call was sent anywhere names none, and releases the key
+ *   (platform OPL-5310), so the same key is the resend. It is also safe when
+ *   the key was not released after all: that is answered
+ *   `idempotency_outcome_unknown`, whose own advice is the read below.
+ * - The platform itself answered a `5xx` naming an `operation_id`: it has
+ *   settled that key as lost (OPL-5304), so the same key can only be answered
  *   `idempotency_outcome_unknown`. The next step is a read, then a resend
  *   with a new key or none if the step did not happen. Which read depends on
  *   the tool (see {@link resendAfterSpentKey}): a create, clone or restore
@@ -116,13 +125,30 @@ export function keyedFailure(
   key: string,
 ): CallToolResult {
   const advice = idempotencyAdvice(err, tool);
-  const result = failed(err, advice === undefined);
+  const unsentRefusal =
+    !keyedOutcomeUnknown(err) &&
+    platformAnsweredFailure(err) &&
+    !operationIdOf((err as APIError).body);
+  // The unsent-refusal paragraph below says how to resend, so the status line
+  // must not also carry a 503's read-the-state-first sentence: two routes in
+  // one answer, and the read-first one names no key, which is the resend that
+  // could do it twice (OPL-5437). Only that sentence is replaced; any other
+  // 5xx keeps the platform's own word.
+  const result =
+    unsentRefusal && unavailableAdvice(err as APIError) !== undefined
+      ? failed(err, advice === undefined, UNSENT_REFUSAL_ADVICE)
+      : failed(err, advice === undefined);
   const [first, ...rest] = result.content;
   if (first?.type !== 'text') return result;
   let text = first.text;
   if (advice) text += `\n\nAbout its idempotency_key: ${advice}.`;
   if (keyedOutcomeUnknown(err)) {
     text += `\n\nTo retry without risking a second ${what}, call ${tool} again with idempotency_key "${key}".`;
+  } else if (unsentRefusal) {
+    text +=
+      `\n\nThe platform answered this itself and named no operation, so nothing may have been done: an answer like this is usually a refusal given before the call was sent anywhere, which releases idempotency_key "${key}". ` +
+      `Call ${tool} again with the SAME idempotency_key "${key}" (after a short wait on a busy or unavailable answer): if the key was released the platform carries the call out, and if not it answers idempotency_outcome_unknown and says what to read before anything else. ` +
+      `Do not switch to a new key or none for this resend — that is the one that could make a second ${what}.`;
   } else if (platformAnsweredFailure(err)) {
     const op = operationIdOf((err as APIError).body);
     text +=

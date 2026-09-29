@@ -209,13 +209,49 @@ describe('an unknown outcome', () => {
     );
   });
 
-  it('after a 5xx on a restart with no operation named, finds it by the key', async () => {
+  // OPL-5437: a platform 5xx that names no operation_id is usually a refusal
+  // given before the call was sent anywhere (platform OPL-5310/5365), which
+  // releases the key. The same key is the resend, and it is safe either way: a
+  // key that was not released answers idempotency_outcome_unknown.
+  it.each([
+    ['restart_computer', 'POST', '/computers/vm-1/restart', {}, 500],
+    ['update_computer', 'PATCH', '/computers/vm-1', { egress_proxy: null }, 500],
+    ['create_computer', 'POST', '/computers', { template: 'base' }, 503],
+  ] as const)(
+    'after a platform 5xx on %s that names no operation, resends with the same key',
+    async (tool, verb, route, args, status) => {
+      answer(
+        (method, path) => method === verb && path === route,
+        () =>
+          Response.json(
+            { error: 'Another launch is already in progress on this account.' },
+            { status },
+          ),
+      );
+      const result = await (await open()).call(tool, { ...args, idempotency_key: 'k-unsent' });
+      const said = text(result);
+      expect(result.isError).toBe(true);
+      expect(said).toContain('named no operation, so nothing may have been done');
+      expect(said).toContain(`Call ${tool} again with the SAME idempotency_key "k-unsent"`);
+      expect(said).toContain('answers idempotency_outcome_unknown');
+      expect(said).not.toContain('settled idempotency_key');
+      expect(said).not.toContain('with a new idempotency_key');
+      expect(said).not.toContain('do NOT resend it meanwhile');
+      // The status line must not give a second, conflicting route: a 503's
+      // read-first sentence names no key, which is the duplicate resend.
+      expect(said).not.toContain('Read the current state before sending it again');
+      expect(said).not.toContain('MAY OR MAY NOT HAVE HAPPENED');
+      if (status === 503) expect(said).toContain('see below for how to resend it');
+    },
+  );
+
+  it('after a platform 5xx on a restart that names its operation, reads the operation', async () => {
     answer(
       (method, path) => method === 'POST' && path === '/computers/vm-1/restart',
-      () => Response.json({ error: 'boom' }, { status: 500 }),
+      () => Response.json({ error: 'boom', operation_id: OPERATION.id }, { status: 500 }),
     );
     const said = text(await (await open()).call('restart_computer', { idempotency_key: 'k-500' }));
-    expect(said).toContain('list_operations with idempotency_key "k-500"');
+    expect(said).toContain(`get_operation ${OPERATION.id}`);
     expect(said).not.toContain('If get_computer shows the step did not take effect');
     expect(said).toContain('Ask the user before you call restart_computer again');
   });
@@ -237,10 +273,10 @@ describe('an unknown outcome', () => {
     expect(said).toContain('call create_computer again with a new idempotency_key, or none');
   });
 
-  it('after a 5xx on an egress update, reads the computer and does not talk of a slow create', async () => {
+  it('after a 5xx on an egress update that names its operation, reads the computer', async () => {
     answer(
       (method, path) => method === 'PATCH' && path === '/computers/vm-1',
-      () => Response.json({ error: 'boom' }, { status: 500 }),
+      () => Response.json({ error: 'boom', operation_id: OPERATION.id }, { status: 500 }),
     );
     const said = text(
       await (await open()).call('update_computer', {
@@ -248,27 +284,25 @@ describe('an unknown outcome', () => {
         idempotency_key: 'k-patch',
       }),
     );
-    expect(said).toContain('Read get_computer first');
+    expect(said).toContain('Read get_computer and get_operation');
     expect(said).toContain('call update_computer again with a new idempotency_key, or none');
     expect(said).not.toContain('a slow create or clone may still land');
     expect(said).not.toContain('do NOT resend it meanwhile');
   });
 
-  it('says the same after a platform 500 on a create, naming the key the server made', async () => {
+  it('names the key the server made when a platform 5xx on a create names no operation', async () => {
     answer(
       (method, path) => method === 'POST' && path === '/computers',
-      () => Response.json({ error: 'boom' }, { status: 500 }),
+      () => Response.json({ error: 'No host can place this right now.' }, { status: 503 }),
     );
     const result = await (await open()).call('create_computer', { template: 'base' });
     const sent = keyed()[0];
-    expect(text(result)).toContain(`settled idempotency_key "${sent}"`);
-    expect(text(result)).toContain('list_computers after a create');
+    expect(sent).toMatch(KEY_SYNTAX);
+    expect(text(result)).toContain(
+      `Call create_computer again with the SAME idempotency_key "${sent}"`,
+    );
     expect(text(result)).not.toContain('To retry without risking');
-    // No operation_id in the body: the operation is found by the key, and a
-    // slow create may still land, so nothing is resent on a first read alone.
-    expect(text(result)).toContain(`list_operations with idempotency_key "${sent}"`);
-    expect(text(result)).toContain('do NOT resend it meanwhile');
-    expect(text(result)).toContain('a slow create or clone may still land');
+    expect(text(result)).not.toContain('a slow create or clone may still land');
   });
 
   it('ends with the same-key retry when the connection died after the request went out', async () => {

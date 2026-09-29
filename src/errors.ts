@@ -367,8 +367,10 @@ export function resendAfterRead(operation?: string, resend = 'send the call agai
 /**
  * The route to a new-key resend for the tools that make a new computer or
  * overwrite a disk (see {@link WAITS_FOR_FINAL}) after a keyed call whose
- * outcome is unknown and whose key is spent: a `5xx` the platform answered, or
- * `idempotency_outcome_unknown` (platform OPL-5304).
+ * outcome is unknown and whose key is spent: a `5xx` the platform answered that
+ * names an `operation_id`, or `idempotency_outcome_unknown` (platform OPL-5304).
+ * A platform `5xx` naming none is not this route: its key is resent as it is
+ * (see `keyedFailure` in tools/operations.ts).
  *
  * The condition has to be one a read can decide. The platform keeps such a
  * call's operation `pending` for up to an hour, because its host may still be
@@ -401,11 +403,14 @@ export function resendOnlyOnceFinal(
  * still running, or a `5xx` that the platform itself never answered (see
  * {@link platformAnsweredFailure}).
  *
- * NOT a `5xx` the platform answered. The platform settles a keyed call it
- * answered outside `2xx` and `4xx` as lost (OPL-5304), so the same key sent
- * again can only be answered `409 idempotency_outcome_unknown` for the rest of
- * its 24 hours. Advising that resend is advising a retry that cannot succeed;
- * `keyedFailure` in tools/operations.ts tells that caller to read first instead.
+ * NOT a `5xx` the platform answered, which `keyedFailure` in
+ * tools/operations.ts splits by whether it names an `operation_id`. One that
+ * does is a call the platform settled as lost (OPL-5304): the same key can only
+ * be answered `409 idempotency_outcome_unknown` for the rest of its 24 hours,
+ * so that caller is told to read first. One that names none is usually a
+ * refusal given before the call was sent anywhere, which releases the key and
+ * deletes its operation (platform OPL-5310, OPL-5365), so that caller is told to
+ * resend with the same key — which is also safe if it was not released.
  */
 export function keyedOutcomeUnknown(err: unknown): boolean {
   return (
@@ -418,7 +423,8 @@ export function keyedOutcomeUnknown(err: unknown): boolean {
 
 /**
  * Whether a `5xx` came from the platform itself rather than from a hop in
- * front of it.
+ * front of it. Says nothing about whether the key was spent: that turns on
+ * whether the body names an `operation_id` (see {@link keyedOutcomeUnknown}).
  *
  * The platform answers every error with a JSON object. A proxy that gave up
  * (a Cloudflare or nginx `502`/`504`, or an edge-only `520`-`526`) answers
@@ -485,6 +491,47 @@ export function statusAdvice(status: number | undefined, reason?: string): strin
     default:
       return undefined;
   }
+}
+
+/**
+ * What a failed agent run's status means, for run_agent and run_agent_chat.
+ *
+ * Not {@link statusAdvice}, because on these two routes the same numbers mean
+ * something else. The platform re-checks the caller's own authority before each
+ * model call, and that refusal is a 401 or 403 carrying `reason: 'revoked'`.
+ * Every other failure status on a run is the model provider's own, relayed as
+ * the provider sent it for the configured model key: 402 is its
+ * `billing_error`, 504 its `timeout_error`, 529 its `overloaded_error`, and a
+ * 403 without `revoked` can be its `permission_error`. None of those is the
+ * Mandala plan, and telling a model it was left it reporting a plan limit to a
+ * user whose fix was on their model-provider account.
+ *
+ * `undefined` for a status with nothing to add, so the caller keeps its own
+ * wording. A 401 without `revoked` is left to {@link authenticationAdvice},
+ * which already says it cannot tell the account key from the model key.
+ */
+export function agentRunAdvice(
+  status: number | undefined,
+  reason: string | undefined,
+  tool: string,
+): string | undefined {
+  const noReplay = `Do not call ${tool} again with the same task: completed steps were already billed, so read what they did first`;
+  if (status === 403 && reason === 'revoked') {
+    return `this Mandala account no longer permits the run — a role that changed or an account suspended, not anything wrong with the computer. Nothing you can send changes that, and a new credential does not either: say what was refused and stop. ${noReplay}`;
+  }
+  if (status === 403) {
+    return `the model provider may have refused the configured model key (its permission_error: the key cannot use this model or this feature). The Mandala plan is not the cause and neither is the computer; check the model-provider account and the model name. ${noReplay}`;
+  }
+  const provider =
+    status === 402
+      ? 'billing_error: the configured model key has no credit or billing set up'
+      : status === 504
+        ? 'timeout_error'
+        : status === 529
+          ? 'overloaded_error: the model API is overloaded'
+          : undefined;
+  if (!provider) return undefined;
+  return `this is the model provider's own status for the configured model key (its ${provider}), not the Mandala plan and not the computer — check the model-provider account${status === 402 ? '' : ' and its status page, and try later'}. ${noReplay}`;
 }
 
 /**

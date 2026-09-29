@@ -199,11 +199,15 @@ header rather than the operator's environment variable.
   to. Do not re-run the same prompt with a bigger number without looking first.
 - A run is minutes. Do not start one and then poll `screenshot` beside it.
 - A run can be stopped part way through by something that is about the caller
-  rather than the computer — a key revoked, a role changed, an account
-  suspended, a plan that no longer covers the work. The answer says so and
-  lists the steps that did run; those are billed. Re-running the same prompt
+  rather than the computer — a key revoked, a role changed or an account
+  suspended (a `401` or `403` carrying `reason: "revoked"`). The answer says so
+  and lists the steps that did run; those are billed. Re-running the same prompt
   pays for them again and is refused the same way, so fix the cause first, and
   when you do resume, resume from what the completed steps already did.
+- A `402`, `504` or `529` in the middle of a run is the model provider's own
+  status for the model key (its billing, timeout or overloaded error), not the
+  Mandala plan: tell the user to check that model-provider account, not to
+  upgrade their plan.
 
 **`run_agent_chat` uses textual OpenAI-shaped messages and JSON-only results.**
 It drives the same BYOK Anthropic loop, not hosted inference or a chat UI.
@@ -344,10 +348,11 @@ says what to do. The judgement it cannot make for you:
   for a 401; for a 403 say what was refused and stop. Do not report either as the
   computer being broken or gone, and do not read it as a transport failure worth
   retrying.
-- **A 402 is a plan limit.** Waiting does not fix it and neither do you — tell
-  the user what was refused and leave it there. One that arrives after a long
-  wait means the same thing rather than something going wrong on the machine:
-  the plan, as it stands now, does not cover the work.
+- **A 402 is a plan limit** (except in the middle of an agent run, where it is
+  the model provider's billing error — see above). Waiting does not fix it and
+  neither do you — tell the user what was refused and leave it there. One that
+  arrives after a long wait means the same thing rather than something going
+  wrong on the machine: the plan, as it stands now, does not cover the work.
 - **A 404 is not proof the computer is gone.** An API key can be scoped to a
   single workspace, and a computer in a *different* workspace answers 404 and
   not 403 — deliberately, so a key that cannot reach a machine is not told the
@@ -372,9 +377,13 @@ says what to do. The judgement it cannot make for you:
   After a dropped connection, a proxy that gave up, or
   `idempotency_in_progress`: send the same call again with that key — the
   platform answers with the first call's result, so a create cannot build a
-  second computer. After a `5xx` the platform answered itself, or
-  `idempotency_outcome_unknown`: the key is spent, and the call may still be
-  under way on its host. For a start, stop, suspend, delete, move or
+  second computer. After a `5xx` the platform answered itself that names no
+  `operation_id`: nothing may have been done (usually it was refused before
+  being sent anywhere, which releases the key), so send the same call again with the SAME
+  key — the platform carries it out, or answers `idempotency_outcome_unknown`,
+  and only then does the next case apply. After a `5xx` that names an
+  `operation_id`, or `idempotency_outcome_unknown`: the key is spent, and the
+  call may still be under way on its host. For a start, stop, suspend, delete, move or
   `update_computer`, read `get_computer` (and `get_operation` if the error
   named one; a `pending` operation alone is no reason to wait, since it stays
   pending for an hour), and if the step did not take effect, send it again
@@ -394,7 +403,9 @@ says what to do. The judgement it cannot make for you:
 - **A 503 on a change is the same: it may or may not have happened.** A read
   answered 503 can be sent again shortly. A create, a command, a clone or a
   snapshot answered 503 is read back first — the sentence says so — because
-  repeating it blind can do it twice.
+  repeating it blind can do it twice. The exception is a lifecycle tool's 503
+  that names no `operation_id`: resend it with the same key, as above, which
+  cannot do it twice.
 - **A refused resize with an offer** ("another host could run it") does not
   clear by retrying. `move_computer` takes the offer up; it copies the disk,
   so say what that costs before calling it.

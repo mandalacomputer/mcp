@@ -116,6 +116,49 @@ describe('deleting a computer', () => {
     }
   });
 
+  // OPL-5437: a purge with copies still queued is a 202 with ok:false. It was
+  // reported as "Deleted vm-1 and 1 of its snapshot(s)." with the rest dropped.
+  it('says a purge left incomplete is incomplete, and keeps what the platform sent', async () => {
+    const real = globalThis.fetch;
+    const purge = {
+      selected: 3,
+      confirmed: 1,
+      queued: 2,
+      failed: 0,
+      unknown: 0,
+      remaining: 2,
+      unselected: 0,
+      complete: false,
+    };
+    const error =
+      'The computer was deleted. 2 snapshot copies are queued for deletion, 0 were refused and 0 have an unknown outcome. Review what remains before retrying.';
+    globalThis.fetch = (async () =>
+      new Response(
+        JSON.stringify({ ok: false, computer_deleted: true, snapshots_deleted: 1, purge, error }),
+        { status: 202, headers: { 'Content-Type': 'application/json' } },
+      )) as typeof fetch;
+    try {
+      const { call, close } = await connect();
+      const res = await call('delete_computer', {
+        computer_id: 'vm-1',
+        confirm: true,
+        delete_snapshots: true,
+        expect: 'fp-abc123',
+      });
+      await close();
+      const text = textOf(res);
+      expect(text).toContain('Deleted vm-1, but the snapshot purge is INCOMPLETE');
+      expect(text).toContain('queued 2, failed 0, unknown 0, remaining 2');
+      expect(text).toContain(error);
+      expect(text).toContain('Read snapshot_holdings');
+      expect(text).not.toContain('Deleted vm-1 and 1 of its snapshot(s).');
+      expect(text).toContain('"ok": false');
+      expect(text).toContain('"queued": 2');
+    } finally {
+      globalThis.fetch = real;
+    }
+  });
+
   it("passes on the platform's refusal when the set moved underneath it", async () => {
     const real = globalThis.fetch;
     globalThis.fetch = (async () =>

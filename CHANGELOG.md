@@ -14,6 +14,52 @@ are wording changes, and they are behaviour changes in the way that matters.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`run_agent` and `run_agent_chat` no longer blame the plan for the model
+  provider's refusals.** On these routes a `402` is the model provider's
+  billing error for the configured model key, a `504` its timeout and a `529`
+  its overload, and the advice now says to check the model-provider account.
+  A `403` gets account advice (a role that changed, an account suspended) only
+  when it carries `reason: "revoked"`; any other `403` is named as a possible
+  permission error on the model key. This applies to a run that started and
+  failed; a refusal given before any run started (a role that cannot run
+  agents, a plan that does not cover them) keeps the role and plan advice.
+- **`run_agent_chat` says it is for short tasks.** It does not stream, and the
+  hosted edge cuts a request that does not stream after about 120 seconds,
+  which stops the run and loses its result; the description and README say so
+  and point long tasks to `run_agent`, and a `524` is answered with that
+  explanation.
+- **`open_url` opens the browser the image has.** It named `firefox` and
+  backgrounded it, so it reported success either way, including on Omarchy,
+  which ships only `chromium`. It now opens the first of `firefox-esr`,
+  `firefox` or `chromium`, and an image with none is an error (exit 127)
+  rather than a success. A launch still running when the 30-second wait runs
+  out is reported as unknown (screenshot before retrying), not as a failure.
+- **A lifecycle tool's platform `5xx` that names no `operation_id` is resent
+  with the same `idempotency_key`.** Such an answer is usually a refusal given
+  before the call was sent anywhere (another launch in progress, no host, an
+  incomplete template catalogue), which releases the key; resending with it is
+  safe either way. The spent-key, read-first route is kept for a `5xx` that
+  names an `operation_id` and for `idempotency_outcome_unknown`.
+- **The hosted server admits a suspended account.** Its bearer check read
+  `GET ssh-keys`, which a suspended account is refused, so it was answered
+  `503` and could never reach `whoami`; the check now reads `GET whoami`.
+- **`delete_computer` reports a snapshot purge left incomplete.** A `202` with
+  `ok: false` is now said to be a deleted computer with copies still queued,
+  refused or unknown, quoting the platform's `error`, and `ok` and `purge` are
+  kept in the structured answer.
+- **`clone_snapshot` no longer says a disk clone boots.** A clone built from a
+  disk ends its build stopped and has to be started with `start_computer`; the
+  answer says "Built", not "Forked", since nothing in it says a fork resumed.
+- Descriptions: `create_computer`'s `template` and `list_templates` describe
+  the fallback to base and the retryable `503` while the catalogue is
+  incomplete, and call the template's disk a minimum; `build_template` and
+  `check_template` state the `system/...` parent rule and the `spec.secrets`
+  rules (by id, at most 32, which refusals are worth retrying); every `exec`,
+  plain or desktop, is said to see bound environment variables on an image
+  that supports it; `create_webhook` says eight attempts (seven retries).
+
 ## [0.7.0] — 2026-09-27
 
 ### Added

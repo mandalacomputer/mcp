@@ -218,10 +218,10 @@ binding list (`[]` removes every binding) and reaches the guest at the
 computer's next start or restart; send the `version` a read answered to have it
 refused with 409 if the list changed since. A replaced value also reaches a
 running computer: a file binding's file is rewritten in place, and on an image
-that supports it an env binding reaches new shells and `exec` with
-`desktop: true` (programs already running keep the old value until a restart).
-A command that needs a bound variable should use `desktop: true`. Whether a
-plain root `exec` sees it depends on the platform version. `replace_secret`
+that supports it an env binding reaches new shells, and every `exec`, plain
+or with `desktop: true`, runs with the bound variables as they are at that
+moment (programs already running keep the old value until a restart).
+`replace_secret`
 and `delete_secret` need the current `revision_id`, and a stale one is a 409.
 `delete_secret` also needs `confirm: true`: a computer still bound to a deleted
 secret cannot start again until that binding is removed. A bound computer runs,
@@ -350,8 +350,16 @@ with. What to do next depends on who answered:
   `idempotency_in_progress`: call the same tool again with the same
   `idempotency_key`. The platform answers with the first call's result, or says
   it is still running; the step is not done twice.
-- **The platform answered a `5xx`**, or `idempotency_outcome_unknown`: the key
-  is spent, and resending with it only answers `idempotency_outcome_unknown`.
+- **The platform answered a `5xx` that names no `operation_id`**: nothing may
+  have been done. A refusal given before the call was sent anywhere — another
+  launch already in progress, no host to place it on, the template catalogue
+  incomplete — names none, and the platform releases its key. Call the same
+  tool again with the same `idempotency_key`: the platform carries it out if
+  the key was released, or answers `idempotency_outcome_unknown` if not, and
+  only then does the case below apply.
+- **The platform answered a `5xx` that names an `operation_id`**, or
+  `idempotency_outcome_unknown`: the key is spent, and resending with it only
+  answers `idempotency_outcome_unknown`.
   The platform then keeps the call's operation `pending` for up to an hour,
   whatever happened, while its host may be carrying it out. What to read
   depends on the tool:
@@ -1122,7 +1130,8 @@ address.
   Settings → Connected apps.
 - **A bearer is checked with the platform before it gets anything.** An
   initialize makes no session until the platform accepts its token — a `2xx`
-  from `GET ssh-keys`, which every valid credential gets — so invented tokens
+  from `GET whoami`, which every valid credential gets, a suspended account's
+  included — so invented tokens
   cannot fill the session pool. A `401` is the challenge above; any other
   answer is `503` and nothing is remembered. Refused initializes are budgeted
   per source address, 20 a minute. Past that, a token already accepted still
@@ -1234,7 +1243,13 @@ default 20. This is computer control, not hosted general-purpose inference or a
 chat UI; it adds no key storage or model billing service.
 
 This tool deliberately sends `stream:false` and uses the JSON response so the
-result preserves the underlying `agent.stop`, step count and token usage.
+result preserves the underlying `agent.stop`, step count and token usage: the
+streamed form of this route carries no usage and no `agent` block. The price is
+time. **On the hosted API a request that does not stream is cut at the edge after
+about 120 seconds** (a bodiless `524`), which stops the run where it was and loses
+its result, usage and steps; the default 20 steps can take longer than that. Use
+`run_agent`, which streams, for anything that may. The tool answers a `524` by
+saying so rather than as a generic gateway failure.
 Only explicit `end_turn` consistent with the completion's finish reason can
 report success. Limits, refusal, missing or conflicting terminal fields remain
 errors with valid partial results. Nested failures preserve the agent computer,
@@ -1247,9 +1262,21 @@ Neither agent tool starts the computer or switches endpoints after a failure.
 The caller supplies the model key through `MANDALA_MODEL_KEY` on stdio or their
 own `X-Model-Key` header on HTTP. The account Authorization remains separate;
 HTTP never falls back to the operator's model key. Waiting heartbeats count
-notifications, not completed actions. Long-running clients need a
-`progressToken` plus `resetTimeoutOnProgress`; otherwise choose a smaller
-`max_steps`. That bound is neither a time cap nor a spend cap.
+notifications, not completed actions. A `progressToken` plus
+`resetTimeoutOnProgress` keeps the MCP client waiting, but not the hosted edge
+above; `max_steps` is neither a time cap nor a spend cap.
+
+On both agent tools a failure status is read for what it is on these routes
+rather than for what it means elsewhere. The platform's own re-check of the
+caller is a `401` or `403` carrying `reason: "revoked"`, and only that gets
+account advice. A `402`, `504` or `529` is the model provider's own status for
+the configured model key (its billing, timeout or overloaded error), so the
+advice is to check the model-provider account, not the Mandala plan; a `403`
+without `revoked` may be the provider's permission error for that key. The
+exception is a refusal `run_agent_chat` is given before any run started — a flat
+`{error: string}` body, from the role gate, a bad body, a suspension or the
+meter: nothing ran, and it keeps the usual role and plan advice every other tool
+gets.
 
 ## Development
 

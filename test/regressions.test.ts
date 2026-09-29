@@ -6530,6 +6530,7 @@ describe('an agent run stopped part way through', () => {
         errorFrame({
           error: 'This requires member access to this account; your current role is viewer.',
           status: 403,
+          reason: 'revoked',
         }),
         { headers: { 'Content-Type': 'text/event-stream' } },
       )) as typeof fetch;
@@ -6537,7 +6538,7 @@ describe('an agent run stopped part way through', () => {
       const { call, close } = await connect({ modelKey: 'sk-test' });
       const res = await call('run_agent', { prompt: 'finish the task' });
       expect(res.isError).toBe(true);
-      expect(said(res)).toMatch(/does not permit the run \(HTTP 403\)/);
+      expect(said(res)).toMatch(/HTTP 403: this Mandala account no longer permits the run/);
       expect(said(res)).toMatch(/your current role is viewer\./);
       expect(said(res)).toMatch(/say what was refused and stop/);
       expect(said(res)).not.toMatch(/[Rr]e-authenticate/);
@@ -6548,24 +6549,43 @@ describe('an agent run stopped part way through', () => {
     }
   });
 
-  it('calls a plan stop a plan stop rather than a broken computer', async () => {
+  it('reads a 403 without revoked as the model key, not the role (OPL-5437)', async () => {
     const real = globalThis.fetch;
     globalThis.fetch = (async () =>
-      new Response(
-        errorFrame({
-          error: 'Choose a plan to start a computer.',
-          status: 402,
-        }),
-        {
-          headers: { 'Content-Type': 'text/event-stream' },
-        },
-      )) as typeof fetch;
+      new Response(errorFrame({ error: 'model API: permission denied', status: 403 }), {
+        headers: { 'Content-Type': 'text/event-stream' },
+      })) as typeof fetch;
     try {
       const { call, close } = await connect({ modelKey: 'sk-test' });
       const res = await call('run_agent', { prompt: 'finish the task' });
       expect(res.isError).toBe(true);
-      expect(said(res)).toMatch(/stopped by the plan on this account/);
-      expect(said(res)).toMatch(/Choose a plan to start a computer\./);
+      expect(said(res)).toMatch(/permission_error/);
+      expect(said(res)).not.toMatch(/a role that changed/);
+      await close();
+    } finally {
+      globalThis.fetch = real;
+    }
+  });
+
+  it.each([
+    [402, /billing_error/],
+    [504, /timeout_error/],
+    [529, /overloaded_error/],
+  ])('reads a %i as the model provider, not the plan (OPL-5437)', async (status, word) => {
+    const real = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      new Response(errorFrame({ error: 'model API: refused', status }), {
+        headers: { 'Content-Type': 'text/event-stream' },
+      })) as typeof fetch;
+    try {
+      const { call, close } = await connect({ modelKey: 'sk-test' });
+      const res = await call('run_agent', { prompt: 'finish the task' });
+      expect(res.isError).toBe(true);
+      expect(said(res)).toMatch(word);
+      expect(said(res)).toMatch(/check the model-provider account/);
+      expect(said(res)).toMatch(/not the Mandala plan/);
+      expect(said(res)).not.toMatch(/stopped by the plan/);
+      expect(said(res)).toMatch(/model API: refused/);
       await close();
     } finally {
       globalThis.fetch = real;
