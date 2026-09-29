@@ -1188,8 +1188,9 @@ address.
   session idle timeout (30 minutes), longer than its `Retry-After` suggests,
   unless those clients close their old sessions. A revoked token's session
   idles out within about the acceptance window (60 s) plus that timeout even
-  while its holder keeps sending notifications or holding the stream: traffic
-  that carries no request is never checked with the platform, so it keeps a
+  while its holder keeps sending notifications, holding the stream, or
+  sending `HEAD /mcp` or a `DELETE /mcp` the server refuses: traffic that
+  carries no request is never checked with the platform, so it keeps a
   session alive only while the token's acceptance is still cached. Suspension is held per
   token, as above, not per account. A full pool (256) is answered `503` with
   `Retry-After`, whoever holds it, and nothing is closed to make room in it.

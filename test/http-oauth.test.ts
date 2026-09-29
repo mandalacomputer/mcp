@@ -1781,6 +1781,48 @@ describe('hosted: traffic that carries no request', () => {
     }
   }, 15_000);
 
+  it('lets a revoked token’s session idle out while its holder keeps sending HEAD /mcp', async () => {
+    const { server, url, c, leaked } = await revokedAccount();
+    try {
+      // Express routes a HEAD to the GET handler with the method still HEAD,
+      // and the SDK answers it 405 without closing anything. It is no request,
+      // and must not keep the session from idling out.
+      const swept = await keepUntil(8000, async () => {
+        if ((await sessions(url)) === 0) return true;
+        const res = await fetch(url, { method: 'HEAD', headers: as('mcpat_leak', leaked) });
+        expect(await status(res)).toBe(405);
+        return false;
+      });
+      expect(swept).toBe(true);
+      await c.open('mcpat_owner');
+      expect(await sessions(url)).toBe(1);
+    } finally {
+      await stop(server);
+    }
+  }, 15_000);
+
+  it('lets a revoked token’s session idle out while its holder keeps sending a DELETE the SDK refuses', async () => {
+    const { server, url, c, leaked } = await revokedAccount();
+    try {
+      // An unsupported protocol version is refused before the SDK closes the
+      // session, so the session stays open; it must not be kept alive either.
+      const swept = await keepUntil(8000, async () => {
+        if ((await sessions(url)) === 0) return true;
+        const res = await fetch(url, {
+          method: 'DELETE',
+          headers: { ...as('mcpat_leak', leaked), 'mcp-protocol-version': '1999-01-01' },
+        });
+        expect(await status(res)).toBe(400);
+        return false;
+      });
+      expect(swept).toBe(true);
+      await c.open('mcpat_owner');
+      expect(await sessions(url)).toBe(1);
+    } finally {
+      await stop(server);
+    }
+  }, 15_000);
+
   it('keeps a session whose accepted token sends only notifications within the cache window', async () => {
     platform = platformWithRefusals();
     const { server, url } = await start({

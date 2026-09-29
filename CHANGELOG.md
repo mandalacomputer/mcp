@@ -131,8 +131,9 @@ are wording changes, and they are behaviour changes in the way that matters.
   `503`, now with `Retry-After`, and nothing is closed to make room in it.
 - **A revoked token's sessions idle out on the hosted server, whatever
   else its holder sends.** Only a POST carrying a request has its token
-  checked, yet a notification, a response or the standing `GET /mcp` stream
-  each kept its session from idling out, so a revoked token's holder could
+  checked, yet a notification, a response, the standing `GET /mcp` stream,
+  a `HEAD /mcp` or a `DELETE /mcp` the server refused (an unsupported
+  protocol version, say) each kept its session from idling out, so a revoked token's holder could
   keep its sessions, and its account's ceiling, held indefinitely without
   ever being found refused, answering the account's valid tokens `429`. That
   traffic is still served, but now keeps a session alive only while the

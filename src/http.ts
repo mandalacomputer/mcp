@@ -1481,13 +1481,21 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
     // The stream is refused on a token the platform has already refused; a
     // DELETE is still honoured, since the digest shows it is the holder.
     if (challenge && live.refused && req.method === 'GET') return challenged(res, TOKEN_REFUSED);
-    // The DELETE is a request and is held for; the GET is the notification
-    // stream and is only noted. See `serving`.
+    // The GET is the notification stream and is only noted; anything else
+    // here (a DELETE, or a HEAD, which Express routes to the GET handler with
+    // the method unchanged) is held for while the SDK handles it. See
+    // `serving`. None of it is put to the platform, so none of it may keep the
+    // session from idling out once the token's acceptance lapses: a HEAD is
+    // answered 405 and a DELETE the SDK refuses (an unsupported protocol
+    // version, say) 400, both leaving the session open, and a revoked token's
+    // holder could otherwise send either for ever to keep its sessions, and
+    // its account's ceiling, held (OPL-5455). A DELETE that succeeds closes
+    // the session anyway, and `active` is counted whatever `heard` says.
     if (req.method === 'GET') {
       touch(live, res, heardWhileAccepted(key));
       return live.transport.handleRequest(req, res);
     }
-    return serving(live, () => live.transport.handleRequest(req, res));
+    return serving(live, () => live.transport.handleRequest(req, res), heardWhileAccepted(key));
   };
   app.get('/mcp', bySession);
   app.delete('/mcp', bySession);
