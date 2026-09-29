@@ -1150,8 +1150,17 @@ address.
   idle session it planned to close is put to work before the new session is
   made, the new one is dropped instead and the initialize is answered `404`
   (`Session not found`, no `Retry-After`), which an SDK client reports as a
-  failed connect. Other bearers' sessions are never touched. `runHttp` takes
-  the 16 as `maxSessionsPerBearer`. A self-hosted `--http` server applies it
+  failed connect. Other bearers' sessions are never touched. An account
+  suspended after its bearer opened sessions keeps only one: the next request
+  on any of them closes the bearer's other idle sessions, as does its next
+  initialize, and one still serving a request goes on a later request once
+  it is idle. A
+  `429` names what the bearer holds, so one still over its limit is told to
+  wait for its busy sessions rather than to close one. `runHttp` takes the 16
+  as `maxSessionsPerBearer`, and the CLI reads it from
+  `MANDALA_MCP_MAX_SESSIONS_PER_TOKEN` (a whole number from 1 to 256, the
+  whole pool; anything else is refused at startup, and at 256 one token can
+  hold every session). A self-hosted `--http` server applies it
   too, but checks no bearer with the platform, so there any string is its own
   bucket: the per-bearer cap spreads one key's clients, and what bounds an
   untrusted caller is the process-wide cap (256), and the default loopback
@@ -1190,8 +1199,9 @@ address.
 | `MANDALA_ALLOWED_HOSTS`, `MANDALA_ALLOWED_ORIGINS` | Comma-separated. Which `Host` and `Origin` values this server answers to. On a loopback bind the host list defaults to the address it was given, so DNS-rebinding protection is on without configuration; set this when serving under a name. |
 | `MANDALA_MCP_RESOURCE_METADATA_URL` | `--http` only. The OAuth protected-resource metadata URL this server is published under. Set, it answers OAuth clients as described under Hosted, with OAuth; unset, callers bring an API key. |
 | `MANDALA_MCP_SERVICE_SECRET` | `--http` only. Sent as `X-Mandala-MCP-Service` on every platform request, to `MANDALA_BASE_URL` only. Never logged. |
+| `MANDALA_MCP_MAX_SESSIONS_PER_TOKEN` | `--http` only. How many live sessions one bearer token may hold. Default 16; a whole number from 1 to 256 (the server's whole session pool), and anything else is refused at startup. A suspended account's token is held to one whatever this says. |
 
-Every one of these but the model key, the two tool filters and the two OAuth settings has a flag as well, and a flag overrides
+Every one of these but the model key, the two tool filters, the two OAuth settings and the per-token session limit has a flag as well, and a flag overrides
 the environment: `--http`, `--port`, `--host`, `--base-url`, `--computer`,
 `--allowed-hosts`, `--allowed-origins`, `--no-lifecycle`, local `--profile`, plus `--help` and
 `--version`. `--key` exists for a caller launching several servers under

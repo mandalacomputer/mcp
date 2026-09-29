@@ -14,6 +14,15 @@ are wording changes, and they are behaviour changes in the way that matters.
 
 ## [Unreleased]
 
+### Added
+
+- **`MANDALA_MCP_MAX_SESSIONS_PER_TOKEN`** sets the per-bearer session limit
+  of a `--http` server (default 16), so 17 or more agents on one key need not
+  evict each other's sessions and lose their `use_computer` bindings. It takes
+  a whole number from 1 to 256, the server's whole session pool; anything
+  else is refused at startup, and at 256 one token can hold every session. A
+  suspended account's bearer is still held to one.
+
 ### Fixed
 
 - **`run_agent` and `run_agent_chat` no longer blame the plan for the model
@@ -85,6 +94,16 @@ are wording changes, and they are behaviour changes in the way that matters.
   checks no bearer, so there the per-bearer cap only spreads one key's
   clients, and the process-wide cap still bounds an untrusted caller, even
   when `maxSessionsPerBearer` is not a usable number.
+- **An account suspended after its bearer opened sessions no longer keeps
+  them all.** The one-session limit was applied only at initialize, so a
+  bearer that opened 16 sessions while active held all 16 after suspension,
+  and while any of them was busy its next initialize was answered `429`
+  saying it held its maximum of one session and should close one. Now the
+  next request on any of its sessions, and its next initialize, close its
+  other idle sessions down to one; the session serving that request and any
+  with a request in flight are kept, and go on a later request once idle. A
+  `429` for a bearer still over its limit says how many it holds and to wait
+  for the busy ones.
 
 ## [0.7.0] — 2026-09-27
 
