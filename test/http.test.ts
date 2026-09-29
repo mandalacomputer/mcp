@@ -514,6 +514,112 @@ describe('the per-bearer session cap', () => {
       await t.teardown();
     }
   });
+
+  // Review round 1: the room was made before the SDK had looked at the
+  // request, so an initialize it then refused cost the caller its idle session
+  // and gave it nothing in return.
+  it('closes nothing for an initialize the SDK refuses, and still makes room for a valid one', async () => {
+    const t = await setup({ maxSessionsPerBearer: 1 });
+    try {
+      const first = await t.open('com_alice');
+      const refused = await t.send(INIT, {
+        Accept: 'application/json',
+        Authorization: 'Bearer com_alice',
+      });
+      expect(refused.status).toBe(406);
+      await refused.text();
+
+      const kept = await t.send(LIST, t.as('com_alice', first));
+      expect(kept.status).toBe(200);
+      await kept.text();
+      expect(await t.count()).toBe(1);
+
+      const second = await t.open('com_alice');
+      expect(await t.count()).toBe(1);
+      const gone = await t.send(LIST, t.as('com_alice', first));
+      expect(gone.status).toBe(404);
+      await gone.text();
+      const now = await t.send(LIST, t.as('com_alice', second));
+      expect(now.status).toBe(200);
+      await now.text();
+    } finally {
+      await t.teardown();
+    }
+  });
+
+  // The session it will close is still in the map when the process-wide cap
+  // is checked; it must not count against the bearer giving it back.
+  it('makes room within its own share when the whole pool is full', async () => {
+    const t = await setup({ maxSessionsPerBearer: 1, maxSessions: 2 });
+    try {
+      const first = await t.open('com_alice');
+      await t.open('com_bob');
+      const second = await t.open('com_alice');
+      expect(await t.count()).toBe(2);
+      const gone = await t.send(LIST, t.as('com_alice', first));
+      expect(gone.status).toBe(404);
+      await gone.text();
+      const now = await t.send(LIST, t.as('com_alice', second));
+      expect(now.status).toBe(200);
+      await now.text();
+
+      // Another bearer with nothing to give back still meets the full pool.
+      const carol = await t.send(INIT, t.as('com_carol'));
+      expect(carol.status).toBe(503);
+      await carol.text();
+    } finally {
+      await t.teardown();
+    }
+  });
+
+  // The room is chosen when the initialize arrives but made only once its
+  // session exists. A session put to work in between is not closed under its
+  // request, and the bearer is not let over its cap either.
+  it('drops a new session rather than close one put to work while it was being made', async () => {
+    const original = StreamableHTTPServerTransport.prototype.handleRequest;
+    let open = () => {};
+    const hold = new Promise<void>((r) => {
+      open = r;
+    });
+    let held = 0;
+    const t = await setup({ maxSessionsPerBearer: 1 });
+    try {
+      const first = await t.open('com_alice');
+      StreamableHTTPServerTransport.prototype.handleRequest = async function (...args) {
+        if (!this.sessionId) {
+          held++;
+          await hold;
+        }
+        return original.apply(this, args);
+      };
+      const second = t.send(INIT, t.as('com_alice'));
+      const deadline = Date.now() + 5000;
+      while (held === 0) {
+        if (Date.now() > deadline) throw new Error('the initialize never reached the transport');
+        await new Promise((r) => setTimeout(r, 5));
+      }
+      // Idle when the initialize was admitted; busy by the time it lands.
+      const call = await t.busy('com_alice', first);
+      open();
+      const late = await second;
+      expect(late.status).not.toBe(200);
+      expect(late.headers.get('mcp-session-id')).toBeNull();
+      await late.text();
+      expect(await t.count()).toBe(1);
+
+      t.release();
+      const answered = await call;
+      expect(answered.status).toBe(200);
+      await answered.text();
+      const kept = await t.send(LIST, t.as('com_alice', first));
+      expect(kept.status).toBe(200);
+      await kept.text();
+    } finally {
+      open();
+      StreamableHTTPServerTransport.prototype.handleRequest = original;
+      await t.teardown();
+    }
+  });
 });
 
 describe('a session whose client walked away', () => {

@@ -733,6 +733,16 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
     };
   };
 
+  /** The live sessions opened with this bearer, by its digest. */
+  const sessionsOf = (keyDigest: Buffer): Array<[string, Live]> => {
+    const own: Array<[string, Live]> = [];
+    for (const entry of sessions) {
+      const theirs = entry[1].keyDigest;
+      if (theirs.length === keyDigest.length && timingSafeEqual(theirs, keyDigest)) own.push(entry);
+    }
+    return own;
+  };
+
   const serving = async <T>(live: Live, handle: () => Promise<T>): Promise<T> => {
     const release = beginActivity(live);
     try {
@@ -875,6 +885,7 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
     }
 
     if (sessionId) {
+      let unpin = () => {};
       try {
         const live = sessions.get(sessionId);
         if (!live) return notFound(res, 'Unknown session. Initialize a new one.', rpcId(req));
@@ -896,6 +907,20 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
           }
           return unauthorized(res, 'This session belongs to a different API key.', rpcId(req));
         }
+        // In flight from here, not only once it is dispatched: the bearer
+        // check below awaits the platform, for up to BEARER_CHECK_TIMEOUT_MS on
+        // a cache miss, and an initialize on the same bearer at its cap closes
+        // an idle session to make room. Counted as busy through that wait, this
+        // one is never the session closed under a request already routed to it
+        // (OPL-5443). Only `active` is raised: a request refused below has not
+        // been served, and does not stamp the session as heard from.
+        live.active++;
+        let pinned = true;
+        unpin = () => {
+          if (!pinned) return;
+          pinned = false;
+          live.active--;
+        };
         if (challenge && live.refused) return challenged(res, TOKEN_REFUSED, rpcId(req));
         // Checked before a request is dispatched, while the answer can still
         // be a 401 whatever the call goes on to do. A platform that cannot say
@@ -916,6 +941,10 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
           ),
         );
       } finally {
+        // serving() held its own lease across handleRequest, and a tool
+        // callback that outlives it holds another through activity(), so the
+        // pin can go once the route is done with the request.
+        unpin();
         // A verified session is the only request allowed through the large
         // parser. Release the route's ownership here; a tool callback that
         // outlives handleRequest retains its own reference through activity().
@@ -1014,39 +1043,36 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
     const keyDigest = digest(key);
     const keyId = keyDigest.toString('hex');
     const bearerCap = suspended ? MAX_SESSIONS_SUSPENDED : maxPerBearer;
-    const own: Array<[string, Live]> = [];
-    for (const entry of sessions) {
-      const theirs = entry[1].keyDigest;
-      if (theirs.length === keyDigest.length && timingSafeEqual(theirs, keyDigest)) own.push(entry);
-    }
+    const bearerFull = () => {
+      res.set('Retry-After', String(BEARER_FULL_RETRY_AFTER_S));
+      return rpcError(
+        res,
+        429,
+        -32002,
+        `This token already holds its maximum of ${bearerCap} ${bearerCap === 1 ? 'session' : 'sessions'} on this server. Close one (DELETE /mcp) or retry shortly.`,
+        rpcId(req),
+      );
+    };
+    const own = sessionsOf(keyDigest);
     const over = own.length + (pendingByDigest.get(keyId) ?? 0) - bearerCap + 1;
-    if (over > 0) {
-      // Room is made from this bearer's own IDLE sessions, least recently seen
-      // first, exactly as the sweeper would close them — never another
-      // bearer's, and never one with a request in flight. A client whose old
-      // session is gone gets 404 for it and initializes again, as MCP clients
-      // do. Either enough are closed to fit this one, or none are: a refusal
-      // does not also cost the caller sessions.
-      const idle = own.filter(([, live]) => live.active === 0);
-      if (idle.length < over) {
-        res.set('Retry-After', String(BEARER_FULL_RETRY_AFTER_S));
-        return rpcError(
-          res,
-          429,
-          -32002,
-          `This token already holds its maximum of ${bearerCap} ${bearerCap === 1 ? 'session' : 'sessions'} on this server. Close one (DELETE /mcp) or retry shortly.`,
-          rpcId(req),
-        );
-      }
-      idle.sort((a, b) => a[1].lastSeen - b[1].lastSeen);
-      for (const [id, live] of idle.slice(0, over)) {
-        sessions.delete(id);
-        void live.transport.close().catch(() => {});
-      }
+    // Room is made from this bearer's own IDLE sessions, least recently seen
+    // first, exactly as the sweeper would close them — never another bearer's,
+    // and never one with a request in flight. A client whose old session is
+    // gone gets 404 for it and initializes again, as MCP clients do. Decided
+    // here, so a bearer with nothing idle is refused at once; carried out only
+    // once the new session exists (in `onsessioninitialized`), so an
+    // initialize the SDK then refuses (406, 415, 400) or that throws on the way
+    // does not also cost the caller a working session.
+    const planned = Math.max(0, over);
+    if (planned > 0 && own.filter(([, live]) => live.active === 0).length < planned) {
+      return bearerFull();
     }
     // Swept sessions free their slot on the timer; this is the backstop for the
     // case the timer cannot help with, which is arrivals faster than the TTL.
-    if (sessions.size + pending >= maxSessions) {
+    // The sessions this initialize will close are still in the map, and are not
+    // counted against it: a bearer making room in its own share is not newly
+    // refused for the room it is about to give back.
+    if (sessions.size - planned + pending >= maxSessions) {
       return unavailable(
         res,
         `This server is holding its maximum of ${maxSessions} sessions. Retry shortly.`,
@@ -1082,6 +1108,9 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
     let transport: StreamableHTTPServerTransport | undefined;
     let mcp: ReturnType<typeof createServer> | undefined;
     let finishInitialize = () => {};
+    // Set when the session was dropped at birth for want of room (see
+    // `onsessioninitialized`): it has an id but no map slot.
+    let dropped = false;
     try {
       const t = new StreamableHTTPServerTransport({
         sessionIdGenerator: () => randomUUID(),
@@ -1096,6 +1125,28 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
         allowedHosts: hosts,
         allowedOrigins,
         onsessioninitialized: (id) => {
+          // The room the check above planned, made now that there is a session
+          // to make it for. Chosen again from what is here NOW: a session
+          // closed or put to work since then is not a candidate. Should too
+          // few still be idle, nothing is closed and this session is dropped
+          // instead of admitted over the cap — the transport closes before the
+          // SDK answers, which it then does with a 404, and the client
+          // initializes again to be refused or fitted on what is idle then.
+          const needed = sessionsOf(keyDigest).length + 1 - bearerCap;
+          if (needed > 0) {
+            const idle = sessionsOf(keyDigest).filter(([, other]) => other.active === 0);
+            if (idle.length < needed) {
+              dropped = true;
+              release();
+              void t.close().catch(() => {});
+              return;
+            }
+            idle.sort((a, b) => a[1].lastSeen - b[1].lastSeen);
+            for (const [other, gone] of idle.slice(0, needed)) {
+              sessions.delete(other);
+              void gone.transport.close().catch(() => {});
+            }
+          }
           const live: Live = {
             transport: t,
             keyDigest,
@@ -1166,10 +1217,11 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
       mcp = server;
       await server.connect(t);
       const handled = await t.handleRequest(req, res, req.body);
-      // Any initialize that never reached `onsessioninitialized` has no map
-      // slot and nothing the sweeper will reap. The SDK's 403 used to take
-      // this path without throwing; other early returns still can.
-      if (!t.sessionId) {
+      // Any initialize that never reached `onsessioninitialized`, or was
+      // dropped there, has no map slot and nothing the sweeper will reap. The
+      // SDK's 403 used to take this path without throwing; other early returns
+      // still can.
+      if (!t.sessionId || dropped) {
         void server.close().catch(() => {});
         void t.close().catch(() => {});
       }

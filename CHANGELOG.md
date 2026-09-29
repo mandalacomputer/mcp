@@ -69,9 +69,11 @@ are wording changes, and they are behaviour changes in the way that matters.
   holds at most 16 live sessions (`maxSessionsPerBearer` for embedders of
   `runHttp`), and a suspended account's bearer at most one, which is still
   enough to reach `whoami`. At its limit, an initialize closes that bearer's
-  least recently used idle session to make room; when none is idle it is
-  answered `429` with `Retry-After`. Another bearer's sessions are never
-  touched.
+  least recently used idle session to make room, and only once the new
+  session exists, so an initialize that is refused or fails closes nothing;
+  a session with a request in flight, including one still waiting on its
+  token check, is never the one closed. When none is idle it is answered
+  `429` with `Retry-After`. Another bearer's sessions are never touched.
 
 ## [0.7.0] — 2026-09-27
 

@@ -1144,7 +1144,8 @@ address.
 - **One bearer holds at most 16 sessions**, and a suspended account's bearer
   one (enough to ask `whoami`), so no single token can fill the pool. At that
   limit, an initialize closes the bearer's least recently used idle session to
-  make room, and a client whose old session is gone initializes again; if none
+  make room, once its own session exists (a refused initialize closes
+  nothing), and a client whose old session is gone initializes again; if none
   is idle, the answer is `429` with `Retry-After`. Other bearers' sessions are
   never touched. The 16 applies to a self-hosted `--http` server too, and
   `runHttp` takes it as `maxSessionsPerBearer`.

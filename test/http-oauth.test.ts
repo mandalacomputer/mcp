@@ -641,6 +641,61 @@ describe('hosted: checking a bearer before it gets anything', () => {
     }
   });
 
+  // Review round 1: a request already routed to a session waits on its bearer
+  // probe before it is dispatched, and the session looked idle all that time,
+  // so an initialize on the same bearer at its cap closed it and the request
+  // was answered 404.
+  it('never closes a session to make room while a request on it waits for its probe', async () => {
+    platform = platformWithRefusals();
+    const { server, url } = await start({
+      resourceMetadataUrl: METADATA,
+      serviceSecret: SECRET,
+      maxSessionsPerBearer: 1,
+      // Every request probes, so the one below waits on the platform.
+      bearerCheckTtlMs: 0,
+    });
+    const as = (session?: string) => ({
+      Authorization: 'Bearer mcpat_one',
+      ...(session ? { 'mcp-session-id': session } : {}),
+    });
+    let release = () => {};
+    try {
+      const c = client(url);
+      const first = await c.open('mcpat_one');
+
+      platform.state.probeGate = new Promise<void>((r) => {
+        release = r;
+      });
+      const before = probes();
+      const call = c.send(LIST, as(first));
+      const deadline = Date.now() + 5000;
+      while (probes() === before) {
+        if (Date.now() > deadline) throw new Error('the request never reached its probe');
+        await new Promise((r) => setTimeout(r, 5));
+      }
+      // Only that probe is held; the initialize's own goes straight through.
+      platform.state.probeGate = undefined;
+
+      const second = await c.send(INIT, as());
+      expect(second.status).toBe(429);
+      expect(second.headers.get('mcp-session-id')).toBeNull();
+      await second.text();
+
+      release();
+      const answered = await call;
+      expect(answered.status).toBe(200);
+      await answered.text();
+      expect(await sessions(url)).toBe(1);
+      const kept = await c.send(LIST, as(first));
+      expect(kept.status).toBe(200);
+      await kept.text();
+    } finally {
+      platform.state.probeGate = undefined;
+      release();
+      await stop(server);
+    }
+  });
+
   // OPL-5050: a refused bearer on a sessionless request that is not an
   // initialize was answered 400 "No session id", which sent the client to its
   // session handling when the fix was its token.
