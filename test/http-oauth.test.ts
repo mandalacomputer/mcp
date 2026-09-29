@@ -1692,18 +1692,31 @@ describe('hosted: traffic that carries no request', () => {
   };
   const pause = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-  /** Open the standing stream, and a way to close it. */
-  const stream = async (url: string, token: string, session: string) => {
+  /**
+   * Try to open the standing stream: its status, and a way to close it. A
+   * caller racing the sweeper may meet 404, and decides for itself what that
+   * means.
+   */
+  const openStream = async (url: string, token: string, session: string) => {
     const abort = new AbortController();
     const res = await fetch(url, {
       headers: { Accept: 'text/event-stream', ...as(token, session) },
       signal: abort.signal,
     });
-    expect(res.status).toBe(200);
-    return async () => {
-      abort.abort();
-      await res.body?.cancel().catch(() => {});
+    return {
+      status: res.status,
+      close: async () => {
+        abort.abort();
+        await res.body?.cancel().catch(() => {});
+      },
     };
+  };
+
+  /** Open the standing stream, which must be served, and a way to close it. */
+  const stream = async (url: string, token: string, session: string) => {
+    const { status: code, close } = await openStream(url, token, session);
+    expect(code).toBe(200);
+    return close;
   };
 
   /**
@@ -1765,10 +1778,16 @@ describe('hosted: traffic that carries no request', () => {
     const { server, url, c, leaked } = await revokedAccount();
     try {
       // Opening and closing the stream each stamped the session; neither does
-      // for a bearer the platform no longer vouches for.
+      // for a bearer the platform no longer vouches for. The sweeper may run
+      // between the count and the GET, so a 404 is the sweep too.
       const swept = await keepUntil(8000, async () => {
         if ((await sessions(url)) === 0) return true;
-        const close = await stream(url, 'mcpat_leak', leaked);
+        const { status: code, close } = await openStream(url, 'mcpat_leak', leaked);
+        if (code === 404) {
+          await close();
+          return true;
+        }
+        expect(code).toBe(200);
         await pause(20);
         await close();
         return false;
@@ -1790,7 +1809,10 @@ describe('hosted: traffic that carries no request', () => {
       const swept = await keepUntil(8000, async () => {
         if ((await sessions(url)) === 0) return true;
         const res = await fetch(url, { method: 'HEAD', headers: as('mcpat_leak', leaked) });
-        expect(await status(res)).toBe(405);
+        // Swept between the count and this HEAD.
+        const code = await status(res);
+        if (code === 404) return true;
+        expect(code).toBe(405);
         return false;
       });
       expect(swept).toBe(true);
@@ -1812,7 +1834,10 @@ describe('hosted: traffic that carries no request', () => {
           method: 'DELETE',
           headers: { ...as('mcpat_leak', leaked), 'mcp-protocol-version': '1999-01-01' },
         });
-        expect(await status(res)).toBe(400);
+        // Swept between the count and this DELETE.
+        const code = await status(res);
+        if (code === 404) return true;
+        expect(code).toBe(400);
         return false;
       });
       expect(swept).toBe(true);
