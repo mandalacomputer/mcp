@@ -941,6 +941,45 @@ describe('the per-bearer session cap', () => {
       }
     });
 
+    // The landing fallback to the requester's own idle session is for a room
+    // another landing took. A planned victim put to work is the older race,
+    // and it still drops the new session: the requester's own idle session is
+    // not closed in its place, as it would not be at admission either.
+    it('drops a new session rather than close its own idle one when the planned victim was put to work', async () => {
+      const t = await setup({ maxSessionsPerBearer: 16, maxSessions: 3 });
+      let hold: ReturnType<typeof holdInitializes> | undefined;
+      try {
+        const a1 = await t.open('com_alice');
+        await pause();
+        const b1 = await t.open('com_bob');
+        await pause();
+        const b2 = await t.open('com_bob');
+        const busyB2 = await t.busy('com_bob', b2);
+
+        // Bob holds the most, and b1 is his idle session: it is planned.
+        hold = holdInitializes();
+        const h = hold;
+        const alice2 = t.send(INIT, t.as('com_alice'));
+        await until(() => h.state.held === 1, 'the initialize never reached the transport');
+        const busyB1 = await t.busy('com_bob', b1);
+        h.open();
+        const late = await alice2;
+        expect(late.status).toBe(404);
+        expect(late.headers.get('mcp-session-id')).toBeNull();
+        await late.text();
+        expect(await t.count()).toBe(3);
+        expect(await status(t, 'com_alice', a1)).toBe(200);
+
+        t.release();
+        for (const call of [busyB1, busyB2]) await (await call).text();
+        expect(await status(t, 'com_bob', b1)).toBe(200);
+        expect(await status(t, 'com_bob', b2)).toBe(200);
+      } finally {
+        hold?.restore();
+        await t.teardown();
+      }
+    });
+
     // At admission the requester's own session is not yet anybody's, so a tie
     // on count goes by the oldest idle session. Landing must choose the same
     // way when nothing changed in between: counting the new session toward

@@ -865,13 +865,21 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
    * holding the most may then have nothing idle. Only there, the requester's
    * own idle session makes the room instead of the session being dropped: its
    * admission already let it in, and that takes nothing from anybody else.
+   * `planned` tells that race from the other one: it holds the fair-share
+   * victims the admission chose (`pooled`), and while any of them is still
+   * here with a request in flight, the room was not taken, it was put to
+   * work, and the session drops at birth as it always has.
    */
   const planRoom = (
     seat: Seat,
     countPending: boolean,
-  ): { victims: Array<[string, Live]> } | { refuse: 'bearer' | 'account' | 'pool' } => {
+    planned: readonly string[] = [],
+  ):
+    | { victims: Array<[string, Live]>; pooled: string[] }
+    | { refuse: 'bearer' | 'account' | 'pool' } => {
     const chosen = new Set<string>();
     const victims: Array<[string, Live]> = [];
+    const pooled: string[] = [];
     const idleOf = (list: Array<[string, Live]>) =>
       list.filter(([id, live]) => live.active === 0 && !chosen.has(id)).sort(leastRecentFirst);
     const take = (list: Array<[string, Live]>) => {
@@ -901,7 +909,7 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
     }
 
     let overPool = sessions.size + (countPending ? pending : 0) - victims.length + 1 - maxSessions;
-    if (overPool <= 0) return { victims };
+    if (overPool <= 0) return { victims, pooled };
     // What each account holds once the victims above are gone, and which of
     // those sessions are idle, least recently seen first.
     const held = new Map<string, { count: number; idle: Array<[string, Live]> }>();
@@ -930,18 +938,21 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
         }
       }
       let victim = top?.idle.shift();
-      if (!victim && !countPending) {
-        // Landing, and the account holding the most has nothing idle. The
-        // admission already let this session in, so its own account's idle
-        // session makes the room: that takes nothing from anybody else.
+      if (!victim && !countPending && !planned.some((id) => (sessions.get(id)?.active ?? 0) > 0)) {
+        // Landing, the account holding the most has nothing idle, and no
+        // victim the admission planned was put to work: another landing took
+        // the room. The admission already let this session in, so its own
+        // account's idle session makes the room: that takes nothing from
+        // anybody else.
         top = held.get(seat.account);
         victim = top?.idle.shift();
       }
       if (!top || !victim) return { refuse: 'pool' };
       top.count--;
       take([victim]);
+      pooled.push(victim[0]);
     }
-    return { victims };
+    return { victims, pooled };
   };
 
   const serving = async <T>(live: Live, handle: () => Promise<T>): Promise<T> => {
@@ -1363,7 +1374,8 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
           // rules: a session closed or put to work since then is not a
           // candidate. Where another initialize landed first and took the
           // room this one planned, and the account holding the most now has
-          // nothing idle, the requester's own idle session makes it (see
+          // nothing idle, the requester's own idle session makes it, unless a
+          // victim the check above planned was put to work instead (see
           // `planRoom`). Should the room no longer be there, nothing is closed
           // and this session is dropped instead of admitted over a limit. The
           // transport closes before the SDK answers, so the SDK answers this
@@ -1374,7 +1386,7 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
           // on its own. Only a race reaches this: a request landing on a
           // planned session, or another initialize taking the room, between
           // the check above and this callback.
-          const landing = planRoom(seat, false);
+          const landing = planRoom(seat, false, room.pooled);
           if ('refuse' in landing) {
             dropped = true;
             release();
