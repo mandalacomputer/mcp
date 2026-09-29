@@ -5,6 +5,8 @@ import {
   type Server,
 } from 'node:http';
 import { type AddressInfo, connect, Socket } from 'node:net';
+import { setFlagsFromString } from 'node:v8';
+import { runInNewContext } from 'node:vm';
 import { gzipSync } from 'node:zlib';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
@@ -433,6 +435,45 @@ describe('the per-bearer session cap', () => {
         await res.text();
       }
     } finally {
+      await t.teardown();
+    }
+  });
+
+  it('lets a session its successor evicted be collected', async () => {
+    // Each initialize at the cap evicts the bearer's idle session. Nothing the
+    // new session keeps may reach the one it replaced (its transport, its
+    // server), or every generation before it stays reachable through the
+    // chain and memory grows with each initialize while the map stays at the
+    // cap. Round 3 had the initialize callback capture the admission plan,
+    // victims included, and this counted 30 of 30 still alive.
+    const t = await setup({ maxSessionsPerBearer: 1 });
+    const original = StreamableHTTPServerTransport.prototype.handleRequest;
+    const refs: WeakRef<StreamableHTTPServerTransport>[] = [];
+    const seen = new WeakSet<StreamableHTTPServerTransport>();
+    StreamableHTTPServerTransport.prototype.handleRequest = async function (...args) {
+      if (!seen.has(this)) {
+        seen.add(this);
+        refs.push(new WeakRef(this));
+      }
+      return original.apply(this, args);
+    };
+    try {
+      const opens = 30;
+      for (let i = 0; i < opens; i++) await t.open('com_alice');
+      expect(refs).toHaveLength(opens);
+      expect(await t.count()).toBe(1);
+
+      setFlagsFromString('--expose-gc');
+      const gc = runInNewContext('gc') as () => void;
+      let alive = opens;
+      for (let i = 0; i < 10 && alive > 2; i++) {
+        await new Promise((r) => setTimeout(r, 20));
+        gc();
+        alive = refs.filter((r) => r.deref() !== undefined).length;
+      }
+      expect(alive).toBeLessThanOrEqual(2);
+    } finally {
+      StreamableHTTPServerTransport.prototype.handleRequest = original;
       await t.teardown();
     }
   });

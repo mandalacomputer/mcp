@@ -1318,6 +1318,13 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
           : `${who} already holds its maximum of ${cap} ${cap === 1 ? 'session' : 'sessions'} on this server. Close one (DELETE /mcp) or retry shortly.`;
       return rpcError(res, 429, -32002, message, rpcId(req));
     }
+    // Only the planned ids go on to the landing, never `room` itself: a
+    // closure that named `room` would keep its `victims` (the evicted
+    // sessions, their transports and servers) alive for as long as the new
+    // session lives, and each of those the generation before, so memory
+    // would grow with every initialize at the cap though the map never
+    // passes it.
+    const plannedIds = room.pooled;
     pending++;
     pendingByDigest.set(keyId, (pendingByDigest.get(keyId) ?? 0) + 1);
     pendingByAccount.set(seat.account, (pendingByAccount.get(seat.account) ?? 0) + 1);
@@ -1386,7 +1393,7 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
           // on its own. Only a race reaches this: a request landing on a
           // planned session, or another initialize taking the room, between
           // the check above and this callback.
-          const landing = planRoom(seat, false, room.pooled);
+          const landing = planRoom(seat, false, plannedIds);
           if ('refuse' in landing) {
             dropped = true;
             release();
