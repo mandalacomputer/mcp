@@ -362,6 +362,31 @@ describe('flat and nested chat failures', () => {
     expect(text(result)).toContain('permission_error');
     expect(text(result)).not.toContain('a role that changed');
   });
+  // A flat {error: string} is the platform refusing before any run started
+  // (the role gate), not a provider's answer inside a run: it keeps the role
+  // advice, and nothing was billed.
+  it('keeps the role advice for a flat pre-run 403 from the role gate', async () => {
+    answer(
+      {
+        error:
+          'Your role on this account is viewer, and POST /chat/completions needs member. Ask an owner to change your role.',
+      },
+      403,
+    );
+    const result = await connection.call('run_agent_chat', task);
+    expect(result.isError).toBe(true);
+    expect(text(result)).toContain('a role that changed');
+    expect(text(result)).toContain('Retrying does not help');
+    expect(text(result)).not.toContain('permission_error');
+    expect(text(result)).not.toContain('model-provider account');
+    expect(text(result)).not.toContain('completed steps were already billed');
+  });
+  it('keeps the plan advice for a flat pre-run 402', async () => {
+    answer({ error: 'Your plan does not include agent runs.' }, 402);
+    const result = await connection.call('run_agent_chat', task);
+    expect(text(result)).toContain('the plan on this account');
+    expect(text(result)).not.toContain('billing_error');
+  });
   it('keeps account advice for a 403 the platform marked revoked', async () => {
     answer({ error: { message: 'account suspended', code: 403, reason: 'revoked' } }, 403);
     const result = await connection.call('run_agent_chat', task);

@@ -22,7 +22,9 @@ are wording changes, and they are behaviour changes in the way that matters.
   its overload, and the advice now says to check the model-provider account.
   A `403` gets account advice (a role that changed, an account suspended) only
   when it carries `reason: "revoked"`; any other `403` is named as a possible
-  permission error on the model key.
+  permission error on the model key. This applies to a run that started and
+  failed; a refusal given before any run started (a role that cannot run
+  agents, a plan that does not cover them) keeps the role and plan advice.
 - **`run_agent_chat` says it is for short tasks.** It does not stream, and the
   hosted edge cuts a request that does not stream after about 120 seconds,
   which stops the run and loses its result; the description and README say so

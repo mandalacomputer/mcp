@@ -237,6 +237,11 @@ describe('an unknown outcome', () => {
       expect(said).not.toContain('settled idempotency_key');
       expect(said).not.toContain('with a new idempotency_key');
       expect(said).not.toContain('do NOT resend it meanwhile');
+      // The status line must not give a second, conflicting route: a 503's
+      // read-first sentence names no key, which is the duplicate resend.
+      expect(said).not.toContain('Read the current state before sending it again');
+      expect(said).not.toContain('MAY OR MAY NOT HAVE HAPPENED');
+      if (status === 503) expect(said).toContain('see below for how to resend it');
     },
   );
 

@@ -11,7 +11,7 @@ import {
   resendAfterSpentKey,
   resendUnseenByRead,
 } from '../errors.js';
-import { failed, guarded, operationIdOf, refused, said } from '../format.js';
+import { failed, guarded, operationIdOf, refused, said, unavailableAdvice } from '../format.js';
 import * as P from '../paths.js';
 import { heartbeat, POLL_MS, pollDelay, sleep } from '../poll.js';
 import { label, metadata, metadataCall } from './directory.js';
@@ -89,6 +89,10 @@ export const buildIdempotencyKeyArg = keyArg.describe(
   `${KEY_FIRST}, and the call may still be under way: read its operation first (get_operation with the operation_id the error named, or list_operations with the key), wait while it is pending or running and do not resend meanwhile, and send the call with a new key (or none) only once the operation is final as failed or not found AND get_computer shows the step did not happen.${KEY_LAST}`,
 );
 
+/** The status line's advice beside the unsent-refusal resend paragraph. */
+const UNSENT_REFUSAL_ADVICE =
+  'the platform could not carry this out right now; see below for how to resend it';
+
 /**
  * The answer to a lifecycle tool call that failed, with what its key means.
  *
@@ -121,14 +125,26 @@ export function keyedFailure(
   key: string,
 ): CallToolResult {
   const advice = idempotencyAdvice(err, tool);
-  const result = failed(err, advice === undefined);
+  const unsentRefusal =
+    !keyedOutcomeUnknown(err) &&
+    platformAnsweredFailure(err) &&
+    !operationIdOf((err as APIError).body);
+  // The unsent-refusal paragraph below says how to resend, so the status line
+  // must not also carry a 503's read-the-state-first sentence: two routes in
+  // one answer, and the read-first one names no key, which is the resend that
+  // could do it twice (OPL-5437). Only that sentence is replaced; any other
+  // 5xx keeps the platform's own word.
+  const result =
+    unsentRefusal && unavailableAdvice(err as APIError) !== undefined
+      ? failed(err, advice === undefined, UNSENT_REFUSAL_ADVICE)
+      : failed(err, advice === undefined);
   const [first, ...rest] = result.content;
   if (first?.type !== 'text') return result;
   let text = first.text;
   if (advice) text += `\n\nAbout its idempotency_key: ${advice}.`;
   if (keyedOutcomeUnknown(err)) {
     text += `\n\nTo retry without risking a second ${what}, call ${tool} again with idempotency_key "${key}".`;
-  } else if (platformAnsweredFailure(err) && !operationIdOf((err as APIError).body)) {
+  } else if (unsentRefusal) {
     text +=
       `\n\nThe platform answered this itself and named no operation, so nothing may have been done: an answer like this is usually a refusal given before the call was sent anywhere, which releases idempotency_key "${key}". ` +
       `Call ${tool} again with the SAME idempotency_key "${key}" (after a short wait on a busy or unavailable answer): if the key was released the platform carries the call out, and if not it answers idempotency_outcome_unknown and says what to read before anything else. ` +

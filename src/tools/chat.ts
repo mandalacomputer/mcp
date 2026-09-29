@@ -89,15 +89,22 @@ const failedAgent = z.object({
 });
 /**
  * The advice for a failed chat run, in place of the status advice every other
- * tool gets (OPL-5437). A JSON body is the platform's answer, and on this route
- * its 402, 504, 529 and unrevoked 403 are the model provider's statuses for the
- * configured model key rather than the Mandala plan or role — see
- * `agentRunAdvice`. Without a JSON body the status is a proxy's, and the one
- * this route meets by design is the hosted edge's cut on a request that is not
- * streaming.
+ * tool gets (OPL-5437). A run that started and failed comes back in OpenAI's
+ * nested shape, `{error: {message, ...}}`, and there its 402, 504, 529 and
+ * unrevoked 403 are the model provider's statuses for the configured model key
+ * rather than the Mandala plan or role — see `agentRunAdvice`. A flat
+ * `{error: string}` is the platform refusing before any run started (the role
+ * gate, a bad body, a suspension, the meter), so it keeps the status advice
+ * every other tool gets: nothing ran, nothing was billed, and a viewer's 403 is
+ * the role. Without a JSON body the status is a proxy's, and the one this route
+ * meets by design is the hosted edge's cut on a request that is not streaming.
  */
 function runAdvice(error: APIError): string | undefined {
-  if (isRecord(error.body)) return agentRunAdvice(error.status, error.reason, 'run_agent_chat');
+  if (isRecord(error.body)) {
+    return isRecord(error.body.error)
+      ? agentRunAdvice(error.status, error.reason, 'run_agent_chat')
+      : undefined;
+  }
   if (error.status === 524) return EDGE_CUT;
   return undefined;
 }
