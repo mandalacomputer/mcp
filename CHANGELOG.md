@@ -110,34 +110,22 @@ are wording changes, and they are behaviour changes in the way that matters.
   `429` for a bearer still over its limit says how many it holds and to wait
   for the busy ones.
 - **One account can no longer fill the hosted server's session pool by
-  holding many keys, and a suspended account no longer gets one session per
-  key.** The limits were per bearer, so an account with 16 keys held all 256
-  sessions and every other tenant's initialize was answered `503`. Sessions
-  now also count against the account the platform's `whoami` names for each
-  token (a token whose `whoami` names none is an account of its own), and an
-  account holds at most 128, half the pool. Past that an initialize is
-  answered `429` with `Retry-After`; a bearer's own least recently used idle
-  session makes room under the account's ceiling as it does under its own
-  cap, but no other token's session is ever closed for it. Initializes in
-  flight are counted per account, so a burst across its keys cannot pass the
-  ceiling together. Every POST on a session and every event stream is now
-  checked with the platform (cached), not only a POST carrying a request, so
-  a revoked token can no longer keep its sessions alive with notifications.
-  A session whose token was refused still counts toward its account's
-  ceiling until it is closed, and while idle it is closed to make room for
-  the account's other tokens, so a revoked key cannot lock them out and the
-  account cannot pass its ceiling by revoking its keys. A suspended account is held to one session across all
-  its tokens: once any of its tokens is found suspended, its other tokens are
-  held too, even with an active answer still cached, and an active answer to
-  a check that started before the suspension was seen does not undo it. The
-  next request, notification or event stream on any of its sessions, or an
-  initialize on any of its tokens, closes the account's other idle sessions
-  down to one; one with a request in flight is kept. While it holds that
-  one, an initialize on any of its other tokens is answered `429`, and
-  another token's session is never closed for it. An initialize admitted
-  just before its account was suspended is dropped as its session is made
-  (`404`). A full pool is still a `503`, now with `Retry-After`, and no
-  other token's session is closed to make room in it.
+  holding many keys.** The limit was per bearer, so an account with 16 keys
+  held all 256 sessions and every other tenant's initialize was answered
+  `503`. Sessions now also count against the account the platform's
+  `whoami` names for each token (a token whose `whoami` names none is an
+  account of its own), and an account holds at most 128, half the pool.
+  Initializes in flight are counted per account, so a burst across its keys
+  cannot pass the ceiling together. At the ceiling an initialize closes an
+  idle session to make room only if it is the requesting token's own (least
+  recently used first, as at its own cap, and even while it is under that
+  cap) or one of the same account whose token the platform has already
+  refused; otherwise it is answered `429` with `Retry-After`, naming only
+  the account's limit. A live session of another token, or any session of
+  another account, is never closed for it. A refused session counts until it
+  is closed, so an account cannot pass its ceiling by revoking its own keys.
+  Suspension is unchanged and still held per token. A full pool is still a
+  `503`, now with `Retry-After`, and nothing is closed to make room in it.
 
 ## [0.7.0] — 2026-09-27
 

@@ -65,14 +65,15 @@ Environment
                        held to its account's maximum, below.
   MANDALA_MCP_MAX_SESSIONS_PER_ACCOUNT
                        --http only. How many live sessions one account may hold
-                       across all its tokens (default ${DEFAULT_MAX_SESSIONS / 2}, half the pool; a
-                       suspended account is held to one whatever this says).
+                       across all its tokens (default ${DEFAULT_MAX_SESSIONS / 2}, half the pool).
                        Hosted (the metadata URL set), the account is the one the
                        platform names for the token; otherwise each token is an
-                       account of its own. Past it an initialize is refused 429
-                       with Retry-After; no other token's session is closed. A
-                       whole number from 1 to ${DEFAULT_MAX_SESSIONS}; anything else is
-                       refused at startup.
+                       account of its own. At it an initialize closes only the
+                       token's own idle sessions, or the account's ones whose
+                       token the platform refused, and is otherwise refused 429
+                       with Retry-After. Suspension is held per token, above,
+                       not here. A whole number from 1 to ${DEFAULT_MAX_SESSIONS}; anything
+                       else is refused at startup.
 
 Flags override the environment.`;
 

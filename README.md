@@ -1137,14 +1137,10 @@ address.
   per source address, 20 a minute. Past that, a token already accepted still
   passes and a new one is still checked, but only one every 5 s per address;
   the rest get `429` with `Retry-After`. The budget comes back when its minute
-  is up. Every POST
-  on a session, a notification as much as a request, and the event stream's
-  `GET` are checked again before they are served, with an acceptance cached
-  for 60 s under the token's digest, so an expired or revoked token is a clean
-  `401` before any stream opens. A session whose token was refused is served
-  nothing more; it still counts toward its account's ceiling below until it
-  is closed, and while idle it is the one session of another token that may
-  be closed to make room for the account's other tokens.
+  is up. A POST
+  carrying a request is checked again before it is dispatched, with an
+  acceptance cached for 60 s under the token's digest, so an expired or
+  revoked token is a clean `401` before any stream opens.
 - **One bearer holds at most 16 sessions**, and a suspended account's bearer
   one (enough to ask `whoami`), so no single token can fill the pool. At that
   limit, an initialize closes the bearer's least recently used idle session to
@@ -1154,52 +1150,46 @@ address.
   idle session it planned to close is put to work before the new session is
   made, the new one is dropped instead and the initialize is answered `404`
   (`Session not found`, no `Retry-After`), which an SDK client reports as a
-  failed connect. Other bearers' sessions are never touched. A
+  failed connect. Other bearers' sessions are never touched. An account
+  suspended after its bearer opened sessions keeps only one: the next request
+  on any of them closes the bearer's other idle sessions, as does its next
+  initialize, and one still serving a request goes on a later request once
+  it is idle. A
   `429` names what the bearer holds, so one still over its limit is told to
   wait for its busy sessions rather than to close one. `runHttp` takes the 16
   as `maxSessionsPerBearer`, and the CLI reads it from
   `MANDALA_MCP_MAX_SESSIONS_PER_TOKEN` (a whole number from 1 to 256, the
-  whole pool; anything else is refused at startup). A self-hosted `--http`
-  server applies it too, but checks no bearer with the platform, so there any
-  string is its own bucket: the per-bearer cap spreads one key's clients, and
-  what bounds an untrusted caller is the process-wide cap (256), and the
-  default loopback bind until you expose the port.
+  whole pool; anything else is refused at startup; a token is also held to
+  its account's ceiling, below). A self-hosted `--http` server applies it
+  too, but checks no bearer with the platform, so there any string is its own
+  bucket: the per-bearer cap spreads one key's clients, and what bounds an
+  untrusted caller is the process-wide cap (256), and the default loopback
+  bind until you expose the port.
 - **One account holds at most 128 sessions, half the pool, across all its
   tokens.** Sessions are counted by the account id the platform's `whoami`
   names for each token, so an account with many keys or grants counts once;
   a token whose `whoami` names no account counts as an account of its own.
-  Past the ceiling, an initialize is answered `429` with `Retry-After`,
-  saying it is the account's limit and naming only that number. The
-  bearer's own room-making above applies at the ceiling as at its own cap:
-  a token whose account is at its ceiling has its own least recently used
-  idle session closed to make room, even while it is under its own cap, and
-  is refused only when it has none idle. Nothing else is closed to make
-  room: not another token's live session, and not another account's; only an
-  idle session of the account's whose token the platform refused. A full
-  pool (256) is answered
-  `503` with `Retry-After`, whoever holds it. Initializes in flight are
-  counted, so a burst across one account's keys cannot pass its ceiling
-  together; one admitted before its account reached a lower limit (it was
-  suspended) is dropped as its session is made, answered `404` as in the
-  race above. `runHttp` takes the ceiling as `maxSessionsPerAccount`, and the
-  CLI reads it from `MANDALA_MCP_MAX_SESSIONS_PER_ACCOUNT`. A self-hosted
-  server verifies no account, so there each token is an account of its own,
-  held to the ceiling as well as to its own cap; to let one token hold more
-  than 128 sessions, raise both.
-- **A suspended account holds one session, across all its tokens**, enough
-  to ask `whoami`. Once any of its tokens is found suspended, the account is
-  held to one for at least a minute (longer if the check cache is), including
-  its tokens whose last check said it was active; an active answer clears
-  that only when its check started after the suspension was seen, so an
-  answer that was already on its way cannot undo it. The next request,
-  notification or event stream on any of its sessions closes the account's
-  other idle sessions, whichever token opened them, as does an initialize on
-  any of its tokens; the session being served and any with a request in
-  flight are kept, and go later once idle. While the account holds its one
-  session, an initialize on any other of its tokens is answered `429` with
-  `Retry-After`, idle or not; another token's session is never closed for
-  it. The token that holds the session replaces it with a new one when it
-  is idle, as at its own cap.
+  Initializes in flight are counted too, so a burst across one account's keys
+  cannot pass the ceiling together. At the ceiling, an initialize makes room
+  by closing idle sessions of two kinds only: the account's sessions whose
+  token the platform has already refused on a request made there, first,
+  and then the requesting token's own least recently used,
+  as at its own cap and even while it is under that cap. When that is not
+  enough the answer is `429` with `Retry-After`, saying it is the account's
+  limit and naming only that number. A live session of another token is
+  never closed for the ceiling, nor any session of another account, and the
+  race above applies here too (`404`). A refused session counts until it is
+  closed, so revoking keys never lets an account past its ceiling; a session
+  whose token was revoked but never sent a request again is not known to be
+  refused, and counts until it idles out. Suspension is held per token, as
+  above, not per account. A full pool (256) is answered `503` with
+  `Retry-After`, whoever holds it, and nothing is closed to make room in it.
+  `runHttp` takes the ceiling as `maxSessionsPerAccount`, and the CLI reads
+  it from `MANDALA_MCP_MAX_SESSIONS_PER_ACCOUNT` (a whole number from 1 to
+  256; anything else is refused at startup). A self-hosted server verifies
+  no account, so there each token is an account of its own, held to the
+  ceiling as well as to its own cap; to let one token hold more than 128
+  sessions, raise both.
 - **A token the platform refuses during a call comes back as that same
   `401`**, not as a tool error, so the client refreshes or authorizes again —
   the answer is held until its first byte for this. The one case that cannot
@@ -1212,10 +1202,7 @@ address.
   `404 Unknown session`, the MCP spec's signal to initialize again. An access
   token says nothing this server can check about which grant it came from, so
   rebinding would let any valid credential that learned a session id take over
-  its bound computer, buffered events and retained results. On a suspended
-  account, the old token's session holds the account's one session until the
-  client deletes it or it idles out, and the refreshed token is answered
-  `429` until then.
+  its bound computer, buffered events and retained results.
 - `X-Mandala-MCP-Service` carries `MANDALA_MCP_SERVICE_SECRET` on every
   platform request, only ever to `MANDALA_BASE_URL`, so a token cannot be
   replayed at the API directly by the app it was issued to. A client's own
@@ -1238,7 +1225,7 @@ address.
 | `MANDALA_MCP_RESOURCE_METADATA_URL` | `--http` only. The OAuth protected-resource metadata URL this server is published under. Set, it answers OAuth clients as described under Hosted, with OAuth; unset, callers bring an API key. |
 | `MANDALA_MCP_SERVICE_SECRET` | `--http` only. Sent as `X-Mandala-MCP-Service` on every platform request, to `MANDALA_BASE_URL` only. Never logged. |
 | `MANDALA_MCP_MAX_SESSIONS_PER_TOKEN` | `--http` only. How many live sessions one bearer token may hold. Default 16; a whole number from 1 to 256 (the server's whole session pool), and anything else is refused at startup. A suspended account's token is held to one whatever this says. A token is also held to its account's limit, below. |
-| `MANDALA_MCP_MAX_SESSIONS_PER_ACCOUNT` | `--http` only. How many live sessions one account may hold across all its tokens. Default 128, half the pool; a whole number from 1 to 256, and anything else is refused at startup. Hosted (the metadata URL set), the account is the one the platform's `whoami` names for the token; self-hosted, or when `whoami` names none, each token is an account of its own. Past it an initialize is refused `429`; no other token's session is closed. A suspended account is held to one whatever this says. |
+| `MANDALA_MCP_MAX_SESSIONS_PER_ACCOUNT` | `--http` only. How many live sessions one account may hold across all its tokens. Default 128, half the pool; a whole number from 1 to 256, and anything else is refused at startup. Hosted (the metadata URL set), the account is the one the platform's `whoami` names for the token; self-hosted, or when `whoami` names none, each token is an account of its own. Past it an initialize is refused `429`, after closing only the token's own idle sessions or the account's refused ones. Suspension is not counted here; it holds each token to one. |
 
 Every one of these but the model key, the two tool filters, the two OAuth settings and the two session limits has a flag as well, and a flag overrides
 the environment: `--http`, `--port`, `--host`, `--base-url`, `--computer`,
