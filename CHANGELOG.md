@@ -129,6 +129,19 @@ are wording changes, and they are behaviour changes in the way that matters.
   30 minutes, so an account above half its ceiling when its clients refresh
   can be answered `429` for that long. Suspension is unchanged and still held per token. A full pool is still a
   `503`, now with `Retry-After`, and nothing is closed to make room in it.
+- **A revoked token's sessions idle out on the hosted server, whatever
+  else its holder sends.** Only a POST carrying a request has its token
+  checked, yet a notification, a response or the standing `GET /mcp` stream
+  each kept its session from idling out, so a revoked token's holder could
+  keep its sessions, and its account's ceiling, held indefinitely without
+  ever being found refused, answering the account's valid tokens `429`. That
+  traffic is still served, but now keeps a session alive only while the
+  platform's acceptance of its token is still cached (60 s), so such a
+  session idles out within about that plus the session idle timeout (30
+  minutes). Each request renews the acceptance, so a client that makes one
+  at least once per idle timeout is unaffected, and a session with a request
+  in flight is still never swept.
+  A self-hosted server is unchanged.
 
 ## [0.7.0] — 2026-09-27
 
