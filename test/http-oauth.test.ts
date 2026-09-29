@@ -1,4 +1,10 @@
-import type { Server } from 'node:http';
+import { once } from 'node:events';
+import {
+  request as httpRequest,
+  type IncomingMessage,
+  type Server,
+  type ServerResponse,
+} from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
@@ -1157,6 +1163,180 @@ describe('hosted: checking a bearer before it gets anything', () => {
         expect(probes()).toBe(before);
         expect(await sessions(url)).toBe(3);
       } finally {
+        await stop(server);
+      }
+    });
+
+    /**
+     * A tools/list POST on a session, sent raw so that the test holds its
+     * connection: only the headers and five bytes of the body now, the rest
+     * on `finish` (or at once, with `whole`), or never, on `abandon`. Returns
+     * once the server has the request, with the server's side of it:
+     * Express is the server's first `request` listener and runs its
+     * middleware up to the body read synchronously, so whatever the request
+     * marks on its session before its body is read is marked by then.
+     */
+    const post = async (
+      server: Server,
+      url: string,
+      token: string,
+      session: string,
+      whole = false,
+    ) => {
+      const payload = JSON.stringify(LIST);
+      const target = new URL(url);
+      const seen = once(server, 'request') as Promise<[IncomingMessage, ServerResponse]>;
+      const req = httpRequest({
+        hostname: target.hostname,
+        port: target.port,
+        path: target.pathname,
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Accept: 'application/json, text/event-stream',
+          'Content-Length': Buffer.byteLength(payload),
+          ...as(token, session),
+        },
+      });
+      const done = new Promise<number>((resolve) => {
+        req.on('response', (res) => {
+          res.resume();
+          res.on('end', () => resolve(res.statusCode ?? 0));
+        });
+        req.on('error', () => resolve(0));
+        req.on('close', () => resolve(0));
+      });
+      if (whole) req.end(payload);
+      else req.write(payload.slice(0, 5));
+      const [, served] = await seen;
+      return {
+        done,
+        served,
+        finish: () => req.end(payload.slice(5)),
+        abandon: () => req.destroy(),
+      };
+    };
+
+    // Marked before the body was read, an upload kept its session out of a
+    // suspended account's trim for as long as the body took to arrive, which
+    // is the sender's to choose: an account held to one session kept three.
+    it('holds a suspended account to one session while requests on the others are still uploading', async () => {
+      platform = platformWithRefusals();
+      platform.state.accounts = accounts(['s1', 's2', 's3', 's4']);
+      const { server, url } = await start({
+        resourceMetadataUrl: METADATA,
+        serviceSecret: SECRET,
+        bearerCheckTtlMs: 0,
+      });
+      const calls: Array<Awaited<ReturnType<typeof post>>> = [];
+      try {
+        const c = client(url);
+        const a = await c.open('s1');
+        await pause();
+        const b = await c.open('s2');
+        await pause();
+        const d = await c.open('s3');
+        calls.push(await post(server, url, 's2', b), await post(server, url, 's3', d));
+        platform.state.suspended = true;
+
+        expect(await status(url, 's1', a)).toBe(200);
+        expect(await sessions(url)).toBe(1);
+        // A fourth key's initialize takes the one left, idle, for itself.
+        const e = await c.open('s4');
+        expect(await sessions(url)).toBe(1);
+        expect(await status(url, 's1', a)).toBe(404);
+        expect(await status(url, 's4', e)).toBe(200);
+
+        // The uploads find their sessions closed once they arrive.
+        for (const call of calls) call.finish();
+        expect(await Promise.all(calls.map((call) => call.done))).toEqual([404, 404]);
+      } finally {
+        for (const call of calls) call.abandon();
+        await stop(server);
+      }
+    });
+
+    // A token the platform refused is answered 401 on every later request
+    // before anything is dispatched; an upload on it must not keep its
+    // session from being closed to make room for somebody else.
+    it('does not spare a refused token’s session from room-making for an upload on it', async () => {
+      platform = platformWithRefusals();
+      platform.state.accounts = { r1: 'acc-r', x1: 'acc-x', y1: 'acc-y' };
+      const { server, url } = await start({
+        resourceMetadataUrl: METADATA,
+        serviceSecret: SECRET,
+        maxSessions: 2,
+        bearerCheckTtlMs: 0,
+      });
+      let call: Awaited<ReturnType<typeof post>> | undefined;
+      try {
+        const c = client(url);
+        const r = await c.open('r1');
+        await pause();
+        const x = await c.open('x1');
+        platform.refused.add('r1');
+        expect(await status(url, 'r1', r)).toBe(401);
+        call = await post(server, url, 'r1', r);
+
+        // The refused token's session is the older idle one, and it goes.
+        const y = await c.open('y1');
+        expect(await sessions(url)).toBe(2);
+        expect(await status(url, 'x1', x)).toBe(200);
+        expect(await status(url, 'y1', y)).toBe(200);
+        call.finish();
+        expect(await call.done).toBe(404);
+      } finally {
+        call?.abandon();
+        await stop(server);
+      }
+    });
+
+    // Once the route has taken a request over, releasing its pin is the
+    // route's job, whenever the response closes: a client that went away
+    // while its bearer was being checked left the session looking idle to
+    // an initialize making room, which closed it under the route.
+    it('keeps a session busy while its route waits on the bearer check, though its client has gone', async () => {
+      platform = platformWithRefusals();
+      platform.state.accounts = { t1: 'acc-1', t2: 'acc-2', t3: 'acc-3' };
+      const { server, url } = await start({
+        resourceMetadataUrl: METADATA,
+        serviceSecret: SECRET,
+        maxSessions: 2,
+        bearerCheckTtlMs: 0,
+      });
+      let release = () => {};
+      let call: Awaited<ReturnType<typeof post>> | undefined;
+      try {
+        const c = client(url);
+        const a = await c.open('t1');
+        await pause();
+        const b = await c.open('t2');
+
+        platform.state.probeGate = new Promise<void>((r) => {
+          release = r;
+        });
+        const before = probes();
+        call = await post(server, url, 't1', a, true);
+        const deadline = Date.now() + 5000;
+        while (probes() === before) {
+          if (Date.now() > deadline) throw new Error('the request never reached its probe');
+          await pause();
+        }
+        platform.state.probeGate = undefined;
+        const closed = once(call.served, 'close');
+        call.abandon();
+        await closed;
+
+        // The older idle session is a's, but its route is still running: b's goes.
+        const d = await c.open('t3');
+        expect(await sessions(url)).toBe(2);
+        expect(await status(url, 't2', b)).toBe(404);
+        expect(await status(url, 't1', a)).toBe(200);
+        expect(await status(url, 't3', d)).toBe(200);
+      } finally {
+        platform.state.probeGate = undefined;
+        release();
+        call?.abandon();
         await stop(server);
       }
     });

@@ -1176,7 +1176,9 @@ address.
   holding the most sessions (on a tie, the one whose idle session is oldest),
   which may be the caller's own; if that account has nothing idle, the answer
   is `503` with `Retry-After`, and nothing is taken from a smaller account instead. A session
-  with a request in flight is never closed, and the same `404` race as above
+  with a request in flight is never closed to make room, counted from when
+  its headers arrive (an unfinished body does not, though, spare a session
+  the idle sweep or a suspended account's trim), and the same `404` race as above
   applies. If another initialize lands first and takes the room this one
   planned, the caller's own least recently used idle session makes it
   instead, and the `404` comes only when the caller has none idle. `runHttp` takes the ceiling as `maxSessionsPerAccount`, and the CLI

@@ -88,6 +88,13 @@ type Live = {
   /** Requests currently being served on this session. */
   active: number;
   /**
+   * POSTs naming this session whose body has not all arrived yet (see
+   * `pinBeforeBody`). Busy for fair-share room-making only: the idle sweep and
+   * a suspended account's trim do not wait on them, since how long a body
+   * takes to arrive is the sender's to choose.
+   */
+  uploading: number;
+  /**
    * The platform has refused this session's bearer (hosted mode only). Every
    * later request carrying it is answered with the challenge before anything is
    * dispatched: the token is expired or revoked and only the client can mend it.
@@ -794,7 +801,10 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
       // that outlives the TTL — run_agent is minutes of clicking, and
       // wait_for_computer takes a timeout_s of up to 900 — would otherwise be
       // swept while it was still being served, closing the transport under an
-      // answer the caller had not received yet.
+      // answer the caller had not received yet. A body still uploading is not
+      // in flight here (`uploading`, not `active`): nothing about its bearer
+      // has been checked, and a sender that never finishes one must not keep a
+      // session past its TTL.
       if (live.active === 0 && live.lastSeen < cutoff) {
         sessions.delete(id);
         void live.transport.close().catch(() => {});
@@ -854,8 +864,10 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
   /**
    * Close some of `own`'s idle sessions, least recently seen first, until it
    * holds no more than `cap` or none idle is left. Never `keep`, and never one
-   * with a request in flight: the same test the sweeper and an initialize's
-   * room-making apply. Only a cap that has fallen needs this — an account
+   * with a request in flight: the sweeper's test. One whose request is still
+   * uploading its body is not spared (see `pinBeforeBody`): a sender could
+   * otherwise hold a suspended account's sessions open by never finishing
+   * one. Only a cap that has fallen needs this — an account
    * suspended after its bearers opened sessions (OPL-5448, OPL-5447) — since
    * an initialize never admits a session over the cap it is checked against.
    */
@@ -866,6 +878,15 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
     idle.sort(leastRecentFirst);
     evict(idle.slice(0, excess));
   };
+
+  /**
+   * Whether an initialize making room must pass this session over: a request
+   * is being served on it, or one naming it is still uploading its body. Only
+   * room-making waits on an upload; the sweeper and `trimIdle` test `active`
+   * alone (see `pinBeforeBody`).
+   */
+  const busyForRoom = (live: Live | undefined): boolean =>
+    live !== undefined && (live.active > 0 || live.uploading > 0);
 
   /**
    * Which sessions must close for one more to be admitted for `seat`, or
@@ -884,9 +905,9 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
    *    the pool is full: nothing is taken from a smaller account because a
    *    larger one is busy.
    *
-   * Idle means `active === 0`, the sweeper's test, so a session with a
-   * request in flight (or routed and waiting on its bearer check) is never
-   * chosen. Pure: nothing is closed here.
+   * Idle means nothing in flight and nothing uploading (`busyForRoom`), so a
+   * session with a request in flight (routed and waiting on its bearer check,
+   * or still sending its body) is never chosen. Pure: nothing is closed here.
    *
    * `countPending`: the admission check counts every initialize still in
    * flight, so a burst cannot all read the same numbers and all pass. At
@@ -918,7 +939,7 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
     const victims: Array<[string, Live]> = [];
     const pooled: string[] = [];
     const idleOf = (list: Array<[string, Live]>) =>
-      list.filter(([id, live]) => live.active === 0 && !chosen.has(id)).sort(leastRecentFirst);
+      list.filter(([id, live]) => !busyForRoom(live) && !chosen.has(id)).sort(leastRecentFirst);
     const take = (list: Array<[string, Live]>) => {
       for (const entry of list) {
         chosen.add(entry[0]);
@@ -966,7 +987,7 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
       if (chosen.has(entry[0])) continue;
       const t = tally(entry[1].account);
       t.count++;
-      if (entry[1].active === 0) t.idle.push(entry);
+      if (!busyForRoom(entry[1])) t.idle.push(entry);
     }
     if (countPending) for (const [account, n] of pendingByAccount) tally(account).count += n;
     for (const t of held.values()) t.idle.sort(leastRecentFirst);
@@ -979,7 +1000,7 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
         }
       }
       let victim = top?.idle.shift();
-      if (!victim && !countPending && !planned.some((id) => (sessions.get(id)?.active ?? 0) > 0)) {
+      if (!victim && !countPending && !planned.some((id) => busyForRoom(sessions.get(id)))) {
         // Landing, the account holding the most has nothing idle, and no
         // victim the admission planned was put to work: another landing took
         // the room. The admission already let this session in, so its own
@@ -1024,32 +1045,57 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
     };
   };
 
-  type SessionPin = { live: Live; release: () => void; handedOff: boolean };
+  /**
+   * A POST's claim on the session it names. `uploading` until the route takes
+   * it over, when it becomes an ordinary in-flight count (`active`); then
+   * `released`, once.
+   */
+  type SessionPin = { live: Live; state: 'uploading' | 'routed' | 'released' };
+
+  const releasePin = (pin: SessionPin) => {
+    if (pin.state === 'uploading') pin.live.uploading--;
+    else if (pin.state === 'routed') pin.live.active--;
+    pin.state = 'released';
+  };
 
   /**
-   * Pin the session a POST names, before its body is read (OPL-5447).
+   * Mark the session a POST names as uploading, before its body is read
+   * (OPL-5447).
    *
    * A body can take as long to arrive as its sender likes, and until it has,
    * the route has not run: pinned only there, a session whose request was
    * still uploading counted as idle, so an initialize making room closed it
-   * under that request, which then met a 404. Pinned here instead, for a
+   * under that request, which then met a 404. Marked here instead, for a
    * request whose bearer matches the session it names, the test the route
-   * applies first. The pin is released if the request never reaches the route
-   * (a parse failure, a refusal mid-upload, a client that went away): the
-   * response closes in every one of those. Otherwise the route takes it over
-   * (see {@link takePin}) and releases it itself, since a response can close
-   * while the route still has work in flight on the session.
+   * applies first, and never on a session whose bearer the platform refused.
+   *
+   * Only room-making honours the mark (`busyForRoom`). The idle sweep and a
+   * suspended account's trim do not: nothing about the bearer has been
+   * checked yet, and a sender that never finishes its body, or starts a fresh
+   * one as each times out, would otherwise keep a suspended account's
+   * sessions, or a revoked token's, open for as long as it liked. A session
+   * closed under an upload answers that upload 404 once it arrives, as any
+   * closed session does.
+   *
+   * The mark is released if the request never reaches the route (a parse
+   * failure, a refusal mid-upload, a client that went away): the response
+   * closes in every one of those. Otherwise the route takes it over (see
+   * {@link takePin}) and releases it itself, since a response can close while
+   * the route still has work in flight on the session.
    */
   const pinBeforeBody = (req: Request, res: Response, next: express.NextFunction) => {
     const id = req.header('mcp-session-id');
     const live = id ? sessions.get(id) : undefined;
     const key = bearer(req);
-    if (live && key && sameKey(live.keyDigest, key)) {
-      const pin: SessionPin = { live, release: pinSession(live), handedOff: false };
+    if (live && !live.refused && key && sameKey(live.keyDigest, key)) {
+      live.uploading++;
+      const pin: SessionPin = { live, state: 'uploading' };
       res.locals.sessionPin = pin;
       res.once('close', () => {
-        if (pin.handedOff) return;
-        pin.release();
+        // Once routed, the pin is the route's to release, however early the
+        // response closes: its bearer check and handler may still be running.
+        if (pin.state !== 'uploading') return;
+        releasePin(pin);
         // Should the route still run, it pins afresh rather than taking this.
         if (res.locals.sessionPin === pin) delete res.locals.sessionPin;
       });
@@ -1057,11 +1103,18 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
     next();
   };
 
-  /** The route's side of {@link pinBeforeBody}: from here, releasing it is the route's job. */
+  /**
+   * The route's side of {@link pinBeforeBody}: the body has arrived, so the
+   * upload becomes a request in flight, and releasing it is the route's job.
+   */
   const takePin = (res: Response): SessionPin | undefined => {
     const pin = res.locals.sessionPin as SessionPin | undefined;
     delete res.locals.sessionPin;
-    if (pin) pin.handedOff = true;
+    if (pin?.state === 'uploading') {
+      pin.live.uploading--;
+      pin.live.active++;
+      pin.state = 'routed';
+    }
     return pin;
   };
 
@@ -1197,7 +1250,7 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
       // The pin taken before the body was read, if there is one, is this
       // route's to release from here: exactly once, in the finally below.
       const pin = takePin(res);
-      let unpin = pin?.release ?? (() => {});
+      let unpin = pin ? () => releasePin(pin) : () => {};
       try {
         const live = sessions.get(sessionId);
         if (!live) return notFound(res, 'Unknown session. Initialize a new one.', rpcId(req));
@@ -1226,8 +1279,8 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
         // one is never the session closed under a request already routed to it
         // (OPL-5443). Only `active` is raised: a request refused below has not
         // been served, and does not stamp the session as heard from. Normally
-        // already pinned since before its body was read (see `pinBeforeBody`),
-        // and then not counted twice.
+        // already marked since before its body was read (see `pinBeforeBody`),
+        // and taken over from that mark above rather than counted twice.
         if (pin?.live !== live) {
           unpin();
           unpin = pinSession(live);
@@ -1515,6 +1568,7 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
             // Initialize is already in flight when the session first becomes
             // visible to the sweeper. Count it until handleRequest settles.
             active: 1,
+            uploading: 0,
             refused: false,
           };
           sessions.set(id, live);

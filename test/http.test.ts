@@ -1,3 +1,4 @@
+import { once } from 'node:events';
 import {
   Agent as HttpAgent,
   request as httpRequest,
@@ -296,6 +297,7 @@ describe('the per-bearer session cap', () => {
     maxSessionsPerBearer: number;
     maxSessions?: number;
     maxSessionsPerAccount?: number;
+    sessionTtlMs?: number;
   }) {
     const platform = installFakePlatform();
     const inner = globalThis.fetch;
@@ -364,6 +366,7 @@ describe('the per-bearer session cap', () => {
       await new Promise<void>((r) => server.close(() => r()));
     };
     return {
+      server,
       url: `${base}/mcp`,
       send,
       as,
@@ -1161,7 +1164,7 @@ describe('the per-bearer session cap', () => {
      * A POST on a session whose body arrives only when told to: the headers
      * and the first bytes now, the rest on `finish`, or never, on `abandon`.
      */
-    function uploading(url: string, token: string, session: string, body: unknown) {
+    function uploading(url: string, token: string | undefined, session: string, body: unknown) {
       const payload = JSON.stringify(body);
       const target = new URL(url);
       const req = httpRequest({
@@ -1173,7 +1176,7 @@ describe('the per-bearer session cap', () => {
           'Content-Type': 'application/json',
           Accept: 'application/json, text/event-stream',
           'Content-Length': Buffer.byteLength(payload),
-          Authorization: `Bearer ${token}`,
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
           'mcp-session-id': session,
         },
       });
@@ -1192,6 +1195,22 @@ describe('the per-bearer session cap', () => {
         abandon: () => req.destroy(),
       };
     }
+    /**
+     * Start an upload and return once the server has its headers. Express
+     * is the server's first `request` listener and runs its middleware up to
+     * the body read synchronously, so by the time this one fires, whatever
+     * the request marks on its session before the body is read is marked.
+     */
+    async function uploadingSeen(
+      t: Awaited<ReturnType<typeof setup>>,
+      token: string | undefined,
+      session: string,
+    ) {
+      const seen = once(t.server, 'request');
+      const call = uploading(t.url, token, session, LIST);
+      await seen;
+      return call;
+    }
 
     // Pinned only once the route ran, a session whose request was still
     // uploading its body counted as idle: an initialize making room closed
@@ -1205,8 +1224,7 @@ describe('the per-bearer session cap', () => {
         const bob = await t.open('com_bob');
         // Alice's session is the older, so the one a newcomer would close, but
         // for the request on it whose body has not all arrived.
-        call = uploading(t.url, 'com_alice', alice, LIST);
-        await new Promise((r) => setTimeout(r, 100));
+        call = await uploadingSeen(t, 'com_alice', alice);
 
         const carol = await t.open('com_carol');
         expect(await t.count()).toBe(2);
@@ -1218,6 +1236,62 @@ describe('the per-bearer session cap', () => {
         expect(await status(t, 'com_carol', carol)).toBe(200);
       } finally {
         // A connection still open would hold the server's close.
+        call?.abandon();
+        await t.teardown();
+      }
+    });
+
+    // Only the session's own bearer marks it before the body is read, the
+    // test the route applies first. Anybody else holding the session id (it
+    // travels in a plain header, and ends up in proxy logs) would otherwise
+    // keep another tenant's idle session from being closed to make room.
+    for (const who of ['another bearer', 'no bearer'] as const) {
+      it(`does not spare a session from room-making for an upload from ${who}`, async () => {
+        const t = await setup({ maxSessionsPerBearer: 16, maxSessions: 2 });
+        let call: ReturnType<typeof uploading> | undefined;
+        try {
+          const alice = await t.open('com_alice');
+          await pause();
+          const bob = await t.open('com_bob');
+          call = await uploadingSeen(
+            t,
+            who === 'another bearer' ? 'com_mallory' : undefined,
+            alice,
+          );
+
+          // Alice's is the older idle session, so it is the one closed.
+          const carol = await t.open('com_carol');
+          expect(await t.count()).toBe(2);
+          expect(await status(t, 'com_alice', alice)).toBe(404);
+          expect(await status(t, 'com_bob', bob)).toBe(200);
+          expect(await status(t, 'com_carol', carol)).toBe(200);
+          call.finish();
+          expect(await call.done).toBe(404);
+        } finally {
+          call?.abandon();
+          await t.teardown();
+        }
+      });
+    }
+
+    // A body can take as long to arrive as its sender likes. Counted as a
+    // request in flight, one that never finished (or a fresh one started as
+    // each timed out) kept its session past the idle TTL indefinitely.
+    it('sweeps an idle session whose only traffic is an upload that never finishes', async () => {
+      const t = await setup({ maxSessionsPerBearer: 16, sessionTtlMs: 50 });
+      let call: ReturnType<typeof uploading> | undefined;
+      try {
+        const alice = await t.open('com_alice');
+        call = await uploadingSeen(t, 'com_alice', alice);
+        // The sweep runs once a second at its fastest.
+        const deadline = Date.now() + 5000;
+        while ((await t.count()) > 0) {
+          if (Date.now() > deadline) throw new Error('the session was never swept');
+          await new Promise((r) => setTimeout(r, 50));
+        }
+        call.finish();
+        expect(await call.done).toBe(404);
+      } finally {
         call?.abandon();
         await t.teardown();
       }
@@ -1247,8 +1321,7 @@ describe('the per-bearer session cap', () => {
             expect(res.status).toBe(400);
             await res.text();
           } else {
-            const call = uploading(t.url, 'com_alice', alice, LIST);
-            await new Promise((r) => setTimeout(r, 50));
+            const call = await uploadingSeen(t, 'com_alice', alice);
             call.abandon();
             await call.done;
           }

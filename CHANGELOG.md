@@ -123,8 +123,11 @@ are wording changes, and they are behaviour changes in the way that matters.
   session of the account holding the most sessions (the caller's own, if it
   is that account), and is answered `503` with `Retry-After` if that account
   has nothing idle.
-  A session with a request in flight is never closed, counted as such from
-  the moment the request arrives, before its body is read; concurrent initializes
+  A session with a request in flight is never closed to make room, counted
+  as such from the moment the request arrives, before its body is read; a
+  body still arriving does not, however, keep a session from the idle sweep
+  or from a suspended account's trim, or mark a refused token's session at
+  all, since how long a body takes is its sender's choice. Concurrent initializes
   are counted before either lands so they cannot pass the ceiling or the
   pool together, and a session planned for closing that is put to work first
   drops the new one (`404`) as before. If another initialize lands first and
