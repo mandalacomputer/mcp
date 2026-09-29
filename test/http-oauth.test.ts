@@ -1617,4 +1617,50 @@ describe('hosted: one account, however many bearers', () => {
       await stop(server);
     }
   });
+  // Review round 1 (docs): a refresh leaves the old token's session behind,
+  // and it counts against the account until it is closed or idles out. The
+  // README and CHANGELOG say so and name the way out, which this pins: a
+  // DELETE under the old token, honoured on its digest alone, even once the
+  // platform refuses that token.
+  it('counts the session a refresh left behind until the old token closes it', async () => {
+    platform = platformWithRefusals();
+    platform.state.accounts = {
+      mcpat_old1: active('acc-r'),
+      mcpat_old2: active('acc-r'),
+      mcpat_new1: active('acc-r'),
+    };
+    const { server, url } = await start({
+      resourceMetadataUrl: METADATA,
+      serviceSecret: SECRET,
+      maxSessionsPerAccount: 2,
+      // No acceptance cached, so the DELETE below cannot lean on one.
+      bearerCheckTtlMs: 0,
+    });
+    try {
+      const c = client(url);
+      const first = await c.open('mcpat_old1');
+      await c.open('mcpat_old2');
+      // The first client refreshes: its old token is no longer accepted, and
+      // its old session answers the new one as unknown.
+      delete platform.state.accounts.mcpat_old1;
+      platform.refused.add('mcpat_old1');
+      expect(await status(await c.send(LIST, as('mcpat_new1', first)))).toBe(404);
+      // Its re-initialize is held to the ceiling the old session still fills.
+      const over = await c.send(INIT, as('mcpat_new1'));
+      expect(over.status).toBe(429);
+      expect(await message(over)).toBe(
+        'This account has reached its maximum of 2 sessions on this server, across all its tokens. Close one (DELETE /mcp) or retry shortly.',
+      );
+      expect(await sessions(url)).toBe(2);
+      // The old token closes it without the platform being asked.
+      const seen = platform.seen.length;
+      expect(await status(await c.send(undefined, as('mcpat_old1', first), 'DELETE'))).toBe(200);
+      expect(platform.seen).toHaveLength(seen);
+      expect(await sessions(url)).toBe(1);
+      await c.open('mcpat_new1');
+      expect(await sessions(url)).toBe(2);
+    } finally {
+      await stop(server);
+    }
+  });
 });

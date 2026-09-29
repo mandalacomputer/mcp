@@ -124,7 +124,10 @@ are wording changes, and they are behaviour changes in the way that matters.
   the account's limit. A live session of another token, or any session of
   another account, is never closed for it. A refused session counts until it
   is closed, so an account cannot pass its ceiling by revoking its own keys.
-  Suspension is unchanged and still held per token. A full pool is still a
+  A session left behind by an OAuth refresh keeps counting too, until the
+  client closes it (`DELETE /mcp` with the old token) or it idles out after
+  30 minutes, so an account above half its ceiling when its clients refresh
+  can be answered `429` for that long. Suspension is unchanged and still held per token. A full pool is still a
   `503`, now with `Retry-After`, and nothing is closed to make room in it.
 
 ## [0.7.0] — 2026-09-27

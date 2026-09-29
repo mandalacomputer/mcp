@@ -1181,8 +1181,13 @@ address.
   race above applies here too (`404`). A refused session counts until it is
   closed, so revoking keys never lets an account past its ceiling; a session
   whose token was revoked but never sent a request again is not known to be
-  refused, and counts until it idles out. Suspension is held per token, as
-  above, not per account. A full pool (256) is answered `503` with
+  refused, and counts until it idles out. So does the session a token
+  leaves behind when the client refreshes it (see below): it is neither the
+  new token's own nor refused, so an account that holds more than half its
+  ceiling when its clients refresh can be answered `429` for up to the
+  session idle timeout (30 minutes), longer than its `Retry-After` suggests,
+  unless those clients close their old sessions. Suspension is held per
+  token, as above, not per account. A full pool (256) is answered `503` with
   `Retry-After`, whoever holds it, and nothing is closed to make room in it.
   `runHttp` takes the ceiling as `maxSessionsPerAccount`, and the CLI reads
   it from `MANDALA_MCP_MAX_SESSIONS_PER_ACCOUNT` (a whole number from 1 to
@@ -1202,7 +1207,11 @@ address.
   `404 Unknown session`, the MCP spec's signal to initialize again. An access
   token says nothing this server can check about which grant it came from, so
   rebinding would let any valid credential that learned a session id take over
-  its bound computer, buffered events and retained results.
+  its bound computer, buffered events and retained results. The old session
+  is not closed by the refresh: it still counts against the token's account
+  ceiling (above) until the client closes it with `DELETE /mcp` under the old
+  token (only the token's digest is compared, so an expired one still works)
+  or it idles out after 30 minutes.
 - `X-Mandala-MCP-Service` carries `MANDALA_MCP_SERVICE_SECRET` on every
   platform request, only ever to `MANDALA_BASE_URL`, so a token cannot be
   replayed at the API directly by the app it was issued to. A client's own
