@@ -160,7 +160,7 @@ const DEFAULT_TTL_MS = 30 * 60 * 1000;
  * any string gets that far; without a cap, a loop of initializes is a memory
  * exhaustion that costs the sender nothing.
  */
-const DEFAULT_MAX_SESSIONS = 256;
+export const DEFAULT_MAX_SESSIONS = 256;
 /**
  * A ceiling on live sessions per bearer, under the one above.
  *
@@ -754,6 +754,26 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
     return own;
   };
 
+  /**
+   * Close this bearer's idle sessions, least recently seen first, until it
+   * holds no more than `cap` or none idle is left. Never `keep`, and never one
+   * with a request in flight: the same test the sweeper and an initialize's
+   * room-making apply. Only a cap that has fallen needs this — an account
+   * suspended after its bearer opened sessions (OPL-5448) — since an
+   * initialize never admits a session over the cap it is checked against.
+   */
+  const trimIdle = (keyDigest: Buffer, cap: number, keep?: string): void => {
+    const own = sessionsOf(keyDigest);
+    const excess = own.length - cap;
+    if (excess <= 0) return;
+    const idle = own.filter(([id, live]) => id !== keep && live.active === 0);
+    idle.sort((a, b) => a[1].lastSeen - b[1].lastSeen);
+    for (const [id, gone] of idle.slice(0, excess)) {
+      sessions.delete(id);
+      void gone.transport.close().catch(() => {});
+    }
+  };
+
   const serving = async <T>(live: Live, handle: () => Promise<T>): Promise<T> => {
     const release = beginActivity(live);
     try {
@@ -937,10 +957,17 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
         // be a 401 whatever the call goes on to do. A platform that cannot say
         // is not a refusal: the call goes ahead, and a real refusal during it
         // still reaches the client through the held answer or the mark.
-        if (challenge && carriesRequest(req.body) && (await checkBearer(key)) === 'refused') {
+        const verdict = challenge && carriesRequest(req.body) ? await checkBearer(key) : undefined;
+        if (verdict === 'refused') {
           live.refused = true;
           return challenged(res, TOKEN_REFUSED, rpcId(req));
         }
+        // An account suspended after its bearer opened sessions kept every one
+        // of them, up to the 16 an active bearer may hold, while an initialize
+        // on it was held to one (OPL-5448). Its other idle sessions go now,
+        // down to that one; this session is pinned above and one busy
+        // elsewhere is skipped, and closed on a later request once it is idle.
+        if (verdict === 'suspended') trimIdle(live.keyDigest, MAX_SESSIONS_SUSPENDED, sessionId);
         const lease = res.locals.largeBodyLease as LargeBodyLease | undefined;
         const id = rpcId(req);
         const held = challenge
@@ -1054,17 +1081,22 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
     const keyDigest = digest(key);
     const keyId = keyDigest.toString('hex');
     const bearerCap = suspended ? MAX_SESSIONS_SUSPENDED : maxPerBearer;
+    // A bearer can hold more than its cap only when the cap fell under it: an
+    // account suspended after it opened sessions (OPL-5448). Those over the
+    // cap are closed first if idle, whatever becomes of this initialize, so
+    // what is left to count, and to name in a 429, is what it really holds.
+    trimIdle(keyDigest, bearerCap);
+    const own = sessionsOf(keyDigest);
     const bearerFull = () => {
       res.set('Retry-After', String(BEARER_FULL_RETRY_AFTER_S));
-      return rpcError(
-        res,
-        429,
-        -32002,
-        `This token already holds its maximum of ${bearerCap} ${bearerCap === 1 ? 'session' : 'sessions'} on this server. Close one (DELETE /mcp) or retry shortly.`,
-        rpcId(req),
-      );
+      // Over the cap after the trim means every session over it is busy, and
+      // closing one would not be enough: the client can only wait for them.
+      const message =
+        own.length > bearerCap
+          ? `This token holds ${own.length} sessions on this server, over its maximum of ${bearerCap}, and the ones over it are all serving a request. Retry once they finish; idle ones are closed to make room.`
+          : `This token already holds its maximum of ${bearerCap} ${bearerCap === 1 ? 'session' : 'sessions'} on this server. Close one (DELETE /mcp) or retry shortly.`;
+      return rpcError(res, 429, -32002, message, rpcId(req));
     };
-    const own = sessionsOf(keyDigest);
     const over = own.length + (pendingByDigest.get(keyId) ?? 0) - bearerCap + 1;
     // Room is made from this bearer's own IDLE sessions, least recently seen
     // first, exactly as the sweeper would close them — never another bearer's,

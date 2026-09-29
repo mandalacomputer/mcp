@@ -696,6 +696,152 @@ describe('hosted: checking a bearer before it gets anything', () => {
     }
   });
 
+  // OPL-5448: the one-session limit was applied only at initialize, so a
+  // bearer that opened sessions while its account was active kept every one
+  // of them after the account was suspended.
+  it('closes a newly suspended bearer’s other idle sessions on its next request, never a busy one', async () => {
+    platform = platformWithRefusals();
+    const { server, url } = await start({
+      resourceMetadataUrl: METADATA,
+      serviceSecret: SECRET,
+      // Every request probes, so the suspension is seen at once.
+      bearerCheckTtlMs: 0,
+    });
+    const as = (session?: string) => ({
+      Authorization: 'Bearer mcpat_flip',
+      ...(session ? { 'mcp-session-id': session } : {}),
+    });
+    let release = () => {};
+    try {
+      const c = client(url);
+      const [a, b, d, e] = [
+        await c.open('mcpat_flip'),
+        await c.open('mcpat_flip'),
+        await c.open('mcpat_flip'),
+        await c.open('mcpat_flip'),
+      ];
+      expect(await sessions(url)).toBe(4);
+      platform.state.suspended = true;
+
+      // B is in flight: its request waits on its probe at the platform.
+      platform.state.probeGate = new Promise<void>((r) => {
+        release = r;
+      });
+      const before = probes();
+      const busy = c.send(LIST, as(b));
+      const deadline = Date.now() + 5000;
+      while (probes() === before) {
+        if (Date.now() > deadline) throw new Error('the request on B never reached its probe');
+        await new Promise((r) => setTimeout(r, 5));
+      }
+      platform.state.probeGate = undefined;
+
+      // A request on A: A is kept (it is serving this), B is kept (busy), and
+      // the idle D and E are closed.
+      const onA = await c.send(LIST, as(a));
+      expect(onA.status).toBe(200);
+      await onA.text();
+      expect(await sessions(url)).toBe(2);
+      for (const gone of [d, e]) {
+        const res = await c.send(LIST, as(gone));
+        expect(res.status).toBe(404);
+        await res.text();
+      }
+
+      // B finishes its probe with A now idle, so A goes and B is the one left.
+      release();
+      const onB = await busy;
+      expect(onB.status).toBe(200);
+      await onB.text();
+      expect(await sessions(url)).toBe(1);
+      const goneA = await c.send(LIST, as(a));
+      expect(goneA.status).toBe(404);
+      await goneA.text();
+      const keptB = await c.send(LIST, as(b));
+      expect(keptB.status).toBe(200);
+      await keptB.text();
+    } finally {
+      platform.state.probeGate = undefined;
+      release();
+      await stop(server);
+    }
+  });
+
+  // OPL-5448: the initialize of a newly suspended bearer trims the same way,
+  // and a 429 for a bearer still over its limit says what it holds rather
+  // than telling it to close one.
+  it('trims a newly suspended bearer at initialize, and its 429 names what it still holds', async () => {
+    platform = platformWithRefusals();
+    const { server, url } = await start({
+      resourceMetadataUrl: METADATA,
+      serviceSecret: SECRET,
+      bearerCheckTtlMs: 0,
+    });
+    const as = (session?: string) => ({
+      Authorization: 'Bearer mcpat_flip2',
+      ...(session ? { 'mcp-session-id': session } : {}),
+    });
+    let release = () => {};
+    try {
+      const c = client(url);
+      const [a, b, d, e] = [
+        await c.open('mcpat_flip2'),
+        await c.open('mcpat_flip2'),
+        await c.open('mcpat_flip2'),
+        await c.open('mcpat_flip2'),
+      ];
+      platform.state.suspended = true;
+
+      // A and B are in flight, each waiting on its probe.
+      platform.state.probeGate = new Promise<void>((r) => {
+        release = r;
+      });
+      const inFlight: Array<Promise<Response>> = [];
+      for (const s of [a, b]) {
+        const before = probes();
+        inFlight.push(c.send(LIST, as(s)));
+        const deadline = Date.now() + 5000;
+        while (probes() === before) {
+          if (Date.now() > deadline) throw new Error('a request never reached its probe');
+          await new Promise((r) => setTimeout(r, 5));
+        }
+      }
+      platform.state.probeGate = undefined;
+
+      const refused = await c.send(INIT, as());
+      expect(refused.status).toBe(429);
+      expect(refused.headers.get('mcp-session-id')).toBeNull();
+      const message = ((await refused.json()) as { error: { message: string } }).error.message;
+      expect(message).toContain(
+        'This token holds 2 sessions on this server, over its maximum of 1',
+      );
+      expect(message).not.toContain('Close one');
+      // The idle two went, whatever became of the initialize.
+      expect(await sessions(url)).toBe(2);
+      for (const gone of [d, e]) {
+        const res = await c.send(LIST, as(gone));
+        expect(res.status).toBe(404);
+        await res.text();
+      }
+
+      release();
+      for (const answer of await Promise.all(inFlight)) {
+        expect(answer.status).toBe(200);
+        await answer.text();
+      }
+      // Both idle now: the next initialize closes them and leaves one, its own.
+      const last = await c.open('mcpat_flip2');
+      expect(await sessions(url)).toBe(1);
+      const kept = await c.send(LIST, as(last));
+      expect(kept.status).toBe(200);
+      await kept.text();
+    } finally {
+      platform.state.probeGate = undefined;
+      release();
+      await stop(server);
+    }
+  });
+
   // OPL-5050: a refused bearer on a sessionless request that is not an
   // initialize was answered 400 "No session id", which sent the client to its
   // session handling when the fix was its token.

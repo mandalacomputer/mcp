@@ -3,7 +3,7 @@ import { realpathSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import { DEFAULT_BASE_URL } from './api.js';
 import { CredentialsError } from './credentials.js';
-import { runHttp } from './http.js';
+import { DEFAULT_MAX_SESSIONS, runHttp } from './http.js';
 import { SERVER_VERSION } from './server.js';
 import { runStdio } from './stdio.js';
 import { parseToolTags, type ToolFilters, VALID_TAGS } from './tool-filters.js';
@@ -56,6 +56,13 @@ Environment
                        platform takes OAuth access tokens only with it. Never
                        logged. A client's own header of that name is never
                        forwarded.
+  MANDALA_MCP_MAX_SESSIONS_PER_TOKEN
+                       --http only. How many live sessions one bearer token may
+                       hold (default 16; a suspended account's token is held to
+                       one whatever this says). A whole number from 1 to
+                       ${DEFAULT_MAX_SESSIONS}, the whole server's session pool;
+                       anything else is refused at startup. At ${DEFAULT_MAX_SESSIONS} one
+                       token can hold the entire pool.
 
 Flags override the environment.`;
 
@@ -354,6 +361,34 @@ function env(name: string): string | undefined {
   return v ? v : undefined;
 }
 
+/**
+ * `MANDALA_MCP_MAX_SESSIONS_PER_TOKEN`, or undefined for `runHttp`'s default.
+ *
+ * Refused, not defaulted, when it is not a whole number from 1 to the
+ * process-wide pool — the call `port()` makes for a port and `envFlag` for a
+ * yes-or-no. Defaulting would be quiet in the worse direction: an operator who
+ * raised the cap for 40 agents on one key and mistyped it would get 16, and
+ * the 17th agent would evict another's session, bound computer and all.
+ * Decimal digits only, for `port()`'s reason (`Number('1e3')` is 1000). Above
+ * the pool it would not raise anything — the pool caps a bearer first — so it
+ * is refused too rather than accepted as a promise the server cannot keep.
+ */
+export function maxSessionsPerToken(
+  raw = env('MANDALA_MCP_MAX_SESSIONS_PER_TOKEN'),
+): number | undefined {
+  if (raw === undefined) return undefined;
+  const v = raw.trim();
+  if (!v) return undefined;
+  const n = /^\d+$/.test(v) ? Number(v) : Number.NaN;
+  if (!Number.isInteger(n) || n < 1 || n > DEFAULT_MAX_SESSIONS) {
+    throw new Error(
+      `MANDALA_MCP_MAX_SESSIONS_PER_TOKEN=${raw} is not a session count. ` +
+        `Use a whole number from 1 to ${DEFAULT_MAX_SESSIONS}, or leave it unset for 16.`,
+    );
+  }
+  return n;
+}
+
 const list = (v: string | undefined) =>
   v
     ? v
@@ -399,6 +434,7 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
       ),
       resourceMetadataUrl: env('MANDALA_MCP_RESOURCE_METADATA_URL'),
       serviceSecret: env('MANDALA_MCP_SERVICE_SECRET'),
+      maxSessionsPerBearer: maxSessionsPerToken(),
     });
     return;
   }
