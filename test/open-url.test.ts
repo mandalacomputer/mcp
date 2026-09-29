@@ -26,7 +26,12 @@ describe('the open_url command', () => {
     for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
   });
 
-  /** A PATH holding `nohup` and a fake of each named browser that records its argv. */
+  /**
+   * A PATH holding `nohup` and a fake of each named browser that records its
+   * argv. The record is written to a temporary name and renamed into place, so
+   * `opened` never exists half-written: the shell's `>` creates the file
+   * before printf fills it, and a poll that saw it in that window read ''.
+   */
   function guest(browsers: string[]): { bin: string; opened: string } {
     const bin = mkdtempSync(join(tmpdir(), 'open-url-'));
     dirs.push(bin);
@@ -34,7 +39,10 @@ describe('the open_url command', () => {
     symlinkSync('/usr/bin/nohup', join(bin, 'nohup'));
     for (const name of browsers) {
       const path = join(bin, name);
-      writeFileSync(path, `#!/bin/sh\nprintf '%s %s' "${name}" "$1" > '${opened}'\n`);
+      writeFileSync(
+        path,
+        `#!/bin/sh\nprintf '%s %s' "${name}" "$1" > '${opened}.tmp' && /bin/mv '${opened}.tmp' '${opened}'\n`,
+      );
       chmodSync(path, 0o755);
     }
     return { bin, opened };
