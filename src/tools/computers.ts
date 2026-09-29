@@ -1160,14 +1160,14 @@ export const registerComputers: Registrar = (server, session, opts) => {
     {
       title: 'Wait for a computer to be ready',
       description:
-        'Poll until the computer is running, or until the software inside it answers. Use "guest" before exec, files or windows, and before expecting a screenshot to show a desktop rather than a boot screen; on a computer with secrets bound, "guest" also waits until they have reached the desktop, so a command run next sees them, on one whose browser proxy is being set or removed it waits until its browsers have the change, and on one whose egress proxy is waiting for its credentials it waits until they arrive, since every connection the computer opens meanwhile is closed. Reports progress while it waits, so a client that sends a progressToken and sets resetTimeoutOnProgress can hold the request open; a client that cannot should lower timeout_s and call again rather than watch its own default timeout cancel the wait.',
+        'Poll until the computer is running, or until the software inside it answers. Use "guest" before exec, files or windows, and before expecting a screenshot to show a desktop rather than a boot screen; on Linux "guest" also waits until the desktop session is logged in, so exec with desktop: true is not refused as having no desktop session; on a computer with secrets bound, "guest" also waits until they have reached the desktop, so a command run next sees them, on one whose browser proxy is being set or removed it waits until its browsers have the change, and on one whose egress proxy is waiting for its credentials it waits until they arrive, since every connection the computer opens meanwhile is closed. Reports progress while it waits, so a client that sends a progressToken and sets resetTimeoutOnProgress can hold the request open; a client that cannot should lower timeout_s and call again rather than watch its own default timeout cancel the wait.',
       inputSchema: {
         ...idArg,
         until: z
           .enum(['running', 'guest'])
           .default('guest')
           .describe(
-            '"running" is the hypervisor reporting the VM up. "guest" is the software inside it answering, which is what exec and a painted desktop actually need — and, on a computer with secrets bound, its secrets delivered, on one with a browser proxy, its browsers holding it, and on one with an egress proxy that names credentials, its host holding them.',
+            '"running" is the hypervisor reporting the VM up. "guest" is the software inside it answering, which is what exec and a painted desktop actually need — its desktop session logged in on Linux, and, on a computer with secrets bound, its secrets delivered, on one with a browser proxy, its browsers holding it, and on one with an egress proxy that names credentials, its host holding them.',
           ),
         timeout_s: z.number().int().min(5).max(900).default(180),
       },
@@ -1219,7 +1219,7 @@ export const registerComputers: Registrar = (server, session, opts) => {
           // lost) as the fallback. browser_proxy_pending is named too, so a
           // wait held on it does not
           // end saying only "last seen running".
-          let heldOn: 'egress' | 'browser' | undefined;
+          let heldOn: 'egress' | 'browser' | 'desktop' | undefined;
           while (!untilDeadline.aborted) {
             // The caller giving up ends the wait. The signal aborts the request
             // in flight, but nothing about an aborted request stops the next
@@ -1388,7 +1388,6 @@ export const registerComputers: Registrar = (server, session, opts) => {
                 await api.send('POST', P.computerAction(id, 'exec'), {
                   body: P.execBody({ command: 'true', timeout_s: 5 }),
                 });
-                return said(`Guest is answering: ${describe(c)}`, withoutCredentials(c));
               } catch (err) {
                 // The same two deadlines as the status read above, and for the
                 // same reason: this catch used to judge the error alone, so a
@@ -1439,6 +1438,53 @@ export const registerComputers: Registrar = (server, session, opts) => {
                 await sleep(pollDelay(err), signal);
                 continue;
               }
+              // The guest agent answers a few seconds before the desktop user is
+              // logged in, and a desktop exec sent in between is refused with a
+              // 409 carrying no `reason` — deliberately, since the same sentence
+              // describes a guest where nobody will ever log in, so only a
+              // caller that knows it has just booted can wait it out. Linux
+              // only; an absent `desktop` is X11 and is waited on, an explicit
+              // empty one is not.
+              const desktop = (c as { desktop?: unknown }).desktop;
+              if (c.os !== 'linux' || desktop === '') {
+                return said(`Guest is answering: ${describe(c)}`, withoutCredentials(c));
+              }
+              try {
+                await api.send('POST', P.computerAction(id, 'exec'), {
+                  body: P.execBody({ command: 'true', timeout_s: 5, desktop: true }),
+                });
+                return said(`Guest is answering: ${describe(c)}`, withoutCredentials(c));
+              } catch (err) {
+                // The guest probe's rules, in the same order.
+                if (extra.signal?.aborted) return cancelled(id, last);
+                if (err instanceof CancelledError) {
+                  if (untilDeadline.aborted) {
+                    blocked = `the desktop probe was still in flight when the ${timeout_s}s deadline arrived`;
+                    break;
+                  }
+                  blocked = err.message;
+                  await beat(
+                    `Waiting for ${id} — running; the platform could not be asked: ${blocked}`,
+                  );
+                  await sleep(POLL_MS, signal);
+                  continue;
+                }
+                // A computer that stopped answers 409 `unavailable`, which polls
+                // through here: the status read on the next turn names it.
+                if (!isTransientForPoll(err)) throw err;
+                if (err instanceof ConflictError) {
+                  heldOn = 'desktop';
+                } else {
+                  blocked = err instanceof Error ? err.message : String(err);
+                }
+                await beat(
+                  err instanceof ConflictError
+                    ? `Waiting for ${id} — running; the guest answers, and its desktop session is not active yet.`
+                    : `Waiting for ${id} — running; the platform could not be asked: ${blocked}`,
+                );
+                await sleep(pollDelay(err), signal);
+                continue;
+              }
             }
             await sleep(POLL_MS, signal);
           }
@@ -1461,7 +1507,9 @@ export const registerComputers: Registrar = (server, session, opts) => {
                 ? `Gave up after ${timeout_s}s; ${id} is running, but its egress proxy's credentials have not reached its host yet (egress_proxy_pending), so every connection it opens is closed until they do. Nothing was changed — call again to keep waiting. If it persists across waits, the secret its egress_proxy.credentials_secret_id names may have been deleted, or an earlier update_computer egress_proxy change may have got a 5xx or no answer: send the egress_proxy setting again with update_computer, naming a secret that exists (list_secrets). Removing the proxy with null is for the user to decide, not a fix: it sends all of the computer's traffic directly.`
                 : heldOn === 'browser'
                   ? `Gave up after ${timeout_s}s; ${id} is running, but its browser proxy was still being applied in the guest (browser_proxy_pending), so a browser opened now may not use it. Nothing was changed — call again to keep waiting; if it persists, send the browser_proxy setting again with update_computer.`
-                  : `Gave up after ${timeout_s}s; ${id} was last seen ${last}. Nothing was changed — call again to keep waiting.`,
+                  : heldOn === 'desktop'
+                    ? `Gave up after ${timeout_s}s; ${id} is running and its guest answers, but its desktop session is not active yet — the desktop user may still be logging in, or nobody is logged in — so exec with desktop: true is refused until it is. Nothing was changed — call again to keep waiting.`
+                    : `Gave up after ${timeout_s}s; ${id} was last seen ${last}. Nothing was changed — call again to keep waiting.`,
           );
         } finally {
           await beat.stop();
