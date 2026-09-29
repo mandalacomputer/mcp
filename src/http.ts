@@ -29,6 +29,17 @@ export type HttpConfig = Omit<ServerConfig, 'apiKey' | 'activity'> & {
    * held to one, whatever this is.
    */
   maxSessionsPerBearer?: number;
+  /**
+   * How many live sessions one account may hold at once, across all of its
+   * bearers (OPL-5447). Hosted mode counts by the account id the platform's
+   * whoami names for each bearer; a self-hosted server verifies no account, so
+   * there each bearer is its own. Default half of `maxSessions` (128 of 256),
+   * which is also what anything but a number of at least one means; above
+   * `maxSessions` it is `maxSessions`. A suspended account is held to one,
+   * whatever this is. Reaching it refuses an initialize; it never closes
+   * another bearer's session.
+   */
+  maxSessionsPerAccount?: number;
   /** How many requests may retain a parsed body above 256 KiB at once. */
   maxLargeBodyParses?: number;
   /**
@@ -68,6 +79,11 @@ type Live = {
   transport: StreamableHTTPServerTransport;
   /** Not the key. Enough to prove a later request came from the same holder. */
   keyDigest: Buffer;
+  /**
+   * What this session counts against for the account ceiling and a suspended
+   * account's one session (OPL-5447). See {@link accountKey}.
+   */
+  account: string;
   lastSeen: number;
   /** Requests currently being served on this session. */
   active: number;
@@ -178,6 +194,8 @@ const DEFAULT_MAX_SESSIONS_PER_BEARER = 16;
 const MAX_SESSIONS_SUSPENDED = 1;
 /** How long a caller whose bearer holds its maximum is asked to wait, in s. */
 const BEARER_FULL_RETRY_AFTER_S = 30;
+/** How long a caller is asked to wait when the whole pool is full, in s. */
+const POOL_FULL_RETRY_AFTER_S = 30;
 const DEFAULT_MAX_LARGE_BODY_PARSES = 4;
 const SMALL_BODY_BYTES = 256 * 1024;
 
@@ -327,19 +345,62 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
   // dispatched — the latter cached briefly, keyed by the token's digest and
   // never by the token.
   const checkTtl = cfg.bearerCheckTtlMs ?? DEFAULT_BEARER_CHECK_TTL_MS;
-  // What the platform said, per digest: until when it is taken on trust, and
-  // whether the account behind it is suspended, which sets its session cap.
-  const accepted = new Map<string, { until: number; suspended: boolean }>();
+  // What the platform said, per digest: until when it is taken on trust,
+  // whether the account behind it is suspended, which sets its session cap,
+  // and the account id whoami named, which the account ceiling counts by.
+  type Acceptance = { until: number; suspended: boolean; account?: string };
+  const accepted = new Map<string, Acceptance>();
   let checksInFlight = 0;
 
   /** The platform's acceptance of this bearer, while the cache window lasts. */
-  const acceptance = (key: string): { suspended: boolean } | undefined => {
+  const acceptance = (key: string): Acceptance | undefined => {
     const entry = accepted.get(digest(key).toString('hex'));
     return entry !== undefined && entry.until > Date.now() ? entry : undefined;
   };
 
   /** Whether the platform accepted this bearer within the cache window. */
   const isAccepted = (key: string): boolean => acceptance(key) !== undefined;
+
+  // Accounts a probe found suspended, by account key (OPL-5447): until when
+  // that is believed over any of the account's bearers' cached answers, and
+  // when it was marked. A verdict is cached per bearer, so without this an
+  // account's other bearers kept the `ok` they were given before the
+  // suspension for the rest of their window, one session each.
+  //
+  // `at` is a tick of `standingClock`, which also stamps every probe as it
+  // starts. A probe's `ok` clears the mark only if the probe started after the
+  // mark was set: probes resolve in any order, and one that began before the
+  // suspension and answers late says nothing about the account now.
+  const suspendedAccounts = new Map<string, { until: number; at: number }>();
+  let standingClock = 0;
+  const accountSuspended = (account: string): boolean => {
+    const mark = suspendedAccounts.get(account);
+    if (mark === undefined) return false;
+    if (mark.until > Date.now()) return true;
+    suspendedAccounts.delete(account);
+    return false;
+  };
+  const noteStanding = (account: string, suspended: boolean, startedAt: number, now: number) => {
+    if (!suspended) {
+      const mark = suspendedAccounts.get(account);
+      if (mark !== undefined && mark.at < startedAt) suspendedAccounts.delete(account);
+      return;
+    }
+    suspendedAccounts.delete(account);
+    if (suspendedAccounts.size >= MAX_SUSPENDED_ACCOUNTS) {
+      for (const [k, m] of suspendedAccounts) if (m.until <= now) suspendedAccounts.delete(k);
+      // Still full: drop the oldest, which Map iteration yields first.
+      if (suspendedAccounts.size >= MAX_SUSPENDED_ACCOUNTS) {
+        suspendedAccounts.delete(suspendedAccounts.keys().next().value as string);
+      }
+    }
+    // Never shorter than a minute, and never shorter than a bearer's cached
+    // answer, so no answer cached before the mark outlives it.
+    suspendedAccounts.set(account, {
+      until: now + Math.max(checkTtl, DEFAULT_BEARER_CHECK_TTL_MS),
+      at: ++standingClock,
+    });
+  };
 
   /**
    * `ok`: the probe answered 2xx, and only that — the one answer that says the
@@ -349,7 +410,11 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
    * `unknown`: anything else — a 403 (a lost membership, say; a suspended
    * account is answered 2xx on whoami and admitted), a 404 (the route moved), a 429, a 5xx, a timeout, or this
    * server already asking about as many bearers as it will at once. Only `ok`
-   * and `suspended` are cached, the standing with the acceptance.
+   * and `suspended` are cached, the standing and the account id with the
+   * acceptance. `account` is the account key the bearer counts against (see
+   * {@link accountKey}); it is set whenever the verdict is `ok` or
+   * `suspended`. An account another bearer's probe found suspended since is
+   * `suspended` here, whatever this bearer's own answer was.
    */
   // `onStart` runs only when a probe really starts — never for a cached answer
   // or a full cap — and synchronously, before the first await, so a caller's
@@ -357,14 +422,20 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
   const checkBearer = async (
     key: string,
     onStart?: () => void,
-  ): Promise<'ok' | 'suspended' | 'refused' | 'unknown'> => {
+  ): Promise<{ verdict: 'ok' | 'suspended' | 'refused' | 'unknown'; account?: string }> => {
     const id = digest(key).toString('hex');
     const cached = acceptance(key);
-    if (cached) return cached.suspended ? 'suspended' : 'ok';
-    if (checksInFlight >= MAX_BEARER_CHECKS_IN_FLIGHT) return 'unknown';
+    if (cached) {
+      const account = accountKey(id, cached.account);
+      const suspended = cached.suspended || accountSuspended(account);
+      return { verdict: suspended ? 'suspended' : 'ok', account };
+    }
+    if (checksInFlight >= MAX_BEARER_CHECKS_IN_FLIGHT) return { verdict: 'unknown' };
     checksInFlight++;
     onStart?.();
+    const startedAt = ++standingClock;
     let suspended: boolean;
+    let confirmed: string | undefined;
     try {
       const api = new Api(key, cfg.baseUrl, AbortSignal.timeout(BEARER_CHECK_TIMEOUT_MS), {
         serviceSecret,
@@ -379,9 +450,11 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
       // refused (403): its holder was answered 503 on every initialize and so
       // could never reach whoami, the one tool that would say it is suspended
       // (OPL-5437). It takes no parameters, so none are sent.
-      suspended = isSuspended(await api.json<unknown>('GET', WHOAMI));
+      const who = await api.json<unknown>('GET', WHOAMI);
+      suspended = isSuspended(who);
+      confirmed = accountIdOf(who);
     } catch (err) {
-      return err instanceof APIError && err.status === 401 ? 'refused' : 'unknown';
+      return { verdict: err instanceof APIError && err.status === 401 ? 'refused' : 'unknown' };
     } finally {
       checksInFlight--;
     }
@@ -393,8 +466,13 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
         accepted.delete(accepted.keys().next().value as string);
       }
     }
-    accepted.set(id, { until: now + checkTtl, suspended });
-    return suspended ? 'suspended' : 'ok';
+    const account = accountKey(id, confirmed);
+    noteStanding(account, suspended, startedAt, now);
+    // A mark this probe could not clear stands over its answer, and is cached
+    // with it, so the answer does not outlive the mark as an `ok`.
+    const standing = suspended || accountSuspended(account);
+    accepted.set(id, { until: now + checkTtl, suspended: standing, account: confirmed });
+    return { verdict: standing ? 'suspended' : 'ok', account };
   };
 
   // Refused initializes per source, in fixed one-minute windows. Kept apart
@@ -489,6 +567,18 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
     typeof perBearer === 'number' && perBearer >= 1
       ? Math.floor(perBearer)
       : DEFAULT_MAX_SESSIONS_PER_BEARER;
+  // The same reservations per account (OPL-5447): an account may hold any
+  // number of bearers, so a burst spread across its keys would otherwise all
+  // count the same sessions and all pass the account ceiling.
+  const pendingByAccount = new Map<string, number>();
+  // The ceiling no account may pass, live plus pending: half the pool by
+  // default, so no one tenant can take the whole of it however many keys it
+  // mints. Normalised as the per-bearer cap is, and clamped to the pool.
+  const perAccount = cfg.maxSessionsPerAccount;
+  const maxPerAccount =
+    typeof perAccount === 'number' && perAccount >= 1
+      ? Math.min(Math.floor(perAccount), maxSessions)
+      : Math.max(1, Math.floor(maxSessions / 2));
 
   // Two parsers, chosen by whether this server has already checked who is
   // asking.
@@ -754,16 +844,22 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
     return own;
   };
 
+  /** The live sessions counted against this account, whichever bearer opened them. */
+  const sessionsOfAccount = (account: string): Array<[string, Live]> => {
+    const own: Array<[string, Live]> = [];
+    for (const entry of sessions) if (entry[1].account === account) own.push(entry);
+    return own;
+  };
+
   /**
-   * Close this bearer's idle sessions, least recently seen first, until it
+   * Close some of `own`'s idle sessions, least recently seen first, until it
    * holds no more than `cap` or none idle is left. Never `keep`, and never one
    * with a request in flight: the same test the sweeper and an initialize's
    * room-making apply. Only a cap that has fallen needs this — an account
-   * suspended after its bearer opened sessions (OPL-5448) — since an
-   * initialize never admits a session over the cap it is checked against.
+   * suspended after its bearers opened sessions (OPL-5448, OPL-5447) — since
+   * an initialize never admits a session over the cap it is checked against.
    */
-  const trimIdle = (keyDigest: Buffer, cap: number, keep?: string): void => {
-    const own = sessionsOf(keyDigest);
+  const trimIdle = (own: Array<[string, Live]>, cap: number, keep?: string): void => {
     const excess = own.length - cap;
     if (excess <= 0) return;
     const idle = own.filter(([id, live]) => id !== keep && live.active === 0);
@@ -957,7 +1053,8 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
         // be a 401 whatever the call goes on to do. A platform that cannot say
         // is not a refusal: the call goes ahead, and a real refusal during it
         // still reaches the client through the held answer or the mark.
-        const verdict = challenge && carriesRequest(req.body) ? await checkBearer(key) : undefined;
+        const verdict =
+          challenge && carriesRequest(req.body) ? (await checkBearer(key)).verdict : undefined;
         if (verdict === 'refused') {
           live.refused = true;
           return challenged(res, TOKEN_REFUSED, rpcId(req));
@@ -965,9 +1062,14 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
         // An account suspended after its bearer opened sessions kept every one
         // of them, up to the 16 an active bearer may hold, while an initialize
         // on it was held to one (OPL-5448). Its other idle sessions go now,
-        // down to that one; this session is pinned above and one busy
-        // elsewhere is skipped, and closed on a later request once it is idle.
-        if (verdict === 'suspended') trimIdle(live.keyDigest, MAX_SESSIONS_SUSPENDED, sessionId);
+        // down to that one, whichever of the account's bearers opened them
+        // (OPL-5447: one between all its keys, not one on each); this session
+        // is pinned above and one busy elsewhere is skipped, and closed on a
+        // later request once it is idle.
+        if (verdict === 'suspended') {
+          trimIdle(sessionsOf(live.keyDigest), MAX_SESSIONS_SUSPENDED, sessionId);
+          trimIdle(sessionsOfAccount(live.account), MAX_SESSIONS_SUSPENDED, sessionId);
+        }
         const lease = res.locals.largeBodyLease as LargeBodyLease | undefined;
         const id = rpcId(req);
         const held = challenge
@@ -1019,6 +1121,7 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
     // Hosted: no session for a bearer the platform does not accept. Before the
     // cap and the reservation, so a refused bearer never holds a slot.
     let suspended = false;
+    let checkedAccount: string | undefined;
     if (challenge) {
       // A spent budget does not close the address. Many clients can share one
       // (a NAT, an office), and one bad neighbour must not lock out the rest:
@@ -1046,7 +1149,7 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
       // The interval is spent only by a probe that starts: a request turned
       // away because the process-wide cap is full reached nobody, and must not
       // make the next client at this address wait out an interval for it.
-      const verdict = await checkBearer(
+      const { verdict, account } = await checkBearer(
         key,
         spent
           ? () => {
@@ -1069,35 +1172,41 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
         );
       }
       suspended = verdict === 'suspended';
+      checkedAccount = account;
     }
     if (!initialize) {
       return badRequest(res, 'No session id, and this is not an initialize request.', rpcId(req));
     }
-    // One bearer may not hold the whole pool (OPL-5443). Counted before the
-    // process-wide cap, so a bearer at its own limit that can make room by
-    // closing one of its idle sessions frees a process-wide slot as well. From
-    // the count to the reservation below is synchronous, so a burst from one
-    // bearer cannot all read the same count.
+    // One bearer may not hold the whole pool (OPL-5443), nor one account more
+    // than its ceiling however many bearers it holds (OPL-5447). Both counted
+    // before the process-wide cap, so a bearer at its own limit that can make
+    // room by closing one of its idle sessions frees a process-wide slot as
+    // well. From the count to the reservation below is synchronous, so a
+    // burst cannot all read the same count.
+    //
+    // Nothing below may be captured by a closure that outlives this request,
+    // the transport's callbacks included: an array of sessions held there would
+    // keep every session it names, and their transports, alive with the new one.
     const keyDigest = digest(key);
     const keyId = keyDigest.toString('hex');
+    // Hosted, the account the platform confirmed for this bearer (or the
+    // bearer itself, when whoami named none); self-hosted, the bearer.
+    const account = checkedAccount ?? accountKey(keyId, undefined);
     const bearerCap = suspended ? MAX_SESSIONS_SUSPENDED : maxPerBearer;
+    const accountCap = suspended ? MAX_SESSIONS_SUSPENDED : maxPerAccount;
     // A bearer can hold more than its cap only when the cap fell under it: an
     // account suspended after it opened sessions (OPL-5448). Those over the
     // cap are closed first if idle, whatever becomes of this initialize, so
     // what is left to count, and to name in a 429, is what it really holds.
-    trimIdle(keyDigest, bearerCap);
-    const own = sessionsOf(keyDigest);
-    const bearerFull = () => {
+    // A suspended account is held to one session across all its bearers, so
+    // its other bearers' idle sessions go the same way (OPL-5447). An active
+    // account's ceiling never closes anything: it only refuses.
+    trimIdle(sessionsOf(keyDigest), bearerCap);
+    if (suspended) trimIdle(sessionsOfAccount(account), accountCap);
+    const tooMany = (message: string) => {
       res.set('Retry-After', String(BEARER_FULL_RETRY_AFTER_S));
-      // Over the cap after the trim means every session over it is busy, and
-      // closing one would not be enough: the client can only wait for them.
-      const message =
-        own.length > bearerCap
-          ? `This token holds ${own.length} sessions on this server, over its maximum of ${bearerCap}, and the ones over it are all serving a request. Retry once they finish; idle ones are closed to make room.`
-          : `This token already holds its maximum of ${bearerCap} ${bearerCap === 1 ? 'session' : 'sessions'} on this server. Close one (DELETE /mcp) or retry shortly.`;
       return rpcError(res, 429, -32002, message, rpcId(req));
     };
-    const over = own.length + (pendingByDigest.get(keyId) ?? 0) - bearerCap + 1;
     // Room is made from this bearer's own IDLE sessions, least recently seen
     // first, exactly as the sweeper would close them — never another bearer's,
     // and never one with a request in flight. A client whose old session is
@@ -1106,16 +1215,44 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
     // once the new session exists (in `onsessioninitialized`), so an
     // initialize the SDK then refuses (406, 415, 400) or that throws on the way
     // does not also cost the caller a working session.
-    const planned = Math.max(0, over);
-    if (planned > 0 && own.filter(([, live]) => live.active === 0).length < planned) {
-      return bearerFull();
+    let planned = 0;
+    // How many of those belong to this account, and so make room under its
+    // ceiling as well. A bearer's sessions are all its account's, unless the
+    // platform named a different account (or none) when some were opened.
+    let freed = 0;
+    {
+      const own = sessionsOf(keyDigest);
+      planned = Math.max(0, own.length + (pendingByDigest.get(keyId) ?? 0) - bearerCap + 1);
+      if (planned > 0) {
+        const idle = own.filter(([, live]) => live.active === 0).sort(leastRecentFirst);
+        if (idle.length < planned) {
+          // Over the cap after the trim means every session over it is busy,
+          // and closing one would not be enough: the client can only wait.
+          return tooMany(
+            own.length > bearerCap
+              ? `This token holds ${own.length} sessions on this server, over its maximum of ${bearerCap}, and the ones over it are all serving a request. Retry once they finish; idle ones are closed to make room.`
+              : `This token already holds its maximum of ${bearerCap} ${bearerCap === 1 ? 'session' : 'sessions'} on this server. Close one (DELETE /mcp) or retry shortly.`,
+          );
+        }
+        freed = idle.slice(0, planned).filter(([, live]) => live.account === account).length;
+      }
     }
+    // The account's ceiling, live plus pending, less what the bearer's own
+    // room-making above gives back. Refused, never made room for: closing a
+    // session of another of the account's bearers would hand one client's
+    // session to another's initialize, and the account's holder is the one who
+    // knows which of its clients can spare one. The 429 names only the limit.
+    const accountHolds =
+      sessionsOfAccount(account).length + (pendingByAccount.get(account) ?? 0) - freed;
+    if (accountHolds + 1 > accountCap) return tooMany(accountFullMessage(account, accountCap));
     // Swept sessions free their slot on the timer; this is the backstop for the
     // case the timer cannot help with, which is arrivals faster than the TTL.
     // The sessions this initialize will close are still in the map, and are not
     // counted against it: a bearer making room in its own share is not newly
-    // refused for the room it is about to give back.
+    // refused for the room it is about to give back. Nothing is closed to make
+    // room here, whoever holds the pool.
     if (sessions.size - planned + pending >= maxSessions) {
+      res.set('Retry-After', String(POOL_FULL_RETRY_AFTER_S));
       return unavailable(
         res,
         `This server is holding its maximum of ${maxSessions} sessions. Retry shortly.`,
@@ -1124,12 +1261,14 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
     }
     pending++;
     pendingByDigest.set(keyId, (pendingByDigest.get(keyId) ?? 0) + 1);
+    pendingByAccount.set(account, (pendingByAccount.get(account) ?? 0) + 1);
     // Released exactly once, whether the initialize lands in the map or throws
     // on the way there. A reservation that leaked on the failure path would
     // ratchet the cap down until the process restarted — every later initialize
     // refused with 503 for the life of the process, which is the denial of
     // service the counter was added to prevent, self-inflicted. The per-bearer
-    // count leaking would do the same to that one bearer.
+    // and per-account counts leaking would do the same to that bearer and that
+    // account.
     let reserved = true;
     const release = () => {
       if (reserved) {
@@ -1138,6 +1277,9 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
         const left = (pendingByDigest.get(keyId) ?? 1) - 1;
         if (left > 0) pendingByDigest.set(keyId, left);
         else pendingByDigest.delete(keyId);
+        const accountLeft = (pendingByAccount.get(account) ?? 1) - 1;
+        if (accountLeft > 0) pendingByAccount.set(account, accountLeft);
+        else pendingByAccount.delete(account);
       }
     };
 
@@ -1178,25 +1320,43 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
           // the refusal above gives, which cannot be written from here. An
           // SDK client surfaces that as a failed connect; it does not retry
           // on its own. Only a race reaches this: a request landing on the
-          // planned session between the check above and this callback.
-          const needed = sessionsOf(keyDigest).length + 1 - bearerCap;
+          // planned session between the check above and this callback, or the
+          // account suspended since (a probe on another of its bearers said
+          // so), which lands under the suspended limits instead of the ones it
+          // was admitted under.
+          //
+          // The account is re-checked against the map alone. Initializes
+          // still pending were each admitted against this one's reservation,
+          // and the room they will make is still in the map, so counting them
+          // here as well would drop a session that fits. The pending count is
+          // what keeps a burst under the ceiling, at admission.
+          const drop = () => {
+            dropped = true;
+            release();
+            void t.close().catch(() => {});
+          };
+          const held = suspended || accountSuspended(account);
+          const capNow = held ? MAX_SESSIONS_SUSPENDED : bearerCap;
+          const own = sessionsOf(keyDigest);
+          const needed = own.length + 1 - capNow;
+          const victims: Array<[string, Live]> = [];
           if (needed > 0) {
-            const idle = sessionsOf(keyDigest).filter(([, other]) => other.active === 0);
-            if (idle.length < needed) {
-              dropped = true;
-              release();
-              void t.close().catch(() => {});
-              return;
-            }
-            idle.sort((a, b) => a[1].lastSeen - b[1].lastSeen);
-            for (const [other, gone] of idle.slice(0, needed)) {
-              sessions.delete(other);
-              void gone.transport.close().catch(() => {});
-            }
+            const idle = own.filter(([, other]) => other.active === 0);
+            if (idle.length < needed) return drop();
+            idle.sort(leastRecentFirst);
+            victims.push(...idle.slice(0, needed));
+          }
+          const freedNow = victims.filter(([, other]) => other.account === account).length;
+          const ceiling = held ? MAX_SESSIONS_SUSPENDED : accountCap;
+          if (sessionsOfAccount(account).length - freedNow + 1 > ceiling) return drop();
+          for (const [other, gone] of victims) {
+            sessions.delete(other);
+            void gone.transport.close().catch(() => {});
           }
           const live: Live = {
             transport: t,
             keyDigest,
+            account,
             lastSeen: Date.now(),
             // Initialize is already in flight when the session first becomes
             // visible to the sweeper. Count it until handleRequest settles.
@@ -1204,10 +1364,10 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
             refused: false,
           };
           sessions.set(id, live);
-          let held = true;
+          let inFlight = true;
           finishInitialize = () => {
-            if (!held) return;
-            held = false;
+            if (!inFlight) return;
+            inFlight = false;
             live.active--;
             live.lastSeen = Date.now();
           };
@@ -1468,6 +1628,7 @@ const BEARER_CHECK_TIMEOUT_MS = 10_000;
 /** How many bearers this server will be asking the platform about at once. */
 const MAX_BEARER_CHECKS_IN_FLIGHT = 32;
 const MAX_ACCEPTED_BEARERS = 4096;
+const MAX_SUSPENDED_ACCOUNTS = 4096;
 const MAX_FAILURE_SOURCES = 10_000;
 
 /**
@@ -1483,6 +1644,43 @@ function isSuspended(who: unknown): boolean {
   if (typeof account !== 'object' || account === null) return false;
   return (account as { status?: unknown }).status === 'suspended';
 }
+
+/**
+ * The account id a whoami record names: a non-empty string of at most 256
+ * characters. Anything else is no account, and the bearer then counts as an
+ * account of its own rather than as one this server could not confirm.
+ */
+function accountIdOf(who: unknown): string | undefined {
+  if (typeof who !== 'object' || who === null) return undefined;
+  const account = (who as { account?: unknown }).account;
+  if (typeof account !== 'object' || account === null) return undefined;
+  const id = (account as { id?: unknown }).id;
+  return typeof id === 'string' && id.length > 0 && id.length <= 256 ? id : undefined;
+}
+
+/**
+ * What a session counts against for the account ceiling and a suspended
+ * account's one session (OPL-5447).
+ *
+ * The account id the platform confirmed for the bearer when there is one
+ * (hosted mode), and otherwise the bearer's own digest: a hosted whoami that
+ * names no account, and every bearer on a self-hosted server, which verifies
+ * none and so puts no trust in a string it cannot check. Prefixed so the two
+ * can never name the same thing.
+ */
+function accountKey(keyId: string, confirmed: string | undefined): string {
+  return confirmed !== undefined ? `account:${confirmed}` : `bearer:${keyId}`;
+}
+
+/** The 429 for an account at its ceiling. It names the limit and nothing else. */
+function accountFullMessage(account: string, cap: number): string {
+  const noun = cap === 1 ? 'session' : 'sessions';
+  return account.startsWith('account:')
+    ? `This account has reached its maximum of ${cap} ${noun} on this server, across all its tokens. Close one (DELETE /mcp) or retry shortly.`
+    : `This token has reached the per-account maximum of ${cap} ${noun} on this server, as an account of its own. Close one (DELETE /mcp) or retry shortly.`;
+}
+
+const leastRecentFirst = (a: [string, Live], b: [string, Live]) => a[1].lastSeen - b[1].lastSeen;
 
 /** Whether a POST body holds a JSON-RPC request, which is what opens a stream. */
 function carriesRequest(body: unknown): boolean {

@@ -1,5 +1,6 @@
 import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
+import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { Api, SERVICE_HEADER } from '../src/api.js';
 import { bearerChallenge, runHttp } from '../src/http.js';
@@ -51,6 +52,14 @@ function platformWithRefusals() {
     probeDelayMs?: number;
     /** When set, every probe waits on this before answering. */
     probeGate?: Promise<void>;
+    /**
+     * Per token: the `account` its whoami names (OPL-5447). Read when the
+     * probe ARRIVES, before any gate, so a gated probe answers with what was
+     * true when it was sent.
+     */
+    accounts?: Record<string, Record<string, unknown>>;
+    /** Per token: a gate that token's probes wait on. */
+    probeGates?: Map<string, Promise<void>>;
   } = { providerRefuses: false };
   /** Tokens refused on `GET account` only, after a delay in ms. */
   const slowRefusals = new Map<string, number>();
@@ -65,6 +74,16 @@ function platformWithRefusals() {
     });
     seen.push(headers);
     const token = (headers.authorization ?? '').replace(/^Bearer /, '');
+    const named = url.pathname.endsWith('/whoami') ? state.accounts?.[token] : undefined;
+    const record = named ? { ...WHOAMI, account: { ...named } } : undefined;
+    const gate = url.pathname.endsWith('/whoami') ? state.probeGates?.get(token) : undefined;
+    if (gate) await gate;
+    if (record) {
+      return new Response(JSON.stringify(record), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
     if (url.pathname.endsWith('/whoami') && state.probeGate) await state.probeGate;
     if (url.pathname.endsWith('/whoami') && state.probeDelayMs) {
       await new Promise((r) => setTimeout(r, state.probeDelayMs));
@@ -1117,6 +1136,458 @@ describe('hosted: checking a bearer before it gets anything', () => {
       expect(next.headers.get('www-authenticate')).toBe(CHALLENGE);
       await next.text();
       expect(platform.seen).toHaveLength(0);
+    } finally {
+      await stop(server);
+    }
+  });
+});
+
+// OPL-5447: the session cap was per bearer, so one account holding many keys
+// held one bearer's share on each of them, and could fill the whole pool; a
+// suspended account held one session on each key. Sessions now count against
+// the account the platform's whoami names for each bearer.
+describe('hosted: one account, however many bearers', () => {
+  let platform: ReturnType<typeof platformWithRefusals>;
+  afterEach(() => platform.restore());
+
+  const sessions = async (url: string) =>
+    ((await (await fetch(url.replace(/\/mcp$/, '/healthz'))).json()) as { sessions: number })
+      .sessions;
+  const as = (token: string, session?: string) => ({
+    Authorization: `Bearer ${token}`,
+    ...(session ? { 'mcp-session-id': session } : {}),
+  });
+  const active = (id: string) => ({ id, name: id, plan: 'team', status: 'active' });
+  const suspended = (id: string) => ({ id, name: id, plan: 'team', status: 'suspended' });
+  /** Resolve once the platform has seen `n` more requests than `before`. */
+  const reached = async (before: number, n = 1) => {
+    const deadline = Date.now() + 5000;
+    while (platform.seen.length < before + n) {
+      if (Date.now() > deadline) throw new Error('a probe never reached the platform');
+      await new Promise((r) => setTimeout(r, 5));
+    }
+  };
+  const status = async (res: Response) => {
+    await res.text();
+    return res.status;
+  };
+  const message = async (res: Response) =>
+    ((await res.json()) as { error: { message: string } }).error.message;
+
+  it('refuses an account at its ceiling 429 with Retry-After, whichever key asks, and leaves another account alone', async () => {
+    platform = platformWithRefusals();
+    platform.state.accounts = {};
+    for (let i = 0; i < 6; i++) platform.state.accounts[`mcpat_a${i}`] = active('acc-a');
+    platform.state.accounts.mcpat_b = active('acc-b');
+    // The default ceiling is half the pool: 4 of 8.
+    const { server, url } = await start({
+      resourceMetadataUrl: METADATA,
+      serviceSecret: SECRET,
+      maxSessions: 8,
+    });
+    try {
+      const c = client(url);
+      const held: Array<[string, string]> = [];
+      for (let i = 0; i < 4; i++) held.push([`mcpat_a${i}`, await c.open(`mcpat_a${i}`)]);
+
+      for (const token of ['mcpat_a4', 'mcpat_a5', 'mcpat_a0']) {
+        const over = await c.send(INIT, as(token));
+        expect(over.status).toBe(429);
+        expect(over.headers.get('retry-after')).toBe('30');
+        expect(over.headers.get('mcp-session-id')).toBeNull();
+        const said = await message(over);
+        expect(said).toBe(
+          'This account has reached its maximum of 4 sessions on this server, across all its tokens. Close one (DELETE /mcp) or retry shortly.',
+        );
+      }
+      // Refused, never made room for: every session the account held is kept.
+      expect(await sessions(url)).toBe(4);
+      for (const [token, session] of held) {
+        expect(await status(await c.send(LIST, as(token, session)))).toBe(200);
+      }
+
+      // Another account is not held to the first one's ceiling.
+      await c.open('mcpat_b');
+      await c.open('mcpat_b');
+      expect(await sessions(url)).toBe(6);
+
+      // A slot the account gives back is its own again.
+      const del = await c.send(undefined, as(...held[0]), 'DELETE');
+      expect(del.status).toBe(200);
+      await del.text();
+      await c.open('mcpat_a5');
+      expect(await sessions(url)).toBe(6);
+    } finally {
+      await stop(server);
+    }
+  });
+
+  it('still admits at the ceiling when the bearer makes room from its own idle session', async () => {
+    platform = platformWithRefusals();
+    platform.state.accounts = {
+      mcpat_one: active('acc-a'),
+      mcpat_two: active('acc-a'),
+      mcpat_three: active('acc-a'),
+    };
+    const { server, url } = await start({
+      resourceMetadataUrl: METADATA,
+      serviceSecret: SECRET,
+      maxSessionsPerBearer: 1,
+      maxSessionsPerAccount: 2,
+    });
+    try {
+      const c = client(url);
+      const first = await c.open('mcpat_one');
+      const second = await c.open('mcpat_two');
+      // At the ceiling, but the bearer's own idle session makes the room.
+      const again = await c.open('mcpat_one');
+      expect(await sessions(url)).toBe(2);
+      expect(await status(await c.send(LIST, as('mcpat_one', first)))).toBe(404);
+      expect(await status(await c.send(LIST, as('mcpat_one', again)))).toBe(200);
+      expect(await status(await c.send(LIST, as('mcpat_two', second)))).toBe(200);
+      // A third key has nothing of its own to give back.
+      const third = await c.send(INIT, as('mcpat_three'));
+      expect(third.status).toBe(429);
+      expect(await message(third)).toContain('This account has reached its maximum of 2 sessions');
+      expect(await sessions(url)).toBe(2);
+    } finally {
+      await stop(server);
+    }
+  });
+
+  it('never lets concurrent initializes across an account’s keys pass its ceiling', async () => {
+    platform = platformWithRefusals();
+    platform.state.accounts = {};
+    for (let i = 0; i < 5; i++) platform.state.accounts[`mcpat_c${i}`] = active('acc-c');
+    // Held before the transport answers, so every admission is still pending
+    // and none is a session yet: only the per-account reservations stand
+    // between the burst and the ceiling.
+    const original = StreamableHTTPServerTransport.prototype.handleRequest;
+    let open = () => {};
+    const hold = new Promise<void>((r) => {
+      open = r;
+    });
+    let held = 0;
+    StreamableHTTPServerTransport.prototype.handleRequest = async function (...args) {
+      if (!this.sessionId) {
+        held++;
+        await hold;
+      }
+      return original.apply(this, args);
+    };
+    const { server, url } = await start({
+      resourceMetadataUrl: METADATA,
+      serviceSecret: SECRET,
+      maxSessionsPerAccount: 2,
+    });
+    try {
+      const c = client(url);
+      const answered: number[] = [];
+      const burst = Array.from({ length: 5 }, (_, i) =>
+        c.send(INIT, as(`mcpat_c${i}`)).then(async (r) => {
+          answered.push(r.status);
+          await r.text();
+          return r.status;
+        }),
+      );
+      const deadline = Date.now() + 5000;
+      while (held + answered.length < 5 && Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 5));
+      }
+      expect(held).toBe(2);
+      expect(answered).toEqual([429, 429, 429]);
+      open();
+      expect((await Promise.all(burst)).sort()).toEqual([200, 200, 429, 429, 429]);
+      expect(await sessions(url)).toBe(2);
+    } finally {
+      open();
+      StreamableHTTPServerTransport.prototype.handleRequest = original;
+      await stop(server);
+    }
+  });
+
+  it('holds a suspended account to one session across all its keys, never closing a busy one', async () => {
+    platform = platformWithRefusals();
+    platform.state.accounts = {
+      mcpat_s1: active('acc-s'),
+      mcpat_s2: active('acc-s'),
+      mcpat_s3: active('acc-s'),
+      mcpat_s4: active('acc-s'),
+      mcpat_s5: active('acc-s'),
+      mcpat_other: active('acc-o'),
+    };
+    const { server, url } = await start({
+      resourceMetadataUrl: METADATA,
+      serviceSecret: SECRET,
+      // Every request probes, so the suspension is seen at once.
+      bearerCheckTtlMs: 0,
+    });
+    let release = () => {};
+    try {
+      const c = client(url);
+      const s1 = await c.open('mcpat_s1');
+      const s2 = await c.open('mcpat_s2');
+      const s3 = await c.open('mcpat_s3');
+      const s4 = await c.open('mcpat_s4');
+      const other = await c.open('mcpat_other');
+      expect(await sessions(url)).toBe(5);
+      for (const t of ['mcpat_s1', 'mcpat_s2', 'mcpat_s3', 'mcpat_s4', 'mcpat_s5']) {
+        platform.state.accounts[t] = suspended('acc-s');
+      }
+
+      // s2 is in flight: its request waits on its probe at the platform.
+      platform.state.probeGates = new Map([
+        [
+          'mcpat_s2',
+          new Promise<void>((r) => {
+            release = r;
+          }),
+        ],
+      ]);
+      const before = platform.seen.length;
+      const busy = c.send(LIST, as('mcpat_s2', s2));
+      await reached(before);
+
+      // A request on s1 learns of the suspension: s1 is kept (it is serving
+      // this), s2 is kept (busy), and the account's other idle sessions go,
+      // whichever key opened them. Another account's session is untouched.
+      expect(await status(await c.send(LIST, as('mcpat_s1', s1)))).toBe(200);
+      expect(await sessions(url)).toBe(3);
+      for (const [t, s] of [
+        ['mcpat_s3', s3],
+        ['mcpat_s4', s4],
+      ] as const) {
+        expect(await status(await c.send(LIST, as(t, s)))).toBe(404);
+      }
+      expect(await status(await c.send(LIST, as('mcpat_other', other)))).toBe(200);
+
+      // Its keys cannot open more: not a new one, and not one whose session
+      // was just closed.
+      for (const t of ['mcpat_s5', 'mcpat_s3']) {
+        const refused = await c.send(INIT, as(t));
+        expect(refused.status).toBe(429);
+        expect(refused.headers.get('retry-after')).toBe('30');
+        expect(await message(refused)).toContain(
+          'This account has reached its maximum of 1 session on this server, across all its tokens.',
+        );
+      }
+
+      // s2 finishes with s1 idle now, so s1 goes and s2 is the one left.
+      release();
+      expect(await status(await busy)).toBe(200);
+      expect(await sessions(url)).toBe(2);
+      expect(await status(await c.send(LIST, as('mcpat_s1', s1)))).toBe(404);
+      expect(await status(await c.send(LIST, as('mcpat_s2', s2)))).toBe(200);
+    } finally {
+      release();
+      await stop(server);
+    }
+  });
+
+  it('trims a newly suspended account at an initialize on any of its keys, keeping the most recent', async () => {
+    platform = platformWithRefusals();
+    platform.state.accounts = {
+      mcpat_t1: active('acc-t'),
+      mcpat_t2: active('acc-t'),
+      mcpat_t3: active('acc-t'),
+      mcpat_t4: active('acc-t'),
+    };
+    const { server, url } = await start({ resourceMetadataUrl: METADATA, serviceSecret: SECRET });
+    try {
+      const c = client(url);
+      const t1 = await c.open('mcpat_t1');
+      const t2 = await c.open('mcpat_t2');
+      await new Promise((r) => setTimeout(r, 5));
+      const t3 = await c.open('mcpat_t3');
+      platform.state.accounts.mcpat_t4 = suspended('acc-t');
+
+      // A key with no session learns of the suspension at initialize: the
+      // account's idle sessions go down to one, the most recently seen, and
+      // it holds that one, so this key is refused.
+      const refused = await c.send(INIT, as('mcpat_t4'));
+      expect(refused.status).toBe(429);
+      await refused.text();
+      expect(await sessions(url)).toBe(1);
+      expect(await status(await c.send(LIST, as('mcpat_t3', t3)))).toBe(200);
+      for (const [t, s] of [
+        ['mcpat_t1', t1],
+        ['mcpat_t2', t2],
+      ] as const) {
+        expect(await status(await c.send(LIST, as(t, s)))).toBe(404);
+      }
+    } finally {
+      await stop(server);
+    }
+  });
+
+  it('does not let a stale active answer, sent before a suspension, undo it', async () => {
+    platform = platformWithRefusals();
+    platform.state.accounts = {
+      mcpat_late: active('acc-l'),
+      mcpat_now: active('acc-l'),
+    };
+    const { server, url } = await start({ resourceMetadataUrl: METADATA, serviceSecret: SECRET });
+    let release = () => {};
+    try {
+      const c = client(url);
+      // mcpat_late's probe is sent while the account is active, and held.
+      platform.state.probeGates = new Map([
+        [
+          'mcpat_late',
+          new Promise<void>((r) => {
+            release = r;
+          }),
+        ],
+      ]);
+      const before = platform.seen.length;
+      const late = c.send(INIT, as('mcpat_late'));
+      await reached(before);
+
+      // The account is suspended, and a probe sent after that says so.
+      platform.state.accounts.mcpat_now = suspended('acc-l');
+      await c.open('mcpat_now');
+      expect(await sessions(url)).toBe(1);
+
+      // The held probe answers active, but it started before the suspension
+      // was seen: the account stays held to the one session it has.
+      release();
+      const refused = await late;
+      expect(refused.status).toBe(429);
+      expect(await message(refused)).toContain(
+        'This account has reached its maximum of 1 session on this server',
+      );
+      expect(await sessions(url)).toBe(1);
+    } finally {
+      release();
+      await stop(server);
+    }
+  });
+
+  it('holds a key whose own active answer is still cached to a suspension another key found', async () => {
+    platform = platformWithRefusals();
+    platform.state.accounts = { mcpat_cached: active('acc-k'), mcpat_fresh: active('acc-k') };
+    // The default window: mcpat_cached's `ok` is not asked again below.
+    const { server, url } = await start({ resourceMetadataUrl: METADATA, serviceSecret: SECRET });
+    let release = () => {};
+    try {
+      const c = client(url);
+      const first = await c.open('mcpat_cached');
+      // Busy: a whoami call on it is held at the platform.
+      platform.state.probeGates = new Map([
+        [
+          'mcpat_cached',
+          new Promise<void>((r) => {
+            release = r;
+          }),
+        ],
+      ]);
+      const before = platform.seen.length;
+      const call = c.send(
+        { jsonrpc: '2.0', id: 4, method: 'tools/call', params: { name: 'whoami', arguments: {} } },
+        as('mcpat_cached', first),
+      );
+      await reached(before);
+
+      // A probe on the other key finds the account suspended; the account
+      // holds one session already, so that key is refused.
+      platform.state.accounts.mcpat_fresh = suspended('acc-k');
+      const fresh = await c.send(INIT, as('mcpat_fresh'));
+      expect(fresh.status).toBe(429);
+      await fresh.text();
+
+      // mcpat_cached is answered from its cache, and held to one all the
+      // same: its one session is busy, so it is refused before anything is
+      // built, not admitted and then dropped.
+      const probes = platform.seen.length;
+      const refused = await c.send(INIT, as('mcpat_cached'));
+      expect(platform.seen.length).toBe(probes);
+      expect(refused.status).toBe(429);
+      expect(await message(refused)).toContain(
+        'This token already holds its maximum of 1 session on this server',
+      );
+      release();
+      expect(await status(await call)).toBe(200);
+      expect(await sessions(url)).toBe(1);
+    } finally {
+      release();
+      await stop(server);
+    }
+  });
+
+  it('drops at birth a session admitted before its account was suspended, once it is', async () => {
+    platform = platformWithRefusals();
+    platform.state.accounts = { mcpat_d1: active('acc-d'), mcpat_d2: active('acc-d') };
+    const { server, url } = await start({
+      resourceMetadataUrl: METADATA,
+      serviceSecret: SECRET,
+      bearerCheckTtlMs: 0,
+    });
+    const original = StreamableHTTPServerTransport.prototype.handleRequest;
+    let open = () => {};
+    const hold = new Promise<void>((r) => {
+      open = r;
+    });
+    let held = 0;
+    try {
+      const c = client(url);
+      const first = await c.open('mcpat_d1');
+      // mcpat_d2's initialize is admitted while the account is active, and
+      // held before its session exists.
+      StreamableHTTPServerTransport.prototype.handleRequest = async function (...args) {
+        if (!this.sessionId) {
+          held++;
+          await hold;
+        }
+        return original.apply(this, args);
+      };
+      const late = c.send(INIT, as('mcpat_d2'));
+      const deadline = Date.now() + 5000;
+      while (held === 0) {
+        if (Date.now() > deadline) throw new Error('the initialize never reached the transport');
+        await new Promise((r) => setTimeout(r, 5));
+      }
+      // Suspended now, and a request on the other key's session says so.
+      platform.state.accounts.mcpat_d1 = suspended('acc-d');
+      expect(await status(await c.send(LIST, as('mcpat_d1', first)))).toBe(200);
+
+      open();
+      const dropped = await late;
+      expect(dropped.status).toBe(404);
+      expect(dropped.headers.get('mcp-session-id')).toBeNull();
+      await dropped.text();
+      expect(await sessions(url)).toBe(1);
+      expect(await status(await c.send(LIST, as('mcpat_d1', first)))).toBe(200);
+    } finally {
+      open();
+      StreamableHTTPServerTransport.prototype.handleRequest = original;
+      await stop(server);
+    }
+  });
+
+  it('counts a bearer whose whoami names no account as an account of its own', async () => {
+    platform = platformWithRefusals();
+    platform.state.accounts = {
+      mcpat_noid1: { name: 'nameless', status: 'active' },
+      mcpat_noid2: { id: '', name: 'blank', status: 'active' },
+      mcpat_id: active('acc-1'),
+    };
+    const { server, url } = await start({
+      resourceMetadataUrl: METADATA,
+      serviceSecret: SECRET,
+      maxSessionsPerAccount: 1,
+    });
+    try {
+      const c = client(url);
+      await c.open('mcpat_noid1');
+      const again = await c.send(INIT, as('mcpat_noid1'));
+      expect(again.status).toBe(429);
+      expect(await message(again)).toBe(
+        'This token has reached the per-account maximum of 1 session on this server, as an account of its own. Close one (DELETE /mcp) or retry shortly.',
+      );
+      // Neither lumped with the other nameless bearer nor with a named account.
+      await c.open('mcpat_noid2');
+      await c.open('mcpat_id');
+      expect(await sessions(url)).toBe(3);
     } finally {
       await stop(server);
     }

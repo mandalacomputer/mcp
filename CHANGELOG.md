@@ -20,8 +20,13 @@ are wording changes, and they are behaviour changes in the way that matters.
   of a `--http` server (default 16), so 17 or more agents on one key need not
   evict each other's sessions and lose their `use_computer` bindings. It takes
   a whole number from 1 to 256, the server's whole session pool; anything
-  else is refused at startup, and at 256 one token can hold every session. A
-  suspended account's bearer is still held to one.
+  else is refused at startup. A suspended account's bearer is still held to
+  one, and a token is also held to its account's limit, below.
+- **`MANDALA_MCP_MAX_SESSIONS_PER_ACCOUNT`** (`maxSessionsPerAccount` for
+  embedders of `runHttp`) sets how many sessions one account may hold across
+  all its tokens: default 128, half the pool. Read by the same rules as the
+  per-token variable. On a self-hosted server each token is an account of its
+  own, so a token that should hold more than 128 needs both raised.
 
 ### Fixed
 
@@ -104,6 +109,26 @@ are wording changes, and they are behaviour changes in the way that matters.
   with a request in flight are kept, and go on a later request once idle. A
   `429` for a bearer still over its limit says how many it holds and to wait
   for the busy ones.
+- **One account can no longer fill the hosted server's session pool by
+  holding many keys, and a suspended account no longer gets one session per
+  key.** The limits were per bearer, so an account with 16 keys held all 256
+  sessions and every other tenant's initialize was answered `503`. Sessions
+  now also count against the account the platform's `whoami` names for each
+  token (a token whose `whoami` names none is an account of its own), and an
+  account holds at most 128, half the pool. Past that an initialize is
+  answered `429` with `Retry-After`; a bearer's own least recently used idle
+  session still makes room as before, but no other token's session is ever
+  closed for it. Initializes in flight are counted per account, so a burst
+  across its keys cannot pass the ceiling together. A suspended account is
+  held to one session across all its tokens: once any of its tokens is found
+  suspended, its other tokens are held too, even with an active answer still
+  cached, and an active answer to a check that started before the suspension
+  was seen does not undo it. The next request on any of its sessions, or an
+  initialize on any of its tokens, closes the account's other idle sessions
+  down to one; one with a request in flight is kept. An initialize admitted
+  just before its account was suspended is dropped as its session is made
+  (`404`). A full pool is still a `503`, now with `Retry-After`, and no
+  other token's session is closed to make room in it.
 
 ## [0.7.0] — 2026-09-27
 

@@ -1,5 +1,5 @@
 import { afterEach, expect, it, vi } from 'vitest';
-import { main, maxSessionsPerToken } from '../src/cli.js';
+import { main, maxSessionsPerAccount, maxSessionsPerToken } from '../src/cli.js';
 import * as hosted from '../src/http.js';
 
 // OPL-5449: the per-token session cap had no knob, so a self-hosted `--http`
@@ -60,6 +60,43 @@ it('never starts the HTTP server on a value it refuses', async () => {
   vi.stubEnv('MANDALA_MCP_MAX_SESSIONS_PER_TOKEN', '16x');
   await expect(main(['--http', '--port', '0'])).rejects.toThrow(
     'MANDALA_MCP_MAX_SESSIONS_PER_TOKEN=16x is not a session count',
+  );
+  expect(run).not.toHaveBeenCalled();
+});
+
+// OPL-5447: the per-account ceiling's variable, read by the same rules.
+it('reads the per-account variable by the same rules, naming it', () => {
+  expect(maxSessionsPerAccount('40')).toBe(40);
+  expect(maxSessionsPerAccount(String(hosted.DEFAULT_MAX_SESSIONS))).toBe(
+    hosted.DEFAULT_MAX_SESSIONS,
+  );
+  expect(maxSessionsPerAccount(undefined)).toBeUndefined();
+  expect(maxSessionsPerAccount('  ')).toBeUndefined();
+  for (const bad of ['0', '-1', '2.5', '1e2', 'many', String(hosted.DEFAULT_MAX_SESSIONS + 1)]) {
+    expect(() => maxSessionsPerAccount(bad), bad).toThrow(
+      `MANDALA_MCP_MAX_SESSIONS_PER_ACCOUNT=${bad} is not a session count. Use a whole number from 1 to ${hosted.DEFAULT_MAX_SESSIONS}, or leave it unset for ${hosted.DEFAULT_MAX_SESSIONS / 2}.`,
+    );
+  }
+});
+
+it('passes the per-account variable to the HTTP server, and nothing when it is unset', async () => {
+  const seen: Array<Parameters<typeof hosted.runHttp>[0]> = [];
+  vi.spyOn(hosted, 'runHttp').mockImplementation(async (cfg) => {
+    seen.push(cfg);
+    return undefined as never;
+  });
+  vi.stubEnv('MANDALA_MCP_MAX_SESSIONS_PER_ACCOUNT', '64');
+  await main(['--http', '--port', '0']);
+  vi.stubEnv('MANDALA_MCP_MAX_SESSIONS_PER_ACCOUNT', undefined);
+  await main(['--http', '--port', '0']);
+  expect(seen.map((cfg) => cfg.maxSessionsPerAccount)).toEqual([64, undefined]);
+});
+
+it('never starts the HTTP server on a per-account value it refuses', async () => {
+  const run = vi.spyOn(hosted, 'runHttp').mockImplementation(async () => undefined as never);
+  vi.stubEnv('MANDALA_MCP_MAX_SESSIONS_PER_ACCOUNT', '0');
+  await expect(main(['--http', '--port', '0'])).rejects.toThrow(
+    'MANDALA_MCP_MAX_SESSIONS_PER_ACCOUNT=0 is not a session count',
   );
   expect(run).not.toHaveBeenCalled();
 });

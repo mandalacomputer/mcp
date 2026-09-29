@@ -283,7 +283,11 @@ describe('the per-bearer session cap', () => {
    * A server whose platform holds every `GET account` until released, so a
    * `get_account` call keeps its session busy for as long as a test needs.
    */
-  async function setup(extra: { maxSessionsPerBearer: number; maxSessions?: number }) {
+  async function setup(extra: {
+    maxSessionsPerBearer: number;
+    maxSessions?: number;
+    maxSessionsPerAccount?: number;
+  }) {
     const platform = installFakePlatform();
     const inner = globalThis.fetch;
     let open = () => {};
@@ -600,6 +604,77 @@ describe('the per-bearer session cap', () => {
       await over.text();
       t.release();
       for (const c of calls) await c.text();
+    } finally {
+      await t.teardown();
+    }
+  });
+
+  // OPL-5447: a self-hosted server verifies no account, so each bearer is an
+  // account of its own, held to the account ceiling (half the pool by
+  // default) as well as its own cap; a full pool is still a 503, and nothing
+  // ever closes another bearer's session to make room.
+  it('holds each token to the account ceiling as its own account, and a full pool is a 503 with Retry-After', async () => {
+    const t = await setup({ maxSessionsPerBearer: 3, maxSessions: 4 });
+    try {
+      const alice = [await t.open('com_alice'), await t.open('com_alice')];
+      // Under its own cap of 3, but at the account ceiling of 2.
+      const third = await t.send(INIT, t.as('com_alice'));
+      expect(third.status).toBe(429);
+      expect(third.headers.get('retry-after')).toBe('30');
+      expect(((await third.json()) as { error: { message: string } }).error.message).toBe(
+        'This token has reached the per-account maximum of 2 sessions on this server, as an account of its own. Close one (DELETE /mcp) or retry shortly.',
+      );
+
+      const bob = [await t.open('com_bob'), await t.open('com_bob')];
+      expect(await t.count()).toBe(4);
+      const carol = await t.send(INIT, t.as('com_carol'));
+      expect(carol.status).toBe(503);
+      expect(carol.headers.get('retry-after')).toBe('30');
+      await carol.text();
+
+      // Every session is still there: neither refusal closed anyone's.
+      for (const [token, ids] of [
+        ['com_alice', alice],
+        ['com_bob', bob],
+      ] as const) {
+        for (const id of ids) {
+          const res = await t.send(LIST, t.as(token, id));
+          expect(res.status).toBe(200);
+          await res.text();
+        }
+      }
+    } finally {
+      await t.teardown();
+    }
+  });
+
+  it('reads an unusable maxSessionsPerAccount as the default, and clamps one above the pool', async () => {
+    for (const bad of [Number.NaN, 0, -3]) {
+      const t = await setup({
+        maxSessionsPerBearer: 16,
+        maxSessions: 4,
+        maxSessionsPerAccount: bad,
+      });
+      try {
+        await t.open('com_alice');
+        await t.open('com_alice');
+        const over = await t.send(INIT, t.as('com_alice'));
+        expect(over.status).toBe(429);
+        expect(((await over.json()) as { error: { message: string } }).error.message).toContain(
+          'per-account maximum of 2 sessions',
+        );
+      } finally {
+        await t.teardown();
+      }
+    }
+    const t = await setup({ maxSessionsPerBearer: 16, maxSessions: 4, maxSessionsPerAccount: 100 });
+    try {
+      for (let i = 0; i < 4; i++) await t.open('com_alice');
+      const over = await t.send(INIT, t.as('com_alice'));
+      expect(over.status).toBe(429);
+      expect(((await over.json()) as { error: { message: string } }).error.message).toContain(
+        'per-account maximum of 4 sessions',
+      );
     } finally {
       await t.teardown();
     }

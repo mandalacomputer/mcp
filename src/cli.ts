@@ -61,8 +61,18 @@ Environment
                        hold (default 16; a suspended account's token is held to
                        one whatever this says). A whole number from 1 to
                        ${DEFAULT_MAX_SESSIONS}, the whole server's session pool;
-                       anything else is refused at startup. At ${DEFAULT_MAX_SESSIONS} one
-                       token can hold the entire pool.
+                       anything else is refused at startup. A token is also
+                       held to its account's maximum, below.
+  MANDALA_MCP_MAX_SESSIONS_PER_ACCOUNT
+                       --http only. How many live sessions one account may hold
+                       across all its tokens (default ${DEFAULT_MAX_SESSIONS / 2}, half the pool; a
+                       suspended account is held to one whatever this says).
+                       Hosted (the metadata URL set), the account is the one the
+                       platform names for the token; otherwise each token is an
+                       account of its own. Past it an initialize is refused 429
+                       with Retry-After; no other token's session is closed. A
+                       whole number from 1 to ${DEFAULT_MAX_SESSIONS}; anything else is
+                       refused at startup.
 
 Flags override the environment.`;
 
@@ -362,7 +372,7 @@ function env(name: string): string | undefined {
 }
 
 /**
- * `MANDALA_MCP_MAX_SESSIONS_PER_TOKEN`, or undefined for `runHttp`'s default.
+ * A session-count variable, or undefined for `runHttp`'s default.
  *
  * Refused, not defaulted, when it is not a whole number from 1 to the
  * process-wide pool — the call `port()` makes for a port and `envFlag` for a
@@ -373,20 +383,35 @@ function env(name: string): string | undefined {
  * the pool it would not raise anything — the pool caps a bearer first — so it
  * is refused too rather than accepted as a promise the server cannot keep.
  */
-export function maxSessionsPerToken(
-  raw = env('MANDALA_MCP_MAX_SESSIONS_PER_TOKEN'),
-): number | undefined {
+function sessionCount(name: string, raw: string | undefined, unset: string): number | undefined {
   if (raw === undefined) return undefined;
   const v = raw.trim();
   if (!v) return undefined;
   const n = /^\d+$/.test(v) ? Number(v) : Number.NaN;
   if (!Number.isInteger(n) || n < 1 || n > DEFAULT_MAX_SESSIONS) {
     throw new Error(
-      `MANDALA_MCP_MAX_SESSIONS_PER_TOKEN=${raw} is not a session count. ` +
-        `Use a whole number from 1 to ${DEFAULT_MAX_SESSIONS}, or leave it unset for 16.`,
+      `${name}=${raw} is not a session count. ` +
+        `Use a whole number from 1 to ${DEFAULT_MAX_SESSIONS}, or leave it unset for ${unset}.`,
     );
   }
   return n;
+}
+
+/** `MANDALA_MCP_MAX_SESSIONS_PER_TOKEN` (OPL-5449); see {@link sessionCount}. */
+export function maxSessionsPerToken(
+  raw = env('MANDALA_MCP_MAX_SESSIONS_PER_TOKEN'),
+): number | undefined {
+  return sessionCount('MANDALA_MCP_MAX_SESSIONS_PER_TOKEN', raw, '16');
+}
+
+/**
+ * `MANDALA_MCP_MAX_SESSIONS_PER_ACCOUNT` (OPL-5447), read exactly as the
+ * per-token variable is; see {@link sessionCount}.
+ */
+export function maxSessionsPerAccount(
+  raw = env('MANDALA_MCP_MAX_SESSIONS_PER_ACCOUNT'),
+): number | undefined {
+  return sessionCount('MANDALA_MCP_MAX_SESSIONS_PER_ACCOUNT', raw, `${DEFAULT_MAX_SESSIONS / 2}`);
 }
 
 const list = (v: string | undefined) =>
@@ -435,6 +460,7 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
       resourceMetadataUrl: env('MANDALA_MCP_RESOURCE_METADATA_URL'),
       serviceSecret: env('MANDALA_MCP_SERVICE_SECRET'),
       maxSessionsPerBearer: maxSessionsPerToken(),
+      maxSessionsPerAccount: maxSessionsPerAccount(),
     });
     return;
   }
