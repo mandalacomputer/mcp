@@ -1664,3 +1664,259 @@ describe('hosted: one account, however many bearers', () => {
     }
   });
 });
+
+// OPL-5455: only a POST carrying a request asks the platform about its bearer,
+// yet a notification, a response and the standing stream each stamped their
+// session as heard from. A revoked token's holder could keep its sessions,
+// and its account's ceiling, held for ever by sending only those, never once
+// found refused. Now, hosted, they keep a session alive only while the
+// platform's acceptance of its bearer is still cached.
+describe('hosted: traffic that carries no request', () => {
+  let platform: ReturnType<typeof platformWithRefusals> | undefined;
+  afterEach(() => platform?.restore());
+
+  const NOTE = { jsonrpc: '2.0', method: 'notifications/initialized' };
+  // Long enough that a loaded machine's pauses do not read as idling.
+  const TTL = 1000;
+  const sessions = async (url: string) =>
+    ((await (await fetch(url.replace(/\/mcp$/, '/healthz'))).json()) as { sessions: number })
+      .sessions;
+  const as = (token: string, session?: string) => ({
+    Authorization: `Bearer ${token}`,
+    ...(session ? { 'mcp-session-id': session } : {}),
+  });
+  const active = (id: string) => ({ id, name: id, plan: 'team', status: 'active' });
+  const status = async (res: Response) => {
+    await res.text();
+    return res.status;
+  };
+  const pause = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+  /**
+   * Try to open the standing stream: its status, and a way to close it. A
+   * caller racing the sweeper may meet 404, and decides for itself what that
+   * means.
+   */
+  const openStream = async (url: string, token: string, session: string) => {
+    const abort = new AbortController();
+    const res = await fetch(url, {
+      headers: { Accept: 'text/event-stream', ...as(token, session) },
+      signal: abort.signal,
+    });
+    return {
+      status: res.status,
+      close: async () => {
+        abort.abort();
+        await res.body?.cancel().catch(() => {});
+      },
+    };
+  };
+
+  /** Open the standing stream, which must be served, and a way to close it. */
+  const stream = async (url: string, token: string, session: string) => {
+    const { status: code, close } = await openStream(url, token, session);
+    expect(code).toBe(200);
+    return close;
+  };
+
+  /**
+   * Keep doing `step` every 50 ms until `gone` says so (true) or `ms` pass
+   * (false), whichever is first.
+   */
+  const keepUntil = async (ms: number, step: () => Promise<boolean>) => {
+    const deadline = Date.now() + ms;
+    while (Date.now() < deadline) {
+      if (await step()) return true;
+      await pause(50);
+    }
+    return false;
+  };
+
+  const revokedAccount = async () => {
+    platform = platformWithRefusals();
+    platform.state.accounts = { mcpat_leak: active('acc-r'), mcpat_owner: active('acc-r') };
+    const started = await start({
+      resourceMetadataUrl: METADATA,
+      serviceSecret: SECRET,
+      maxSessionsPerAccount: 1,
+      bearerCheckTtlMs: 100,
+      sessionTtlMs: TTL,
+    });
+    const c = client(started.url);
+    const leaked = await c.open('mcpat_leak');
+    delete platform.state.accounts.mcpat_leak;
+    platform.refused.add('mcpat_leak');
+    // The account's other key is held out by the leaked key's session.
+    const blocked = await c.send(INIT, as('mcpat_owner'));
+    expect(blocked.status).toBe(429);
+    await blocked.text();
+    return { ...started, c, leaked };
+  };
+
+  it('lets a revoked token’s session idle out while its holder sends only notifications', async () => {
+    const { server, url, c, leaked } = await revokedAccount();
+    try {
+      // Each is still served, until the session has idled out under it.
+      const swept = await keepUntil(8000, async () => {
+        const res = await c.send(NOTE, as('mcpat_leak', leaked));
+        const code = await status(res);
+        if (code === 404) return true;
+        expect(code).toBe(202);
+        return false;
+      });
+      expect(swept).toBe(true);
+      expect(await sessions(url)).toBe(0);
+      // The account's valid key now fits under the ceiling.
+      await c.open('mcpat_owner');
+      expect(await sessions(url)).toBe(1);
+    } finally {
+      await stop(server);
+    }
+  }, 15_000);
+
+  it('lets a revoked token’s session idle out while its holder keeps reopening the stream', async () => {
+    const { server, url, c, leaked } = await revokedAccount();
+    try {
+      // Opening and closing the stream each stamped the session; neither does
+      // for a bearer the platform no longer vouches for. The sweeper may run
+      // between the count and the GET, so a 404 is the sweep too.
+      const swept = await keepUntil(8000, async () => {
+        if ((await sessions(url)) === 0) return true;
+        const { status: code, close } = await openStream(url, 'mcpat_leak', leaked);
+        if (code === 404) {
+          await close();
+          return true;
+        }
+        expect(code).toBe(200);
+        await pause(20);
+        await close();
+        return false;
+      });
+      expect(swept).toBe(true);
+      await c.open('mcpat_owner');
+      expect(await sessions(url)).toBe(1);
+    } finally {
+      await stop(server);
+    }
+  }, 15_000);
+
+  it('lets a revoked token’s session idle out while its holder keeps sending HEAD /mcp', async () => {
+    const { server, url, c, leaked } = await revokedAccount();
+    try {
+      // Express routes a HEAD to the GET handler with the method still HEAD,
+      // and the SDK answers it 405 without closing anything. It is no request,
+      // and must not keep the session from idling out.
+      const swept = await keepUntil(8000, async () => {
+        if ((await sessions(url)) === 0) return true;
+        const res = await fetch(url, { method: 'HEAD', headers: as('mcpat_leak', leaked) });
+        // Swept between the count and this HEAD.
+        const code = await status(res);
+        if (code === 404) return true;
+        expect(code).toBe(405);
+        return false;
+      });
+      expect(swept).toBe(true);
+      await c.open('mcpat_owner');
+      expect(await sessions(url)).toBe(1);
+    } finally {
+      await stop(server);
+    }
+  }, 15_000);
+
+  it('lets a revoked token’s session idle out while its holder keeps sending a DELETE the SDK refuses', async () => {
+    const { server, url, c, leaked } = await revokedAccount();
+    try {
+      // An unsupported protocol version is refused before the SDK closes the
+      // session, so the session stays open; it must not be kept alive either.
+      const swept = await keepUntil(8000, async () => {
+        if ((await sessions(url)) === 0) return true;
+        const res = await fetch(url, {
+          method: 'DELETE',
+          headers: { ...as('mcpat_leak', leaked), 'mcp-protocol-version': '1999-01-01' },
+        });
+        // Swept between the count and this DELETE.
+        const code = await status(res);
+        if (code === 404) return true;
+        expect(code).toBe(400);
+        return false;
+      });
+      expect(swept).toBe(true);
+      await c.open('mcpat_owner');
+      expect(await sessions(url)).toBe(1);
+    } finally {
+      await stop(server);
+    }
+  }, 15_000);
+
+  it('keeps a session whose accepted token sends only notifications within the cache window', async () => {
+    platform = platformWithRefusals();
+    const { server, url } = await start({
+      resourceMetadataUrl: METADATA,
+      serviceSecret: SECRET,
+      bearerCheckTtlMs: 60_000,
+      sessionTtlMs: TTL,
+    });
+    try {
+      const c = client(url);
+      const session = await c.open('mcpat_ok');
+      const close = await stream(url, 'mcpat_ok', session);
+      try {
+        // Well past the TTL, and through at least two sweeps.
+        const swept = await keepUntil(3000, async () => {
+          const code = await status(await c.send(NOTE, as('mcpat_ok', session)));
+          return code !== 202;
+        });
+        expect(swept).toBe(false);
+        expect(await sessions(url)).toBe(1);
+      } finally {
+        await close();
+      }
+      expect(await status(await c.send(LIST, as('mcpat_ok', session)))).toBe(200);
+    } finally {
+      await stop(server);
+    }
+  }, 15_000);
+
+  it('still keeps a session alive on requests, with no acceptance cached at all', async () => {
+    platform = platformWithRefusals();
+    // A zero cache window: nothing is ever taken on trust, so only the
+    // requests themselves, each checked with the platform, keep this alive.
+    const { server, url } = await start({
+      resourceMetadataUrl: METADATA,
+      serviceSecret: SECRET,
+      bearerCheckTtlMs: 0,
+      sessionTtlMs: TTL,
+    });
+    try {
+      const c = client(url);
+      const session = await c.open('mcpat_ok');
+      const swept = await keepUntil(3000, async () => {
+        const code = await status(await c.send(LIST, as('mcpat_ok', session)));
+        return code !== 200;
+      });
+      expect(swept).toBe(false);
+      expect(await sessions(url)).toBe(1);
+    } finally {
+      await stop(server);
+    }
+  }, 15_000);
+
+  it('self-hosted: notifications and the stream keep a session alive, as before', async () => {
+    platform = platformWithRefusals();
+    const { server, url } = await start({ sessionTtlMs: TTL });
+    try {
+      const c = client(url);
+      const session = await c.open('com_alice');
+      const swept = await keepUntil(3000, async () => {
+        const close = await stream(url, 'com_alice', session);
+        await close();
+        const code = await status(await c.send(NOTE, as('com_alice', session)));
+        return code !== 202;
+      });
+      expect(swept).toBe(false);
+      expect(await sessions(url)).toBe(1);
+    } finally {
+      await stop(server);
+    }
+  }, 15_000);
+});

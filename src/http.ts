@@ -776,18 +776,35 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
    * exists for, a laptop that slept and left the socket half-open, is exactly
    * the one where `close` never fires to undo the count. The transport and its
    * fully-registered server would sit on a `maxSessions` slot forever.
+   *
+   * `heard` says whether this traffic may stamp the session as heard from; it
+   * is asked at the start and again at the end. Only `active` is unconditional,
+   * so a session with work in flight is never swept whatever `heard` says.
    */
-  const beginActivity = (live: Live): (() => void) => {
+  const beginActivity = (live: Live, heard: () => boolean = always): (() => void) => {
     live.active++;
-    live.lastSeen = Date.now();
+    if (heard()) live.lastSeen = Date.now();
     let held = true;
     return () => {
       if (!held) return;
       held = false;
       live.active--;
-      live.lastSeen = Date.now();
+      if (heard()) live.lastSeen = Date.now();
     };
   };
+
+  /**
+   * Whether traffic on this bearer that carries no request may keep its
+   * session from idling out (OPL-5455). Hosted, only while the platform's
+   * acceptance of the bearer is still cached: a notification, a response or
+   * the standing stream never asks the platform, so without this a revoked
+   * token's holder could keep its sessions (and its account's ceiling) held
+   * for ever by sending nothing but those. Once the acceptance lapses and no
+   * request renews it, they idle out after the session TTL. A cache peek, never
+   * a probe. Self-hosted: always.
+   */
+  const heardWhileAccepted = (key: string): (() => boolean) =>
+    challenge ? () => isAccepted(key) : always;
 
   /** The live sessions opened with this bearer, by its digest. */
   const sessionsOf = (keyDigest: Buffer): Array<[string, Live]> => {
@@ -886,8 +903,12 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
     }
   };
 
-  const serving = async <T>(live: Live, handle: () => Promise<T>): Promise<T> => {
-    const release = beginActivity(live);
+  const serving = async <T>(
+    live: Live,
+    handle: () => Promise<T>,
+    heard: () => boolean = always,
+  ): Promise<T> => {
+    const release = beginActivity(live, heard);
     try {
       return await handle();
     } finally {
@@ -899,11 +920,14 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
     }
   };
 
-  /** Stamp a session as heard from, without claiming anything is in flight. */
-  const touch = (live: Live, res: Response) => {
-    live.lastSeen = Date.now();
+  /**
+   * Stamp a session as heard from, without claiming anything is in flight, on
+   * open and on close, each only when `heard` allows it (see `beginActivity`).
+   */
+  const touch = (live: Live, res: Response, heard: () => boolean) => {
+    if (heard()) live.lastSeen = Date.now();
     res.on('close', () => {
-      live.lastSeen = Date.now();
+      if (heard()) live.lastSeen = Date.now();
     });
   };
 
@@ -1069,8 +1093,8 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
         // be a 401 whatever the call goes on to do. A platform that cannot say
         // is not a refusal: the call goes ahead, and a real refusal during it
         // still reaches the client through the held answer or the mark.
-        const verdict =
-          challenge && carriesRequest(req.body) ? (await checkBearer(key)).verdict : undefined;
+        const request = carriesRequest(req.body);
+        const verdict = challenge && request ? (await checkBearer(key)).verdict : undefined;
         if (verdict === 'refused') {
           live.refused = true;
           return challenged(res, TOKEN_REFUSED, rpcId(req));
@@ -1088,7 +1112,14 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
           : undefined;
         return await heldAnswer.run(held, () =>
           requestBodyLease.run(lease, () =>
-            serving(live, () => live.transport.handleRequest(req, res, req.body)),
+            serving(
+              live,
+              () => live.transport.handleRequest(req, res, req.body),
+              // A request keeps the session as before: it was just put to
+              // the platform, or found its acceptance cached. Anything else
+              // keeps it only while that acceptance lasts.
+              request ? always : heardWhileAccepted(key),
+            ),
           ),
         );
       } finally {
@@ -1450,13 +1481,21 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
     // The stream is refused on a token the platform has already refused; a
     // DELETE is still honoured, since the digest shows it is the holder.
     if (challenge && live.refused && req.method === 'GET') return challenged(res, TOKEN_REFUSED);
-    // The DELETE is a request and is held for; the GET is the notification
-    // stream and is only noted. See `serving`.
+    // The GET is the notification stream and is only noted; anything else
+    // here (a DELETE, or a HEAD, which Express routes to the GET handler with
+    // the method unchanged) is held for while the SDK handles it. See
+    // `serving`. None of it is put to the platform, so none of it may keep the
+    // session from idling out once the token's acceptance lapses: a HEAD is
+    // answered 405 and a DELETE the SDK refuses (an unsupported protocol
+    // version, say) 400, both leaving the session open, and a revoked token's
+    // holder could otherwise send either for ever to keep its sessions, and
+    // its account's ceiling, held (OPL-5455). A DELETE that succeeds closes
+    // the session anyway, and `active` is counted whatever `heard` says.
     if (req.method === 'GET') {
-      touch(live, res);
+      touch(live, res, heardWhileAccepted(key));
       return live.transport.handleRequest(req, res);
     }
-    return serving(live, () => live.transport.handleRequest(req, res));
+    return serving(live, () => live.transport.handleRequest(req, res), heardWhileAccepted(key));
   };
   app.get('/mcp', bySession);
   app.delete('/mcp', bySession);
@@ -1661,6 +1700,8 @@ function accountFullMessage(account: string, cap: number): string {
     ? `This account has reached its maximum of ${cap} ${noun} on this server, across all its tokens. Close one (DELETE /mcp) or retry shortly.`
     : `This token has reached the per-account maximum of ${cap} ${noun} on this server, as an account of its own. Close one (DELETE /mcp) or retry shortly.`;
 }
+
+const always = () => true;
 
 /** Whether a POST body holds a JSON-RPC request, which is what opens a stream. */
 function carriesRequest(body: unknown): boolean {
