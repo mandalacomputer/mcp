@@ -366,6 +366,37 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
   /** Whether the platform accepted this bearer within the cache window. */
   const isAccepted = (key: string): boolean => acceptance(key) !== undefined;
 
+  // Accounts a probe found suspended, by the id whoami confirmed: until when
+  // that is believed over any bearer's cached answer (OPL-5447). A verdict is
+  // cached per bearer, so without this an account's other keys kept the `ok`
+  // they were given before the suspension for the rest of their window, and a
+  // re-initialize on one of them was admitted under the active ceiling, not
+  // the suspended one. Kept at least as long as any verdict cached before it
+  // can be believed, and never under a minute, so an initialize admitted just
+  // before it is still held to it when it lands; forgotten as soon as a probe
+  // for the account answers active.
+  const suspendedAccounts = new Map<string, number>();
+  const accountSuspended = (account: string | undefined): boolean => {
+    if (account === undefined) return false;
+    const until = suspendedAccounts.get(account);
+    if (until === undefined) return false;
+    if (until > Date.now()) return true;
+    suspendedAccounts.delete(account);
+    return false;
+  };
+  const noteStanding = (account: string, suspended: boolean, now: number) => {
+    suspendedAccounts.delete(account);
+    if (!suspended) return;
+    if (suspendedAccounts.size >= MAX_SUSPENDED_ACCOUNTS) {
+      for (const [k, until] of suspendedAccounts) if (until <= now) suspendedAccounts.delete(k);
+      // Still full: drop the oldest, which Map iteration yields first.
+      if (suspendedAccounts.size >= MAX_SUSPENDED_ACCOUNTS) {
+        suspendedAccounts.delete(suspendedAccounts.keys().next().value as string);
+      }
+    }
+    suspendedAccounts.set(account, now + Math.max(checkTtl, DEFAULT_BEARER_CHECK_TTL_MS));
+  };
+
   /**
    * `ok`: the probe answered 2xx, and only that — the one answer that says the
    * platform authenticated this credential AND let it act. `suspended`: the
@@ -386,7 +417,12 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
   ): Promise<{ verdict: 'ok' | 'suspended' | 'refused' | 'unknown'; account?: string }> => {
     const id = digest(key).toString('hex');
     const cached = acceptance(key);
-    if (cached) return { verdict: cached.suspended ? 'suspended' : 'ok', account: cached.account };
+    if (cached) {
+      // A suspension the platform reported since, on any of the account's
+      // bearers, stands over this bearer's older answer.
+      const suspended = cached.suspended || accountSuspended(cached.account);
+      return { verdict: suspended ? 'suspended' : 'ok', account: cached.account };
+    }
     if (checksInFlight >= MAX_BEARER_CHECKS_IN_FLIGHT) return { verdict: 'unknown' };
     checksInFlight++;
     onStart?.();
@@ -423,6 +459,7 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
       }
     }
     accepted.set(id, { until: now + checkTtl, suspended, account });
+    if (account !== undefined) noteStanding(account, suspended, now);
     return { verdict: suspended ? 'suspended' : 'ok', account };
   };
 
@@ -898,10 +935,14 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
       take(idle.slice(0, overBearer));
     }
 
-    // Every victim so far is this bearer's, so this account's too.
+    // Every victim so far is this bearer's, but not always this account's:
+    // one it opened while the platform named no account counts against the
+    // bearer's own bucket, and closing it frees nothing under the account the
+    // platform has since confirmed. Only what the account really holds counts.
     const mine = sessionsOfAccount(seat.account);
     const accountPending = countPending ? (pendingByAccount.get(seat.account) ?? 0) : 0;
-    const overAccount = mine.length + accountPending - victims.length + 1 - seat.accountCap;
+    const freed = victims.filter(([, live]) => live.account === seat.account).length;
+    const overAccount = mine.length + accountPending - freed + 1 - seat.accountCap;
     if (overAccount > 0) {
       const idle = idleOf(mine);
       if (idle.length < overAccount) return { refuse: 'account' };
@@ -966,6 +1007,62 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
       // The work itself is the lifetime that matters.
       release();
     }
+  };
+
+  /**
+   * Count a request as in flight on its session without stamping it as heard
+   * from: a request refused before it is dispatched has not been served. The
+   * callback undoes it, once however often it is called.
+   */
+  const pinSession = (live: Live): (() => void) => {
+    live.active++;
+    let pinned = true;
+    return () => {
+      if (!pinned) return;
+      pinned = false;
+      live.active--;
+    };
+  };
+
+  type SessionPin = { live: Live; release: () => void; handedOff: boolean };
+
+  /**
+   * Pin the session a POST names, before its body is read (OPL-5447).
+   *
+   * A body can take as long to arrive as its sender likes, and until it has,
+   * the route has not run: pinned only there, a session whose request was
+   * still uploading counted as idle, so an initialize making room closed it
+   * under that request, which then met a 404. Pinned here instead, for a
+   * request whose bearer matches the session it names, the test the route
+   * applies first. The pin is released if the request never reaches the route
+   * (a parse failure, a refusal mid-upload, a client that went away): the
+   * response closes in every one of those. Otherwise the route takes it over
+   * (see {@link takePin}) and releases it itself, since a response can close
+   * while the route still has work in flight on the session.
+   */
+  const pinBeforeBody = (req: Request, res: Response, next: express.NextFunction) => {
+    const id = req.header('mcp-session-id');
+    const live = id ? sessions.get(id) : undefined;
+    const key = bearer(req);
+    if (live && key && sameKey(live.keyDigest, key)) {
+      const pin: SessionPin = { live, release: pinSession(live), handedOff: false };
+      res.locals.sessionPin = pin;
+      res.once('close', () => {
+        if (pin.handedOff) return;
+        pin.release();
+        // Should the route still run, it pins afresh rather than taking this.
+        if (res.locals.sessionPin === pin) delete res.locals.sessionPin;
+      });
+    }
+    next();
+  };
+
+  /** The route's side of {@link pinBeforeBody}: from here, releasing it is the route's job. */
+  const takePin = (res: Response): SessionPin | undefined => {
+    const pin = res.locals.sessionPin as SessionPin | undefined;
+    delete res.locals.sessionPin;
+    if (pin) pin.handedOff = true;
+    return pin;
   };
 
   /** Stamp a session as heard from, without claiming anything is in flight. */
@@ -1083,7 +1180,7 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
     });
   });
 
-  app.post('/mcp', parseBody, async (req: Request, res: Response) => {
+  app.post('/mcp', pinBeforeBody, parseBody, async (req: Request, res: Response) => {
     const sessionId = req.header('mcp-session-id');
     const key = bearer(req);
 
@@ -1097,7 +1194,10 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
     }
 
     if (sessionId) {
-      let unpin = () => {};
+      // The pin taken before the body was read, if there is one, is this
+      // route's to release from here: exactly once, in the finally below.
+      const pin = takePin(res);
+      let unpin = pin?.release ?? (() => {});
       try {
         const live = sessions.get(sessionId);
         if (!live) return notFound(res, 'Unknown session. Initialize a new one.', rpcId(req));
@@ -1125,14 +1225,13 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
         // an idle session to make room. Counted as busy through that wait, this
         // one is never the session closed under a request already routed to it
         // (OPL-5443). Only `active` is raised: a request refused below has not
-        // been served, and does not stamp the session as heard from.
-        live.active++;
-        let pinned = true;
-        unpin = () => {
-          if (!pinned) return;
-          pinned = false;
-          live.active--;
-        };
+        // been served, and does not stamp the session as heard from. Normally
+        // already pinned since before its body was read (see `pinBeforeBody`),
+        // and then not counted twice.
+        if (pin?.live !== live) {
+          unpin();
+          unpin = pinSession(live);
+        }
         if (challenge && live.refused) return challenged(res, TOKEN_REFUSED, rpcId(req));
         // Checked before a request is dispatched, while the answer can still
         // be a 401 whatever the call goes on to do. A platform that cannot say
@@ -1393,7 +1492,14 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
           // on its own. Only a race reaches this: a request landing on a
           // planned session, or another initialize taking the room, between
           // the check above and this callback.
-          const landing = planRoom(seat, false, plannedIds);
+          //
+          // An account suspended since the check above (a probe on another
+          // of its bearers said so) lands under the suspended limits, not the
+          // ones it was admitted under.
+          const landingSeat = accountSuspended(confirmedAccount)
+            ? { ...seat, bearerCap: MAX_SESSIONS_SUSPENDED, accountCap: MAX_SESSIONS_SUSPENDED }
+            : seat;
+          const landing = planRoom(landingSeat, false, plannedIds);
           if ('refuse' in landing) {
             dropped = true;
             release();
@@ -1676,6 +1782,7 @@ const BEARER_CHECK_TIMEOUT_MS = 10_000;
 /** How many bearers this server will be asking the platform about at once. */
 const MAX_BEARER_CHECKS_IN_FLIGHT = 32;
 const MAX_ACCEPTED_BEARERS = 4096;
+const MAX_SUSPENDED_ACCOUNTS = 4096;
 const MAX_FAILURE_SOURCES = 10_000;
 
 /**

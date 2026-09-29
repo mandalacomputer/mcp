@@ -1156,6 +1156,119 @@ describe('the per-bearer session cap', () => {
         await t.teardown();
       }
     });
+
+    /**
+     * A POST on a session whose body arrives only when told to: the headers
+     * and the first bytes now, the rest on `finish`, or never, on `abandon`.
+     */
+    function uploading(url: string, token: string, session: string, body: unknown) {
+      const payload = JSON.stringify(body);
+      const target = new URL(url);
+      const req = httpRequest({
+        hostname: target.hostname,
+        port: target.port,
+        path: target.pathname,
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Accept: 'application/json, text/event-stream',
+          'Content-Length': Buffer.byteLength(payload),
+          Authorization: `Bearer ${token}`,
+          'mcp-session-id': session,
+        },
+      });
+      const done = new Promise<number>((resolve) => {
+        req.on('response', (res) => {
+          res.resume();
+          res.on('end', () => resolve(res.statusCode ?? 0));
+        });
+        req.on('error', () => resolve(0));
+        req.on('close', () => resolve(0));
+      });
+      req.write(payload.slice(0, 5));
+      return {
+        done,
+        finish: () => req.end(payload.slice(5)),
+        abandon: () => req.destroy(),
+      };
+    }
+
+    // Pinned only once the route ran, a session whose request was still
+    // uploading its body counted as idle: an initialize making room closed
+    // it under that request, which then met a 404.
+    it('never closes a session whose request is still uploading its body', async () => {
+      const t = await setup({ maxSessionsPerBearer: 16, maxSessions: 2 });
+      let call: ReturnType<typeof uploading> | undefined;
+      try {
+        const alice = await t.open('com_alice');
+        await pause();
+        const bob = await t.open('com_bob');
+        // Alice's session is the older, so the one a newcomer would close, but
+        // for the request on it whose body has not all arrived.
+        call = uploading(t.url, 'com_alice', alice, LIST);
+        await new Promise((r) => setTimeout(r, 100));
+
+        const carol = await t.open('com_carol');
+        expect(await t.count()).toBe(2);
+        expect(await status(t, 'com_bob', bob)).toBe(404);
+
+        call.finish();
+        expect(await call.done).toBe(200);
+        expect(await status(t, 'com_alice', alice)).toBe(200);
+        expect(await status(t, 'com_carol', carol)).toBe(200);
+      } finally {
+        // A connection still open would hold the server's close.
+        call?.abandon();
+        await t.teardown();
+      }
+    });
+
+    // The pin taken before the body is read is released once whichever way
+    // the request ends. Leaked, the session would never be idle again, and
+    // never closed to make room; released twice, its count would go below
+    // zero, and it would read as busy just the same.
+    for (const ending of ['completes', 'is malformed', 'is abandoned mid-upload'] as const) {
+      it(`leaves the session idle again once a request on it ${ending}`, async () => {
+        const t = await setup({ maxSessionsPerBearer: 16, maxSessions: 1 });
+        try {
+          const alice = await t.open('com_alice');
+          if (ending === 'completes') {
+            expect(await status(t, 'com_alice', alice)).toBe(200);
+          } else if (ending === 'is malformed') {
+            const res = await fetch(t.url, {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                Accept: 'application/json, text/event-stream',
+                ...t.as('com_alice', alice),
+              },
+              body: '{"jsonrpc":',
+            });
+            expect(res.status).toBe(400);
+            await res.text();
+          } else {
+            const call = uploading(t.url, 'com_alice', alice, LIST);
+            await new Promise((r) => setTimeout(r, 50));
+            call.abandon();
+            await call.done;
+          }
+
+          // The pool holds one, alice's: it is closed for bob's once idle.
+          const deadline = Date.now() + 2000;
+          let res = await t.send(INIT, t.as('com_bob'));
+          while (res.status !== 200 && Date.now() < deadline) {
+            await res.text();
+            await pause();
+            res = await t.send(INIT, t.as('com_bob'));
+          }
+          expect(res.status).toBe(200);
+          await res.text();
+          expect(await status(t, 'com_alice', alice)).toBe(404);
+        } finally {
+          await t.teardown();
+        }
+      });
+    }
   });
 });
 

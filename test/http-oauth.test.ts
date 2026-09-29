@@ -54,6 +54,8 @@ function platformWithRefusals() {
     probeGate?: Promise<void>;
     /** The account id whoami names per token; unnamed tokens share the fixture's. */
     accounts?: Record<string, string>;
+    /** Whoami names no account id at all, for any token. */
+    noAccountId?: boolean;
   } = { providerRefuses: false };
   /** Tokens refused on `GET account` only, after a delay in ms. */
   const slowRefusals = new Map<string, number>();
@@ -110,10 +112,11 @@ function platformWithRefusals() {
     // A suspended account's whoami says so, as the platform's does, and it
     // names the account the token belongs to.
     const accountId = state.accounts?.[token];
-    if ((state.suspended || accountId) && url.pathname.endsWith('/whoami')) {
+    if ((state.suspended || accountId || state.noAccountId) && url.pathname.endsWith('/whoami')) {
+      const { id: _fixtureId, ...unnamed } = WHOAMI.account;
       const account = {
-        ...WHOAMI.account,
-        ...(accountId ? { id: accountId } : {}),
+        ...(state.noAccountId ? unnamed : WHOAMI.account),
+        ...(accountId && !state.noAccountId ? { id: accountId } : {}),
         ...(state.suspended ? { status: 'suspended' } : {}),
       };
       return new Response(JSON.stringify({ ...WHOAMI, account }), {
@@ -1093,6 +1096,158 @@ describe('hosted: checking a bearer before it gets anything', () => {
       } finally {
         platform.state.probeGate = undefined;
         release();
+        await stop(server);
+      }
+    });
+
+    // A verdict is cached per token. A suspension one token's probe found
+    // left the account's other tokens their cached `ok`, and an initialize on
+    // one of them was admitted under the active ceiling: a second session.
+    it('holds a suspended account to one on a token whose active answer is still cached', async () => {
+      platform = platformWithRefusals();
+      platform.state.accounts = accounts(['s1', 's2', 's3']);
+      const { server, url } = await start({ resourceMetadataUrl: METADATA, serviceSecret: SECRET });
+      try {
+        const c = client(url);
+        await c.open('s1');
+        await pause();
+        await c.open('s2');
+        expect(await sessions(url)).toBe(2);
+        platform.state.suspended = true;
+
+        // A new token's probe finds the account suspended.
+        const d = await c.open('s3');
+        expect(await sessions(url)).toBe(1);
+
+        // s1's answer is cached from before, and is not asked again...
+        const before = probes();
+        const again = await c.open('s1');
+        expect(probes()).toBe(before);
+        // ...but the account's suspension stands over it.
+        expect(await sessions(url)).toBe(1);
+        expect(await status(url, 's3', d)).toBe(404);
+        expect(await status(url, 's1', again)).toBe(200);
+      } finally {
+        await stop(server);
+      }
+    });
+
+    it('forgets an account’s suspension once a probe finds it active again', async () => {
+      platform = platformWithRefusals();
+      platform.state.accounts = accounts(['s1', 's2', 's3']);
+      const { server, url } = await start({
+        resourceMetadataUrl: METADATA,
+        serviceSecret: SECRET,
+        maxSessions: 4,
+        maxSessionsPerAccount: 4,
+      });
+      try {
+        const c = client(url);
+        await c.open('s2');
+        platform.state.suspended = true;
+        await c.open('s1');
+        expect(await sessions(url)).toBe(1);
+        platform.state.suspended = false;
+        // A new token's probe finds the account active again...
+        await c.open('s3');
+        expect(await sessions(url)).toBe(2);
+        // ...so s2's cached active answer, older than both, is believed again.
+        const before = probes();
+        await c.open('s2');
+        expect(probes()).toBe(before);
+        expect(await sessions(url)).toBe(3);
+      } finally {
+        await stop(server);
+      }
+    });
+
+    it('lands an initialize admitted before its account was suspended under the suspended limit', async () => {
+      platform = platformWithRefusals();
+      platform.state.accounts = accounts(['s1', 's2', 's3']);
+      const original = StreamableHTTPServerTransport.prototype.handleRequest;
+      let open = () => {};
+      const gate = new Promise<void>((r) => {
+        open = r;
+      });
+      let held = 0;
+      const { server, url } = await start({ resourceMetadataUrl: METADATA, serviceSecret: SECRET });
+      try {
+        const c = client(url);
+        await c.open('s1');
+        await pause();
+        const b = await c.open('s2');
+
+        // s1's second initialize is admitted on its cached active answer and
+        // held before it lands.
+        StreamableHTTPServerTransport.prototype.handleRequest = async function (...args) {
+          if (!this.sessionId && held === 0) {
+            held++;
+            await gate;
+          }
+          return original.apply(this, args);
+        };
+        const late = c.send(INIT, as('s1'));
+        const deadline = Date.now() + 5000;
+        while (held === 0) {
+          if (Date.now() > deadline) throw new Error('the initialize was never held');
+          await pause();
+        }
+
+        // Meanwhile a new token's probe finds the account suspended.
+        platform.state.suspended = true;
+        const over = await c.send(INIT, as('s3'));
+        expect(over.status).toBe(429);
+        await over.text();
+
+        open();
+        const landed = await late;
+        expect(landed.status).toBe(200);
+        await landed.text();
+        expect(await sessions(url)).toBe(1);
+        expect(await status(url, 's2', b)).toBe(404);
+        expect(await status(url, 's1', landed.headers.get('mcp-session-id') as string)).toBe(200);
+      } finally {
+        open();
+        StreamableHTTPServerTransport.prototype.handleRequest = original;
+        await stop(server);
+      }
+    });
+
+    // Whoami named no account id, so the token's session counted against its
+    // own bucket; later the same token was confirmed as an account, and the
+    // session closed under its per-token cap was subtracted from the
+    // account's count, which it had never been part of.
+    it('counts a token’s session from before its account was confirmed against the token alone', async () => {
+      platform = platformWithRefusals();
+      platform.state.noAccountId = true;
+      const { server, url } = await start({
+        resourceMetadataUrl: METADATA,
+        serviceSecret: SECRET,
+        maxSessions: 4,
+        maxSessionsPerBearer: 1,
+        bearerCheckTtlMs: 0,
+      });
+      try {
+        const c = client(url);
+        const early = await c.open('k0');
+        await pause();
+        platform.state.noAccountId = false;
+        platform.state.accounts = accounts(['k0', 'k1', 'k2']);
+        const k1 = await c.open('k1');
+        await pause();
+        const k2 = await c.open('k2');
+        expect(await sessions(url)).toBe(3);
+
+        // k0, now confirmed, is at its per-token cap, and its account at its
+        // ceiling of two: its own old session goes for the one, and the
+        // account's least recently used for the other.
+        const k0 = await c.open('k0');
+        expect(await sessions(url)).toBe(2);
+        expect(await status(url, 'k0', early)).toBe(404);
+        expect(await status(url, 'k1', k1)).toBe(404);
+        expect(await status(url, 'k2', k2)).toBe(200);
+        expect(await status(url, 'k0', k0)).toBe(200);
+      } finally {
         await stop(server);
       }
     });

@@ -123,13 +123,16 @@ are wording changes, and they are behaviour changes in the way that matters.
   session of the account holding the most sessions (the caller's own, if it
   is that account), and is answered `503` with `Retry-After` if that account
   has nothing idle.
-  A session with a request in flight is never closed, concurrent initializes
+  A session with a request in flight is never closed, counted as such from
+  the moment the request arrives, before its body is read; concurrent initializes
   are counted before either lands so they cannot pass the ceiling or the
   pool together, and a session planned for closing that is put to work first
   drops the new one (`404`) as before. If another initialize lands first and
   takes the room an initialize planned, the caller's own idle session makes
   it instead, and the new session is dropped only when the caller has none
-  idle. A suspended account is held to one session across all its tokens. A self-hosted server verifies no account,
+  idle. A suspended account is held to one session across all its tokens,
+  including tokens whose last check came before the suspension. A self-hosted
+  server verifies no account,
   so there each token is its own: its full pool is shared out between tokens
   the same way (it used to answer `503`), with no ceiling unless one is set.
 
