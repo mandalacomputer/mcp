@@ -1142,8 +1142,9 @@ address.
   `GET` are checked again before they are served, with an acceptance cached
   for 60 s under the token's digest, so an expired or revoked token is a clean
   `401` before any stream opens. A session whose token was refused is served
-  nothing more; it idles out, and no longer counts toward its account's
-  ceiling below.
+  nothing more; it still counts toward its account's ceiling below until it
+  is closed, and while idle it is the one session of another token that may
+  be closed to make room for the account's other tokens.
 - **One bearer holds at most 16 sessions**, and a suspended account's bearer
   one (enough to ask `whoami`), so no single token can fill the pool. At that
   limit, an initialize closes the bearer's least recently used idle session to
@@ -1173,7 +1174,9 @@ address.
   a token whose account is at its ceiling has its own least recently used
   idle session closed to make room, even while it is under its own cap, and
   is refused only when it has none idle. Nothing else is closed to make
-  room: not another token's session, and not another account's. A full pool (256) is answered
+  room: not another token's live session, and not another account's; only an
+  idle session of the account's whose token the platform refused. A full
+  pool (256) is answered
   `503` with `Retry-After`, whoever holds it. Initializes in flight are
   counted, so a burst across one account's keys cannot pass its ceiling
   together; one admitted before its account reached a lower limit (it was
@@ -1192,11 +1195,11 @@ address.
   notification or event stream on any of its sessions closes the account's
   other idle sessions, whichever token opened them, as does an initialize on
   any of its tokens; the session being served and any with a request in
-  flight are kept, and go later once idle. An initialize on any of its
-  tokens replaces the account's one session when that session is idle,
-  whichever token opened it, so a client whose token was refreshed gets its
-  new session and can reach `whoami`; while that session has a request in
-  flight, the initialize is answered `429`.
+  flight are kept, and go later once idle. While the account holds its one
+  session, an initialize on any other of its tokens is answered `429` with
+  `Retry-After`, idle or not; another token's session is never closed for
+  it. The token that holds the session replaces it with a new one when it
+  is idle, as at its own cap.
 - **A token the platform refuses during a call comes back as that same
   `401`**, not as a tool error, so the client refreshes or authorizes again —
   the answer is held until its first byte for this. The one case that cannot
@@ -1209,7 +1212,10 @@ address.
   `404 Unknown session`, the MCP spec's signal to initialize again. An access
   token says nothing this server can check about which grant it came from, so
   rebinding would let any valid credential that learned a session id take over
-  its bound computer, buffered events and retained results.
+  its bound computer, buffered events and retained results. On a suspended
+  account, the old token's session holds the account's one session until the
+  client deletes it or it idles out, and the refreshed token is answered
+  `429` until then.
 - `X-Mandala-MCP-Service` carries `MANDALA_MCP_SERVICE_SECRET` on every
   platform request, only ever to `MANDALA_BASE_URL`, so a token cannot be
   replayed at the API directly by the app it was issued to. A client's own

@@ -846,15 +846,16 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
 
   /**
    * The live sessions counted against this account, whichever bearer opened
-   * them. Not one whose token the platform has refused: nothing is served on
-   * it any more (every request, notification and stream on it is a 401), so
-   * it only waits for the sweep, and counting it would let a revoked key hold
-   * its account's ceiling against the account's other keys until then.
+   * them. One whose token the platform has refused included: it still holds
+   * its transport and its slot in the pool until it is closed, so leaving it
+   * out would let an account that revokes its own keys hold more than its
+   * ceiling, up to the whole pool. It is closed to make room instead (see
+   * `planRoom`), since nothing is served on it any more.
    */
   const sessionsOfAccount = (account: string): Array<[string, Live]> => {
     const own: Array<[string, Live]> = [];
     for (const entry of sessions) {
-      if (entry[1].account === account && !entry[1].refused) own.push(entry);
+      if (entry[1].account === account) own.push(entry);
     }
     return own;
   };
@@ -865,14 +866,15 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
    *
    * Candidates are idle only (`active === 0`, what the sweeper closes), least
    * recently seen first. They are the bearer's own sessions, which make room
-   * under whichever limit binds, its own cap or the account's (OPL-5447). And,
-   * only while the account is `held` to its suspended limit, the account's
-   * sessions of any of its bearers: its one session is then whichever its
-   * client last opened, and a token refreshed on that client is a different
-   * bearer that would otherwise find the old token's session holding the
-   * account's only slot until the sweep. An active account's ceiling never
-   * takes another bearer's session: that would hand one of its clients'
-   * sessions to another's initialize.
+   * under whichever limit binds, its own cap or the account's (OPL-5447),
+   * whether or not the account is suspended. And the account's sessions of
+   * its other bearers whose token the platform has refused: nothing is served
+   * on those any more, and they still count against the ceiling until closed,
+   * so they make room rather than let a revoked key lock its account's other
+   * keys out until the sweep. Never a live session of another bearer: that
+   * would hand one of the account's clients' sessions to another's
+   * initialize, and a suspended account's one session is held against its
+   * other tokens, which are answered 429 while it lasts.
    *
    * `pendingBearer`/`pendingAccount` are the initializes admitted and not yet
    * landed; at landing both are 0 (see `onsessioninitialized`). The result
@@ -883,7 +885,6 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
     account: string,
     bearerCap: number,
     accountCap: number,
-    held: boolean,
     pendingBearer: number,
     pendingAccount: number,
   ):
@@ -897,12 +898,12 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
     const victims: Array<[string, Live]> = [];
     if (bearerNeed <= 0 && accountNeed <= 0) return { victims };
     const mine = new Set(own.map(([id]) => id));
-    const candidates = held ? [...own, ...counted.filter(([id]) => !mine.has(id))] : own;
+    const candidates = [...own, ...counted.filter(([id, live]) => !mine.has(id) && live.refused)];
     const idle = candidates.filter(([, live]) => live.active === 0).sort(leastRecentFirst);
     for (const entry of idle) {
       if (bearerNeed <= 0 && accountNeed <= 0) break;
       const ofBearer = mine.has(entry[0]);
-      const ofAccount = entry[1].account === account && !entry[1].refused;
+      const ofAccount = entry[1].account === account;
       if (!(ofBearer && bearerNeed > 0) && !(ofAccount && accountNeed > 0)) continue;
       victims.push(entry);
       if (ofBearer) bearerNeed--;
@@ -1285,12 +1286,12 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
     // Room is made from this bearer's own IDLE sessions, least recently seen
     // first, exactly as the sweeper would close them, under whichever limit
     // binds: its own cap or its account's ceiling. Never another bearer's
-    // while the account is active: the account's ceiling is then refused,
+    // live session, suspended or not: the account's ceiling is then refused,
     // never made room for, since closing a session of another of its bearers
     // would hand one client's session to another's initialize, and the
     // account's holder is the one who knows which of its clients can spare
-    // one. A suspended account's one session, which may be an older token's,
-    // is the exception (see `planRoom`). Never one with a request in flight. A
+    // one. An idle session of another of its bearers whose token the platform
+    // refused is the exception (see `planRoom`). Never one with a request in flight. A
     // client whose old session is gone gets 404 for it and initializes again,
     // as MCP clients do. Decided here, so a caller with nothing idle to give
     // back is refused at once; carried out only once the new session exists
@@ -1304,7 +1305,6 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
         account,
         bearerCap,
         accountCap,
-        suspended,
         pendingByDigest.get(keyId) ?? 0,
         pendingByAccount.get(account) ?? 0,
       );
@@ -1412,16 +1412,14 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
           };
           //
           // The candidates are the ones admission chose from, under the
-          // limits that hold now: a suspended account's idle sessions of any
-          // of its bearers included, whether it was suspended at admission or
-          // since.
+          // limits that hold now, whether the account was suspended at
+          // admission or since.
           const held = suspended || accountSuspended(account);
           const room = planRoom(
             keyDigest,
             account,
             held ? MAX_SESSIONS_SUSPENDED : bearerCap,
             held ? MAX_SESSIONS_SUSPENDED : accountCap,
-            held,
             0,
             0,
           );
@@ -1551,15 +1549,27 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
       // suspended account's other sessions, could otherwise be kept from the
       // sweep by reopening it. Cached, as there.
       if (challenge) {
+        // A client that hangs up during the probe must not have its stream
+        // registered afterwards: the SDK would hold it against a response
+        // whose 'close' has already fired, and answer every later GET on the
+        // session 409 (one stream per session) until the session ended.
+        let gone = false;
+        res.once('close', () => {
+          gone = true;
+        });
         const { verdict } = await checkBearer(key);
         // The probe can yield to a trim or the sweep, which may have closed
         // this session meanwhile.
         if (sessions.get(sessionId as string) !== live) return notFound(res, 'Unknown session.');
+        // What the platform said is acted on whether or not anyone is still
+        // listening for the answer.
+        const hungUp = gone || res.destroyed || res.writableEnded;
         if (verdict === 'refused') {
           live.refused = true;
-          return challenged(res, TOKEN_REFUSED);
+          return hungUp ? undefined : challenged(res, TOKEN_REFUSED);
         }
         if (verdict === 'suspended') trimSuspended(live, sessionId as string);
+        if (hungUp) return;
       }
       touch(live, res);
       return live.transport.handleRequest(req, res);

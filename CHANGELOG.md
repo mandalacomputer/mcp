@@ -122,20 +122,21 @@ are wording changes, and they are behaviour changes in the way that matters.
   flight are counted per account, so a burst across its keys cannot pass the
   ceiling together. Every POST on a session and every event stream is now
   checked with the platform (cached), not only a POST carrying a request, so
-  a revoked token can no longer keep its sessions alive with notifications,
-  and a session whose token was refused no longer counts toward its
-  account's ceiling. A suspended account is held to one session across all
+  a revoked token can no longer keep its sessions alive with notifications.
+  A session whose token was refused still counts toward its account's
+  ceiling until it is closed, and while idle it is closed to make room for
+  the account's other tokens, so a revoked key cannot lock them out and the
+  account cannot pass its ceiling by revoking its keys. A suspended account is held to one session across all
   its tokens: once any of its tokens is found suspended, its other tokens are
   held too, even with an active answer still cached, and an active answer to
   a check that started before the suspension was seen does not undo it. The
   next request, notification or event stream on any of its sessions, or an
   initialize on any of its tokens, closes the account's other idle sessions
-  down to one; one with a request in flight is kept. An initialize on any of
-  its tokens replaces that one session while it is idle, whichever token
-  opened it, so a refreshed token still reaches `whoami`, and is answered
-  `429` while it is busy. An initialize admitted just before its account was
-  suspended replaces the account's session as its own is made if that one is
-  idle, and is dropped (`404`) if it is busy. A full pool is still a `503`, now with `Retry-After`, and no
+  down to one; one with a request in flight is kept. While it holds that
+  one, an initialize on any of its other tokens is answered `429`, and
+  another token's session is never closed for it. An initialize admitted
+  just before its account was suspended is dropped as its session is made
+  (`404`). A full pool is still a `503`, now with `Retry-After`, and no
   other token's session is closed to make room in it.
 
 ## [0.7.0] — 2026-09-27
