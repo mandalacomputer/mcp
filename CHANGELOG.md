@@ -20,8 +20,13 @@ are wording changes, and they are behaviour changes in the way that matters.
   of a `--http` server (default 16), so 17 or more agents on one key need not
   evict each other's sessions and lose their `use_computer` bindings. It takes
   a whole number from 1 to 256, the server's whole session pool; anything
-  else is refused at startup, and at 256 one token can hold every session. A
-  suspended account's bearer is still held to one.
+  else is refused at startup. A suspended account's bearer is still held to
+  one.
+- **`MANDALA_MCP_MAX_SESSIONS_PER_ACCOUNT`** (`maxSessionsPerAccount` for
+  embedders of `runHttp`) sets how many sessions one account may hold across
+  all its tokens: default half the pool (128) on the hosted server, and the
+  whole pool self-hosted, where each token is its own account. Read by the
+  same rules as the per-token variable.
 
 ### Fixed
 
@@ -90,7 +95,8 @@ are wording changes, and they are behaviour changes in the way that matters.
   token check, is never the one closed. When none is idle it is answered
   `429` with `Retry-After`; if the one it planned to close is put to work
   before the new session is made, the new one is dropped and answered `404`
-  instead. Another bearer's sessions are never touched. A self-hosted server
+  instead. This limit never closes another bearer's session (the pool's fair
+  share, below, can). A self-hosted server
   checks no bearer, so there the per-bearer cap only spreads one key's
   clients, and the process-wide cap still bounds an untrusted caller, even
   when `maxSessionsPerBearer` is not a usable number.
@@ -104,6 +110,25 @@ are wording changes, and they are behaviour changes in the way that matters.
   with a request in flight are kept, and go on a later request once idle. A
   `429` for a bearer still over its limit says how many it holds and to wait
   for the busy ones.
+- **One account can no longer fill the hosted server's session pool, however
+  many keys it holds.** The cap was per bearer, so an account with 16 keys
+  (up to 1000 are mintable) held all 256 sessions and every other tenant's
+  initialize was answered `503`, and a suspended account with many keys got
+  one session per key. Sessions are now counted per account, by the account
+  id the platform's `whoami` names for the token. No account holds more than
+  half the pool (128) across all its tokens: past that, an initialize closes
+  the account's own least recently used idle session, or is answered `429`
+  with `Retry-After`. While the pool has room nobody is limited beyond that;
+  when it is full, a new initialize closes the least recently used idle
+  session of the account holding the most sessions (the caller's own, if it
+  is that account), and is answered `503` if that account has nothing idle.
+  A session with a request in flight is never closed, concurrent initializes
+  are counted before either lands so they cannot pass the ceiling or the
+  pool together, and a session planned for closing that is put to work first
+  drops the new one (`404`) as before. A suspended account is held to one
+  session across all its tokens. A self-hosted server verifies no account,
+  so there each token is its own: its full pool is shared out between tokens
+  the same way (it used to answer `503`), with no ceiling unless one is set.
 
 ## [0.7.0] — 2026-09-27
 

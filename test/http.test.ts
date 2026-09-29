@@ -249,6 +249,11 @@ describe('the session cap', () => {
     // property of the SDK's initialize path, not of this file. The reservation
     // is what makes the cap survive that changing; this test is what would
     // notice if it stopped being enough.
+    //
+    // Since fair share (OPL-5447) a newcomer may close the idle session of
+    // the bearer holding the most, so how many of the burst are answered 200
+    // depends on how many land before the next arrives. What cannot change is
+    // the table: never more than its two, and every refusal the 503.
     const burst = await Promise.all(
       Array.from({ length: 16 }, (_, i) =>
         fetch(`${url}/mcp`, {
@@ -263,8 +268,10 @@ describe('the session cap', () => {
       ),
     );
     await Promise.all(burst.map((r) => r.text()));
-    expect(burst.filter((r) => r.status === 200)).toHaveLength(2);
-    expect(burst.filter((r) => r.status === 503)).toHaveLength(14);
+    expect(burst.filter((r) => r.status === 200).length).toBeGreaterThanOrEqual(2);
+    expect(burst.filter((r) => r.status !== 200 && r.status !== 503)).toHaveLength(0);
+    const health = (await (await fetch(`${url}/healthz`)).json()) as { sessions: number };
+    expect(health.sessions).toBe(2);
   });
 });
 
@@ -283,7 +290,11 @@ describe('the per-bearer session cap', () => {
    * A server whose platform holds every `GET account` until released, so a
    * `get_account` call keeps its session busy for as long as a test needs.
    */
-  async function setup(extra: { maxSessionsPerBearer: number; maxSessions?: number }) {
+  async function setup(extra: {
+    maxSessionsPerBearer: number;
+    maxSessions?: number;
+    maxSessionsPerAccount?: number;
+  }) {
     const platform = installFakePlatform();
     const inner = globalThis.fetch;
     let open = () => {};
@@ -553,7 +564,7 @@ describe('the per-bearer session cap', () => {
     const t = await setup({ maxSessionsPerBearer: 1, maxSessions: 2 });
     try {
       const first = await t.open('com_alice');
-      await t.open('com_bob');
+      const bob = await t.open('com_bob');
       const second = await t.open('com_alice');
       expect(await t.count()).toBe(2);
       const gone = await t.send(LIST, t.as('com_alice', first));
@@ -563,10 +574,22 @@ describe('the per-bearer session cap', () => {
       expect(now.status).toBe(200);
       await now.text();
 
-      // Another bearer with nothing to give back still meets the full pool.
-      const carol = await t.send(INIT, t.as('com_carol'));
-      expect(carol.status).toBe(503);
-      await carol.text();
+      // Another bearer with nothing to give back meets a full pool, and it is
+      // shared out (OPL-5447): alice and bob hold one each, so the tie goes to
+      // the one whose idle session is older, bob's, untouched since it opened.
+      const carol = await t.open('com_carol');
+      expect(await t.count()).toBe(2);
+      const bobGone = await t.send(LIST, t.as('com_bob', bob));
+      expect(bobGone.status).toBe(404);
+      await bobGone.text();
+      for (const [token, session] of [
+        ['com_alice', second],
+        ['com_carol', carol],
+      ] as const) {
+        const res = await t.send(LIST, t.as(token, session));
+        expect(res.status).toBe(200);
+        await res.text();
+      }
     } finally {
       await t.teardown();
     }
@@ -578,12 +601,17 @@ describe('the per-bearer session cap', () => {
     for (const bad of [Number.NaN, 0, -3]) {
       const t = await setup({ maxSessionsPerBearer: bad, maxSessions: 2 });
       try {
-        await t.open('com_alice');
-        await t.open('com_bob');
+        // Busy, so fair share has nothing it may close and the pool is full.
+        const calls = [
+          await t.busy('com_alice', await t.open('com_alice')),
+          await t.busy('com_bob', await t.open('com_bob')),
+        ];
         const carol = await t.send(INIT, t.as('com_carol'));
         expect(carol.status).toBe(503);
         await carol.text();
         expect(await t.count()).toBe(2);
+        t.release();
+        for (const c of calls) await c.text();
       } finally {
         await t.teardown();
       }
@@ -655,6 +683,236 @@ describe('the per-bearer session cap', () => {
       StreamableHTTPServerTransport.prototype.handleRequest = original;
       await t.teardown();
     }
+  });
+
+  // OPL-5447: the pool was first come, first served. Full, every newcomer was
+  // 503'd however few sessions it held, while one caller holding most of them
+  // kept them all. Self-hosted, each bearer is its own account.
+  describe('fair share of a full pool', () => {
+    const pause = () => new Promise((r) => setTimeout(r, 5));
+    const status = async (t: Awaited<ReturnType<typeof setup>>, token: string, session: string) => {
+      const res = await t.send(LIST, t.as(token, session));
+      await res.text();
+      return res.status;
+    };
+    /** Hold every initialize at the transport until `open`, counting them. */
+    function holdInitializes() {
+      const original = StreamableHTTPServerTransport.prototype.handleRequest;
+      let open = () => {};
+      const gate = new Promise<void>((r) => {
+        open = r;
+      });
+      const state = { held: 0 };
+      StreamableHTTPServerTransport.prototype.handleRequest = async function (...args) {
+        if (!this.sessionId) {
+          state.held++;
+          await gate;
+        }
+        return original.apply(this, args);
+      };
+      return {
+        state,
+        open: () => open(),
+        restore: () => {
+          open();
+          StreamableHTTPServerTransport.prototype.handleRequest = original;
+        },
+      };
+    }
+    const until = async (done: () => boolean, what: string) => {
+      const deadline = Date.now() + 5000;
+      while (!done()) {
+        if (Date.now() > deadline) throw new Error(what);
+        await pause();
+      }
+    };
+
+    it('closes the least recently used idle session of the bearer holding the most', async () => {
+      const t = await setup({ maxSessionsPerBearer: 16, maxSessions: 4 });
+      try {
+        // Bob's one session is the oldest in the pool, and is not the one to go.
+        const bob = await t.open('com_bob');
+        await pause();
+        const a1 = await t.open('com_alice');
+        await pause();
+        const a2 = await t.open('com_alice');
+        await pause();
+        const a3 = await t.open('com_alice');
+        expect(await t.count()).toBe(4);
+
+        const carol = await t.open('com_carol');
+        expect(await t.count()).toBe(4);
+        expect(await status(t, 'com_alice', a1)).toBe(404);
+        expect(await status(t, 'com_bob', bob)).toBe(200);
+        expect(await status(t, 'com_alice', a2)).toBe(200);
+        expect(await status(t, 'com_alice', a3)).toBe(200);
+        expect(await status(t, 'com_carol', carol)).toBe(200);
+      } finally {
+        await t.teardown();
+      }
+    });
+
+    it('closes the requester’s own idle session when it is the one holding the most', async () => {
+      const t = await setup({ maxSessionsPerBearer: 16, maxSessions: 4 });
+      try {
+        const bob = await t.open('com_bob');
+        await pause();
+        const a1 = await t.open('com_alice');
+        await pause();
+        await t.open('com_alice');
+        await pause();
+        await t.open('com_alice');
+        const a4 = await t.open('com_alice');
+        expect(await t.count()).toBe(4);
+        expect(await status(t, 'com_alice', a1)).toBe(404);
+        expect(await status(t, 'com_bob', bob)).toBe(200);
+        expect(await status(t, 'com_alice', a4)).toBe(200);
+      } finally {
+        await t.teardown();
+      }
+    });
+
+    it('never closes a session with a request in flight, nor a smaller holder’s instead', async () => {
+      const t = await setup({ maxSessionsPerBearer: 16, maxSessions: 4 });
+      try {
+        const bob = await t.open('com_bob');
+        await pause();
+        const a1 = await t.open('com_alice');
+        await pause();
+        const a2 = await t.open('com_alice');
+        await pause();
+        const a3 = await t.open('com_alice');
+        const calls = [await t.busy('com_alice', a1), await t.busy('com_alice', a2)];
+
+        // Alice's older two are busy; her idle third is the one that goes.
+        const carol = await t.open('com_carol');
+        expect(await status(t, 'com_alice', a3)).toBe(404);
+        expect(await t.count()).toBe(4);
+
+        // Alice still holds the most, and nothing of hers is idle: the pool is
+        // full, and bob's and carol's idle sessions are not taken instead.
+        const dave = await t.send(INIT, t.as('com_dave'));
+        expect(dave.status).toBe(503);
+        expect(dave.headers.get('mcp-session-id')).toBeNull();
+        await dave.text();
+        expect(await t.count()).toBe(4);
+        expect(await status(t, 'com_bob', bob)).toBe(200);
+        expect(await status(t, 'com_carol', carol)).toBe(200);
+
+        t.release();
+        for (const call of calls) {
+          const res = await call;
+          expect(res.status).toBe(200);
+          await res.text();
+        }
+      } finally {
+        await t.teardown();
+      }
+    });
+
+    it('never lets concurrent initializes take the same room twice', async () => {
+      const t = await setup({ maxSessionsPerBearer: 16, maxSessions: 2 });
+      let hold: ReturnType<typeof holdInitializes> | undefined;
+      try {
+        const alice = await t.open('com_alice');
+        const bob = await t.open('com_bob');
+        const call = await t.busy('com_bob', bob);
+        hold = holdInitializes();
+        const h = hold;
+        // One idle session in the pool, two newcomers at once: the first
+        // plans to close it, and the second, counting the first as pending,
+        // finds nothing more to close.
+        const answered: number[] = [];
+        const both = ['com_carol', 'com_dave'].map((token) =>
+          t.send(INIT, t.as(token)).then(async (r) => {
+            answered.push(r.status);
+            await r.text();
+            return r.status;
+          }),
+        );
+        await until(() => h.state.held + answered.length === 2, 'the initializes never settled');
+        expect(h.state.held).toBe(1);
+        expect(answered).toEqual([503]);
+
+        h.open();
+        expect((await Promise.all(both)).sort()).toEqual([200, 503]);
+        expect(await t.count()).toBe(2);
+        expect(await status(t, 'com_alice', alice)).toBe(404);
+
+        t.release();
+        await (await call).text();
+      } finally {
+        hold?.restore();
+        await t.teardown();
+      }
+    });
+
+    it('drops a new session rather than close a fair-share victim put to work while it was made', async () => {
+      const t = await setup({ maxSessionsPerBearer: 16, maxSessions: 2 });
+      let hold: ReturnType<typeof holdInitializes> | undefined;
+      try {
+        const a1 = await t.open('com_alice');
+        await pause();
+        const a2 = await t.open('com_alice');
+        const busyA2 = await t.busy('com_alice', a2);
+        hold = holdInitializes();
+        const h = hold;
+        const carol = t.send(INIT, t.as('com_carol'));
+        await until(() => h.state.held === 1, 'the initialize never reached the transport');
+        // Idle when carol was admitted; busy by the time her session lands.
+        const busyA1 = await t.busy('com_alice', a1);
+        h.open();
+        const late = await carol;
+        expect(late.status).toBe(404);
+        expect(late.headers.get('mcp-session-id')).toBeNull();
+        await late.text();
+        expect(await t.count()).toBe(2);
+
+        t.release();
+        for (const call of [busyA1, busyA2]) await (await call).text();
+        expect(await status(t, 'com_alice', a1)).toBe(200);
+        expect(await status(t, 'com_alice', a2)).toBe(200);
+      } finally {
+        hold?.restore();
+        await t.teardown();
+      }
+    });
+
+    it('sets no account ceiling by default, and holds each token to one that is set', async () => {
+      const open = await setup({ maxSessionsPerBearer: 16, maxSessions: 4 });
+      try {
+        for (let i = 0; i < 4; i++) await open.open('com_alice');
+        expect(await open.count()).toBe(4);
+      } finally {
+        await open.teardown();
+      }
+
+      const t = await setup({ maxSessionsPerBearer: 16, maxSessionsPerAccount: 2 });
+      try {
+        const a1 = await t.open('com_alice');
+        await pause();
+        const a2 = await t.open('com_alice');
+        // Idle: the third closes the first.
+        const a3 = await t.open('com_alice');
+        expect(await t.count()).toBe(2);
+        expect(await status(t, 'com_alice', a1)).toBe(404);
+        // Busy: the fourth is refused, in words about the token.
+        const calls = [await t.busy('com_alice', a2), await t.busy('com_alice', a3)];
+        const over = await t.send(INIT, t.as('com_alice'));
+        expect(over.status).toBe(429);
+        expect(over.headers.get('retry-after')).toBe('30');
+        expect(((await over.json()) as { error: { message: string } }).error.message).toContain(
+          'This token already holds its maximum of 2 sessions',
+        );
+        // Another token is its own account.
+        await t.open('com_bob');
+        expect(await t.count()).toBe(3);
+        t.release();
+        for (const c of calls) await (await c).text();
+      } finally {
+        await t.teardown();
+      }
+    });
   });
 });
 

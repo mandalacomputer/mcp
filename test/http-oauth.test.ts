@@ -1,5 +1,6 @@
 import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
+import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { Api, SERVICE_HEADER } from '../src/api.js';
 import { bearerChallenge, runHttp } from '../src/http.js';
@@ -51,6 +52,8 @@ function platformWithRefusals() {
     probeDelayMs?: number;
     /** When set, every probe waits on this before answering. */
     probeGate?: Promise<void>;
+    /** The account id whoami names per token; unnamed tokens share the fixture's. */
+    accounts?: Record<string, string>;
   } = { providerRefuses: false };
   /** Tokens refused on `GET account` only, after a delay in ms. */
   const slowRefusals = new Map<string, number>();
@@ -104,12 +107,19 @@ function platformWithRefusals() {
         headers: { 'Content-Type': 'application/json' },
       });
     }
-    // A suspended account's whoami says so, as the platform's does.
-    if (state.suspended && url.pathname.endsWith('/whoami')) {
-      return new Response(
-        JSON.stringify({ ...WHOAMI, account: { ...WHOAMI.account, status: 'suspended' } }),
-        { status: 200, headers: { 'Content-Type': 'application/json' } },
-      );
+    // A suspended account's whoami says so, as the platform's does, and it
+    // names the account the token belongs to.
+    const accountId = state.accounts?.[token];
+    if ((state.suspended || accountId) && url.pathname.endsWith('/whoami')) {
+      const account = {
+        ...WHOAMI.account,
+        ...(accountId ? { id: accountId } : {}),
+        ...(state.suspended ? { status: 'suspended' } : {}),
+      };
+      return new Response(JSON.stringify({ ...WHOAMI, account }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
     }
     return fake(input as never, init);
   }) as typeof fetch;
@@ -840,6 +850,209 @@ describe('hosted: checking a bearer before it gets anything', () => {
       release();
       await stop(server);
     }
+  });
+
+  // OPL-5447: the cap was per bearer and the pool first come, first served,
+  // so one account with many keys filled the pool and every other tenant's
+  // initialize was 503'd; and a suspended account kept one session per key.
+  describe('sessions per account', () => {
+    const pause = () => new Promise((r) => setTimeout(r, 5));
+    const as = (token: string, session?: string) => ({
+      Authorization: `Bearer ${token}`,
+      ...(session ? { 'mcp-session-id': session } : {}),
+    });
+    const status = async (url: string, token: string, session: string) => {
+      const res = await client(url).send(LIST, as(token, session));
+      await res.text();
+      return res.status;
+    };
+    const accounts = (heavy: string[], light: string[] = []) =>
+      Object.fromEntries([
+        ...heavy.map((t) => [t, 'acc-heavy'] as const),
+        ...light.map((t) => [t, 'acc-light'] as const),
+      ]);
+    /** Put these sessions' requests in flight, each held at its bearer probe. */
+    const holdAtProbe = async (url: string, pairs: Array<[string, string]>) => {
+      let release = () => {};
+      platform.state.probeGate = new Promise<void>((r) => {
+        release = r;
+      });
+      const calls: Array<Promise<Response>> = [];
+      for (const [token, session] of pairs) {
+        const before = probes();
+        calls.push(client(url).send(LIST, as(token, session)));
+        const deadline = Date.now() + 5000;
+        while (probes() === before) {
+          if (Date.now() > deadline) throw new Error('a request never reached its probe');
+          await pause();
+        }
+      }
+      platform.state.probeGate = undefined;
+      return { calls, release };
+    };
+
+    it('lets another account in by closing the heavy account’s least recently used idle session', async () => {
+      platform = platformWithRefusals();
+      platform.state.accounts = accounts(['h1', 'h2', 'h3', 'h4'], ['l1']);
+      const { server, url } = await start({
+        resourceMetadataUrl: METADATA,
+        serviceSecret: SECRET,
+        maxSessions: 4,
+        // No ceiling below the pool, so one account can fill it with four keys.
+        maxSessionsPerAccount: 4,
+      });
+      try {
+        const c = client(url);
+        const heavy: string[] = [];
+        for (const token of ['h1', 'h2', 'h3', 'h4']) {
+          heavy.push(await c.open(token));
+          await pause();
+        }
+        expect(await sessions(url)).toBe(4);
+
+        const light = await c.open('l1');
+        expect(await sessions(url)).toBe(4);
+        expect(await status(url, 'h1', heavy[0])).toBe(404);
+        for (const [i, token] of ['h2', 'h3', 'h4'].entries()) {
+          expect(await status(url, token, heavy[i + 1])).toBe(200);
+        }
+        expect(await status(url, 'l1', light)).toBe(200);
+      } finally {
+        await stop(server);
+      }
+    });
+
+    it('holds an account to half the pool across all its tokens, 429 once nothing of it is idle', async () => {
+      platform = platformWithRefusals();
+      platform.state.accounts = accounts(['h1', 'h2', 'h3', 'h4', 'h5'], ['l1']);
+      const { server, url } = await start({
+        resourceMetadataUrl: METADATA,
+        serviceSecret: SECRET,
+        maxSessions: 6,
+        bearerCheckTtlMs: 0,
+      });
+      let release = () => {};
+      try {
+        const c = client(url);
+        const heavy: string[] = [];
+        for (const token of ['h1', 'h2', 'h3']) {
+          heavy.push(await c.open(token));
+          await pause();
+        }
+        // At its ceiling of three, a fourth key's initialize closes the
+        // account's own least recently used idle session, on another key.
+        const h4 = await c.open('h4');
+        expect(await sessions(url)).toBe(3);
+        expect(await status(url, 'h1', heavy[0])).toBe(404);
+
+        const held = await holdAtProbe(url, [
+          ['h2', heavy[1]],
+          ['h3', heavy[2]],
+          ['h4', h4],
+        ]);
+        release = held.release;
+        const over = await c.send(INIT, as('h5'));
+        expect(over.status).toBe(429);
+        expect(over.headers.get('retry-after')).toBe('30');
+        expect(over.headers.get('mcp-session-id')).toBeNull();
+        expect(((await over.json()) as { error: { message: string } }).error.message).toContain(
+          'This account, across all its tokens, already holds its maximum of 3 sessions',
+        );
+        // The pool has room, and another account is not limited by this one.
+        await c.open('l1');
+        expect(await sessions(url)).toBe(4);
+
+        release();
+        for (const answer of await Promise.all(held.calls)) {
+          expect(answer.status).toBe(200);
+          await answer.text();
+        }
+      } finally {
+        platform.state.probeGate = undefined;
+        release();
+        await stop(server);
+      }
+    });
+
+    it('never admits past the ceiling from concurrent initializes on different keys', async () => {
+      platform = platformWithRefusals();
+      platform.state.accounts = accounts(['h1', 'h2', 'h3']);
+      const original = StreamableHTTPServerTransport.prototype.handleRequest;
+      let open = () => {};
+      const gate = new Promise<void>((r) => {
+        open = r;
+      });
+      let held = 0;
+      StreamableHTTPServerTransport.prototype.handleRequest = async function (...args) {
+        if (!this.sessionId) {
+          held++;
+          await gate;
+        }
+        return original.apply(this, args);
+      };
+      const { server, url } = await start({
+        resourceMetadataUrl: METADATA,
+        serviceSecret: SECRET,
+        maxSessionsPerAccount: 2,
+      });
+      try {
+        const answered: number[] = [];
+        const burst = ['h1', 'h2', 'h3'].map((token) =>
+          client(url)
+            .send(INIT, as(token))
+            .then(async (r) => {
+              answered.push(r.status);
+              await r.text();
+              return r.status;
+            }),
+        );
+        const deadline = Date.now() + 5000;
+        while (held + answered.length < 3 && Date.now() < deadline) await pause();
+        // Nothing is a session yet, so nothing can be closed: only the
+        // account's pending count stands between the burst and the ceiling.
+        expect(held).toBe(2);
+        expect(answered).toEqual([429]);
+        open();
+        expect((await Promise.all(burst)).sort()).toEqual([200, 200, 429]);
+        expect(await sessions(url)).toBe(2);
+      } finally {
+        open();
+        StreamableHTTPServerTransport.prototype.handleRequest = original;
+        await stop(server);
+      }
+    });
+
+    it('holds a suspended account to one session across all its tokens', async () => {
+      platform = platformWithRefusals();
+      platform.state.accounts = accounts(['s1', 's2', 's3', 's4']);
+      const { server, url } = await start({
+        resourceMetadataUrl: METADATA,
+        serviceSecret: SECRET,
+        bearerCheckTtlMs: 0,
+      });
+      try {
+        const c = client(url);
+        const [a, b, d] = [await c.open('s1'), await c.open('s2'), await c.open('s3')];
+        expect(await sessions(url)).toBe(3);
+        platform.state.suspended = true;
+
+        // A request on one key's session closes the idle sessions of the
+        // account's other keys, not only its own key's.
+        expect(await status(url, 's1', a)).toBe(200);
+        expect(await sessions(url)).toBe(1);
+        expect(await status(url, 's2', b)).toBe(404);
+        expect(await status(url, 's3', d)).toBe(404);
+
+        // A fourth key's initialize takes the account's one session, idle, for
+        // itself, rather than opening a second.
+        const e = await c.open('s4');
+        expect(await sessions(url)).toBe(1);
+        expect(await status(url, 's1', a)).toBe(404);
+        expect(await status(url, 's4', e)).toBe(200);
+      } finally {
+        await stop(server);
+      }
+    });
   });
 
   // OPL-5050: a refused bearer on a sessionless request that is not an
