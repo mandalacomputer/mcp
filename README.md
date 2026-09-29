@@ -1137,10 +1137,13 @@ address.
   per source address, 20 a minute. Past that, a token already accepted still
   passes and a new one is still checked, but only one every 5 s per address;
   the rest get `429` with `Retry-After`. The budget comes back when its minute
-  is up. A POST
-  carrying a request is checked again before it is dispatched, with an
-  acceptance cached for 60 s under the token's digest, so an expired or
-  revoked token is a clean `401` before any stream opens.
+  is up. Every POST
+  on a session, a notification as much as a request, and the event stream's
+  `GET` are checked again before they are served, with an acceptance cached
+  for 60 s under the token's digest, so an expired or revoked token is a clean
+  `401` before any stream opens. A session whose token was refused is served
+  nothing more; it idles out, and no longer counts toward its account's
+  ceiling below.
 - **One bearer holds at most 16 sessions**, and a suspended account's bearer
   one (enough to ask `whoami`), so no single token can fill the pool. At that
   limit, an initialize closes the bearer's least recently used idle session to
@@ -1166,10 +1169,11 @@ address.
   a token whose `whoami` names no account counts as an account of its own.
   Past the ceiling, an initialize is answered `429` with `Retry-After`,
   saying it is the account's limit and naming only that number. The
-  bearer's own room-making above still comes first: when closing that
-  token's own idle session keeps the account within its ceiling, the
-  initialize is admitted. Nothing else is closed to make room: not another
-  token's session, and not another account's. A full pool (256) is answered
+  bearer's own room-making above applies at the ceiling as at its own cap:
+  a token whose account is at its ceiling has its own least recently used
+  idle session closed to make room, even while it is under its own cap, and
+  is refused only when it has none idle. Nothing else is closed to make
+  room: not another token's session, and not another account's. A full pool (256) is answered
   `503` with `Retry-After`, whoever holds it. Initializes in flight are
   counted, so a burst across one account's keys cannot pass its ceiling
   together; one admitted before its account reached a lower limit (it was
@@ -1184,13 +1188,15 @@ address.
   held to one for at least a minute (longer if the check cache is), including
   its tokens whose last check said it was active; an active answer clears
   that only when its check started after the suspension was seen, so an
-  answer that was already on its way cannot undo it. The next request on any
-  of its sessions closes the account's other idle sessions, whichever token
-  opened them, as does an initialize on any of its tokens; the session
-  serving that request and any with a request in flight are kept, and go on a
-  later request once idle. Further initializes on the account are answered
-  `429` while it holds its one, unless it is the token's own idle session,
-  which is replaced.
+  answer that was already on its way cannot undo it. The next request,
+  notification or event stream on any of its sessions closes the account's
+  other idle sessions, whichever token opened them, as does an initialize on
+  any of its tokens; the session being served and any with a request in
+  flight are kept, and go later once idle. An initialize on any of its
+  tokens replaces the account's one session when that session is idle,
+  whichever token opened it, so a client whose token was refreshed gets its
+  new session and can reach `whoami`; while that session has a request in
+  flight, the initialize is answered `429`.
 - **A token the platform refuses during a call comes back as that same
   `401`**, not as a tool error, so the client refreshes or authorizes again —
   the answer is held until its first byte for this. The one case that cannot
