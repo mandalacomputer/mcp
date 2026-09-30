@@ -1141,8 +1141,8 @@ address.
   carrying a request is checked again before it is dispatched, with an
   acceptance cached for 60 s under the token's digest, so an expired or
   revoked token is a clean `401` before any stream opens.
-- **One bearer holds at most 16 sessions**, and a suspended account's bearer
-  one (enough to ask `whoami`), so no single token can fill the pool. At that
+- **One bearer holds at most 16 sessions**, and a suspended account one in
+  all (below), so no single token can fill the pool. At that
   limit, an initialize closes the bearer's least recently used idle session to
   make room, once its own session exists (a refused initialize closes
   nothing), and a client whose old session is gone initializes again; if none
@@ -1150,11 +1150,8 @@ address.
   idle session it planned to close is put to work before the new session is
   made, the new one is dropped instead and the initialize is answered `404`
   (`Session not found`, no `Retry-After`), which an SDK client reports as a
-  failed connect. Other bearers' sessions are never touched. An account
-  suspended after its bearer opened sessions keeps only one: the next request
-  on any of them closes the bearer's other idle sessions, as does its next
-  initialize, and one still serving a request goes on a later request once
-  it is idle. A
+  failed connect. Other bearers' sessions are never touched, except a
+  suspended account's (below). A
   `429` names what the bearer holds, so one still over its limit is told to
   wait for its busy sessions rather than to close one. `runHttp` takes the 16
   as `maxSessionsPerBearer`, and the CLI reads it from
@@ -1191,8 +1188,7 @@ address.
   while its holder keeps sending notifications, holding the stream, or
   sending `HEAD /mcp` or a `DELETE /mcp` the server refuses: traffic that
   carries no request is never checked with the platform, so it keeps a
-  session alive only while the token's acceptance is still cached. Suspension is held per
-  token, as above, not per account. A full pool (256) is answered `503` with
+  session alive only while the token's acceptance is still cached. A full pool (256) is answered `503` with
   `Retry-After`, whoever holds it, and nothing is closed to make room in it.
   `runHttp` takes the ceiling as `maxSessionsPerAccount`, and the CLI reads
   it from `MANDALA_MCP_MAX_SESSIONS_PER_ACCOUNT` (a whole number from 1 to
@@ -1200,6 +1196,26 @@ address.
   no account, so there each token is an account of its own, held to the
   ceiling as well as to its own cap; to let one token hold more than 128
   sessions, raise both.
+- **A suspended account holds one session in all, across all its tokens**
+  (enough to ask `whoami`, the one call the platform still answers for it).
+  Whether an account is suspended is the platform's latest answer about it
+  from any of its tokens: each check is numbered as it starts, and a slower
+  check that started earlier never overrides a newer one, in either
+  direction. So a newer check that finds the account active lifts the hold at
+  once for every token, and one that finds it suspended holds every token,
+  including one whose own acceptance is still cached. Held, an initialize
+  from any of the account's tokens (a refreshed token, say) closes the
+  account's idle sessions to take the one slot: first those whose token the
+  platform has refused, then the least recently used. A session serving a
+  request is never closed; while the one the account holds is busy, an
+  initialize is answered `429` with `Retry-After`, saying the account is
+  suspended. An account suspended after it opened sessions keeps only one:
+  its next initialize, or the next request, notification or event stream on
+  any of its sessions, closes its other idle sessions, keeping the one being
+  served, and a busy one goes at a later one of these once it is idle.
+  Notifications and streams, which ask the platform nothing, do this only
+  while their token's acceptance is cached (60 s). A self-hosted server asks
+  the platform nothing, so nothing is suspended there.
 - **A token the platform refuses during a call comes back as that same
   `401`**, not as a tool error, so the client refreshes or authorizes again —
   the answer is held until its first byte for this. The one case that cannot
@@ -1216,7 +1232,8 @@ address.
   is not closed by the refresh: it still counts against the token's account
   ceiling (above) until the client closes it with `DELETE /mcp` under the old
   token (only the token's digest is compared, so an expired one still works)
-  or it idles out after 30 minutes.
+  or it idles out after 30 minutes. On a suspended account the new token's
+  initialize closes it instead, while it is idle (above).
 - `X-Mandala-MCP-Service` carries `MANDALA_MCP_SERVICE_SECRET` on every
   platform request, only ever to `MANDALA_BASE_URL`, so a token cannot be
   replayed at the API directly by the app it was issued to. A client's own
@@ -1238,8 +1255,8 @@ address.
 | `MANDALA_ALLOWED_HOSTS`, `MANDALA_ALLOWED_ORIGINS` | Comma-separated. Which `Host` and `Origin` values this server answers to. On a loopback bind the host list defaults to the address it was given, so DNS-rebinding protection is on without configuration; set this when serving under a name. |
 | `MANDALA_MCP_RESOURCE_METADATA_URL` | `--http` only. The OAuth protected-resource metadata URL this server is published under. Set, it answers OAuth clients as described under Hosted, with OAuth; unset, callers bring an API key. |
 | `MANDALA_MCP_SERVICE_SECRET` | `--http` only. Sent as `X-Mandala-MCP-Service` on every platform request, to `MANDALA_BASE_URL` only. Never logged. |
-| `MANDALA_MCP_MAX_SESSIONS_PER_TOKEN` | `--http` only. How many live sessions one bearer token may hold. Default 16; a whole number from 1 to 256 (the server's whole session pool), and anything else is refused at startup. A suspended account's token is held to one whatever this says. A token is also held to its account's limit, below. |
-| `MANDALA_MCP_MAX_SESSIONS_PER_ACCOUNT` | `--http` only. How many live sessions one account may hold across all its tokens. Default 128, half the pool; a whole number from 1 to 256, and anything else is refused at startup. Hosted (the metadata URL set), the account is the one the platform's `whoami` names for the token; self-hosted, or when `whoami` names none, each token is an account of its own. Past it an initialize is refused `429`, after closing only the token's own idle sessions or the account's refused ones. Suspension is not counted here; it holds each token to one. |
+| `MANDALA_MCP_MAX_SESSIONS_PER_TOKEN` | `--http` only. How many live sessions one bearer token may hold. Default 16; a whole number from 1 to 256 (the server's whole session pool), and anything else is refused at startup. A suspended account is held to one session in all, across its tokens, whatever this says. A token is also held to its account's limit, below. |
+| `MANDALA_MCP_MAX_SESSIONS_PER_ACCOUNT` | `--http` only. How many live sessions one account may hold across all its tokens. Default 128, half the pool; a whole number from 1 to 256, and anything else is refused at startup. Hosted (the metadata URL set), the account is the one the platform's `whoami` names for the token; self-hosted, or when `whoami` names none, each token is an account of its own. Past it an initialize is refused `429`, after closing only the token's own idle sessions or the account's refused ones. A suspended account is held to one session whatever this says. |
 
 Every one of these but the model key, the two tool filters, the two OAuth settings and the two session limits has a flag as well, and a flag overrides
 the environment: `--http`, `--port`, `--host`, `--base-url`, `--computer`,
