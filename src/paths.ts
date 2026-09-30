@@ -875,9 +875,13 @@ export function pasteBody(text: string, shortcut?: (typeof PASTE_SHORTCUTS)[numb
       `that is ${bytes} bytes of text; a paste takes at most ${MAX_PASTE_BYTES}. Paste it in pieces, or use write_file`,
     );
   }
-  return shortcut === undefined
+  // The chord as `keys`, the array spelling, as both SDKs send it. The string
+  // form `key: 'ctrl+shift+v'` is the same request in the flat vocabulary, and
+  // one spelling across all three clients is the point. ctrl+v is the
+  // platform's default, so asking for it sends nothing extra.
+  return shortcut === undefined || shortcut === 'ctrl+v'
     ? { action: 'paste', text }
-    : { action: 'paste', text, key: shortcut };
+    : { action: 'paste', text, keys: ['ctrl', 'shift', 'v'] };
 }
 
 /**

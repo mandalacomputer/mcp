@@ -32,7 +32,7 @@ import {
   wantsVersion,
 } from '../src/cli.js';
 import {
-  type APIError,
+  APIError,
   CancelledError,
   ConflictError,
   ConnectivityError,
@@ -2676,18 +2676,14 @@ describe('an edge that never reached the platform is not reported as a bare stat
     }
   });
 
-  it('does not discard a message an operator’s own gateway wrote', () => {
-    // platformNamed does not ask whether the PLATFORM spoke — it asks whether
-    // anything did, because a hop in front of a self-hosted MANDALA_BASE_URL is
-    // one this server has never seen and cannot outrank. 521-526 substituted
-    // unconditionally on the reading that a 522 provably is not the platform:
-    // true, and the wrong test. A gateway that names its own fault knows more
-    // about that deployment than the generic outage prose here does.
+  it('gives 521-526 this server’s wording whatever the body says, as the SDKs do', () => {
+    // These statuses say the platform was never reached, so a body on one is
+    // not its account of the request. Both SDKs substitute unconditionally, and
+    // since OPL-5522 so does this server: one answer in three clients. (A
+    // self-hosted operator's gateway sentence was kept here until then.)
     const said = 'backend pool empty; scale the worker group';
     for (const status of [521, 522, 523, 525, 526]) {
-      expect(errorForStatus(status, said, { error: said }).message).toBe(said);
-      // Still substituted when nothing structured came back, which is the case
-      // the substitution was written for.
+      expect(errorForStatus(status, said, { error: said }).message).not.toBe(said);
       expect(errorForStatus(status, `HTTP ${status}`).message).not.toBe(`HTTP ${status}`);
     }
   });
@@ -2698,8 +2694,11 @@ describe('an edge that never reached the platform is not reported as a bare stat
     // of nginx's HTML, which is the failure this whole range exists to remove.
     // It polls through isTransientForPoll, so the wait tools reach it and
     // replay whichever of those two it was into their give-up text.
+    // A bare APIError since OPL-5522, as in both SDKs, but still not a bare
+    // message.
     const err = errorForStatus(502, 'HTTP 502');
-    expect(err).toBeInstanceOf(OriginResponseError);
+    expect(err.constructor).toBe(APIError);
+    expect(err).not.toBeInstanceOf(OriginResponseError);
     expect(err.message).not.toBe('HTTP 502');
     // And it must claim neither of the two things it cannot know. A 520 knows
     // the request arrived; a 502 is that failure and the unreachable one at

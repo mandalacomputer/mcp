@@ -10,7 +10,7 @@ import {
   errorForStatus,
   isCreateOnlyUpload,
   MandalaError,
-  platformSaid,
+  messageFromBody,
   RangeNotSatisfiableError,
   RedirectError,
 } from './errors.js';
@@ -641,7 +641,9 @@ export class Api {
         // entire body arrived.
         if (truncated) throw new SyntaxError('truncated response body');
         body = JSON.parse(text);
-        message = platformSaid(body) ?? text.slice(0, 500);
+        // An RFC 9457 `detail`/`title` counts for the message, never as the
+        // platform naming the failure: see messageFromBody.
+        message = messageFromBody(body) ?? text.slice(0, 500);
       } catch {
         message = text.slice(0, 500);
         // The bounded page prefix, not the 500-character message. errorForStatus replaces

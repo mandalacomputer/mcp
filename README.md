@@ -505,6 +505,14 @@ anything and keep the hint. When a stretch of work is over, `suspend_computer` (
 suspend catches the ones a model forgets, but only after 30 minutes untouched.
 `get_usage` is what says what any of it cost.
 
+**Some defaults here differ from the SDKs', on purpose.** `screenshot`'s
+`fresh` defaults to true (the SDKs default to false), because after a click a
+cached frame can predate the action and a model reading it clicks again. Its
+`width` outside 64-3840 is refused rather than clamped as the API would.
+`wait_for_computer` polls every 2 seconds (an SDK launch polls every 3), and
+refuses a suspended computer and names `start_computer`, where the SDKs'
+`waitForGuest` resumes it.
+
 **A screenshot need not be the whole screen.** `screenshot` takes `region` (a
 crop, in the screen pixels `click` takes, before any scaling), `scale` (0 to 1),
 `format` (`png` or `jpeg`) and `quality` (JPEG, 1-100). A cropped or scaled
@@ -617,7 +625,11 @@ predates the feature is not something a caller can act on at all.
 **`running` does not mean ready.** A computer reports running when the
 hypervisor has started the VM; the desktop inside comes up seconds later.
 `wait_for_computer(until="guest")` waits for the software to answer, which is
-what `exec`, files and a painted screen actually need.
+what `exec`, files and a painted screen actually need. On a Linux computer it
+also waits for the desktop session to be logged in, so an `exec` with
+`desktop: true` sent next is not refused. That is more than the SDKs'
+`waitForGuest` / `wait_for_guest`, which return once the guest agent answers;
+the value keeps the name `"guest"` because renaming it would break callers.
 
 **A resize can be refused with an offer rather than a no.** Growing a computer
 past what the host it is on can run comes back as a refusal that says another
@@ -1312,8 +1324,10 @@ address.
 | `MANDALA_MCP_MAX_SESSIONS_PER_ACCOUNT` | `--http` only. How many live sessions one account may hold across all its tokens. Default 64, a quarter of the pool; a whole number from 1 to 256, and anything else is refused at startup. Hosted (the metadata URL set), the account is the one the platform's `whoami` names for the token; self-hosted, or when `whoami` names none, each token is an account of its own. Past it an initialize is refused `429`, after closing only the token's own idle sessions or the account's refused ones. A suspended account is held to one session whatever this says. Whatever this says, the last quarter of the pool goes only to accounts holding less than their share of it. |
 | `MANDALA_MCP_MAX_SESSIONS_PER_WORKSPACE` | `--http`, hosted only. How many live sessions one workspace may hold across all its tokens. Default a quarter of the per-account limit (16 of 64); a whole number from 1 to 256, and anything else is refused at startup; above the per-account limit it is that limit. Counted by the workspace the platform's `whoami` names for a workspace-scoped token; such tokens also share their account's limit, above, with the account's own tokens and its other workspaces. |
 
-Every one of these but the model key, the two tool filters, the two OAuth settings and the two session limits has a flag as well, and a flag overrides
-the environment: `--http`, `--port`, `--host`, `--base-url`, `--computer`,
+Every one of these but the model key, the two tool filters, the two hosted
+settings (`MANDALA_MCP_RESOURCE_METADATA_URL` and `MANDALA_MCP_SERVICE_SECRET`)
+and the three session limits has a flag as well, and a flag overrides the
+environment: `--http`, `--port`, `--host`, `--base-url`, `--computer`,
 `--allowed-hosts`, `--allowed-origins`, `--no-lifecycle`, local `--profile`, plus `--help` and
 `--version`. `--key` exists for a caller launching several servers under
 different keys, and warns when used, because an argument vector is readable by

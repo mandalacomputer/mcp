@@ -47,6 +47,16 @@ are wording changes, and they are behaviour changes in the way that matters.
   sessions and all its end customers' together stay under the account's.
   Past the sub-ceiling an initialize is answered `429` with `Retry-After`.
 
+- **`click` takes a `count` up to 10, on any button.** A left double and
+  triple click are still sent as `double_click` and `triple_click`; every
+  other repeat — four left clicks, a right or middle double click, which were
+  refused before — is that button's click with a `count`, paced as a double
+  click is. Needs a platform that accepts `count`.
+- **`click` takes `context: true`** and answers the desktop's windows and the
+  focused one as they stand just after the click, saving a `list_windows`
+  call. When they cannot be read the click still happened, and the answer
+  says why instead of listing them.
+
 ### Security
 
 - **A suspended account holds one hosted session in all, however many keys
@@ -88,7 +98,10 @@ are wording changes, and they are behaviour changes in the way that matters.
   between was refused with a 409 "no active desktop session". A computer whose
   desktop session never becomes active now gives up naming it rather than
   reporting the guest as answering. Only a desktop probe that finished with
-  exit 0 counts; one that timed out inside the guest is polled through.
+  exit 0 counts; one that timed out inside the guest is polled through. This
+  is more than the SDKs' `waitForGuest` / `wait_for_guest` waits for; the
+  value keeps the name `"guest"`, and the tool's description and the README
+  say so.
 - **The hosted server tells a refused API key that it is one.** A `com_…` key
   the platform does not accept was answered "no longer accepts this access
   token. Refresh it, or authorize again." — advice for an OAuth token, which
@@ -97,21 +110,37 @@ are wording changes, and they are behaviour changes in the way that matters.
   Credentials." The 401 and its `WWW-Authenticate` challenge are unchanged, an
   OAuth access token keeps the old wording, and neither message repeats the
   bearer.
+- **The secret store's two 409 words, `name_taken` and `stale_revision`, are
+  permanent**: `isTransient` says no to them, `reasonKind` answers
+  `"permanent"`, and a secret tool's refusal shows the word and says to pick
+  another name or replace the existing one, or to read the secret again and
+  retry with its current revision. Needs a platform that sends them; without
+  the word a secret-store 409 reads as before.
 - **The missing-key error points to Settings → Credentials → API keys**, the
   dashboard tab that holds API keys, instead of a Settings tab named "API keys"
   that no longer exists. The README and the plugin skill say the same.
 
-### Added
+### Fixed
 
-- **`click` takes a `count` up to 10, on any button.** A left double and
-  triple click are still sent as `double_click` and `triple_click`; every
-  other repeat — four left clicks, a right or middle double click, which were
-  refused before — is that button's click with a `count`, paced as a double
-  click is. Needs a platform that accepts `count`.
-- **`click` takes `context: true`** and answers the desktop's windows and the
-  focused one as they stand just after the click, saving a `list_windows`
-  call. When they cannot be read the click still happened, and the answer
-  says why instead of listing them.
+- **`paste_text` sends its shortcut as `keys`**, `["ctrl", "shift", "v"]`, as
+  both SDKs do, instead of the string `key: "ctrl+shift+v"`. `ctrl+v`, the
+  platform's default, sends nothing extra.
+- **An RFC 9457 error body reads as its sentence.** A refusal with no `error`
+  but a `detail` or `title` (Cloudflare answers its own 403s and 5xx that way)
+  now shows `detail`, then `title`, instead of `HTTP <status>` or raw JSON. It
+  does not count as the platform naming the failure, so a status this server
+  has its own wording for keeps it.
+- **A 502 is a plain `APIError`**, as in both SDKs, rather than an
+  `OriginResponseError`; it keeps its own message and is still polled through
+  by the wait tools and not called transient. **521-526 always get this
+  server's wording**, as in the SDKs, even when the body carried a message.
+- **`write_file` no longer claims every byte landed when the platform gave no
+  count.** It reported the local length; it now says no count came back and
+  answers `bytes: null`, as the SDKs answer undefined/None.
+- **A secret name is trimmed before its length is checked**, as the platform
+  trims it, so a padded name that is 60 characters once trimmed is accepted,
+  and the trimmed name is what is sent. Length is counted in characters (code
+  points), as the platform counts it.
 
 ## [0.8.0] — 2026-09-29
 

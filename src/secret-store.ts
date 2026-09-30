@@ -85,7 +85,8 @@ export interface SecretStore {
  * The refusal words the platform documents, and the only ones a secret-store
  * refusal is allowed to carry through this package. Taken from the published
  * `Error.reason` (contention, starting, unavailable, unsupported, exists,
- * revoked) and the API-key ingress words beside it (missing, invalid).
+ * revoked), the API-key ingress words beside it (missing, invalid), and the
+ * secret store's conflicts (name_taken, stale_revision).
  *
  * An allow-list rather than a shape check, because a shape check is exactly
  * what a secret prefix passes: `sk-proj-abc…` cut to thirty-two characters is a
@@ -101,6 +102,10 @@ export const DOCUMENTED_REASONS: ReadonlySet<string> = new Set([
   'revoked',
   'missing',
   'invalid',
+  // The secret store's own two 409s: a name already used in the scope, and a
+  // revision_id that is no longer current.
+  'name_taken',
+  'stale_revision',
 ]);
 
 /**

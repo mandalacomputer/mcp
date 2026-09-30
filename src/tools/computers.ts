@@ -1167,7 +1167,7 @@ export const registerComputers: Registrar = (server, session, opts) => {
           .enum(['running', 'guest'])
           .default('guest')
           .describe(
-            '"running" is the hypervisor reporting the VM up. "guest" is the software inside it answering, which is what exec and a painted desktop actually need — its desktop session logged in on Linux, and, on a computer with secrets bound, its secrets delivered, on one with a browser proxy, its browsers holding it, and on one with an egress proxy that names credentials, its host holding them.',
+            '"running" is the hypervisor reporting the VM up. "guest" is the software inside it answering, which is what exec and a painted desktop actually need — its desktop session logged in on Linux, and, on a computer with secrets bound, its secrets delivered, on one with a browser proxy, its browsers holding it, and on one with an egress proxy that names credentials, its host holding them. So "guest" here waits for more than waitForGuest in the SDKs, which returns once the guest agent answers.',
           ),
         timeout_s: z.number().int().min(5).max(900).default(180),
       },

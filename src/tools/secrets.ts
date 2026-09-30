@@ -1,6 +1,13 @@
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
-import { APIError, ConflictError, MandalaError, NotFoundError, statusAdvice } from '../errors.js';
+import {
+  APIError,
+  ConflictError,
+  MandalaError,
+  NotFoundError,
+  reasonAdvice,
+  statusAdvice,
+} from '../errors.js';
 import { guarded, refused, said, unavailableAdvice } from '../format.js';
 import * as P from '../paths.js';
 import {
@@ -268,6 +275,9 @@ function scopeDefault(session: {
 /** A secret's name as a tool argument, checked for what the platform would refuse. */
 const nameArg = z
   .string()
+  // Trimmed BEFORE the length check, as the platform trims it: a padded name
+  // that is 60 characters once trimmed is one the platform takes (OPL-5522).
+  .trim()
   .min(1, 'name must not be empty')
   .refine((v) => [...v].length <= SECRET_NAME_MAX_CHARS, {
     message: `name must be at most ${SECRET_NAME_MAX_CHARS} characters`,
@@ -337,6 +347,11 @@ function storeAdvice(err: APIError, change: boolean): string {
     case 404:
       return 'no such secret in this scope. A secret in a workspace is found only with its workspace_id; list_secrets says which exist';
     case 409:
+      // The platform's word, where it says which of the two conflicts this was;
+      // this server's own sentence for it, never the platform's.
+      if (err.reason === 'name_taken' || err.reason === 'stale_revision') {
+        return `${reasonAdvice(err.reason)}. Nothing changed`;
+      }
       return change
         ? 'refused as a conflict and nothing changed: for a create, the name is taken in that scope; for a replace or delete, the revision_id is no longer the current one — get_secret for the current one, and send it again only if you still mean to'
         : 'refused as a conflict';

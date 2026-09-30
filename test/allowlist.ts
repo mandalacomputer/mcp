@@ -479,6 +479,10 @@ export const PARAMETERS: ReadonlyMap<string, readonly string[]> = new Map([
  * would say nothing that route's own line does not.
  */
 export const UNIMPLEMENTED_PARAMETERS: ReadonlySet<string> = new Set([
+  // DECISION. `keys: ['ctrl', 'c']` is sent instead, as both SDKs send it. The
+  // chord-as-one-string form cannot express a key whose own name contains the
+  // separator.
+  'POST computers/:id/input  body:key',
   // DECISION. `scroll_direction` is sent instead — `button` is the flat
   // vocabulary's name for it, and on a route that also accepts a real mouse
   // button that is a word worth not overloading.

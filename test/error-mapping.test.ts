@@ -255,7 +255,8 @@ describe('special constructors and transport branches', () => {
       });
       if (status === 416) expect(error).toMatchObject({ size: 143 });
       if (status === 409) expect(error).toMatchObject({ movePossible: false });
-      if (status === 502) expect(error).toBeInstanceOf(publicApi.OriginResponseError);
+      // A bare APIError, as in both SDKs (OPL-5522).
+      if (status === 502) expect(error.constructor).toBe(publicApi.APIError);
     },
   );
   it.each([true, false])('preserves direct and factory move constructors: %s', (possible) => {
