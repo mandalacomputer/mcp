@@ -1,5 +1,5 @@
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
-import { resolveCredentials } from './credentials.js';
+import { resolveCredentials, resolveWorkspaceDefault } from './credentials.js';
 import { createServer, type ServerConfig } from './server.js';
 
 export type StdioConfig = Omit<ServerConfig, 'apiKey'> & { apiKey?: string; profile?: string };
@@ -14,11 +14,16 @@ export type StdioConfig = Omit<ServerConfig, 'apiKey'> & { apiKey?: string; prof
  */
 export async function runStdio(cfg: StdioConfig = {}): Promise<void> {
   const credentials = resolveCredentials(cfg);
+  // Only a saved profile has one; an explicit or environment key never does.
+  const defaults = resolveWorkspaceDefault(credentials);
   const resolved: ServerConfig = {
     ...cfg,
     apiKey: credentials.apiKey,
     baseUrl: credentials.baseUrl,
+    ...(defaults ? { defaultWorkspace: defaults.workspace } : {}),
+    ...(defaults?.unreadable ? { defaultWorkspaceUnreadable: defaults.unreadable } : {}),
   };
+  if (defaults?.note) console.error(`mandala-computer-mcp: ${defaults.note}`);
   const server = createServer(resolved);
   const transport = new StdioServerTransport();
   await server.connect(transport);
@@ -48,4 +53,8 @@ export async function runStdio(cfg: StdioConfig = {}): Promise<void> {
   process.stdin.once('end', shutdown);
   process.stdin.once('close', shutdown);
   console.error(`mandala-computer-mcp on stdio → ${new URL(credentials.baseUrl).origin}`);
+  if (defaults?.workspace)
+    console.error(
+      `mandala-computer-mcp: secret tools default to workspace ${defaults.workspace.name} (${defaults.workspace.id}), from mandala workspaces use`,
+    );
 }

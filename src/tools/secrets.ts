@@ -245,6 +245,26 @@ const workspaceArg = z
     'The workspace the secret belongs to. Leave it out for an account-wide secret. A secret in a workspace is found only with its workspace_id.',
   );
 
+/**
+ * What a left-out workspace_id means, said in the tool's schema: the local
+ * server started from a saved profile falls back to that profile's default
+ * workspace from `mandala workspaces use`. Every other session (an explicit
+ * or environment key, and every hosted one) keeps the words it always had.
+ */
+function scopeDefault(session: {
+  defaultWorkspace?: { id: string; name: string } | null;
+  defaultWorkspaceUnreadable?: string;
+}): string {
+  const d = session.defaultWorkspace;
+  if (d === undefined) return '';
+  const here = session.defaultWorkspaceUnreadable
+    ? 'unknown, because ~/.mandala/defaults.json cannot be read: list_secrets and get_secret use account-wide, and create_secret, set_secret, replace_secret and delete_secret refuse a call without workspace_id'
+    : d
+      ? `workspace ${d.name} (${d.id})`
+      : 'account-wide';
+  return ` Default when left out: the saved profile's workspace from \`mandala workspaces use\`, else account-wide — here ${here}.`;
+}
+
 /** A secret's name as a tool argument, checked for what the platform would refuse. */
 const nameArg = z
   .string()
@@ -374,6 +394,29 @@ async function storeGuarded(
 }
 
 export const registerSecrets: Registrar = (server, session) => {
+  // A left-out workspace_id: the saved profile's default, where there is one.
+  const scoped = (workspace_id: string | undefined) =>
+    workspace_id ?? session.defaultWorkspace?.id ?? undefined;
+  // A tool that writes, called without workspace_id while defaults.json cannot
+  // be read: the profile's default is unknown, and account-wide is the widest
+  // scope, where any computer on the account may be bound to what is stored.
+  // Refused before any request; the reading tools go on account-wide.
+  const unknownDefault = (workspace_id: string | undefined) =>
+    workspace_id === undefined && session.defaultWorkspaceUnreadable !== undefined
+      ? refused(
+          `Nothing was sent: ~/.mandala/defaults.json cannot be read (${session.defaultWorkspaceUnreadable}), so the saved profile's default workspace is unknown and this would otherwise act account-wide. Pass workspace_id explicitly, or fix or delete the file and restart this server.`,
+        )
+      : undefined;
+  const byDefault = (workspace_id: string | undefined) =>
+    workspace_id === undefined && session.defaultWorkspace
+      ? " (the saved profile's default from mandala workspaces use)"
+      : '';
+  const scopeArg = (text?: string) =>
+    workspaceArg.describe(
+      (text ??
+        'The workspace the secret belongs to. Leave it out for an account-wide secret. A secret in a workspace is found only with its workspace_id.') +
+        scopeDefault(session),
+    );
   server.registerTool(
     'get_computer_secrets',
     {
@@ -471,20 +514,22 @@ export const registerSecrets: Registrar = (server, session) => {
     {
       title: "List the account's secrets",
       description:
-        "The secrets stored on this account, in one scope: the account-wide ones by default, or one workspace's with workspace_id. For each: its name, its id (what set_computer_secrets binds), its current revision_id (what replace_secret and delete_secret need), its scope and when it was last delivered to a computer. Values are NEVER shown — no route returns one. Also says whether binding secrets to computers is switched on here, and the store's limits. Owners and members may read; a viewer is refused. An API key confined to a workspace lists that workspace's secrets, and naming another scope is refused.",
+        "The secrets stored on this account, in one scope: the account-wide ones by default, or one workspace's with workspace_id. For each: its name, its id (what set_computer_secrets binds), its current revision_id (what replace_secret and delete_secret need), its scope and when it was last delivered to a computer. Values are NEVER shown — no route returns one. Also says whether binding secrets to computers is switched on here, and the store's limits. Owners and members may read; a viewer is refused. An API key confined to a workspace lists that workspace's secrets, and naming another scope is refused." +
+        scopeDefault(session),
       inputSchema: {
-        workspace_id: workspaceArg.describe(
-          'The workspace to list. Leave it out for the account-wide secrets.',
-        ),
+        workspace_id: scopeArg('The workspace to list. Leave it out for the account-wide secrets.'),
       },
       annotations: { readOnlyHint: true },
     },
     ({ workspace_id }, extra) =>
       storeGuarded('Listing the secrets', false, undefined, async () => {
+        const workspace = scoped(workspace_id);
         const list: SecretList = await session.api
           .with(extra.signal)
-          .secrets.list({ workspaceId: workspace_id });
-        const scope = workspace_id === undefined ? 'account-wide' : `in workspace ${workspace_id}`;
+          .secrets.list({ workspaceId: workspace });
+        const scope =
+          (workspace === undefined ? 'account-wide' : `in workspace ${workspace}`) +
+          byDefault(workspace_id);
         const delivery = list.delivery
           ? 'Binding secrets to computers is on.'
           : 'Binding secrets to computers is OFF on this platform: secrets can be stored, but set_computer_secrets and a create carrying secrets are refused.';
@@ -504,14 +549,14 @@ export const registerSecrets: Registrar = (server, session) => {
       title: 'Read one secret',
       description:
         "One secret's name, scope, current revision_id and when it was last delivered — never its value. Read it for the current revision_id after replace_secret or delete_secret is refused because the revision moved. A secret in a workspace is found only with its workspace_id; otherwise it is not found.",
-      inputSchema: { secret_id: secretIdArg, workspace_id: workspaceArg },
+      inputSchema: { secret_id: secretIdArg, workspace_id: scopeArg() },
       annotations: { readOnlyHint: true },
     },
     ({ secret_id, workspace_id }, extra) =>
       storeGuarded(`Reading ${secret_id}`, false, undefined, async () => {
         const secret = await session.api
           .with(extra.signal)
-          .secrets.get(secret_id, { workspaceId: workspace_id });
+          .secrets.get(secret_id, { workspaceId: scoped(workspace_id) });
         return said(`${secretLine(secret)} (values are never shown)`, secret);
       }),
   );
@@ -520,11 +565,11 @@ export const registerSecrets: Registrar = (server, session) => {
     'create_secret',
     {
       title: 'Store a new secret',
-      description: `Store a value under a name on this account, encrypted, for binding to computers with set_computer_secrets (or the secrets field of a create). The value is sent once and NEVER shown again: this answer, every other tool and every route give back only the name, id and revision. Do not put the value anywhere else — not in a command line, a file or a message — when a binding can deliver it. Owners only. A name is unique within its scope (up to ${SECRET_NAME_MAX_CHARS} characters, no control characters); a taken name is refused with 409. The account holds at most 100 secrets at once and may create at most 1000 over its lifetime — list_secrets reports both. Without workspace_id the secret is account-wide and any computer on the account may be bound to it. NOT safe to repeat blind: if the answer is lost, list_secrets before creating again, since the secret may exist.`,
+      description: `Store a value under a name on this account, encrypted, for binding to computers with set_computer_secrets (or the secrets field of a create). The value is sent once and NEVER shown again: this answer, every other tool and every route give back only the name, id and revision. Do not put the value anywhere else — not in a command line, a file or a message — when a binding can deliver it. Owners only. A name is unique within its scope (up to ${SECRET_NAME_MAX_CHARS} characters, no control characters); a taken name is refused with 409. The account holds at most 100 secrets at once and may create at most 1000 over its lifetime — list_secrets reports both. Without workspace_id the secret is account-wide and any computer on the account may be bound to it. NOT safe to repeat blind: if the answer is lost, list_secrets before creating again, since the secret may exist.${scopeDefault(session)}`,
       inputSchema: {
         name: nameArg,
         value: valueArg('The value'),
-        workspace_id: workspaceArg.describe(
+        workspace_id: scopeArg(
           'The workspace it belongs to. Leave it out for an account-wide secret.',
         ),
       },
@@ -532,9 +577,11 @@ export const registerSecrets: Registrar = (server, session) => {
     },
     ({ name, value, workspace_id }, extra) =>
       storeGuarded('Storing the secret', true, value, async () => {
+        const unknown = unknownDefault(workspace_id);
+        if (unknown) return unknown;
         const secret = await session.api
           .with(extra.signal)
-          .secrets.create({ name, value, workspaceId: workspace_id });
+          .secrets.create({ name, value, workspaceId: scoped(workspace_id) });
         return said(
           `Stored ${secret.name} as ${secret.id}, revision ${secret.revision_id}, ${secret.workspace_id === null ? 'account-wide' : `in workspace ${secret.workspace_id}`}. The value is not shown and cannot be read back. Bind it to a computer with set_computer_secrets.`,
           secret,
@@ -550,7 +597,7 @@ export const registerSecrets: Registrar = (server, session) => {
       inputSchema: {
         name: nameArg,
         value: valueArg('The value'),
-        workspace_id: workspaceArg.describe(
+        workspace_id: scopeArg(
           'The scope to look in, and to create in. Leave it out for the account-wide secrets.',
         ),
       },
@@ -558,20 +605,20 @@ export const registerSecrets: Registrar = (server, session) => {
     },
     ({ name, value, workspace_id }, extra) =>
       storeGuarded(`Setting ${name.trim()}`, true, value, async () => {
+        const unknown = unknownDefault(workspace_id);
+        if (unknown) return unknown;
         const store = session.api.with(extra.signal).secrets;
+        const workspace = scoped(workspace_id);
         for (let attempt = 0; ; attempt++) {
-          const found = namedSecret(
-            (await store.list({ workspaceId: workspace_id })).secrets,
-            name,
-          );
+          const found = namedSecret((await store.list({ workspaceId: workspace })).secrets, name);
           try {
             const secret = found
               ? await store.replace(found.id, {
                   value,
                   revisionId: found.revision_id,
-                  workspaceId: workspace_id,
+                  workspaceId: workspace,
                 })
-              : await store.create({ name: name.trim(), value, workspaceId: workspace_id });
+              : await store.create({ name: name.trim(), value, workspaceId: workspace });
             const scope =
               secret.workspace_id === null ? 'account-wide' : `in workspace ${secret.workspace_id}`;
             return said(
@@ -597,16 +644,18 @@ export const registerSecrets: Registrar = (server, session) => {
         secret_id: secretIdArg,
         value: valueArg('The new value'),
         revision_id: revisionArg('A stale one is refused and nothing changes.'),
-        workspace_id: workspaceArg,
+        workspace_id: scopeArg(),
       },
       annotations: { destructiveHint: true, idempotentHint: false },
     },
     ({ secret_id, value, revision_id, workspace_id }, extra) =>
       storeGuarded(`Replacing the value of ${secret_id}`, true, value, async () => {
+        const unknown = unknownDefault(workspace_id);
+        if (unknown) return unknown;
         const secret = await session.api.with(extra.signal).secrets.replace(secret_id, {
           value,
           revisionId: revision_id,
-          workspaceId: workspace_id,
+          workspaceId: scoped(workspace_id),
         });
         return said(
           `Replaced the value of ${secret.name} (${secret.id}); it is now at revision ${secret.revision_id}. The value is not shown. Computers bound to it get it at their next start or restart, and a running one is sent it now on a best-effort basis.`,
@@ -624,7 +673,7 @@ export const registerSecrets: Registrar = (server, session) => {
       inputSchema: {
         secret_id: secretIdArg,
         revision_id: revisionArg('Required; a stale one is refused and nothing is deleted.'),
-        workspace_id: workspaceArg,
+        workspace_id: scopeArg(),
         confirm: z
           .literal(true)
           .describe(
@@ -635,14 +684,17 @@ export const registerSecrets: Registrar = (server, session) => {
     },
     ({ secret_id, revision_id, workspace_id }, extra) =>
       storeGuarded(`Deleting ${secret_id}`, true, undefined, async () => {
+        const unknown = unknownDefault(workspace_id);
+        if (unknown) return unknown;
+        const workspace = scoped(workspace_id);
         try {
           await session.api
             .with(extra.signal)
-            .secrets.delete(secret_id, { revisionId: revision_id, workspaceId: workspace_id });
+            .secrets.delete(secret_id, { revisionId: revision_id, workspaceId: workspace });
         } catch (err) {
           if (!(err instanceof NotFoundError)) throw err;
           return refused(
-            `Nothing was deleted: no secret ${secret_id} was found${workspace_id === undefined ? ' among the account-wide secrets' : ` in workspace ${workspace_id}`}. Either it was already deleted, or it is in a scope this did not name — list_secrets says which.`,
+            `Nothing was deleted: no secret ${secret_id} was found${workspace === undefined ? ' among the account-wide secrets' : ` in workspace ${workspace}${byDefault(workspace_id)}`}. Either it was already deleted, or it is in a scope this did not name — list_secrets says which.`,
           );
         }
         return said(
