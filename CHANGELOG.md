@@ -16,6 +16,11 @@ are wording changes, and they are behaviour changes in the way that matters.
 
 ### Changed
 
+- **`list_api_keys` says why it has no mint or revoke companion**: they are
+  left out on purpose, so a raw key never lands in a transcript and a model
+  never revokes a key on its own reading of the list; a person does both in the
+  dashboard or with `mandala api-keys`.
+
 - **`wait_for_computer` with `until: "guest"` now waits for the desktop
   session** on a Linux computer. The guest agent answers a few seconds before
   the desktop user is logged in, and an `exec` with `desktop: true` sent in

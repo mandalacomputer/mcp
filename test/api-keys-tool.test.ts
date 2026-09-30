@@ -138,6 +138,17 @@ it('list_api_keys says what minted_by_key_id means', async () => {
   expect(tool?.description).toContain('revoking a key does not revoke the keys it minted');
 });
 
+it('list_api_keys says minting and revoking are left out on purpose, and where they are done', async () => {
+  // The scan read the missing create/revoke as a gap (OPL-5471). It is
+  // deliberate: a minted key answered to a model lands in its transcript.
+  const tool = (await (await open()).client.listTools()).tools.find(
+    (t) => t.name === 'list_api_keys',
+  );
+  expect(tool?.description).toContain('deliberately not tools here');
+  expect(tool?.description).toContain('a raw key never lands in this transcript');
+  expect(tool?.description).toContain('mandala api-keys create / revoke');
+});
+
 it('list_api_keys says so when there are none', async () => {
   respond([]);
   const result = await (await open()).call('list_api_keys');
