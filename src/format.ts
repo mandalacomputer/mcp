@@ -2,6 +2,8 @@ import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import {
   APIError,
   MandalaError,
+  OriginTLSError,
+  OriginUnreachableError,
   outcomeUnknownOn503,
   platformSaid,
   reasonAdvice,
@@ -146,6 +148,11 @@ export function withErrorMetadata(
 
 /** Keep scalar error prose, without displaying a serialized response body as its message. */
 export function apiErrorMessage(error: APIError): string {
+  // 521-526 always carry the SDKs' wording, whatever the body says: a body
+  // behind an origin that could not be reached or handshaken with is not the
+  // platform speaking. The body stays on the error for diagnostics.
+  if (error instanceof OriginTLSError || error instanceof OriginUnreachableError)
+    return error.message;
   const named = platformSaid(error.body);
   if (named !== undefined) return named;
   // An unreadable or unclassified JSON envelope can leave a bounded JSON prefix

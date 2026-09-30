@@ -132,8 +132,9 @@ are wording changes, and they are behaviour changes in the way that matters.
   has its own wording for keeps it.
 - **A 502 is a plain `APIError`**, as in both SDKs, rather than an
   `OriginResponseError`; it keeps its own message and is still polled through
-  by the wait tools and not called transient. **521-526 always get this
-  server's wording**, as in the SDKs, even when the body carried a message.
+  by the wait tools and not called transient. **521-523, 525 and 526 always
+  get this server's wording**, as in the SDKs, even when the body carried a
+  message, both on the error and in every tool's reply.
 - **`write_file` no longer claims every byte landed when the platform gave no
   count.** It reported the local length; it now says no count came back and
   answers `bytes: null`, as the SDKs answer undefined/None.

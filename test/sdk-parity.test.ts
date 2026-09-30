@@ -128,6 +128,22 @@ describe('the status to class mapping, as the SDKs have it', () => {
     expect(err).toBeInstanceOf(OriginTLSError);
     expect(err.message).toMatch(/TLS handshake/);
   });
+
+  it.each([
+    [521, /could not reach it/],
+    [522, /could not reach it/],
+    [523, /could not reach it/],
+    [525, /TLS handshake/],
+    [526, /TLS handshake/],
+  ])('shows a tool caller the SDK wording for HTTP %i, not the body', async (status, wording) => {
+    answering(status, JSON.stringify({ error: 'retry immediately' }));
+    const { call, close } = await connect();
+    const res = await call('list_computers', {});
+    await close();
+    expect(res.isError).toBe(true);
+    expect(textOf(res)).toMatch(wording);
+    expect(textOf(res)).not.toContain('retry immediately');
+  });
 });
 
 describe('the byte count after an upload', () => {
