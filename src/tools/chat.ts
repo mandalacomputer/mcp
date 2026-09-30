@@ -143,8 +143,14 @@ function chatFailure(error: unknown): CallToolResult {
   const native = failedAgent.safeParse(nested?.agent);
   const boundedNative = native.success && JSON.stringify(native.data).length <= 4000;
   const incompleteNative = nested?.agent !== undefined && !boundedNative;
+  // A nested `{error: {...}}` body on this route is always the platform's own
+  // run-failure envelope, which forwards the model provider's status: a 522 or
+  // 525 there is the provider's edge failing a later step, after earlier steps
+  // ran and were billed. The SDK wording ("the request was never sent") would
+  // be false, so it applies only to a flat or absent body, which is the edge in
+  // front of the platform speaking.
   const detail =
-    originWording(error) ??
+    (nested === undefined ? originWording(error) : undefined) ??
     (isRecord(error.body)
       ? (platformSaid(error.body) ?? 'Chat request failed without a usable error message')
       : edgeCut(error)

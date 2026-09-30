@@ -162,16 +162,48 @@ describe('the status to class mapping, as the SDKs have it', () => {
     originBodies.map(([shape, body]) => [status, shape, body, wording] as const),
   );
 
-  it.each(originMatrix)(
-    'shows run_agent_chat the SDK wording for HTTP %i with a %s body',
-    async (status, _shape, body, wording) => {
-      answering(status, JSON.stringify(body));
+  // A flat body at these statuses is the edge in front of the platform, so
+  // run_agent_chat gives the SDK wording.
+  it.each(originCases)(
+    'shows run_agent_chat the SDK wording for HTTP %i with a flat body',
+    async (status, wording) => {
+      answering(status, JSON.stringify({ error: 'retry immediately' }));
       const { call, close } = await connect({ modelKey: 'model-secret-sentinel' });
       const res = await call('run_agent_chat', { messages: [{ role: 'user', content: 'x' }] });
       await close();
       expect(res.isError).toBe(true);
       expect(textOf(res)).toMatch(wording);
       expect(textOf(res)).not.toContain('retry immediately');
+    },
+  );
+
+  // A nested body is the platform's own run-failure envelope, forwarding the
+  // model provider's status after earlier steps ran and were billed. Saying the
+  // request was never sent would be false, so the provider's message stays.
+  it.each(originCases)(
+    "keeps run_agent_chat's provider message for HTTP %i with a nested run-failure body",
+    async (status) => {
+      answering(
+        status,
+        JSON.stringify({
+          error: {
+            message: `model API: upstream ${status}`,
+            usage: { prompt_tokens: 120, completion_tokens: 30, total_tokens: 150 },
+            steps: [{ n: 1, action: 'click', detail: 'clicked once' }],
+          },
+        }),
+      );
+      const { call, close } = await connect({ modelKey: 'model-secret-sentinel' });
+      const res = await call('run_agent_chat', { messages: [{ role: 'user', content: 'x' }] });
+      await close();
+      expect(res.isError).toBe(true);
+      const text = textOf(res);
+      expect(text).toContain(`model API: upstream ${status}`);
+      expect(text).not.toContain('never sent');
+      expect(text).not.toContain('nothing was started');
+      expect(text).not.toMatch(/could not reach it|TLS handshake/);
+      expect(text).toContain('clicked once');
+      expect(text).toMatch(/"total_tokens": ?150/);
     },
   );
 
