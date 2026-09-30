@@ -97,6 +97,9 @@ are wording changes, and they are behaviour changes in the way that matters.
   Credentials." The 401 and its `WWW-Authenticate` challenge are unchanged, an
   OAuth access token keeps the old wording, and neither message repeats the
   bearer.
+- **The missing-key error points to Settings → Credentials → API keys**, the
+  dashboard tab that holds API keys, instead of a Settings tab named "API keys"
+  that no longer exists. The README and the plugin skill say the same.
 
 ### Added
 
