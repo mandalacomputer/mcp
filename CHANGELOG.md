@@ -14,6 +14,16 @@ are wording changes, and they are behaviour changes in the way that matters.
 
 ## [Unreleased]
 
+### Changed
+
+- **`wait_for_computer` with `until: "guest"` now waits for the desktop
+  session** on a Linux computer. The guest agent answers a few seconds before
+  the desktop user is logged in, and an `exec` with `desktop: true` sent in
+  between was refused with a 409 "no active desktop session". A computer whose
+  desktop session never becomes active now gives up naming it rather than
+  reporting the guest as answering. Only a desktop probe that finished with
+  exit 0 counts; one that timed out inside the guest is polled through.
+
 ## [0.8.0] — 2026-09-29
 
 ### Added
