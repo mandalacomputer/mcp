@@ -34,18 +34,42 @@ export type HttpConfig = Omit<ServerConfig, 'apiKey' | 'activity'> & {
    * bearers (OPL-5447). Hosted mode counts by the account id the platform's
    * whoami names for each bearer, and a bearer whose whoami names none is an
    * account of its own; a self-hosted server verifies no account, so there
-   * each bearer is its own. Default half of `maxSessions` (128 of 256), which
-   * is also what anything but a number of at least one means; above
-   * `maxSessions` it is `maxSessions`. At the ceiling an initialize makes room
-   * only by closing idle sessions: first the account's whose bearer the
-   * platform has refused, then the requester's own, least recently used
-   * first. Failing that it is refused (429); a live session of another bearer
-   * is never closed for it. A suspended account (hosted mode) is held to one
-   * session in all, whatever this is, and there the one exception applies: a
-   * new bearer of that account may close the account's idle session of
-   * another bearer to take the one slot (OPL-5452).
+   * each bearer is its own. Default a quarter of `maxSessions` (64 of 256,
+   * OPL-5454), which is also what anything but a number of at least one
+   * means; above `maxSessions` it is `maxSessions`. At the ceiling an
+   * initialize makes room only by closing idle sessions: first the account's
+   * whose bearer the platform has refused, then the requester's own, least
+   * recently used first. Failing that it is refused (429); a live session of
+   * another bearer is never closed for it. A suspended account (hosted mode)
+   * is held to one session in all, whatever this is, and there the one
+   * exception applies: a new bearer of that account may close the account's
+   * idle session of another bearer to take the one slot (OPL-5452).
+   *
+   * Separately, the last quarter of `maxSessions` (64 of 256; none in a pool
+   * under 4) is kept for accounts holding less than their share (OPL-5454).
+   * Once only that quarter is free, an initialize is admitted only if its
+   * account, counting its initializes in flight, holds fewer than the other
+   * three quarters divided by the number of accounts holding sessions, its
+   * own included; otherwise it is answered 503 with `Retry-After`, as a full
+   * pool is, and nothing is closed for it. Not configurable.
    */
   maxSessionsPerAccount?: number;
+  /**
+   * How many live sessions one workspace may hold at once, across all of its
+   * bearers, under its account's ceiling (OPL-5453). Hosted mode only, and
+   * only for a bearer whose whoami names both an account and a workspace (a
+   * workspace-scoped key); every other bearer is held only by its own cap and
+   * its account's ceiling. A workspace is counted within its account, so the
+   * same workspace id under two accounts is two workspaces. Default a quarter
+   * of the account ceiling as it stands after the rules above (16 of 64), which
+   * is also what anything but a number of at least one means; above the
+   * account ceiling it is the account ceiling. A workspace-scoped bearer is
+   * still held to its account's ceiling, which it shares with the account's
+   * own bearers and every other workspace of the account. Room is made as for
+   * the account ceiling: only idle sessions of the requester's own, or of the
+   * account's refused bearers, are closed, and failing that the answer is 429.
+   */
+  maxSessionsPerWorkspace?: number;
   /** How many requests may retain a parsed body above 256 KiB at once. */
   maxLargeBodyParses?: number;
   /**
@@ -87,6 +111,11 @@ type Live = {
   keyDigest: Buffer;
   /** What this session counts against for the account ceiling. See {@link accountKey}. */
   account: string;
+  /**
+   * What it counts against for the workspace sub-ceiling, when its bearer is
+   * workspace-scoped (OPL-5453). See {@link workspaceKey}.
+   */
+  workspace?: string;
   lastSeen: number;
   /** Requests currently being served on this session. */
   active: number;
@@ -352,9 +381,11 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
   const checkTtl = cfg.bearerCheckTtlMs ?? DEFAULT_BEARER_CHECK_TTL_MS;
   // What the platform said, per digest: until when it is taken on trust, and
   // the account key (see {@link accountKey}) its whoami named, which the
-  // account ceiling counts by. Whether that account is suspended is NOT kept
-  // here: it is read from `standing`, below, every time it is asked.
-  type Acceptance = { until: number; account: string };
+  // account ceiling counts by, and the workspace key (see {@link
+  // workspaceKey}) when it named a workspace too, which the workspace
+  // sub-ceiling counts by (OPL-5453). Whether that account is suspended is NOT
+  // kept here: it is read from `standing`, below, every time it is asked.
+  type Acceptance = { until: number; account: string; workspace?: string };
   const accepted = new Map<string, Acceptance>();
   let checksInFlight = 0;
 
@@ -442,7 +473,9 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
    * standing per account. `account` is the account key the bearer counts against (see
    * {@link accountKey}); it is set whenever the verdict is `ok` or
    * `suspended`, and returned rather than read back from the cache, which a
-   * zero TTL or a full cache may already have let go of.
+   * zero TTL or a full cache may already have let go of. `workspace` is the
+   * workspace key (see {@link workspaceKey}), returned the same way, when
+   * whoami named a workspace for an account it named (OPL-5453).
    */
   // `onStart` runs only when a probe really starts — never for a cached answer
   // or a full cap — and synchronously, before the first await, so a caller's
@@ -454,7 +487,11 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
   const checkBearer = async (
     key: string,
     onStart?: () => void,
-  ): Promise<{ verdict: 'ok' | 'suspended' | 'refused' | 'unknown'; account?: string }> => {
+  ): Promise<{
+    verdict: 'ok' | 'suspended' | 'refused' | 'unknown';
+    account?: string;
+    workspace?: string;
+  }> => {
     const id = digest(key).toString('hex');
     const cached = acceptance(key);
     // Believed only while its account has a standing to read (see above).
@@ -462,6 +499,7 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
       return {
         verdict: accountSuspended(cached.account) ? 'suspended' : 'ok',
         account: cached.account,
+        workspace: cached.workspace,
       };
     }
     if (checksInFlight >= MAX_BEARER_CHECKS_IN_FLIGHT) return { verdict: 'unknown' };
@@ -471,6 +509,7 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
     onStart?.();
     let suspended: boolean;
     let confirmed: string | undefined;
+    let workspaceId: string | undefined;
     try {
       const api = new Api(key, cfg.baseUrl, AbortSignal.timeout(BEARER_CHECK_TIMEOUT_MS), {
         serviceSecret,
@@ -488,6 +527,7 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
       const who = await api.json<unknown>('GET', WHOAMI);
       suspended = isSuspended(who);
       confirmed = accountIdOf(who);
+      workspaceId = workspaceIdOf(who);
     } catch (err) {
       return { verdict: err instanceof APIError && err.status === 401 ? 'refused' : 'unknown' };
     } finally {
@@ -502,9 +542,10 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
       }
     }
     const account = accountKey(id, confirmed);
-    accepted.set(id, { until: now + checkTtl, account });
+    const workspace = workspaceKey(account, workspaceId);
+    accepted.set(id, { until: now + checkTtl, account, workspace });
     noteStanding(account, suspended, seq);
-    return { verdict: accountSuspended(account) ? 'suspended' : 'ok', account };
+    return { verdict: accountSuspended(account) ? 'suspended' : 'ok', account, workspace };
   };
 
   // Refused initializes per source, in fixed one-minute windows. Kept apart
@@ -603,14 +644,34 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
   // number of bearers, so a burst spread across its keys would otherwise all
   // count the same sessions and all pass the account ceiling.
   const pendingByAccount = new Map<string, number>();
-  // The ceiling no account may pass, live plus pending: half the pool by
-  // default, so no one tenant can take the whole of it however many keys it
-  // holds. Normalised as the per-bearer cap is, and clamped to the pool.
+  // The ceiling no account may pass, live plus pending: a quarter of the pool
+  // by default (OPL-5454). Half let two accounts take the whole of it between
+  // them, however many others were waiting. Normalised as the per-bearer cap
+  // is, and clamped to the pool.
   const perAccount = cfg.maxSessionsPerAccount;
   const maxPerAccount =
     typeof perAccount === 'number' && perAccount >= 1
       ? Math.min(Math.floor(perAccount), maxSessions)
-      : Math.max(1, Math.floor(maxSessions / 2));
+      : Math.max(1, Math.floor(maxSessions / 4));
+  // The same reservations per workspace (OPL-5453), keyed by workspace key and
+  // kept only for workspace-scoped bearers, for the same reason again.
+  const pendingByWorkspace = new Map<string, number>();
+  // The sub-ceiling no workspace may pass under its account's: a quarter of
+  // the account's ceiling by default, the EFFECTIVE one, so raising only the
+  // account ceiling raises this with it. Normalised likewise, and clamped to
+  // the account ceiling, which holds a workspace whatever this says.
+  const perWorkspace = cfg.maxSessionsPerWorkspace;
+  const maxPerWorkspace =
+    typeof perWorkspace === 'number' && perWorkspace >= 1
+      ? Math.min(Math.floor(perWorkspace), maxPerAccount)
+      : Math.max(1, Math.floor(maxPerAccount / 4));
+  // The last quarter of the pool, kept for accounts holding less than their
+  // share of the rest (OPL-5454; see the initialize's admission). None in a
+  // pool under 4. Not configurable. The share is taken of the UNRESERVED part:
+  // of the whole pool, a lone account would always hold less than its share
+  // and could take the reserve too, which would then protect nobody.
+  const poolReserve = Math.floor(maxSessions / 4);
+  const unreserved = maxSessions - poolReserve;
 
   // Two parsers, chosen by whether this server has already checked who is
   // asking.
@@ -907,9 +968,22 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
   };
 
   /**
-   * The sessions to close so that one more fits under both this bearer's cap
-   * and its account's ceiling (OPL-5447), or which of the two it cannot fit
-   * under.
+   * The live sessions counted against this workspace key (OPL-5453; see
+   * {@link workspaceKey}), whichever bearer opened them, refused ones
+   * included for the reason {@link sessionsOfAccount} gives.
+   */
+  const sessionsOfWorkspace = (workspace: string): Array<[string, Live]> => {
+    const counted: Array<[string, Live]> = [];
+    for (const entry of sessions) if (entry[1].workspace === workspace) counted.push(entry);
+    return counted;
+  };
+
+  /**
+   * The sessions to close so that one more fits under this bearer's cap, its
+   * account's ceiling (OPL-5447) and, for a workspace-scoped bearer, its
+   * workspace's sub-ceiling (OPL-5453), or which of them it cannot fit under:
+   * `bearer`, then `workspace`, then `account`, when more than one cannot be
+   * met.
    *
    * Only idle sessions (`active === 0`, what the sweeper closes) are
    * candidates, and of two kinds. The bearer's own, which make room under
@@ -920,27 +994,38 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
    * account's other keys out until the sweep. Refused ones go first, then the
    * least recently seen. A live session of another bearer is never a
    * candidate, and neither is anything of another account; an own session
-   * counts toward the ceiling's need only if it counts against this account.
+   * counts toward the ceiling's need only if it counts against this account,
+   * and any candidate toward the workspace's only if it counts against this
+   * workspace. A candidate is taken only if it meets a need that is still
+   * unmet.
    *
    * `suspended` (hosted mode, the account's standing, OPL-5452) lowers both
    * limits to one, and makes every idle session of the account a candidate,
    * whichever bearer opened it: a suspended account holds one session in all,
    * and the bearer asking now (a refreshed token, say) may take it over while
-   * it is idle. One with a request in flight is still never a candidate.
+   * it is idle. One with a request in flight is still never a candidate. The
+   * workspace sub-ceiling is not applied then: the account's one session is
+   * below any sub-ceiling, and applying it could close a second session that
+   * the account's one-session limit does not need closed.
    *
-   * `pendingBearer`/`pendingAccount` are initializes admitted and not yet
-   * landed; at landing both are 0 (see `onsessioninitialized`). The result
-   * names sessions, so nothing that outlives the call may keep it.
+   * `workspace` is the requester's workspace key, undefined when its bearer
+   * is not workspace-scoped. `pendingBearer`/`pendingWorkspace`/
+   * `pendingAccount` are initializes admitted and not yet landed; at landing
+   * all are 0 (see `onsessioninitialized`). The result names sessions, so
+   * nothing that outlives the call may keep it.
    */
   const planRoom = (
     keyDigest: Buffer,
     account: string,
+    workspace: string | undefined,
     suspended: boolean,
     pendingBearer: number,
+    pendingWorkspace: number,
     pendingAccount: number,
   ):
     | { victims: Array<[string, Live]> }
     | { full: 'bearer'; holds: number }
+    | { full: 'workspace' }
     | { full: 'account' } => {
     const bearerCap = suspended ? MAX_SESSIONS_SUSPENDED : maxPerBearer;
     const accountCap = suspended ? MAX_SESSIONS_SUSPENDED : maxPerAccount;
@@ -948,8 +1033,12 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
     const counted = sessionsOfAccount(account);
     let bearerNeed = own.length + pendingBearer - bearerCap + 1;
     let accountNeed = counted.length + pendingAccount - accountCap + 1;
+    let workspaceNeed =
+      workspace !== undefined && !suspended
+        ? sessionsOfWorkspace(workspace).length + pendingWorkspace - maxPerWorkspace + 1
+        : 0;
     const victims: Array<[string, Live]> = [];
-    if (bearerNeed <= 0 && accountNeed <= 0) return { victims };
+    if (bearerNeed <= 0 && accountNeed <= 0 && workspaceNeed <= 0) return { victims };
     const mine = new Set(own.map(([id]) => id));
     const candidates = [
       ...own,
@@ -958,15 +1047,24 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
       .filter(([, live]) => live.active === 0)
       .sort(closingOrder);
     for (const entry of candidates) {
-      if (bearerNeed <= 0 && accountNeed <= 0) break;
+      if (bearerNeed <= 0 && accountNeed <= 0 && workspaceNeed <= 0) break;
       const ofBearer = mine.has(entry[0]);
       const ofAccount = entry[1].account === account;
-      if (!(ofBearer && bearerNeed > 0) && !(ofAccount && accountNeed > 0)) continue;
+      const ofWorkspace = workspace !== undefined && entry[1].workspace === workspace;
+      if (
+        !(ofBearer && bearerNeed > 0) &&
+        !(ofAccount && accountNeed > 0) &&
+        !(ofWorkspace && workspaceNeed > 0)
+      ) {
+        continue;
+      }
       victims.push(entry);
       if (ofBearer) bearerNeed--;
       if (ofAccount) accountNeed--;
+      if (ofWorkspace) workspaceNeed--;
     }
     if (bearerNeed > 0) return { full: 'bearer', holds: own.length };
+    if (workspaceNeed > 0) return { full: 'workspace' };
     if (accountNeed > 0) return { full: 'account' };
     return { victims };
   };
@@ -1319,6 +1417,7 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
     // Hosted: no session for a bearer the platform does not accept. Before the
     // cap and the reservation, so a refused bearer never holds a slot.
     let checkedAccount: string | undefined;
+    let checkedWorkspace: string | undefined;
     if (challenge) {
       // A spent budget does not close the address. Many clients can share one
       // (a NAT, an office), and one bad neighbour must not lock out the rest:
@@ -1346,7 +1445,7 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
       // The interval is spent only by a probe that starts: a request turned
       // away because the process-wide cap is full reached nobody, and must not
       // make the next client at this address wait out an interval for it.
-      const { verdict, account } = await checkBearer(
+      const { verdict, account, workspace } = await checkBearer(
         key,
         spent
           ? () => {
@@ -1369,6 +1468,7 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
         );
       }
       checkedAccount = account;
+      checkedWorkspace = workspace;
     }
     if (!initialize) {
       return badRequest(res, 'No session id, and this is not an initialize request.', rpcId(req));
@@ -1384,6 +1484,9 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
     // Hosted, the account the platform confirmed for this bearer (or the
     // bearer itself, when whoami named none); self-hosted, the bearer.
     const account = checkedAccount ?? accountKey(keyId, undefined);
+    // Hosted, the workspace key when the platform named a workspace for the
+    // bearer's account (OPL-5453); otherwise none, and no sub-ceiling.
+    const workspace = checkedAccount !== undefined ? checkedWorkspace : undefined;
     // The account's standing, read after the check above (OPL-5452): what the
     // newest-started probe of ANY of its bearers said, not only this one's.
     // Self-hosted there is none, and nothing is suspended.
@@ -1414,14 +1517,19 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
     // nothing idle to give back is refused at once; carried out only once the
     // new session exists (in `onsessioninitialized`), so an initialize the SDK
     // then refuses (406, 415, 400) or that throws on the way does not also
-    // cost the caller a working session. Only the number is kept past here.
+    // cost the caller a working session. Only the number is kept past here,
+    // and, for the pool reserve's count below, the ids, which do not leave
+    // this synchronous block.
     let planned = 0;
+    let plannedIds: Set<string>;
     {
       const room = planRoom(
         keyDigest,
         account,
+        workspace,
         suspended,
         pendingByDigest.get(keyId) ?? 0,
+        workspace !== undefined ? (pendingByWorkspace.get(workspace) ?? 0) : 0,
         pendingByAccount.get(account) ?? 0,
       );
       if ('full' in room) {
@@ -1430,6 +1538,7 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
             suspended ? SUSPENDED_ACCOUNT_FULL : accountFullMessage(account, maxPerAccount),
           );
         }
+        if (room.full === 'workspace') return tooMany(workspaceFullMessage(maxPerWorkspace));
         // Over the cap after the trim means every session over it is busy,
         // and closing one would not be enough: the client can only wait.
         return tooMany(
@@ -1439,6 +1548,7 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
         );
       }
       planned = room.victims.length;
+      plannedIds = new Set(room.victims.map(([id]) => id));
     }
     // Swept sessions free their slot on the timer; this is the backstop for the
     // case the timer cannot help with, which is arrivals faster than the TTL.
@@ -1454,16 +1564,46 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
         rpcId(req),
       );
     }
+    // The last quarter of the pool is kept for accounts holding less than
+    // their share (OPL-5454): without it the ceilings alone let four accounts
+    // take every session between them, and the fifth was refused until one
+    // gave some back. Counted as the check above counts, pending included, so
+    // a burst cannot all read the same count. The share is of the unreserved
+    // part, divided among the accounts holding or opening sessions, this one
+    // included. Checked at admission only, as the pool is; nothing is closed
+    // for it.
+    const inUse = sessions.size - planned + pending;
+    if (poolReserve > 0 && inUse >= unreserved) {
+      const holders = new Set<string>([account, ...pendingByAccount.keys()]);
+      let held = pendingByAccount.get(account) ?? 0;
+      for (const [id, live] of sessions) {
+        if (plannedIds.has(id)) continue;
+        holders.add(live.account);
+        if (live.account === account) held++;
+      }
+      const fairShare = Math.max(1, Math.floor(unreserved / holders.size));
+      if (held >= fairShare) {
+        res.set('Retry-After', String(POOL_FULL_RETRY_AFTER_S));
+        return unavailable(
+          res,
+          `This server keeps its last ${poolReserve} sessions for accounts holding less than their share of it, and this account holds its share. Retry shortly.`,
+          rpcId(req),
+        );
+      }
+    }
     pending++;
     pendingByDigest.set(keyId, (pendingByDigest.get(keyId) ?? 0) + 1);
     pendingByAccount.set(account, (pendingByAccount.get(account) ?? 0) + 1);
+    if (workspace !== undefined) {
+      pendingByWorkspace.set(workspace, (pendingByWorkspace.get(workspace) ?? 0) + 1);
+    }
     // Released exactly once, whether the initialize lands in the map or throws
     // on the way there. A reservation that leaked on the failure path would
     // ratchet the cap down until the process restarted — every later initialize
     // refused with 503 for the life of the process, which is the denial of
-    // service the counter was added to prevent, self-inflicted. The per-bearer
-    // and per-account counts leaking would do the same to that bearer and that
-    // account.
+    // service the counter was added to prevent, self-inflicted. The per-bearer,
+    // per-account and per-workspace counts leaking would do the same to that
+    // bearer, account and workspace.
     let reserved = true;
     const release = () => {
       if (reserved) {
@@ -1475,6 +1615,11 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
         const accountLeft = (pendingByAccount.get(account) ?? 1) - 1;
         if (accountLeft > 0) pendingByAccount.set(account, accountLeft);
         else pendingByAccount.delete(account);
+        if (workspace !== undefined) {
+          const workspaceLeft = (pendingByWorkspace.get(workspace) ?? 1) - 1;
+          if (workspaceLeft > 0) pendingByWorkspace.set(workspace, workspaceLeft);
+          else pendingByWorkspace.delete(workspace);
+        }
       }
     };
 
@@ -1517,7 +1662,8 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
           // on its own. Only a race reaches this: a request landing on a
           // planned session between the check above and this callback.
           //
-          // The account's ceiling is re-checked here too (OPL-5447), against
+          // The account's ceiling is re-checked here too (OPL-5447), and the
+          // workspace's sub-ceiling (OPL-5453), against
           // the map alone. Initializes still pending were each admitted
           // counting this one's reservation, and the room they will make is
           // still in the map, so counting them again here would drop a session
@@ -1525,7 +1671,7 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
           // count at admission. Every landing leaves the map within both.
           // The account's standing is read again: a probe that answered in
           // between is the newer word on whether it is suspended.
-          const room = planRoom(keyDigest, account, accountSuspended(account), 0, 0);
+          const room = planRoom(keyDigest, account, workspace, accountSuspended(account), 0, 0, 0);
           if ('full' in room) {
             dropped = true;
             release();
@@ -1540,6 +1686,7 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
             transport: t,
             keyDigest,
             account,
+            workspace,
             lastSeen: Date.now(),
             // Initialize is already in flight when the session first becomes
             // visible to the sweeper. Count it until handleRequest settles.
@@ -1856,6 +2003,20 @@ function accountIdOf(who: unknown): string | undefined {
 }
 
 /**
+ * The workspace id a whoami record names for a workspace-scoped bearer
+ * (OPL-5453): `workspace.id`, a non-empty string of at most 256 characters.
+ * Anything else, `workspace: null` (a key of the account as a whole)
+ * included, is no workspace, and the bearer is held by no sub-ceiling.
+ */
+function workspaceIdOf(who: unknown): string | undefined {
+  if (typeof who !== 'object' || who === null) return undefined;
+  const workspace = (who as { workspace?: unknown }).workspace;
+  if (typeof workspace !== 'object' || workspace === null) return undefined;
+  const id = (workspace as { id?: unknown }).id;
+  return typeof id === 'string' && id.length > 0 && id.length <= 256 ? id : undefined;
+}
+
+/**
  * What a session counts against for the account ceiling (OPL-5447).
  *
  * The account id the platform confirmed for the bearer when there is one
@@ -1875,6 +2036,25 @@ function accountKey(keyId: string, confirmed: string | undefined): string {
  */
 const SUSPENDED_ACCOUNT_FULL =
   'This account is suspended, so it may hold only 1 session on this server across all its tokens, and none it holds is idle. Retry once its session finishes its request, or close it (DELETE /mcp).';
+
+/**
+ * The workspace key a workspace-scoped bearer counts against for the workspace
+ * sub-ceiling (OPL-5453), or undefined when there is none: its account key and
+ * the workspace id together, so the same workspace id under two accounts can
+ * never share a count. Only an account the platform confirmed (`account:`)
+ * has workspaces; a `bearer:` account never does.
+ */
+function workspaceKey(account: string, workspaceId: string | undefined): string | undefined {
+  return account.startsWith('account:') && workspaceId !== undefined
+    ? `${account}/workspace:${workspaceId}`
+    : undefined;
+}
+
+/** The 429 for a workspace at its sub-ceiling. It names the limit and nothing else. */
+function workspaceFullMessage(cap: number): string {
+  const noun = cap === 1 ? 'session' : 'sessions';
+  return `This workspace has reached its maximum of ${cap} ${noun} on this server, across all its tokens. Close one (DELETE /mcp) or retry shortly.`;
+}
 
 /** The 429 for an account at its ceiling. It names the limit and nothing else. */
 function accountFullMessage(account: string, cap: number): string {

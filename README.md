@@ -1162,8 +1162,8 @@ address.
   bucket: the per-bearer cap spreads one key's clients, and what bounds an
   untrusted caller is the process-wide cap (256), and the default loopback
   bind until you expose the port.
-- **One account holds at most 128 sessions, half the pool, across all its
-  tokens.** Sessions are counted by the account id the platform's `whoami`
+- **One account holds at most 64 sessions, a quarter of the pool, across
+  all its tokens.** Sessions are counted by the account id the platform's `whoami`
   names for each token, so an account with many keys or grants counts once;
   a token whose `whoami` names no account counts as an account of its own.
   Initializes in flight are counted too, so a burst across one account's keys
@@ -1190,12 +1190,36 @@ address.
   carries no request is never checked with the platform, so it keeps a
   session alive only while the token's acceptance is still cached. A full pool (256) is answered `503` with
   `Retry-After`, whoever holds it, and nothing is closed to make room in it.
+  The last 64 of the 256 go only to accounts holding less than their share,
+  where a share is the other 192 divided by the accounts holding sessions,
+  the asking one included (initializes in flight count as held): an account
+  at its share once only those 64 are free is answered `503` with
+  `Retry-After` too, saying so, and nothing is closed for it. A lone account
+  therefore stops at 192 even with its ceiling raised, and each newcomer
+  still gets in.
   `runHttp` takes the ceiling as `maxSessionsPerAccount`, and the CLI reads
   it from `MANDALA_MCP_MAX_SESSIONS_PER_ACCOUNT` (a whole number from 1 to
   256; anything else is refused at startup). A self-hosted server verifies
   no account, so there each token is an account of its own, held to the
-  ceiling as well as to its own cap; to let one token hold more than 128
+  ceiling as well as to its own cap; to let one token hold more than 64
   sessions, raise both.
+- **One workspace holds at most 16 sessions, a quarter of its account's
+  ceiling, across all its tokens.** A workspace-scoped key is counted by the
+  workspace the platform's `whoami` names for it as well as by its account;
+  a key of the account as a whole (`workspace: null`) is held by no
+  workspace limit. Workspace-scoped keys share their operator's account
+  ceiling above the sub-ceiling: the operator's own sessions and all its end
+  customers' together stay under 64, so a workspace with room is still
+  answered the account's `429` when the account is full. The same workspace
+  id under two accounts is two workspaces. Room is made, and in-flight
+  initializes are counted, as for the account ceiling; past it the answer is
+  `429` with `Retry-After`, saying it is the workspace's limit and naming
+  only that number. `runHttp` takes it as `maxSessionsPerWorkspace` (default
+  a quarter of the account ceiling, whatever that is set to; above it, it is
+  the account ceiling), and the CLI reads it from
+  `MANDALA_MCP_MAX_SESSIONS_PER_WORKSPACE` (a whole number from 1 to 256;
+  anything else is refused at startup). Hosted only: a self-hosted server
+  verifies no workspace.
 - **A suspended account holds one session in all, across all its tokens**
   (enough to ask `whoami`, the one call the platform still answers for it).
   Whether an account is suspended is the platform's latest answer about it
@@ -1256,7 +1280,8 @@ address.
 | `MANDALA_MCP_RESOURCE_METADATA_URL` | `--http` only. The OAuth protected-resource metadata URL this server is published under. Set, it answers OAuth clients as described under Hosted, with OAuth; unset, callers bring an API key. |
 | `MANDALA_MCP_SERVICE_SECRET` | `--http` only. Sent as `X-Mandala-MCP-Service` on every platform request, to `MANDALA_BASE_URL` only. Never logged. |
 | `MANDALA_MCP_MAX_SESSIONS_PER_TOKEN` | `--http` only. How many live sessions one bearer token may hold. Default 16; a whole number from 1 to 256 (the server's whole session pool), and anything else is refused at startup. A suspended account is held to one session in all, across its tokens, whatever this says. A token is also held to its account's limit, below. |
-| `MANDALA_MCP_MAX_SESSIONS_PER_ACCOUNT` | `--http` only. How many live sessions one account may hold across all its tokens. Default 128, half the pool; a whole number from 1 to 256, and anything else is refused at startup. Hosted (the metadata URL set), the account is the one the platform's `whoami` names for the token; self-hosted, or when `whoami` names none, each token is an account of its own. Past it an initialize is refused `429`, after closing only the token's own idle sessions or the account's refused ones. A suspended account is held to one session whatever this says. |
+| `MANDALA_MCP_MAX_SESSIONS_PER_ACCOUNT` | `--http` only. How many live sessions one account may hold across all its tokens. Default 64, a quarter of the pool; a whole number from 1 to 256, and anything else is refused at startup. Hosted (the metadata URL set), the account is the one the platform's `whoami` names for the token; self-hosted, or when `whoami` names none, each token is an account of its own. Past it an initialize is refused `429`, after closing only the token's own idle sessions or the account's refused ones. A suspended account is held to one session whatever this says. Whatever this says, the last quarter of the pool goes only to accounts holding less than their share of it. |
+| `MANDALA_MCP_MAX_SESSIONS_PER_WORKSPACE` | `--http`, hosted only. How many live sessions one workspace may hold across all its tokens. Default a quarter of the per-account limit (16 of 64); a whole number from 1 to 256, and anything else is refused at startup; above the per-account limit it is that limit. Counted by the workspace the platform's `whoami` names for a workspace-scoped token; such tokens also share their account's limit, above, with the account's own tokens and its other workspaces. |
 
 Every one of these but the model key, the two tool filters, the two OAuth settings and the two session limits has a flag as well, and a flag overrides
 the environment: `--http`, `--port`, `--host`, `--base-url`, `--computer`,

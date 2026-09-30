@@ -14,6 +14,16 @@ are wording changes, and they are behaviour changes in the way that matters.
 
 ## [Unreleased]
 
+### Added
+
+- **`MANDALA_MCP_MAX_SESSIONS_PER_WORKSPACE`** (`maxSessionsPerWorkspace` in
+  `runHttp`) holds each workspace to a sub-ceiling of hosted sessions across
+  all its tokens, by the workspace the platform names for a workspace-scoped
+  key. Default a quarter of the account ceiling (16 of 64). Such keys still
+  share their operator's account ceiling above it: the operator's own
+  sessions and all its end customers' together stay under the account's.
+  Past the sub-ceiling an initialize is answered `429` with `Retry-After`.
+
 ### Security
 
 - **A suspended account holds one hosted session in all, however many keys
@@ -31,6 +41,18 @@ are wording changes, and they are behaviour changes in the way that matters.
   servers are unchanged.
 
 ### Changed
+
+- **An account's default hosted session ceiling is 64, a quarter of the
+  pool** (it was 128, half, so two accounts could hold every session between
+  them). `MANDALA_MCP_MAX_SESSIONS_PER_ACCOUNT` (`maxSessionsPerAccount`)
+  still overrides it.
+- **The last quarter of the session pool (64 of 256) is kept for accounts
+  holding less than their share of it**, a share being the other three
+  quarters divided by the accounts holding sessions, the asking one
+  included. An account at its share once only that quarter is free is
+  answered `503` with `Retry-After`, as a full pool is, and nothing is closed
+  for it. It applies to a self-hosted `--http` server too, where each token
+  is its own account, and is not configurable.
 
 - **`list_api_keys` says why it has no mint or revoke companion**: they are
   left out on purpose, so a raw key never lands in a transcript and a model
