@@ -1088,7 +1088,7 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
           pinned = false;
           live.active--;
         };
-        if (challenge && live.refused) return challenged(res, TOKEN_REFUSED, rpcId(req));
+        if (challenge && live.refused) return challenged(res, refusedMessage(key), rpcId(req));
         // Checked before a request is dispatched, while the answer can still
         // be a 401 whatever the call goes on to do. A platform that cannot say
         // is not a refusal: the call goes ahead, and a real refusal during it
@@ -1097,7 +1097,7 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
         const verdict = challenge && request ? (await checkBearer(key)).verdict : undefined;
         if (verdict === 'refused') {
           live.refused = true;
-          return challenged(res, TOKEN_REFUSED, rpcId(req));
+          return challenged(res, refusedMessage(key), rpcId(req));
         }
         // An account suspended after its bearer opened sessions kept every one
         // of them, up to the 16 an active bearer may hold, while an initialize
@@ -1108,7 +1108,7 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
         const lease = res.locals.largeBodyLease as LargeBodyLease | undefined;
         const id = rpcId(req);
         const held = challenge
-          ? holdAnswer(res, () => challenged(res, TOKEN_REFUSED, id))
+          ? holdAnswer(res, () => challenged(res, refusedMessage(key), id))
           : undefined;
         return await heldAnswer.run(held, () =>
           requestBodyLease.run(lease, () =>
@@ -1202,7 +1202,7 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
       );
       if (verdict === 'refused') {
         noteFailure(req);
-        return challenged(res, TOKEN_REFUSED, rpcId(req));
+        return challenged(res, refusedMessage(key), rpcId(req));
       }
       // Not an initialize, it is a 400 whatever the platform could say about
       // the key short of refusing it.
@@ -1480,7 +1480,8 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
     }
     // The stream is refused on a token the platform has already refused; a
     // DELETE is still honoured, since the digest shows it is the holder.
-    if (challenge && live.refused && req.method === 'GET') return challenged(res, TOKEN_REFUSED);
+    if (challenge && live.refused && req.method === 'GET')
+      return challenged(res, refusedMessage(key));
     // The GET is the notification stream and is only noted; anything else
     // here (a DELETE, or a HEAD, which Express routes to the GET handler with
     // the method unchanged) is held for while the SDK handles it. See
@@ -1714,6 +1715,19 @@ const NO_TOKEN =
   'Authorization required. Authorize this client with Mandala (OAuth), or send a Mandala API key: Authorization: Bearer …';
 const TOKEN_REFUSED =
   'The platform no longer accepts this access token. Refresh it, or authorize again.';
+const API_KEY_REFUSED =
+  'The platform does not accept this API key. Check it, or create a new one in Settings → Credentials.';
+
+/**
+ * What a refused bearer is told. A `com_…` API key was never an OAuth access
+ * token and cannot be refreshed, so it is not told to refresh (OPL-5464); any
+ * other bearer is an access token and keeps the OAuth wording. Only the message
+ * text differs — the 401 and its challenge are the same — and the bearer itself
+ * is never part of it.
+ */
+function refusedMessage(key: string | undefined): string {
+  return key?.startsWith('com_') ? API_KEY_REFUSED : TOKEN_REFUSED;
+}
 
 /**
  * Hold a response's status line until its first byte of body (hosted mode).

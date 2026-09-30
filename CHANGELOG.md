@@ -23,6 +23,14 @@ are wording changes, and they are behaviour changes in the way that matters.
   desktop session never becomes active now gives up naming it rather than
   reporting the guest as answering. Only a desktop probe that finished with
   exit 0 counts; one that timed out inside the guest is polled through.
+- **The hosted server tells a refused API key that it is one.** A `com_…` key
+  the platform does not accept was answered "no longer accepts this access
+  token. Refresh it, or authorize again." — advice for an OAuth token, which
+  an API key is not and cannot follow. It now reads "The platform does not
+  accept this API key. Check it, or create a new one in Settings →
+  Credentials." The 401 and its `WWW-Authenticate` challenge are unchanged, an
+  OAuth access token keeps the old wording, and neither message repeats the
+  bearer.
 
 ## [0.8.0] — 2026-09-29
 

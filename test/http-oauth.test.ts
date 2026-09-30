@@ -1920,3 +1920,98 @@ describe('hosted: traffic that carries no request', () => {
     }
   }, 15_000);
 });
+
+// OPL-5464: a refused `com_…` API key was told "no longer accepts this access
+// token. Refresh it, or authorize again." — OAuth advice for a credential that
+// was never an OAuth token and cannot be refreshed. The 401 and its challenge
+// are unchanged; only the words follow what the bearer is.
+describe('hosted: what a refused bearer is told', () => {
+  let platform: ReturnType<typeof platformWithRefusals>;
+  let server: Server;
+  let url: string;
+
+  beforeAll(async () => {
+    platform = platformWithRefusals();
+    ({ server, url } = await start({ resourceMetadataUrl: METADATA, serviceSecret: SECRET }));
+  });
+  afterAll(async () => {
+    platform.restore();
+    await stop(server);
+  });
+  afterEach(() => {
+    platform.refused.clear();
+    platform.state.onlyAccept = undefined;
+    platform.seen.length = 0;
+  });
+
+  const refusal = async (res: Response) => {
+    expect(res.status).toBe(401);
+    expect(res.headers.get('www-authenticate')).toBe(CHALLENGE);
+    return ((await res.json()) as { error: { message: string } }).error.message;
+  };
+  const saysApiKey = (message: string, key: string) => {
+    expect(message).toContain('API key');
+    expect(message).toContain('Settings → Credentials');
+    expect(message).not.toMatch(/refresh|access token|authorize again/i);
+    expect(message).not.toContain(key);
+  };
+
+  it('names an API key as one on initialize, and never echoes it', async () => {
+    platform.state.onlyAccept = 'com_good';
+    const c = client(url);
+    saysApiKey(
+      await refusal(await c.send(INIT, { Authorization: 'Bearer com_bogus' })),
+      'com_bogus',
+    );
+    saysApiKey(
+      await refusal(await c.send(LIST, { Authorization: 'Bearer com_bogus' })),
+      'com_bogus',
+    );
+  });
+
+  it('keeps the OAuth wording for an access token', async () => {
+    platform.state.onlyAccept = 'mcpat_good';
+    const message = await refusal(
+      await client(url).send(INIT, { Authorization: 'Bearer mcpat_bogus' }),
+    );
+    expect(message).toBe(
+      'The platform no longer accepts this access token. Refresh it, or authorize again.',
+    );
+    expect(message).not.toContain('mcpat_bogus');
+  });
+
+  it('names an API key refused mid-session as one, on every path', async () => {
+    const c = client(url);
+    const session = await c.open('com_alice');
+    platform.refused.add('com_alice');
+    const as = { Authorization: 'Bearer com_alice', 'mcp-session-id': session };
+    // The platform's refusal during the call, turned into the 401.
+    saysApiKey(await refusal(await c.send(ACCOUNT, as)), 'com_alice');
+    // The session remembers it: refused before dispatch.
+    saysApiKey(await refusal(await c.send(ACCOUNT, as)), 'com_alice');
+    // And the event stream.
+    saysApiKey(await refusal(await c.send(undefined, as, 'GET')), 'com_alice');
+  });
+
+  it('names an API key the platform refuses before a call is dispatched as one', async () => {
+    // With no cached acceptance, a request on a session is put to the
+    // platform before it is dispatched, and refused there.
+    const own = await start({
+      resourceMetadataUrl: METADATA,
+      serviceSecret: SECRET,
+      bearerCheckTtlMs: 0,
+    });
+    try {
+      const c = client(own.url);
+      const session = await c.open('com_alice');
+      platform.refused.add('com_alice');
+      const res = await c.send(LIST, {
+        Authorization: 'Bearer com_alice',
+        'mcp-session-id': session,
+      });
+      saysApiKey(await refusal(res), 'com_alice');
+    } finally {
+      await stop(own.server);
+    }
+  });
+});
