@@ -29,6 +29,38 @@ const modifiers = z
   .describe('Keys held down for the duration of the action.');
 
 /**
+ * `context`, as every input tool but cursor_position takes it: the platform's
+ * `?context=1`, which has an input answer carry the desktop's windows as they
+ * stand just after the action.
+ */
+const contextArg = {
+  context: z
+    .boolean()
+    .default(false)
+    .describe(
+      "Answer the desktop's windows, and which one has focus, as they stand just after the action — what list_windows would say, without a second call. Read at once, so a window still opening may not be listed yet. If they cannot be read the action still happened, and the answer says why.",
+    ),
+};
+
+/**
+ * A finished input action's answer, with the context it was asked for.
+ *
+ * `line` is what the tool says about the action itself; the windows follow it,
+ * or the reason the platform gave for not reading them. The action happened
+ * either way, so neither is an error. One renderer, so every input tool says
+ * it the same way.
+ */
+const withContext = (line: string, res: Record<string, unknown> | undefined): CallToolResult => {
+  const ctx = res?.context;
+  if (ctx && typeof ctx === 'object') return said(`${line} The desktop now:`, ctx);
+  const why =
+    typeof res?.context_error === 'string' && res.context_error
+      ? res.context_error
+      : 'the platform answered no context';
+  return said(`${line} Its windows could not be read (${why}); screenshot to see the result.`);
+};
+
+/**
  * A coordinate pair that is genuinely optional.
  *
  * Leaving both out means "where the pointer already is", which the platform
@@ -268,6 +300,42 @@ export const registerInput: Registrar = (server, session) => {
       .with(signal)
       .send('POST', P.computerAction(session.resolve(computerId), 'input'), { body });
 
+  /**
+   * An input action that was asked for context: sent with `?context=1`, and
+   * read with `json` rather than `post`'s `send`, because the answer is now
+   * the point.
+   */
+  const postForContext = (
+    computerId: string | undefined,
+    body: Record<string, unknown>,
+    signal: AbortSignal | undefined,
+  ) =>
+    session.api
+      .with(signal)
+      .json<Record<string, unknown>>(
+        'POST',
+        P.computerAction(session.resolve(computerId), 'input'),
+        { body, query: { context: '1' } },
+      );
+
+  /**
+   * Send an action that answers nothing of its own, and say `line` — with the
+   * desktop after it when `context` asked.
+   */
+  const act = async (
+    computerId: string | undefined,
+    body: Record<string, unknown>,
+    context: boolean,
+    signal: AbortSignal | undefined,
+    line: string,
+  ): Promise<CallToolResult> => {
+    if (!context) {
+      await post(computerId, body, signal);
+      return said(line);
+    }
+    return withContext(line, await postForContext(computerId, body, signal));
+  };
+
   server.registerTool(
     'screenshot',
     {
@@ -475,12 +543,7 @@ export const registerInput: Registrar = (server, session) => {
           .describe(
             `How many clicks, 1 to ${P.MAX_CLICK_COUNT}: 2 is a double click and 3 a triple click, on any button. The presses are paced as a double click's are, so the desktop sees one multi-click.`,
           ),
-        context: z
-          .boolean()
-          .default(false)
-          .describe(
-            "Answer the desktop's windows, and which one has focus, as they stand just after the click — what list_windows would say, without a second call. Read at once, so a window still opening may not be listed yet. If they cannot be read the click still happened, and the answer says why.",
-          ),
+        ...contextArg,
         modifiers,
       },
     },
@@ -494,24 +557,9 @@ export const registerInput: Registrar = (server, session) => {
           await post(computer_id, body, extra.signal);
           return said(`${did} ${where}. Screenshot to see the result.`);
         }
-        const res = await session.api
-          .with(extra.signal)
-          .json<Record<string, unknown>>(
-            'POST',
-            P.computerAction(session.resolve(computer_id), 'input'),
-            {
-              body,
-              query: { context: '1' },
-            },
-          );
-        const ctx = res?.context;
-        if (ctx && typeof ctx === 'object') return said(`${did} ${where}. The desktop now:`, ctx);
-        const why =
-          typeof res?.context_error === 'string' && res.context_error
-            ? res.context_error
-            : 'the platform answered no context';
-        return said(
-          `${did} ${where}. Its windows could not be read (${why}); screenshot to see the result.`,
+        return withContext(
+          `${did} ${where}.`,
+          await postForContext(computer_id, body, extra.signal),
         );
       }),
   );
@@ -533,11 +581,15 @@ export const registerInput: Registrar = (server, session) => {
           .describe(
             `The characters to type, at most ${TYPE_TEXT_MAX_CHARS}. Longer text goes in several calls, or through write_file or write_clipboard.`,
           ),
+        ...contextArg,
       },
     },
-    ({ computer_id, text }, extra) =>
+    ({ computer_id, text, context }, extra) =>
       guarded(async () => {
-        const answer = await post(computer_id, P.typeBody(text), extra.signal);
+        const body = P.typeBody(text);
+        const answer = context
+          ? await postForContext(computer_id, body, extra.signal)
+          : await post(computer_id, body, extra.signal);
         // Code points, not `.length`. A string's length is its UTF-16 code
         // units, so an emoji is two and "Typed 2 character(s)" is a number this
         // server made up about a single keystroke's worth of text — a number a
@@ -557,9 +609,10 @@ export const registerInput: Registrar = (server, session) => {
           typeof mechanism === 'string' && Object.hasOwn(TYPE_MECHANISMS, mechanism)
             ? ` ${TYPE_MECHANISMS[mechanism as keyof typeof TYPE_MECHANISMS]}`
             : '';
-        return said(
-          `Typed ${typed} character(s)${how}. That confirms the keys were sent, not that the application accepted the text: check with a screenshot before relying on it.`,
-        );
+        const line = `Typed ${typed} character(s)${how}. That confirms the keys were sent, not that the application accepted the text: check with a screenshot before relying on it.`;
+        return context
+          ? withContext(line, answer as Record<string, unknown> | undefined)
+          : said(line);
       }),
   );
 
@@ -580,15 +633,19 @@ export const registerInput: Registrar = (server, session) => {
           .describe(
             '"ctrl+v" (the default) or "ctrl+shift+v", which terminals need. Shift+Insert is not offered: it can paste the separate primary selection instead.',
           ),
+        ...contextArg,
       },
     },
-    ({ computer_id, text, shortcut }, extra) =>
-      guarded(async () => {
-        await post(computer_id, P.pasteBody(text, shortcut), extra.signal);
-        return said(
+    ({ computer_id, text, shortcut, context }, extra) =>
+      guarded(() =>
+        act(
+          computer_id,
+          P.pasteBody(text, shortcut),
+          context,
+          extra.signal,
           `Pasted ${[...text].length} character(s) with ${shortcut ?? 'ctrl+v'}. The text is still on the clipboard. That confirms the paste was sent, not that the application accepted it: check with a screenshot before relying on it.`,
-        );
-      }),
+        ),
+      ),
   );
 
   server.registerTool(
@@ -609,17 +666,21 @@ export const registerInput: Registrar = (server, session) => {
           .max(30)
           .optional()
           .describe('Hold the keys down this long instead of tapping them. Capped at 30s.'),
+        ...contextArg,
       },
     },
-    ({ computer_id, keys, hold_seconds }, extra) =>
-      guarded(async () => {
-        await post(computer_id, P.keyBody(keys, hold_seconds), extra.signal);
-        return said(
+    ({ computer_id, keys, hold_seconds, context }, extra) =>
+      guarded(() =>
+        act(
+          computer_id,
+          P.keyBody(keys, hold_seconds),
+          context,
+          extra.signal,
           hold_seconds
             ? `Held ${keys.join('+')} for ${hold_seconds}s.`
             : `Pressed ${keys.join('+')}.`,
-        );
-      }),
+        ),
+      ),
   );
 
   server.registerTool(
@@ -634,17 +695,19 @@ export const registerInput: Registrar = (server, session) => {
         amount: z.number().int().min(1).max(50).default(3).describe('Wheel clicks.'),
         ...point,
         modifiers,
+        ...contextArg,
       },
     },
-    ({ computer_id, direction, amount, x, y, modifiers: mods }, extra) =>
-      guarded(async () => {
-        await post(
+    ({ computer_id, direction, amount, x, y, modifiers: mods, context }, extra) =>
+      guarded(() =>
+        act(
           computer_id,
           P.scrollBody({ direction, amount, x, y, modifiers: mods }),
+          context,
           extra.signal,
-        );
-        return said(`Scrolled ${direction} by ${amount}.`);
-      }),
+          `Scrolled ${direction} by ${amount}.`,
+        ),
+      ),
   );
 
   server.registerTool(
@@ -666,14 +729,21 @@ export const registerInput: Registrar = (server, session) => {
           ),
         from_y: z.number().int().optional(),
         modifiers,
+        ...contextArg,
       },
     },
-    ({ computer_id, to_x, to_y, from_x, from_y, modifiers: mods }, extra) =>
-      guarded(async () => {
-        await post(computer_id, P.dragBody(to_x, to_y, from_x, from_y, mods ?? []), extra.signal);
+    ({ computer_id, to_x, to_y, from_x, from_y, modifiers: mods, context }, extra) =>
+      guarded(() => {
+        const body = P.dragBody(to_x, to_y, from_x, from_y, mods ?? []);
         const from = from_x === undefined ? 'the pointer' : `${from_x},${from_y}`;
         const held = mods?.length ? ` holding ${mods.join('+')}` : '';
-        return said(`Dragged from ${from} to ${to_x},${to_y}${held}.`);
+        return act(
+          computer_id,
+          body,
+          context,
+          extra.signal,
+          `Dragged from ${from} to ${to_x},${to_y}${held}.`,
+        );
       }),
   );
 
@@ -682,13 +752,18 @@ export const registerInput: Registrar = (server, session) => {
     {
       title: 'Move the pointer',
       description: 'Move the pointer without clicking — for hovering over a menu or a tooltip.',
-      inputSchema: { ...idArg, x: z.number().int(), y: z.number().int() },
+      inputSchema: { ...idArg, x: z.number().int(), y: z.number().int(), ...contextArg },
     },
-    ({ computer_id, x, y }, extra) =>
-      guarded(async () => {
-        await post(computer_id, P.pointerBody('mouse_move', x, y), extra.signal);
-        return said(`Pointer at ${x},${y}.`);
-      }),
+    ({ computer_id, x, y, context }, extra) =>
+      guarded(() =>
+        act(
+          computer_id,
+          P.pointerBody('mouse_move', x, y),
+          context,
+          extra.signal,
+          `Pointer at ${x},${y}.`,
+        ),
+      ),
   );
 
   server.registerTool(
@@ -701,13 +776,19 @@ export const registerInput: Registrar = (server, session) => {
         ...idArg,
         state: z.enum(['down', 'up']),
         ...point,
+        ...contextArg,
       },
     },
-    ({ computer_id, state, x, y }, extra) =>
-      guarded(async () => {
-        await post(computer_id, P.buttonBody(`left_mouse_${state}`, x, y), extra.signal);
-        return said(`Left button ${state}${x === undefined ? '' : ` at ${x},${y}`}.`);
-      }),
+    ({ computer_id, state, x, y, context }, extra) =>
+      guarded(() =>
+        act(
+          computer_id,
+          P.buttonBody(`left_mouse_${state}`, x, y),
+          context,
+          extra.signal,
+          `Left button ${state}${x === undefined ? '' : ` at ${x},${y}`}.`,
+        ),
+      ),
   );
 
   server.registerTool(
@@ -764,13 +845,13 @@ export const registerInput: Registrar = (server, session) => {
       inputSchema: {
         ...idArg,
         seconds: z.number().positive().max(30).default(2),
+        ...contextArg,
       },
     },
-    ({ computer_id, seconds }, extra) =>
-      guarded(async () => {
-        await post(computer_id, P.waitBody(seconds), extra.signal);
-        return said(`Waited ${seconds}s.`);
-      }),
+    ({ computer_id, seconds, context }, extra) =>
+      guarded(() =>
+        act(computer_id, P.waitBody(seconds), context, extra.signal, `Waited ${seconds}s.`),
+      ),
   );
 };
 

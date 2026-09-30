@@ -13,7 +13,13 @@ const routesOf = (calls: Recorded[]) =>
   new Set(calls.map((c) => `${c.method} ${patternFor(c.path)}`));
 
 /** Generic HTTP machinery rather than route parameters. */
-const GENERIC_HEADERS = new Set(['authorization', 'accept', 'content-type', 'accept-encoding']);
+const GENERIC_HEADERS = new Set([
+  'authorization',
+  'accept',
+  'content-type',
+  'accept-encoding',
+  'user-agent',
+]);
 
 /** Preserve the platform table's spelling while matching names case-insensitively. */
 const DOCUMENTED_HEADERS = new Map(

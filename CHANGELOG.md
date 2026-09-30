@@ -52,10 +52,17 @@ are wording changes, and they are behaviour changes in the way that matters.
   other repeat — four left clicks, a right or middle double click, which were
   refused before — is that button's click with a `count`, paced as a double
   click is. Needs a platform that accepts `count`.
-- **`click` takes `context: true`** and answers the desktop's windows and the
-  focused one as they stand just after the click, saving a `list_windows`
-  call. When they cannot be read the click still happened, and the answer
-  says why instead of listing them.
+- **Every input tool takes `context: true`** — `click`, `type_text`,
+  `paste_text`, `press_key`, `scroll`, `drag`, `move_mouse`, `mouse_button`
+  and `wait` — and answers the desktop's windows and the focused one as they
+  stand just after the action, saving a `list_windows` call. When they cannot
+  be read the action still happened, and the answer says why instead of
+  listing them.
+- **A `User-Agent` naming this server and its version**:
+  `mandala-computer-mcp/<version> node/<version>`, so the platform can tell
+  which client and release sent a request. The version now lives in
+  `src/version.ts`, which `src/server.ts` re-exports as before; the release
+  workflow checks a tag against that file and `package.json`.
 
 ### Security
 
