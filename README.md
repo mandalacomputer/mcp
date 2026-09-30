@@ -1156,7 +1156,7 @@ address.
   API key, which the platform still accepts. The access token is good for this
   endpoint only. It is not an API key: sent to the API directly, the platform
   refuses it with `401` (`reason: "invalid"`). A person revokes it under
-  Settings → Connected apps.
+  Settings → Credentials → Connected apps.
 - **A bearer is checked with the platform before it gets anything.** An
   initialize makes no session until the platform accepts its token — a `2xx`
   from `GET whoami`, which every valid credential gets, a suspended account's
