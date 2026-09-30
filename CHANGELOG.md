@@ -16,6 +16,16 @@ are wording changes, and they are behaviour changes in the way that matters.
 
 ### Added
 
+- **`create_workspace`, `rename_workspace` and `delete_workspace`**, in the
+  `account` tag. They need an owner's key that is not confined to a workspace;
+  any key confined to one is refused with 403. `delete_workspace` needs
+  `confirm: true`, revokes every API key confined to the workspace (its
+  description says so) and answers how many; its computers are kept. None of
+  them is offered to a read-only session. A `503` answered to any of them says
+  the change may or may not have happened and to read the state before sending
+  it again, as every other change tool does. Needs a platform that has these
+  routes; an older one answers 405.
+
 - **`MANDALA_MCP_MAX_SESSIONS_PER_WORKSPACE`** (`maxSessionsPerWorkspace` in
   `runHttp`) holds each workspace to a sub-ceiling of hosted sessions across
   all its tokens, by the workspace the platform names for a workspace-scoped

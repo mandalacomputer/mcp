@@ -150,10 +150,13 @@ export const EXERCISE: Record<string, Record<string, unknown>[]> = {
   // Who the credential is, and the holder's keys (OPL-5053). No arguments.
   whoami: [{}],
   list_api_keys: [{}],
-  // The account's workspaces, read only (OPL-5057).
+  // The account's workspaces (OPL-5057), and their writes (OPL-5473).
   list_workspaces: [{}],
   get_workspace: [{ workspace_id: 'wsp-0123456789ab' }],
   list_workspace_members: [{ workspace_id: 'wsp-0123456789ab' }],
+  create_workspace: [{ name: 'customer-acme' }],
+  rename_workspace: [{ workspace_id: 'wsp-0123456789ab', name: 'customer-acme-prod' }],
+  delete_workspace: [{ workspace_id: 'wsp-0123456789ab', confirm: true }],
   // Lifecycle operations (OPL-5055): every listing parameter on one variant,
   // because the parameter sweep is what proves each can be sent.
   get_operation: [{ operation_id: 'op_0123456789abcdef01234567' }],

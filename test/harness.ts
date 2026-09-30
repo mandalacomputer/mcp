@@ -808,9 +808,13 @@ function respond(
   if (path.startsWith('/operations/')) return json(OPERATION);
   if (path === '/whoami') return json(WHOAMI);
   if (path === '/api-keys') return json([API_KEY]);
-  if (path === '/workspaces') return json([WORKSPACE]);
+  // A create is a 201 and the workspace; a delete is the ack with the count of
+  // keys it revoked (OPL-5473).
+  if (path === '/workspaces')
+    return json(method === 'GET' ? [WORKSPACE] : WORKSPACE, method === 'GET' ? 200 : 201);
   if (/^\/workspaces\/[^/]+\/members$/.test(path)) return json([WORKSPACE_MEMBER]);
-  if (/^\/workspaces\/[^/]+$/.test(path)) return json(WORKSPACE);
+  if (/^\/workspaces\/[^/]+$/.test(path))
+    return json(method === 'DELETE' ? { ok: true, revoked_keys: 2 } : WORKSPACE);
   if (path === '/ssh-keys')
     return json(method === 'GET' ? [SSH_KEY] : SSH_KEY, method === 'GET' ? 200 : 201);
   if (path.startsWith('/ssh-keys/')) return json({ ok: true });

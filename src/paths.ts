@@ -79,8 +79,8 @@ export const API_KEYS = 'api-keys';
  */
 export const OPERATIONS = 'operations';
 /**
- * The account's workspaces (platform OPL-5057), read only: they are created,
- * renamed and deleted in the dashboard.
+ * The account's workspaces (platform OPL-5057), and their create, rename and
+ * delete (OPL-5473), which need an owner's account-wide key.
  */
 export const WORKSPACES = 'workspaces';
 
