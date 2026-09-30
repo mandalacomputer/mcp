@@ -470,23 +470,49 @@ export const registerInput: Registrar = (server, session) => {
           .number()
           .int()
           .min(1)
-          .max(3)
+          .max(P.MAX_CLICK_COUNT)
           .default(1)
-          .describe('1, 2 for a double click, 3 for a triple click. Left button only.'),
+          .describe(
+            `How many clicks, 1 to ${P.MAX_CLICK_COUNT}: 2 is a double click and 3 a triple click, on any button. The presses are paced as a double click's are, so the desktop sees one multi-click.`,
+          ),
+        context: z
+          .boolean()
+          .default(false)
+          .describe(
+            "Answer the desktop's windows, and which one has focus, as they stand just after the click — what list_windows would say, without a second call. Read at once, so a window still opening may not be listed yet. If they cannot be read the click still happened, and the answer says why.",
+          ),
         modifiers,
       },
     },
-    ({ computer_id, x, y, button, count, modifiers: mods }, extra) =>
+    ({ computer_id, x, y, button, count, context, modifiers: mods }, extra) =>
       guarded(async () => {
-        const action = clickAction(button, count);
-        if (!action) {
-          return refused(
-            `A ${count}-times ${button} click is not a thing the desktop can be asked for; only the left button doubles and triples.`,
-          );
-        }
-        await post(computer_id, P.clickBody(action, x, y, mods ?? []), extra.signal);
+        const { action, repeat } = clickAction(button, count);
+        const body = P.clickBody(action, x, y, mods ?? [], repeat);
         const where = x === undefined ? 'where the pointer was' : `at ${x},${y}`;
-        return said(`${action} ${where}. Screenshot to see the result.`);
+        const did = repeat === undefined ? action : `${action} x${repeat}`;
+        if (!context) {
+          await post(computer_id, body, extra.signal);
+          return said(`${did} ${where}. Screenshot to see the result.`);
+        }
+        const res = await session.api
+          .with(extra.signal)
+          .json<Record<string, unknown>>(
+            'POST',
+            P.computerAction(session.resolve(computer_id), 'input'),
+            {
+              body,
+              query: { context: '1' },
+            },
+          );
+        const ctx = res?.context;
+        if (ctx && typeof ctx === 'object') return said(`${did} ${where}. The desktop now:`, ctx);
+        const why =
+          typeof res?.context_error === 'string' && res.context_error
+            ? res.context_error
+            : 'the platform answered no context';
+        return said(
+          `${did} ${where}. Its windows could not be read (${why}); screenshot to see the result.`,
+        );
       }),
   );
 
@@ -748,9 +774,14 @@ export const registerInput: Registrar = (server, session) => {
   );
 };
 
-/** The platform's verb for a button and a repeat count, or nothing if there isn't one. */
-function clickAction(button: string, count: number): string | undefined {
-  if (count === 1) return `${button}_click`;
-  if (button !== 'left') return undefined;
-  return count === 2 ? 'double_click' : 'triple_click';
+/**
+ * The platform's verb for a button and a repeat count, and the `count` to send
+ * with it. A left double or triple click keeps the verb the platform has always
+ * had for it; every other repeat is the button's own click with a `count`
+ * (OPL-5472), which is what lets a right or middle button repeat at all.
+ */
+function clickAction(button: string, count: number): { action: string; repeat?: number } {
+  if (button === 'left' && count === 2) return { action: 'double_click' };
+  if (button === 'left' && count === 3) return { action: 'triple_click' };
+  return count === 1 ? { action: `${button}_click` } : { action: `${button}_click`, repeat: count };
 }

@@ -75,6 +75,18 @@ are wording changes, and they are behaviour changes in the way that matters.
   OAuth access token keeps the old wording, and neither message repeats the
   bearer.
 
+### Added
+
+- **`click` takes a `count` up to 10, on any button.** A left double and
+  triple click are still sent as `double_click` and `triple_click`; every
+  other repeat — four left clicks, a right or middle double click, which were
+  refused before — is that button's click with a `count`, paced as a double
+  click is. Needs a platform that accepts `count`.
+- **`click` takes `context: true`** and answers the desktop's windows and the
+  focused one as they stand just after the click, saving a `list_windows`
+  call. When they cannot be read the click still happened, and the answer
+  says why instead of listing them.
+
 ## [0.8.0] — 2026-09-29
 
 ### Added

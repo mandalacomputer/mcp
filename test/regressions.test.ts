@@ -499,7 +499,9 @@ describe('refusals this server decides on its own', () => {
   // step that worked.
   it.each([
     ['update_computer', {}],
-    ['click', { count: 2, button: 'right' }],
+    // A right double click was refused here until OPL-5472 gave every button a
+    // repeat count; a count past the platform's ten is what is refused now.
+    ['click', { count: 11 }],
     ['write_file', { path: '/a', content: '!!!!', encoding: 'base64' }],
     ['snapshot_schedule', { set: { enabled: true, hour: 3 }, clear: true }],
   ])('%s says isError when it refuses', async (tool, args) => {
