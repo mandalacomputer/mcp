@@ -586,6 +586,72 @@ describe('hosted: a suspended account holds one session across all its keys', ()
     }
   });
 
+  // A token whose whoami named no account counts its sessions against itself
+  // (a `bearer:` bucket). When the platform later names its account, and
+  // that account is suspended, a request on one of its sessions holds the
+  // token to one there and then, although the sessions stay in the bucket
+  // they were admitted under (mcp#166 review round 2).
+  it('holds a token to one session once the platform names its suspended account', async () => {
+    p = platform();
+    p.accounts.mcpat_m = { id: '', status: 'active' };
+    const { server, url } = await start({ bearerCheckTtlMs: 0 });
+    const c = client(url);
+    try {
+      const s1 = await c.open('mcpat_m');
+      const s2 = await c.open('mcpat_m');
+      const s3 = await c.open('mcpat_m');
+      expect(await sessions(url)).toBe(3);
+      p.set('acc-x', 'suspended', 'mcpat_m');
+      expect(await c.list('mcpat_m', s1)).toBe(200);
+      expect(await sessions(url)).toBe(1);
+      expect(await c.list('mcpat_m', s2)).toBe(404);
+      expect(await c.list('mcpat_m', s3)).toBe(404);
+      expect(await c.list('mcpat_m', s1)).toBe(200);
+    } finally {
+      await stop(server);
+    }
+  });
+
+  // The same, with the probes crossing: the token's probe is sent while the
+  // account is suspended and answers last, after a newer-started probe of
+  // another of its tokens found it reinstated. The newer answer stands, so
+  // the token keeps every session.
+  it('keeps a newly named account’s sessions when a newer probe found it active', async () => {
+    p = platform();
+    p.accounts.mcpat_m = { id: '', status: 'active' };
+    const { server, url } = await start({ bearerCheckTtlMs: 0 });
+    const c = client(url);
+    let release = () => {};
+    try {
+      const s1 = await c.open('mcpat_m');
+      const s2 = await c.open('mcpat_m');
+      const s3 = await c.open('mcpat_m');
+      p.set('acc-x', 'suspended', 'mcpat_m');
+      release = p.hold('mcpat_m');
+      const before = p.count('mcpat_m');
+      const late = c.send(LIST, as('mcpat_m', s1));
+      await p.reached('mcpat_m', before);
+      p.set('acc-x', 'active', 'mcpat_m', 'mcpat_n');
+      const n1 = await c.open('mcpat_n');
+      release();
+      const answered = await late;
+      expect(answered.status).toBe(200);
+      await answered.text();
+      expect(await sessions(url)).toBe(4);
+      for (const [token, session] of [
+        ['mcpat_m', s1],
+        ['mcpat_m', s2],
+        ['mcpat_m', s3],
+        ['mcpat_n', n1],
+      ]) {
+        expect(await c.list(token, session)).toBe(200);
+      }
+    } finally {
+      release();
+      await stop(server);
+    }
+  });
+
   // A self-hosted server asks the platform nothing, so nothing is suspended
   // there, whatever whoami would say: every limit stays per bearer.
   it('leaves a self-hosted server’s limits per bearer', async () => {

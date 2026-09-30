@@ -997,6 +997,33 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
   };
 
   /**
+   * {@link enforceAccountSuspension} for a session served under its own
+   * bearer, whose account the platform may have named only since the session
+   * was admitted: `bearerAccount` is what the bearer counts against NOW (its
+   * probe's or cached acceptance's account). A session is counted against the
+   * account key it was admitted under and is never re-keyed, so one admitted
+   * while whoami named no account sits in a `bearer:` bucket that holds no
+   * standing. When the bearer's account now differs from that and is
+   * suspended, the bearer's own idle sessions go down to one as well, on the
+   * account's standing as it is now: a newer-started probe that found the
+   * account active leaves them be.
+   */
+  const enforceSuspensionFor = (
+    live: Live,
+    bearerAccount: string | undefined,
+    keep: string | undefined,
+  ): void => {
+    if (
+      bearerAccount !== undefined &&
+      bearerAccount !== live.account &&
+      accountSuspended(bearerAccount)
+    ) {
+      trimIdle(live.keyDigest, MAX_SESSIONS_SUSPENDED, keep);
+    }
+    enforceAccountSuspension(live.account, keep);
+  };
+
+  /**
    * Close this bearer's idle sessions, least recently seen first, until it
    * holds no more than `cap` or none idle is left. Never `keep`, and never one
    * with a request in flight: the same test the sweeper and an initialize's
@@ -1207,7 +1234,8 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
         // is not a refusal: the call goes ahead, and a real refusal during it
         // still reaches the client through the held answer or the mark.
         const request = carriesRequest(req.body);
-        const verdict = challenge && request ? (await checkBearer(key)).verdict : undefined;
+        const checked = challenge && request ? await checkBearer(key) : undefined;
+        const verdict = checked?.verdict;
         if (verdict === 'refused') {
           live.refused = true;
           return challenged(res, refusedMessage(key), rpcId(req));
@@ -1226,7 +1254,13 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
         // its bearer's acceptance is cached: the standing is then no older
         // than that, and never an answer from long before a reinstatement.
         const confirmed = request ? verdict === 'ok' || verdict === 'suspended' : isAccepted(key);
-        if (challenge && confirmed) enforceAccountSuspension(live.account, sessionId);
+        if (challenge && confirmed) {
+          enforceSuspensionFor(
+            live,
+            request ? checked?.account : acceptance(key)?.account,
+            sessionId,
+          );
+        }
         const lease = res.locals.largeBodyLease as LargeBodyLease | undefined;
         const id = rpcId(req);
         const held = challenge
@@ -1620,7 +1654,7 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
     // notification: the stream asks the platform nothing, so only while this
     // bearer's acceptance is cached (OPL-5452). This session is the one kept.
     if (challenge && req.method !== 'DELETE' && isAccepted(key)) {
-      enforceAccountSuspension(live.account, sessionId);
+      enforceSuspensionFor(live, acceptance(key)?.account, sessionId);
     }
     // The GET is the notification stream and is only noted; anything else
     // here (a DELETE, or a HEAD, which Express routes to the GET handler with
