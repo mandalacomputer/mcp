@@ -3,7 +3,7 @@ import { APIError } from '../errors.js';
 import { said } from '../format.js';
 import * as P from '../paths.js';
 import { count, label, metadata, metadataCall } from './directory.js';
-import { readAnnotations } from './results.js';
+import { deleteAnnotations, readAnnotations } from './results.js';
 import type { Registrar } from './types.js';
 
 // Every object projects only its public fields; a malformed report never becomes zero usage.
@@ -111,8 +111,8 @@ const whoami = z.object({
   key: apiKey.nullable(),
 });
 
-// The account's workspaces and who reaches them (platform OPL-5057), read
-// only, projected to the public fields.
+// The account's workspaces and who reaches them (platform OPL-5057), and
+// their create, rename and delete (OPL-5473), projected to the public fields.
 const workspace = z.object({ id: label, name: z.string(), created_at: z.string() });
 const workspaceMember = z.object({
   user_id: label,
@@ -122,6 +122,22 @@ const workspaceMember = z.object({
   accepted_at: z.string(),
   suspended: z.boolean(),
 });
+
+// What a workspace delete answers: the ack, and how many keys went with it.
+const workspaceDeleted = z.object({ ok: z.literal(true), revoked_keys: count });
+
+const workspaceNameArg = z
+  .string()
+  .min(1)
+  .max(200)
+  .refine((v) => v.trim().length > 0, 'A workspace name cannot be blank.')
+  .describe(
+    'The name: 1 to 40 characters once trimmed, no control characters, unique within the account.',
+  );
+
+/** Said on each workspace write: who may make it, and why a scoped key may not. */
+const OWNER_ACCOUNT_WIDE =
+  "Needs an owner's key that is not confined to a workspace: a member, a viewer, or any key confined to a workspace is refused with 403 — relay that rather than retrying.";
 
 const workspaceIdArg = z
   .string()
@@ -200,7 +216,7 @@ export const registerAccount: Registrar = (server, session) => {
     {
       title: 'List workspaces',
       description:
-        "The account's workspaces, oldest first: id, name and created_at. A workspace partitions the account's computers: a key confined to one reaches that workspace's computers only, and a computer's workspace_id names the one it is in. A key confined to a workspace lists only that one. Read only: workspaces are created, renamed and deleted in the dashboard. No arguments.",
+        "The account's workspaces, oldest first: id, name and created_at. A workspace partitions the account's computers: a key confined to one reaches that workspace's computers only, and a computer's workspace_id names the one it is in. A key confined to a workspace lists only that one. create_workspace, rename_workspace and delete_workspace change them. No arguments.",
       inputSchema: z.object({}).strict(),
       annotations: readAnnotations,
     },
@@ -259,6 +275,81 @@ export const registerAccount: Registrar = (server, session) => {
           data.length
             ? `${data.length} member${data.length === 1 ? '' : 's'} reach this workspace, oldest first.`
             : 'No members reach this workspace.',
+          data,
+        );
+      }),
+  );
+
+  // The workspace writes (OPL-5473). Create and rename are ordinary owner
+  // writes. Delete is behind `confirm: true`, as delete_secret is, because it
+  // REVOKES every key confined to the workspace — a person's CI or another
+  // agent may be standing in it — and says so in its description. It can never
+  // revoke the key this server runs with: a key confined to a workspace is
+  // refused all three, and an account-wide key is confined to none.
+  server.registerTool(
+    'create_workspace',
+    {
+      title: 'Create a workspace',
+      description: `Make a workspace on this account: a partition of its computers, which API keys can be confined to. Answers its id, name and created_at. A name the account already uses, a blank or over-long one, or an account already holding 500 workspaces is refused with 400. ${OWNER_ACCOUNT_WIDE} NOT safe to repeat blind: if the answer is lost, list_workspaces before creating again, since it may exist.`,
+      inputSchema: z.object({ name: workspaceNameArg }).strict(),
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
+    },
+    ({ name }, extra) =>
+      metadataCall(async () => {
+        const data = metadata(
+          workspace,
+          await session.api.json('POST', P.WORKSPACES, { body: { name }, signal: extra.signal }),
+        );
+        return said(`Created workspace ${data.name} (${data.id}).`, data);
+      }),
+  );
+
+  server.registerTool(
+    'rename_workspace',
+    {
+      title: 'Rename a workspace',
+      description: `Rename a workspace. Its id does not change, so the API keys confined to it and the computers in it are untouched. The name follows create_workspace's rules; a name the account already uses is refused with 400, and an id this key cannot see is not found. ${OWNER_ACCOUNT_WIDE}`,
+      inputSchema: z.object({ workspace_id: workspaceIdArg, name: workspaceNameArg }).strict(),
+      // Not destructiveHint: false: the old name is replaced, as update_computer's is.
+      annotations: { readOnlyHint: false, idempotentHint: true },
+    },
+    ({ workspace_id, name }, extra) =>
+      metadataCall(async () => {
+        const data = metadata(
+          workspace,
+          await session.api.json('PATCH', P.workspace(workspace_id), {
+            body: { name },
+            signal: extra.signal,
+          }),
+        );
+        return said(`Workspace ${data.id} is now named ${data.name}.`, data);
+      }),
+  );
+
+  server.registerTool(
+    'delete_workspace',
+    {
+      title: 'Delete a workspace',
+      description: `Permanently delete a workspace. It REVOKES every API key confined to it, whoever holds it, in the same step: anything using one of those keys — a person's CI, another agent — is refused from its next request, and this cannot be undone. The answer says how many were revoked. The computers in it are NOT deleted, stopped or moved: they keep the deleted workspace's id, and account-wide keys reach them as before. Needs confirm: true. ${OWNER_ACCOUNT_WIDE}`,
+      inputSchema: z
+        .object({
+          workspace_id: workspaceIdArg,
+          confirm: z
+            .literal(true)
+            .describe('Must be true. Every API key confined to this workspace is revoked with it.'),
+        })
+        .strict(),
+      annotations: deleteAnnotations,
+    },
+    ({ workspace_id }, extra) =>
+      metadataCall(async () => {
+        const data = metadata(
+          workspaceDeleted,
+          await session.api.json('DELETE', P.workspace(workspace_id), { signal: extra.signal }),
+        );
+        const n = data.revoked_keys;
+        return said(
+          `Deleted workspace ${workspace_id}; ${n} API key${n === 1 ? '' : 's'} confined to it ${n === 1 ? 'was' : 'were'} revoked. Its computers are kept.`,
           data,
         );
       }),

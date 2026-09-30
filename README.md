@@ -188,7 +188,8 @@ which says nothing about the path; `isTransient` is false for both.
 **Account quota** — `get_account`
 
 **Who you are** — `whoami`, `list_api_keys`, `list_workspaces`,
-`get_workspace`, `list_workspace_members`. Minting and revoking API keys are
+`get_workspace`, `list_workspace_members`, `create_workspace`,
+`rename_workspace`, `delete_workspace`. Minting and revoking API keys are
 deliberately not tools — see [Who you are, and API keys](#who-you-are-and-api-keys).
 
 **Spending** — `get_usage`
@@ -277,7 +278,7 @@ with an error listing all valid tags.
 
 | Tag | Tools |
 | --- | --- |
-| `account` | `get_account`, `whoami`, `list_api_keys`, `list_workspaces`, `get_workspace`, `list_workspace_members` |
+| `account` | `get_account`, `whoami`, `list_api_keys`, `list_workspaces`, `get_workspace`, `list_workspace_members`, `create_workspace`, `rename_workspace`, `delete_workspace` |
 | `computers` | `list_computers`, `get_computer`, `use_computer`, `wait_for_computer`, `get_desktop_url`, `list_sizes` |
 | `lifecycle` | `create_computer`, `start_computer`, `stop_computer`, `suspend_computer`, `restart_computer`, `update_computer`, `clone_computer`, `delete_computer`, `move_computer`, `list_moves`, `get_operation`, `list_operations`, `wait_for_operation` |
 | `input` | `screenshot`, `click`, `type_text`, `paste_text`, `press_key`, `scroll`, `drag`, `move_mouse`, `mouse_button`, `cursor_position`, `wait` |
@@ -422,8 +423,15 @@ the `mandala api-keys` CLI.
 `list_workspaces`, `get_workspace` and `list_workspace_members` read the
 account's workspaces, which partition its computers. A key confined to a
 workspace lists only that one, and is refused (403) the member list, which is
-the whole account's: workspaces do not divide people. All three are reads;
-workspaces are created, renamed and deleted in the dashboard.
+the whole account's: workspaces do not divide people. All three are reads.
+
+`create_workspace`, `rename_workspace` and `delete_workspace` change them, and
+need an owner's key that is not confined to a workspace: any key confined to
+one is refused (403), so none of them can touch the workspace this server's own
+key stands in. `delete_workspace` needs `confirm: true` and REVOKES every API
+key confined to the workspace, whoever holds it — a person's CI or another agent
+may be using one — and answers how many; the workspace's computers are kept.
+None of the three is offered to a read-only session (`MANDALA_READ_ONLY`).
 
 ### Current account quota
 

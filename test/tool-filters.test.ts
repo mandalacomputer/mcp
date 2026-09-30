@@ -16,7 +16,8 @@ import { BASE, connect, fakeEvents, installFakePlatform } from './harness.js';
 // Independent expectations: changing the production mapping must change the
 // advertised contract deliberately, rather than making both sides agree silently.
 const GROUPS = {
-  account: 'get_account whoami list_api_keys list_workspaces get_workspace list_workspace_members',
+  account:
+    'get_account whoami list_api_keys list_workspaces get_workspace list_workspace_members create_workspace rename_workspace delete_workspace',
   computers:
     'list_computers get_computer use_computer wait_for_computer get_desktop_url list_sizes',
   lifecycle:

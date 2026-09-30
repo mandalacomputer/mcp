@@ -5278,6 +5278,8 @@ describe('the event tools and what their annotations claim', () => {
           'get_workspace',
           'list_workspace_members',
           'list_workspaces',
+          // Makes a new workspace; replaces nothing (a taken name is a 400).
+          'create_workspace',
         ].sort(),
       );
     } finally {
