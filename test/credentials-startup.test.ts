@@ -9,7 +9,7 @@ import type { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdi
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { main } from '../src/cli.js';
 import { runStdio, type StdioConfig } from '../src/stdio.js';
-import { ACCOUNT_QUOTA } from './harness.js';
+import { ACCOUNT_QUOTA, SECRET_LIST } from './harness.js';
 
 const COMPUTER = {
   id: 'fixture-computer',
@@ -448,4 +448,133 @@ describe('native built and packed stdio', () => {
         await new Promise<void>((resolve) => backend.close(() => resolve()));
       }
     }, 15_000);
+});
+
+// OPL-5499: the default workspace `mandala workspaces use` saves for a profile
+// in ~/.mandala/defaults.json, applied to the secret tools in local stdio only.
+describe('a saved profile default workspace', () => {
+  const WSP = { id: 'wsp-0123456789ab', name: 'research' };
+  const defaultsFile = () => path.join(home, '.mandala', 'defaults.json');
+  function saveDefaults(value: unknown) {
+    fs.writeFileSync(defaultsFile(), typeof value === 'string' ? value : JSON.stringify(value), {
+      mode: 0o600,
+    });
+  }
+  const entry = (account: string) => ({
+    version: 1,
+    profiles: { default: { account_id: account, workspace: WSP } },
+  });
+  function secretsBackend() {
+    const calls: { url: URL; method: string; body: unknown }[] = [];
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+      const url = new URL(String(input));
+      calls.push({
+        url,
+        method: init?.method ?? 'GET',
+        body: typeof init?.body === 'string' ? JSON.parse(init.body) : undefined,
+      });
+      const workspace = url.searchParams.get('workspace_id');
+      if ((init?.method ?? 'GET') === 'POST')
+        return Response.json(
+          { ...SECRET_LIST.secrets[0], workspace_id: WSP.id, name: 'NEW_ONE' },
+          { status: 201 },
+        );
+      return Response.json({
+        ...SECRET_LIST,
+        secrets: SECRET_LIST.secrets.map((s) => ({ ...s, workspace_id: workspace })),
+      });
+    });
+    return calls;
+  }
+  const listDescription = async (wire: Awaited<ReturnType<typeof local>>) => {
+    const tools = (await wire.request('tools/list')) as unknown as {
+      result: {
+        tools: {
+          name: string;
+          description: string;
+          inputSchema: { properties: Record<string, { description?: string }> };
+        }[];
+      };
+    };
+    const list = tools.result.tools.find((t) => t.name === 'list_secrets')!;
+    return {
+      tool: list.description,
+      arg: list.inputSchema.properties.workspace_id?.description ?? '',
+    };
+  };
+
+  it('scopes a secret tool call that names no workspace, and says so', async () => {
+    saveDefaults(entry(baseDocument().profiles.default.account.id));
+    const calls = secretsBackend();
+    const wire = await local();
+    const listed = await wire.call('list_secrets');
+    expect(listed.result?.isError).not.toBe(true);
+    expect(calls.at(-1)!.url.searchParams.get('workspace_id')).toBe(WSP.id);
+    expect(text(listed)).toContain(
+      `in workspace ${WSP.id} (the saved profile's default from mandala workspaces use)`,
+    );
+    // An explicit workspace_id always wins.
+    await wire.call('list_secrets', { workspace_id: 'wsp-ba9876543210' });
+    expect(calls.at(-1)!.url.searchParams.get('workspace_id')).toBe('wsp-ba9876543210');
+    // A create lands in it too.
+    const created = await wire.call('create_secret', { name: 'NEW_ONE', value: 'v' });
+    expect(created.result?.isError).not.toBe(true);
+    expect(calls.at(-1)).toMatchObject({ method: 'POST', body: { workspace_id: WSP.id } });
+    const described = await listDescription(wire);
+    expect(described.arg).toContain(
+      "Default when left out: the saved profile's workspace from `mandala workspaces use`, else account-wide — here workspace research (wsp-0123456789ab).",
+    );
+    expect(described.tool).toContain('mandala workspaces use');
+    expect(vi.mocked(console.error).mock.calls.flat().join('\n')).toContain(
+      'secret tools default to workspace research (wsp-0123456789ab)',
+    );
+  });
+
+  it('is not applied, nor described, with an environment key', async () => {
+    saveDefaults(entry(baseDocument().profiles.default.account.id));
+    vi.stubEnv('MANDALA_API_KEY', 'com_env_fixture');
+    vi.stubEnv('MANDALA_BASE_URL', baseDocument().profiles.default.base_url);
+    const calls = secretsBackend();
+    const wire = await local();
+    await wire.call('list_secrets');
+    expect(calls.at(-1)!.url.searchParams.has('workspace_id')).toBe(false);
+    const described = await listDescription(wire);
+    expect(described.arg).not.toContain('mandala workspaces use');
+    expect(described.tool).not.toContain('mandala workspaces use');
+  });
+
+  it('is not applied to a key confined to a workspace', async () => {
+    saveDefaults({
+      version: 1,
+      profiles: { Work: { account_id: baseDocument().profiles.Work.account.id, workspace: WSP } },
+    });
+    const calls = secretsBackend();
+    const wire = await local({ profile: 'Work' });
+    await wire.call('list_secrets');
+    expect(calls.at(-1)!.url.searchParams.has('workspace_id')).toBe(false);
+  });
+
+  it('ignores a default saved for another account, and says so', async () => {
+    saveDefaults(entry('account_elsewhere'));
+    const calls = secretsBackend();
+    const wire = await local();
+    await wire.call('list_secrets');
+    expect(calls.at(-1)!.url.searchParams.has('workspace_id')).toBe(false);
+    expect(vi.mocked(console.error).mock.calls.flat().join('\n')).toContain(
+      'ignoring the default workspace saved for profile default',
+    );
+    expect((await listDescription(wire)).arg).toContain('here account-wide');
+  });
+
+  it('starts account-wide, with a note, on a defaults.json it cannot read', async () => {
+    saveDefaults('{"version":1,');
+    const calls = secretsBackend();
+    const wire = await local();
+    const listed = await wire.call('list_secrets');
+    expect(listed.result?.isError).not.toBe(true);
+    expect(calls.at(-1)!.url.searchParams.has('workspace_id')).toBe(false);
+    expect(vi.mocked(console.error).mock.calls.flat().join('\n')).toContain(
+      'ignoring ~/.mandala/defaults.json: it is not valid JSON',
+    );
+  });
 });

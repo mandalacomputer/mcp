@@ -56,6 +56,21 @@ the key in **Settings → API keys** makes later calls fail; MCP does not switch
 profiles, reread the file, or retry a refused action. Run login explicitly when
 new credentials are needed.
 
+A saved profile can also carry a default workspace, set with
+`mandala workspaces use <workspace>` (and removed with `--clear`); the CLI keeps
+it in `~/.mandala/defaults.json`, beside `credentials.json`, which it never
+changes. Started from that profile, the secret tools (`list_secrets`,
+`get_secret`, `create_secret`, `set_secret`, `replace_secret`,
+`delete_secret`) use it when a call leaves out `workspace_id`; an explicit
+`workspace_id` always wins. Their descriptions say so and name the workspace,
+`list_secrets` says when the default chose the scope, and startup prints it on
+stderr. MCP only reads that file, once at startup, with the same checks as
+`credentials.json`. It is not applied when the profile's key is confined to a
+workspace (that key's own scope applies), when the default was saved for
+another account than the profile is logged in to now, or with an explicit or
+environment key; a file that cannot be read is ignored with a note on stderr.
+The hosted HTTP server never reads it, and its tools are unchanged.
+
 **Claude Code** — as a plugin, which installs the server and a skill together:
 
 ```sh

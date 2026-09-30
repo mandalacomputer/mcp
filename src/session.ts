@@ -28,6 +28,13 @@ export type SessionConfig = {
    * service header, and the hook that hears a refused bearer. See ApiOptions.
    */
   platform?: ApiOptions;
+  /**
+   * Local stdio from a saved profile only: the profile's default workspace
+   * from `mandala workspaces use` (null for none), which the secret tools use
+   * when a call names no workspace_id. Absent everywhere else — an explicit or
+   * environment key, and every hosted session — and then nothing changes.
+   */
+  defaultWorkspace?: { id: string; name: string } | null;
 };
 
 /**
@@ -49,6 +56,8 @@ export class Session {
    */
   readonly events: EventHub;
   readonly modelKey?: string;
+  /** See {@link SessionConfig.defaultWorkspace}. */
+  readonly defaultWorkspace?: { id: string; name: string } | null;
   #current?: string;
   /** WIDTHxHEIGHT of the bound computer, remembered from the last read of it. */
   #screen?: string;
@@ -63,6 +72,7 @@ export class Session {
     this.api = new Api(cfg.apiKey, cfg.baseUrl ?? DEFAULT_BASE_URL, undefined, cfg.platform);
     this.events = new EventHub(this.api, cfg.webSocket);
     this.modelKey = cfg.modelKey;
+    this.defaultWorkspace = cfg.defaultWorkspace;
     this.#current = id(cfg.computerId);
   }
 

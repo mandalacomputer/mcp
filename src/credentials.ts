@@ -178,7 +178,12 @@ function stringsWellFormed(value: unknown): void {
   }
 }
 
-type Entry = { api_key: string; base_url: string };
+type Entry = {
+  api_key: string;
+  base_url: string;
+  account: { id: string };
+  scope: { type: 'account' } | { type: 'workspace' };
+};
 type Document = { default_profile: string; profiles: Record<string, Entry> };
 
 export function parseCredentials(bytes: Uint8Array): Document {
@@ -256,7 +261,7 @@ const sameDirectory = (initial: fs.BigIntStats, current: fs.BigIntStats) =>
  * Node has no portable openat: these checks reject observed substitutions
  * rather than claiming an atomic directory-relative open.
  */
-function readStore(): Uint8Array {
+function readStore(file = 'credentials.json'): Uint8Array {
   if (
     process.platform === 'win32' ||
     typeof process.getuid !== 'function' ||
@@ -294,7 +299,7 @@ function readStore(): Uint8Array {
     if (!home || !path.isAbsolute(home))
       fail('missing_credentials', 'Cannot discover your home directory.');
     const directory = path.join(home, '.mandala');
-    const filename = path.join(directory, 'credentials.json');
+    const filename = path.join(directory, file);
     const namedDir = fs.lstatSync(directory, { bigint: true });
     checkDir(namedDir);
     dirFd = fs.openSync(
@@ -370,7 +375,120 @@ export type ResolvedCredentials = {
   baseUrl: string;
   source: 'explicit' | 'environment' | 'file';
   profile?: string;
+  /** A saved profile only: its account, and whether its key is confined to a workspace. */
+  account?: string;
+  confined?: boolean;
 };
+
+/** What {@link resolveWorkspaceDefault} found for a saved profile. */
+export type ResolvedWorkspaceDefault = {
+  /**
+   * The default workspace `mandala workspaces use` saved for the profile in
+   * ~/.mandala/defaults.json, which the secret tools use when a call names
+   * none. Null when there is none, when the profile's key is confined to a
+   * workspace (its own scope applies), or when the default was saved for
+   * another account than the profile is logged in to now.
+   */
+  workspace: { id: string; name: string } | null;
+  /** Why defaults.json, or the profile's entry in it, was ignored, for one stderr line. */
+  note?: string;
+};
+
+const DEFAULTS_REASONS: Record<string, string> = {
+  invalid_utf8: 'it is not UTF-8 text',
+  invalid_json: 'it is not valid JSON',
+  invalid_schema: 'its contents are not in the expected form',
+  invalid_profile: 'it names a profile that is not a valid profile name',
+  unsupported_version: 'it is a version this server does not read',
+  too_many_profiles: 'it holds more than 100 profiles',
+  file_too_large: 'it is larger than 64 KiB',
+  unsafe_file: 'it must be a regular file with mode 0600, owned by you',
+  unsafe_directory: '~/.mandala must be a directory with mode 0700, owned by you',
+  unsupported_file_protection: 'this platform cannot protect it',
+  credential_read_timeout: 'reading it timed out',
+};
+type WorkspaceDefault = { account_id: string; workspace: { id: string; name: string } };
+
+/**
+ * ~/.mandala/defaults.json, which `mandala workspaces use` writes: each
+ * profile's default workspace, in a file of its own so that credentials.json,
+ * whose released readers have a closed schema, never changes. Read here, never
+ * written. The same closed schema the CLIs read.
+ */
+export function parseWorkspaceDefaults(bytes: Uint8Array): Record<string, WorkspaceDefault> {
+  if (bytes.byteLength > MAX_BYTES) fail('file_too_large');
+  let text: string;
+  try {
+    text = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes);
+  } catch {
+    return fail('invalid_utf8');
+  }
+  let doc: unknown;
+  try {
+    doc = JSON.parse(text);
+  } catch {
+    return fail('invalid_json');
+  }
+  stringsWellFormed(doc);
+  object(doc);
+  if (
+    typeof doc.version !== 'number' ||
+    !Number.isFinite(doc.version) ||
+    !Number.isInteger(doc.version)
+  )
+    fail('invalid_schema');
+  if (doc.version !== 1) fail('unsupported_version');
+  closed(doc, ['version', 'profiles']);
+  object(doc.profiles);
+  const names = Object.keys(doc.profiles);
+  if (names.length > 100) fail('too_many_profiles');
+  for (const name of names) {
+    profileName(name);
+    const entry = doc.profiles[name];
+    closed(entry, ['account_id', 'workspace']);
+    nonempty(entry.account_id);
+    closed(entry.workspace, ['id', 'name']);
+    nonempty(entry.workspace.id);
+    nonempty(entry.workspace.name);
+  }
+  return doc.profiles as Record<string, WorkspaceDefault>;
+}
+
+/**
+ * The saved profile's default workspace, read after {@link resolveCredentials}
+ * and apart from it, so that resolving a key reads credentials.json alone.
+ * Never throws for the file: one that cannot be used is a note and no default.
+ */
+export function resolveWorkspaceDefault(
+  credentials: ResolvedCredentials,
+): ResolvedWorkspaceDefault | undefined {
+  // An explicit or environment key has no profile to hold a default.
+  if (credentials.source !== 'file' || !credentials.profile || !credentials.account)
+    return undefined;
+  const name = credentials.profile;
+  // A key confined to a workspace has that one; the file is not even read.
+  if (credentials.confined) return { workspace: null };
+  let defaults: Record<string, WorkspaceDefault>;
+  try {
+    defaults = parseWorkspaceDefaults(readStore('defaults.json'));
+  } catch (error) {
+    if (!(error instanceof CredentialsError)) throw error;
+    // No file: no defaults, and nothing to say.
+    if (error.code === 'missing_credentials') return { workspace: null };
+    return {
+      workspace: null,
+      note: `ignoring ~/.mandala/defaults.json: ${DEFAULTS_REASONS[error.code] ?? error.code}`,
+    };
+  }
+  if (!Object.hasOwn(defaults, name)) return { workspace: null };
+  const saved = defaults[name];
+  if (saved.account_id !== credentials.account)
+    return {
+      workspace: null,
+      note: `ignoring the default workspace saved for profile ${name}: it was saved for another account than the profile is logged in to now`,
+    };
+  return { workspace: { id: saved.workspace.id, name: saved.workspace.name } };
+}
 
 /** Resolve once at local startup, before constructing an explicit ServerConfig. */
 export function resolveCredentials(options: LocalCredentialOptions = {}): ResolvedCredentials {
@@ -410,5 +528,7 @@ export function resolveCredentials(options: LocalCredentialOptions = {}): Resolv
     baseUrl: entry.base_url,
     source: 'file',
     profile: name,
+    account: entry.account.id,
+    confined: entry.scope.type !== 'account',
   };
 }
