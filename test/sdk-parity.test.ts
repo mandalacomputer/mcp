@@ -144,6 +144,49 @@ describe('the status to class mapping, as the SDKs have it', () => {
     expect(textOf(res)).toMatch(wording);
     expect(textOf(res)).not.toContain('retry immediately');
   });
+
+  // run_agent_chat and get_account build their own refusal from the body, so
+  // each needs the same guard as the shared message helper.
+  const originCases: [number, RegExp][] = [
+    [521, /could not reach it/],
+    [522, /could not reach it/],
+    [523, /could not reach it/],
+    [525, /TLS handshake/],
+    [526, /TLS handshake/],
+  ];
+  const originBodies: [string, unknown][] = [
+    ['flat', { error: 'retry immediately' }],
+    ['nested', { error: { message: 'retry immediately' } }],
+  ];
+  const originMatrix = originCases.flatMap(([status, wording]) =>
+    originBodies.map(([shape, body]) => [status, shape, body, wording] as const),
+  );
+
+  it.each(originMatrix)(
+    'shows run_agent_chat the SDK wording for HTTP %i with a %s body',
+    async (status, _shape, body, wording) => {
+      answering(status, JSON.stringify(body));
+      const { call, close } = await connect({ modelKey: 'model-secret-sentinel' });
+      const res = await call('run_agent_chat', { messages: [{ role: 'user', content: 'x' }] });
+      await close();
+      expect(res.isError).toBe(true);
+      expect(textOf(res)).toMatch(wording);
+      expect(textOf(res)).not.toContain('retry immediately');
+    },
+  );
+
+  it.each(originMatrix)(
+    'shows get_account the SDK wording for HTTP %i with a %s body',
+    async (status, _shape, body, wording) => {
+      answering(status, JSON.stringify(body));
+      const { call, close } = await connect();
+      const res = await call('get_account', {});
+      await close();
+      expect(res.isError).toBe(true);
+      expect(textOf(res)).toMatch(wording);
+      expect(textOf(res)).not.toContain('retry immediately');
+    },
+  );
 });
 
 describe('the byte count after an upload', () => {
