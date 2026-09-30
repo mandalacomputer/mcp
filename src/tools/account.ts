@@ -1,6 +1,7 @@
+import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
 import { APIError } from '../errors.js';
-import { said } from '../format.js';
+import { failed, said, unavailableAdvice } from '../format.js';
 import * as P from '../paths.js';
 import { count, label, metadata, metadataCall } from './directory.js';
 import { deleteAnnotations, readAnnotations } from './results.js';
@@ -280,6 +281,22 @@ export const registerAccount: Registrar = (server, session) => {
       }),
   );
 
+  // metadataCall was built for reads, and rebuilds every APIError as a plain
+  // one: a 503 would lose its UnavailableError class and its method, and with
+  // them the "THIS CHANGE MAY OR MAY NOT HAVE HAPPENED" warning every other
+  // mutation tool gives. A write's 503 is answered from the original error; any
+  // other failure keeps metadataCall's handling.
+  const writeCall = (work: () => Promise<CallToolResult>) =>
+    metadataCall(async () => {
+      try {
+        return await work();
+      } catch (error) {
+        if (error instanceof APIError && unavailableAdvice(error) !== undefined)
+          return failed(error);
+        throw error;
+      }
+    });
+
   // The workspace writes (OPL-5473). Create and rename are ordinary owner
   // writes. Delete is behind `confirm: true`, as delete_secret is, because it
   // REVOKES every key confined to the workspace — a person's CI or another
@@ -295,7 +312,7 @@ export const registerAccount: Registrar = (server, session) => {
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
     },
     ({ name }, extra) =>
-      metadataCall(async () => {
+      writeCall(async () => {
         const data = metadata(
           workspace,
           await session.api.json('POST', P.WORKSPACES, { body: { name }, signal: extra.signal }),
@@ -314,7 +331,7 @@ export const registerAccount: Registrar = (server, session) => {
       annotations: { readOnlyHint: false, idempotentHint: true },
     },
     ({ workspace_id, name }, extra) =>
-      metadataCall(async () => {
+      writeCall(async () => {
         const data = metadata(
           workspace,
           await session.api.json('PATCH', P.workspace(workspace_id), {
@@ -342,7 +359,7 @@ export const registerAccount: Registrar = (server, session) => {
       annotations: deleteAnnotations,
     },
     ({ workspace_id }, extra) =>
-      metadataCall(async () => {
+      writeCall(async () => {
         const data = metadata(
           workspaceDeleted,
           await session.api.json('DELETE', P.workspace(workspace_id), { signal: extra.signal }),

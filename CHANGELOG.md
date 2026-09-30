@@ -21,7 +21,9 @@ are wording changes, and they are behaviour changes in the way that matters.
   any key confined to one is refused with 403. `delete_workspace` needs
   `confirm: true`, revokes every API key confined to the workspace (its
   description says so) and answers how many; its computers are kept. None of
-  them is offered to a read-only session. Needs a platform that has these
+  them is offered to a read-only session. A `503` answered to any of them says
+  the change may or may not have happened and to read the state before sending
+  it again, as every other change tool does. Needs a platform that has these
   routes; an older one answers 405.
 
 - **`MANDALA_MCP_MAX_SESSIONS_PER_WORKSPACE`** (`maxSessionsPerWorkspace` in

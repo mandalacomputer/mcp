@@ -6,6 +6,7 @@
 
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { afterEach, beforeEach, expect, it } from 'vitest';
+import { reasonAdvice } from '../src/errors.js';
 import { connect, installFakePlatform, WORKSPACE, WORKSPACE_MEMBER } from './harness.js';
 
 const connections: Awaited<ReturnType<typeof connect>>[] = [];
@@ -175,4 +176,26 @@ it('refuses a delete answer that does not say how many keys it revoked', async (
   });
   expect(result.isError).toBe(true);
   expect(text(result)).toContain('Malformed metadata response');
+});
+
+// A 503 answered to a write leaves the change unknown, whatever reason word it
+// carries: the tool says to read the state first, never to send it again.
+it.each([
+  ['create_workspace', { name: 'customer-acme' }],
+  ['rename_workspace', { workspace_id: WORKSPACE.id, name: 'ci-2' }],
+  ['delete_workspace', { workspace_id: WORKSPACE.id, confirm: true }],
+] as const)('a 503 on %s says the change may or may not have happened', async (name, args) => {
+  const retry = reasonAdvice('contention');
+  expect(retry).toBeDefined();
+  for (const body of [
+    { error: 'The platform could not answer.' },
+    { error: 'The platform could not answer.', reason: 'contention' },
+  ]) {
+    respond(body, 503);
+    const result = await (await open()).call(name, { ...args });
+    expect(result.isError).toBe(true);
+    expect(text(result)).toContain('THIS CHANGE MAY OR MAY NOT HAVE HAPPENED');
+    expect(text(result)).not.toContain('can be sent again shortly');
+    expect(text(result)).not.toContain(retry as string);
+  }
 });
