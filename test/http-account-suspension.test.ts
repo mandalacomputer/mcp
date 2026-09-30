@@ -391,48 +391,61 @@ describe('hosted: a suspended account holds one session across all its keys', ()
   // acts on the account's standing only while its own token's acceptance is
   // cached. Past that the standing may predate a reinstatement nobody has
   // asked about since, so it closes nothing; the next request asks.
-  it('does not act on a standing older than the token’s lapsed acceptance', async () => {
-    p = platform();
-    p.set('acc-g', 'active', 'mcpat_k1', 'mcpat_k2', 'mcpat_k3');
-    const { server, url } = await start({ bearerCheckTtlMs: 300 });
-    const c = client(url);
-    const releases: Array<() => void> = [];
-    try {
-      const s1 = await c.open('mcpat_k1');
-      const s2 = await c.open('mcpat_k2');
-      const busy: Array<Promise<Response>> = [];
-      for (const [token, session] of [
-        ['mcpat_k1', s1],
-        ['mcpat_k2', s2],
-      ]) {
-        releases.push(p.hold(token));
-        const before = p.count(token);
-        busy.push(c.send(WHOAMI_CALL, as(token, session)));
-        await p.reached(token, before);
-      }
-      p.set('acc-g', 'suspended', 'mcpat_k1', 'mcpat_k2', 'mcpat_k3');
-      const refused = await c.send(INIT, as('mcpat_k3'));
-      expect(refused.status).toBe(429);
-      await refused.text();
-      for (const r of releases) r();
-      for (const res of await Promise.all(busy)) await res.text();
-      // Reinstated, and every acceptance lapses with nobody asking.
+  for (const traffic of ['a notification', 'the event stream'] as const) {
+    it(`does not act on a standing older than the token’s lapsed acceptance on ${traffic}`, async () => {
+      p = platform();
       p.set('acc-g', 'active', 'mcpat_k1', 'mcpat_k2', 'mcpat_k3');
-      await new Promise((r) => setTimeout(r, 400));
+      const { server, url } = await start({ bearerCheckTtlMs: 300 });
+      const c = client(url);
+      const releases: Array<() => void> = [];
+      try {
+        const s1 = await c.open('mcpat_k1');
+        const s2 = await c.open('mcpat_k2');
+        const busy: Array<Promise<Response>> = [];
+        for (const [token, session] of [
+          ['mcpat_k1', s1],
+          ['mcpat_k2', s2],
+        ]) {
+          releases.push(p.hold(token));
+          const before = p.count(token);
+          busy.push(c.send(WHOAMI_CALL, as(token, session)));
+          await p.reached(token, before);
+        }
+        p.set('acc-g', 'suspended', 'mcpat_k1', 'mcpat_k2', 'mcpat_k3');
+        const refused = await c.send(INIT, as('mcpat_k3'));
+        expect(refused.status).toBe(429);
+        await refused.text();
+        for (const r of releases) r();
+        for (const res of await Promise.all(busy)) await res.text();
+        // Reinstated, and every acceptance lapses with nobody asking.
+        p.set('acc-g', 'active', 'mcpat_k1', 'mcpat_k2', 'mcpat_k3');
+        await new Promise((r) => setTimeout(r, 400));
 
-      const note = await c.send(NOTE, as('mcpat_k1', s1));
-      expect(note.status).toBe(202);
-      await note.text();
-      expect(await sessions(url)).toBe(2);
-      // A request asks, finds the account active, and closes nothing.
-      expect(await c.list('mcpat_k1', s1)).toBe(200);
-      expect(await c.list('mcpat_k2', s2)).toBe(200);
-      expect(await sessions(url)).toBe(2);
-    } finally {
-      for (const r of releases) r();
-      await stop(server);
-    }
-  });
+        if (traffic === 'a notification') {
+          const note = await c.send(NOTE, as('mcpat_k1', s1));
+          expect(note.status).toBe(202);
+          await note.text();
+        } else {
+          const abort = new AbortController();
+          const res = await fetch(url, {
+            headers: { Accept: 'text/event-stream', ...as('mcpat_k1', s1) },
+            signal: abort.signal,
+          });
+          expect(res.status).toBe(200);
+          abort.abort();
+          await res.body?.cancel().catch(() => {});
+        }
+        expect(await sessions(url)).toBe(2);
+        // A request asks, finds the account active, and closes nothing.
+        expect(await c.list('mcpat_k1', s1)).toBe(200);
+        expect(await c.list('mcpat_k2', s2)).toBe(200);
+        expect(await sessions(url)).toBe(2);
+      } finally {
+        for (const r of releases) r();
+        await stop(server);
+      }
+    });
+  }
 
   // An OAuth refresh: the old token's session is left behind idle, and the
   // new token's initialize takes the one slot over rather than being refused

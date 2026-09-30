@@ -1217,12 +1217,14 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
         // Its other idle sessions go now, whichever of its bearers opened
         // them (OPL-5452), down to this one: it is pinned above, and one busy
         // elsewhere is skipped and closed at a later one of these once idle.
+        // What decides is the account's standing as it is now, not the
+        // verdict above: a newer-started probe of another bearer may have
+        // found the account reinstated while this one awaited its own.
         // A request has just had its bearer's standing confirmed (or found it
         // cached). Anything else — a notification, a response — asks the
         // platform nothing, so it acts on the account's standing only while
         // its bearer's acceptance is cached: the standing is then no older
         // than that, and never an answer from long before a reinstatement.
-        if (verdict === 'suspended') trimIdle(live.keyDigest, MAX_SESSIONS_SUSPENDED, sessionId);
         const confirmed = request ? verdict === 'ok' || verdict === 'suspended' : isAccepted(key);
         if (challenge && confirmed) enforceAccountSuspension(live.account, sessionId);
         const lease = res.locals.largeBodyLease as LargeBodyLease | undefined;
