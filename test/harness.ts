@@ -708,6 +708,18 @@ function respond(
       stdout_offset: 5,
     });
   }
+  // An input call that asked for the desktop afterwards (OPL-5472) gets it, in
+  // the platform's shape; one that did not gets the plain ack.
+  if (path.endsWith('/input') && query.get('context') === '1') {
+    const window = {
+      id: '0x2600003',
+      title: 'T',
+      class: 'Xfce4-terminal',
+      focused: true,
+      visible: true,
+    };
+    return json({ ok: true, context: { windows: [window], focused: window } });
+  }
   if (path.endsWith('/input')) return json({ ok: true, x: 1, y: 2, known: true });
   // Both verbs on one path, told apart by the method: the read answers text and
   // the write answers an ack, and a stub giving both one shape would let a tool

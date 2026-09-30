@@ -564,6 +564,7 @@ export function clickBody(
   x: number | undefined,
   y: number | undefined,
   modifiers: string[] = [],
+  count?: number,
 ): Json {
   wholePoint(x, y);
   const body: Json = { action };
@@ -572,8 +573,14 @@ export function clickBody(
     body.y = y;
   }
   if (modifiers.length) body.text = modifiers.join(MODIFIER_JOIN);
+  // A repeat count for the three single clicks (OPL-5472), 1 to
+  // MAX_CLICK_COUNT; the tool's schema bounds it before it gets here.
+  if (count !== undefined) body.count = count;
   return body;
 }
+
+/** The most presses one click action makes (`count`), as the platform bounds it. */
+export const MAX_CLICK_COUNT = 10;
 
 /**
  * A press, a move and a release — one gesture, not two clicks.

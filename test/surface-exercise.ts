@@ -261,7 +261,10 @@ export const EXERCISE: Record<string, Record<string, unknown>[]> = {
       quality: 60,
     },
   ],
-  click: [{ x: 10, y: 20 }],
+  click: [
+    { x: 10, y: 20 },
+    { x: 10, y: 20, count: 4, context: true },
+  ],
   type_text: [{ text: 'hi' }],
   // Both spellings, so the held key the paste sends is exercised (OPL-5323).
   paste_text: [{ text: 'hi' }, { text: 'hi', shortcut: 'ctrl+shift+v' }],
