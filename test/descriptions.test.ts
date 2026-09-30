@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { Api } from '../src/api.js';
 import { connect, installFakePlatform } from './harness.js';
 
 /**
@@ -101,5 +102,21 @@ describe('the docs agree with the agent tools on what a failure status means', (
     const readme = read('README.md');
     expect(readme).toContain('before any run started — a flat\n`{error: string}` body');
     expect(readme).toContain('it keeps the usual role and plan advice');
+  });
+});
+
+describe('where the docs send a reader for an API key (OPL-5489)', () => {
+  // API keys sit under Settings → Credentials in the dashboard; a "Settings →
+  // API keys" tab no longer exists. Matched across line breaks, since prose wraps.
+  const stale = /Settings\s*(→|->|>)\s*API keys/i;
+
+  it('names Settings → Credentials → API keys when no key is given', () => {
+    expect(() => new Api('')).toThrow(/create one at Settings → Credentials → API keys/);
+  });
+
+  it('never names a Settings → API keys tab in the README or the skill', () => {
+    for (const path of ['README.md', 'plugin/skills/mandala-computer/SKILL.md']) {
+      expect(readFileSync(new URL(`../${path}`, import.meta.url), 'utf8'), path).not.toMatch(stale);
+    }
   });
 });

@@ -54,8 +54,8 @@ required; Windows users can use explicit/environment keys. Base overrides must
 match the saved profile's complete canonical API base, including its path and
 port. A session keeps its chosen key/base until restarted.
 
-- `MANDALA_API_KEY` — optional API key from **Settings → API keys** at
-  https://app.mandala.computer. Treat it as a password. It may cover the account
+- `MANDALA_API_KEY` — optional API key from **Settings → Credentials → API
+  keys** at https://app.mandala.computer. Treat it as a password. It may cover the account
   or only one workspace, which is why a 404 below is not always what it looks like.
 - `MANDALA_MODEL_KEY` — optional Anthropic key, enabling `run_agent` and
   `run_agent_chat` when filters permit them. Without it neither is registered.
@@ -66,9 +66,10 @@ If startup fails, read the local error and ask the user to correct the named
 profile/protection setting, run the TypeScript `mandala login` command, or set
 `MANDALA_API_KEY`. Invalid filters also prevent startup. Do not work around an
 unavailable server with `exec` or a browser. Revoke a device-named API key in
-**Settings → API keys** when it is no longer needed. A revoked key causes an
-ordinary refusal; MCP never logs in, changes profiles, rereads the file, or
-replays the refused action. The user can explicitly log in again and restart.
+**Settings → Credentials → API keys** when it is no longer needed. A revoked key
+causes an ordinary refusal; MCP never logs in, changes profiles, rereads the
+file, or replays the refused action. The user can explicitly log in again and
+restart.
 
 Optional configuration:
 

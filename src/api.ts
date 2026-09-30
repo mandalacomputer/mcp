@@ -295,7 +295,7 @@ export class Api {
   ) {
     if (!apiKey) {
       throw new MandalaError(
-        'No API key. Set MANDALA_API_KEY (create one at Settings → API keys), ' +
+        'No API key. Set MANDALA_API_KEY (create one at Settings → Credentials → API keys), ' +
           'or send it as a bearer token when running over HTTP.',
       );
     }

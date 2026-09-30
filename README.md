@@ -40,7 +40,8 @@ claude mcp add mandala -- npx -y mandala-computer-mcp --profile Work
 Names are case-sensitive. An explicit key or nonempty `MANDALA_API_KEY` takes
 precedence over every profile and avoids accessing the credential store.
 Empty explicit keys fail; an empty or whitespace-only environment key is absent.
-You can still use a key from **Settings → API keys** with `MANDALA_API_KEY`.
+You can still use a key from **Settings → Credentials → API keys** with
+`MANDALA_API_KEY`.
 
 Saved credentials require POSIX protection: a real directory owned by you with
 mode `0700`, and an owned regular file with mode `0600` and one link. Symlinks,
@@ -52,9 +53,9 @@ A saved profile also binds its API base URL. `--base-url` or `MANDALA_BASE_URL`
 must match that stored base after canonicalization, including the entire path
 prefix and port. An explicitly empty base flag is invalid with saved credentials.
 Each stdio session resolves once: restart to pick up another saved key. Revoking
-the key in **Settings → API keys** makes later calls fail; MCP does not switch
-profiles, reread the file, or retry a refused action. Run login explicitly when
-new credentials are needed.
+the key in **Settings → Credentials → API keys** makes later calls fail; MCP
+does not switch profiles, reread the file, or retry a refused action. Run login
+explicitly when new credentials are needed.
 
 A saved profile can also carry a default workspace, set with
 `mandala workspaces use <workspace>` (and removed with `--clear`); the CLI keeps
