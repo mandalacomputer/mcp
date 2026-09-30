@@ -14,6 +14,22 @@ are wording changes, and they are behaviour changes in the way that matters.
 
 ## [Unreleased]
 
+### Security
+
+- **A suspended account holds one hosted session in all, however many keys
+  or tokens it has.** The hold was per token, so an account with five keys
+  kept five sessions. It is now per account: at its next initialize, or the
+  next request, notification or event stream on any of its sessions, the
+  account's other idle sessions are closed down to one, those whose token
+  the platform has refused first. An initialize from another of its tokens
+  (a refreshed OAuth token, say) takes the one slot over while it is idle,
+  and is answered `429` while it is serving a request; a session with a
+  request in flight is never closed. Whether the account is suspended is the
+  newest-started check's answer from any of its tokens, so a slow check
+  that finishes last cannot undo a newer one, and a newer check finding the
+  account active lifts the hold at once for all its tokens. Self-hosted
+  servers are unchanged.
+
 ### Changed
 
 - **`list_api_keys` says why it has no mint or revoke companion**: they are

@@ -25,8 +25,8 @@ export type HttpConfig = Omit<ServerConfig, 'apiKey' | 'activity'> & {
   /**
    * How many live sessions one bearer may hold at once. Default 16, which is
    * also what anything but a number of at least one (NaN, 0) means; Infinity
-   * leaves only `maxSessions`. A suspended account's bearer (hosted mode) is
-   * held to one, whatever this is.
+   * leaves only `maxSessions`. A suspended account (hosted mode) holds one
+   * session in all, across all its bearers, whatever this is (OPL-5452).
    */
   maxSessionsPerBearer?: number;
   /**
@@ -36,12 +36,14 @@ export type HttpConfig = Omit<ServerConfig, 'apiKey' | 'activity'> & {
    * account of its own; a self-hosted server verifies no account, so there
    * each bearer is its own. Default half of `maxSessions` (128 of 256), which
    * is also what anything but a number of at least one means; above
-   * `maxSessions` it is `maxSessions`. Suspension is not applied here: it
-   * holds each suspended bearer to one session, per bearer. At the ceiling an
-   * initialize makes room only by closing idle sessions: first the account's
-   * whose bearer the platform has refused, then the requester's own, least
-   * recently used first. Failing that it is refused (429); a live session of
-   * another bearer is never closed for it.
+   * `maxSessions` it is `maxSessions`. At the ceiling an initialize makes room
+   * only by closing idle sessions: first the account's whose bearer the
+   * platform has refused, then the requester's own, least recently used
+   * first. Failing that it is refused (429); a live session of another bearer
+   * is never closed for it. A suspended account (hosted mode) is held to one
+   * session in all, whatever this is, and there the one exception applies: a
+   * new bearer of that account may close the account's idle session of
+   * another bearer to take the one slot (OPL-5452).
    */
   maxSessionsPerAccount?: number;
   /** How many requests may retain a parsed body above 256 KiB at once. */
@@ -189,7 +191,9 @@ export const DEFAULT_MAX_SESSIONS = 256;
  *
  * A suspended account's bearer is admitted (OPL-5437: it is how its holder
  * reaches `whoami` and learns it is suspended), and one session is all that
- * needs. Every other call it could make is refused by the platform.
+ * needs. Every other call it could make is refused by the platform. One
+ * session for the ACCOUNT, however many keys or tokens it holds (OPL-5452):
+ * see `standing` in {@link runHttp}.
  */
 const DEFAULT_MAX_SESSIONS_PER_BEARER = 16;
 const MAX_SESSIONS_SUSPENDED = 1;
@@ -346,12 +350,76 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
   // dispatched — the latter cached briefly, keyed by the token's digest and
   // never by the token.
   const checkTtl = cfg.bearerCheckTtlMs ?? DEFAULT_BEARER_CHECK_TTL_MS;
-  // What the platform said, per digest: until when it is taken on trust,
-  // whether the account behind it is suspended, which sets its session cap,
-  // and the account id whoami named, which the account ceiling counts by.
-  type Acceptance = { until: number; suspended: boolean; account?: string };
+  // What the platform said, per digest: until when it is taken on trust, and
+  // the account key (see {@link accountKey}) its whoami named, which the
+  // account ceiling counts by. Whether that account is suspended is NOT kept
+  // here: it is read from `standing`, below, every time it is asked.
+  type Acceptance = { until: number; account: string };
   const accepted = new Map<string, Acceptance>();
   let checksInFlight = 0;
+
+  // ---- Account standing: one suspended account, one session (OPL-5452) ---
+  //
+  // A suspended account is held to one live session IN ALL, across every key
+  // and token it holds. Holding each bearer to one instead (OPL-5443/5448)
+  // let an account with N keys keep N sessions. The platform's whoami says
+  // `status: "suspended"` but carries no time or generation, so which of two
+  // answers about one account is the newer is settled here:
+  //
+  // 1. One source of truth per account: `standing`, keyed by account key. A
+  //    whoami probe takes the next `probeSeq` when it STARTS, and its answer
+  //    replaces the account's standing only if that number is higher than the
+  //    standing's. The newest-started probe wins, so a slow probe that
+  //    finishes last can never undo a newer answer, in either direction. A
+  //    bearer's cached acceptance keeps only its account and its expiry: a
+  //    per-key suspended-or-not would outlive a newer answer another key got.
+  // 2. Enforcement per account, one helper (`enforceAccountSuspension`),
+  //    applied at an initialize's admission and on every request,
+  //    notification and event stream on a session: while the standing says
+  //    suspended, the account's idle sessions are closed until it holds one.
+  //    A notification or a stream asks the platform nothing, so it acts on
+  //    the standing only while its own bearer's acceptance is still cached,
+  //    and the standing is then no older than that acceptance.
+  // 3. Which session keeps the slot: only idle sessions are ever closed,
+  //    never one with a request in flight. Those whose bearer the platform
+  //    has refused go first, then the least recently used. An initialize by
+  //    another bearer of a suspended account (a refreshed OAuth token, say)
+  //    may close the account's idle session to take the one slot; when every
+  //    session it holds is busy, it is answered 429.
+  // 4. A self-hosted server asks no platform, so it has no standing: nothing
+  //    is suspended there, and every limit stays per bearer.
+  // 5. A newer probe that finds the account active lifts the hold at once,
+  //    for every bearer of the account, since none of them caches its own.
+  //
+  // Bounded like the acceptance cache. An entry dropped for room is only a
+  // missing answer: a cached acceptance whose account has none is probed
+  // again before it is believed, and a notification or stream enforces
+  // nothing on it.
+  type Standing = { suspended: boolean; seq: number };
+  const standing = new Map<string, Standing>();
+  let probeSeq = 0;
+
+  /** Whether the latest answer about this account says it is suspended. */
+  const accountSuspended = (account: string): boolean => standing.get(account)?.suspended === true;
+
+  /** Take a probe's answer for its account, unless a newer-started one answered already. */
+  const noteStanding = (account: string, suspended: boolean, seq: number) => {
+    const known = standing.get(account);
+    if (known && known.seq >= seq) return;
+    // Re-inserted, so Map order is the order answers were taken in.
+    standing.delete(account);
+    if (standing.size >= MAX_ACCEPTED_BEARERS) {
+      // An account holding no session needs no answer kept: a later request
+      // or initialize for it finds none and asks again.
+      const holding = new Set<string>();
+      for (const live of sessions.values()) holding.add(live.account);
+      for (const k of standing.keys()) if (!holding.has(k)) standing.delete(k);
+      if (standing.size >= MAX_ACCEPTED_BEARERS) {
+        standing.delete(standing.keys().next().value as string);
+      }
+    }
+    standing.set(account, { suspended, seq });
+  };
 
   /** The platform's acceptance of this bearer, while the cache window lasts. */
   const acceptance = (key: string): Acceptance | undefined => {
@@ -365,13 +433,13 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
   /**
    * `ok`: the probe answered 2xx, and only that — the one answer that says the
    * platform authenticated this credential AND let it act. `suspended`: the
-   * same 2xx, for an account whose whoami says `status: "suspended"` — admitted
-   * as `ok` is, and held to one session. `refused`: a 401.
+   * same 2xx, for an account whose standing says `status: "suspended"` —
+   * admitted as `ok` is, and held to one session in all. `refused`: a 401.
    * `unknown`: anything else — a 403 (a lost membership, say; a suspended
    * account is answered 2xx on whoami and admitted), a 404 (the route moved), a 429, a 5xx, a timeout, or this
    * server already asking about as many bearers as it will at once. Only `ok`
-   * and `suspended` are cached, the standing and the account id with the
-   * acceptance. `account` is the account key the bearer counts against (see
+   * and `suspended` are cached: the account key with the acceptance, the
+   * standing per account. `account` is the account key the bearer counts against (see
    * {@link accountKey}); it is set whenever the verdict is `ok` or
    * `suspended`, and returned rather than read back from the cache, which a
    * zero TTL or a full cache may already have let go of.
@@ -379,20 +447,27 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
   // `onStart` runs only when a probe really starts — never for a cached answer
   // or a full cap — and synchronously, before the first await, so a caller's
   // bookkeeping and its check against it cannot interleave with another's.
+  //
+  // `ok` and `suspended` are the account's STANDING when this returns, which
+  // a newer-started probe of another of its bearers may have set, not what
+  // this bearer's own probe (or cached acceptance) said (OPL-5452).
   const checkBearer = async (
     key: string,
     onStart?: () => void,
   ): Promise<{ verdict: 'ok' | 'suspended' | 'refused' | 'unknown'; account?: string }> => {
     const id = digest(key).toString('hex');
     const cached = acceptance(key);
-    if (cached) {
+    // Believed only while its account has a standing to read (see above).
+    if (cached && standing.has(cached.account)) {
       return {
-        verdict: cached.suspended ? 'suspended' : 'ok',
-        account: accountKey(id, cached.account),
+        verdict: accountSuspended(cached.account) ? 'suspended' : 'ok',
+        account: cached.account,
       };
     }
     if (checksInFlight >= MAX_BEARER_CHECKS_IN_FLIGHT) return { verdict: 'unknown' };
     checksInFlight++;
+    // Numbered as it starts, before the first await: see `standing`.
+    const seq = ++probeSeq;
     onStart?.();
     let suspended: boolean;
     let confirmed: string | undefined;
@@ -426,8 +501,10 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
         accepted.delete(accepted.keys().next().value as string);
       }
     }
-    accepted.set(id, { until: now + checkTtl, suspended, account: confirmed });
-    return { verdict: suspended ? 'suspended' : 'ok', account: accountKey(id, confirmed) };
+    const account = accountKey(id, confirmed);
+    accepted.set(id, { until: now + checkTtl, account });
+    noteStanding(account, suspended, seq);
+    return { verdict: accountSuspended(account) ? 'suspended' : 'ok', account };
   };
 
   // Refused initializes per source, in fixed one-minute windows. Kept apart
@@ -845,6 +922,12 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
    * candidate, and neither is anything of another account; an own session
    * counts toward the ceiling's need only if it counts against this account.
    *
+   * `suspended` (hosted mode, the account's standing, OPL-5452) lowers both
+   * limits to one, and makes every idle session of the account a candidate,
+   * whichever bearer opened it: a suspended account holds one session in all,
+   * and the bearer asking now (a refreshed token, say) may take it over while
+   * it is idle. One with a request in flight is still never a candidate.
+   *
    * `pendingBearer`/`pendingAccount` are initializes admitted and not yet
    * landed; at landing both are 0 (see `onsessioninitialized`). The result
    * names sessions, so nothing that outlives the call may keep it.
@@ -852,23 +935,28 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
   const planRoom = (
     keyDigest: Buffer,
     account: string,
-    bearerCap: number,
+    suspended: boolean,
     pendingBearer: number,
     pendingAccount: number,
   ):
     | { victims: Array<[string, Live]> }
     | { full: 'bearer'; holds: number }
     | { full: 'account' } => {
+    const bearerCap = suspended ? MAX_SESSIONS_SUSPENDED : maxPerBearer;
+    const accountCap = suspended ? MAX_SESSIONS_SUSPENDED : maxPerAccount;
     const own = sessionsOf(keyDigest);
     const counted = sessionsOfAccount(account);
     let bearerNeed = own.length + pendingBearer - bearerCap + 1;
-    let accountNeed = counted.length + pendingAccount - maxPerAccount + 1;
+    let accountNeed = counted.length + pendingAccount - accountCap + 1;
     const victims: Array<[string, Live]> = [];
     if (bearerNeed <= 0 && accountNeed <= 0) return { victims };
     const mine = new Set(own.map(([id]) => id));
-    const candidates = [...own, ...counted.filter(([id, live]) => !mine.has(id) && live.refused)]
+    const candidates = [
+      ...own,
+      ...counted.filter(([id, live]) => !mine.has(id) && (live.refused || suspended)),
+    ]
       .filter(([, live]) => live.active === 0)
-      .sort((a, b) => Number(b[1].refused) - Number(a[1].refused) || a[1].lastSeen - b[1].lastSeen);
+      .sort(closingOrder);
     for (const entry of candidates) {
       if (bearerNeed <= 0 && accountNeed <= 0) break;
       const ofBearer = mine.has(entry[0]);
@@ -881,6 +969,31 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
     if (bearerNeed > 0) return { full: 'bearer', holds: own.length };
     if (accountNeed > 0) return { full: 'account' };
     return { victims };
+  };
+
+  /**
+   * Hold a suspended account to one session in all (OPL-5452): close its idle
+   * sessions, whichever of its bearers opened them, in {@link closingOrder},
+   * until it holds one or none idle is left. Never `keep` (the session being
+   * served), and never one with a request in flight, which goes once it is
+   * idle, at the next of these. Does nothing unless the account's standing
+   * says suspended, so a self-hosted server, which has none, is untouched.
+   *
+   * A request whose body is still arriving has not reached its session yet,
+   * so its session can look idle here; for a suspended account that costs
+   * nothing, since the platform refuses every call it could make but whoami.
+   */
+  const enforceAccountSuspension = (account: string, keep?: string): void => {
+    if (!accountSuspended(account)) return;
+    const counted = sessionsOfAccount(account);
+    const excess = counted.length - MAX_SESSIONS_SUSPENDED;
+    if (excess <= 0) return;
+    const idle = counted.filter(([id, live]) => id !== keep && live.active === 0);
+    idle.sort(closingOrder);
+    for (const [id, gone] of idle.slice(0, excess)) {
+      sessions.delete(id);
+      void gone.transport.close().catch(() => {});
+    }
   };
 
   /**
@@ -1099,12 +1212,19 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
           live.refused = true;
           return challenged(res, refusedMessage(key), rpcId(req));
         }
-        // An account suspended after its bearer opened sessions kept every one
-        // of them, up to the 16 an active bearer may hold, while an initialize
-        // on it was held to one (OPL-5448). Its other idle sessions go now,
-        // down to that one; this session is pinned above and one busy
-        // elsewhere is skipped, and closed on a later request once it is idle.
+        // An account suspended after its bearers opened sessions kept every
+        // one of them, while an initialize on it was held to one (OPL-5448).
+        // Its other idle sessions go now, whichever of its bearers opened
+        // them (OPL-5452), down to this one: it is pinned above, and one busy
+        // elsewhere is skipped and closed at a later one of these once idle.
+        // A request has just had its bearer's standing confirmed (or found it
+        // cached). Anything else — a notification, a response — asks the
+        // platform nothing, so it acts on the account's standing only while
+        // its bearer's acceptance is cached: the standing is then no older
+        // than that, and never an answer from long before a reinstatement.
         if (verdict === 'suspended') trimIdle(live.keyDigest, MAX_SESSIONS_SUSPENDED, sessionId);
+        const confirmed = request ? verdict === 'ok' || verdict === 'suspended' : isAccepted(key);
+        if (challenge && confirmed) enforceAccountSuspension(live.account, sessionId);
         const lease = res.locals.largeBodyLease as LargeBodyLease | undefined;
         const id = rpcId(req);
         const held = challenge
@@ -1162,7 +1282,6 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
     if (refused) return rpcError(res, 403, -32000, refused, rpcId(req));
     // Hosted: no session for a bearer the platform does not accept. Before the
     // cap and the reservation, so a refused bearer never holds a slot.
-    let suspended = false;
     let checkedAccount: string | undefined;
     if (challenge) {
       // A spent budget does not close the address. Many clients can share one
@@ -1213,7 +1332,6 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
           rpcId(req),
         );
       }
-      suspended = verdict === 'suspended';
       checkedAccount = account;
     }
     if (!initialize) {
@@ -1230,11 +1348,17 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
     // Hosted, the account the platform confirmed for this bearer (or the
     // bearer itself, when whoami named none); self-hosted, the bearer.
     const account = checkedAccount ?? accountKey(keyId, undefined);
+    // The account's standing, read after the check above (OPL-5452): what the
+    // newest-started probe of ANY of its bearers said, not only this one's.
+    // Self-hosted there is none, and nothing is suspended.
+    const suspended = accountSuspended(account);
     const bearerCap = suspended ? MAX_SESSIONS_SUSPENDED : maxPerBearer;
-    // A bearer can hold more than its cap only when the cap fell under it: an
-    // account suspended after it opened sessions (OPL-5448). Those over the
-    // cap are closed first if idle, whatever becomes of this initialize, so
-    // what is left to count, and to name in a 429, is what it really holds.
+    // A bearer, or a suspended account, can hold more than its limit only when
+    // the limit fell under it: an account suspended after it opened sessions
+    // (OPL-5448, OPL-5452). Those over it are closed first if idle, whatever
+    // becomes of this initialize, so what is left to count, and to name in a
+    // 429, is what it really holds.
+    enforceAccountSuspension(account);
     trimIdle(keyDigest, bearerCap);
     const tooMany = (message: string) => {
       res.set('Retry-After', String(BEARER_FULL_RETRY_AFTER_S));
@@ -1245,9 +1369,11 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
     // binds: its own cap or its account's ceiling. Never another bearer's live
     // session, and never one with a request in flight: past the ceiling an
     // initialize is refused, since the account's holder is the one who knows
-    // which of its clients can spare a session. An idle session of the
-    // account's whose bearer the platform refused is the one exception (see
-    // `planRoom`). A client whose old session is gone gets 404 for it and
+    // which of its clients can spare a session. Two exceptions (see
+    // `planRoom`): an idle session of the account's whose bearer the platform
+    // refused, and, while the account is suspended, any idle session of the
+    // account's, since it holds one in all (OPL-5452). A client whose old
+    // session is gone gets 404 for it and
     // initializes again, as MCP clients do. Decided here, so a caller with
     // nothing idle to give back is refused at once; carried out only once the
     // new session exists (in `onsessioninitialized`), so an initialize the SDK
@@ -1258,12 +1384,16 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
       const room = planRoom(
         keyDigest,
         account,
-        bearerCap,
+        suspended,
         pendingByDigest.get(keyId) ?? 0,
         pendingByAccount.get(account) ?? 0,
       );
       if ('full' in room) {
-        if (room.full === 'account') return tooMany(accountFullMessage(account, maxPerAccount));
+        if (room.full === 'account') {
+          return tooMany(
+            suspended ? SUSPENDED_ACCOUNT_FULL : accountFullMessage(account, maxPerAccount),
+          );
+        }
         // Over the cap after the trim means every session over it is busy,
         // and closing one would not be enough: the client can only wait.
         return tooMany(
@@ -1357,7 +1487,9 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
           // still in the map, so counting them again here would drop a session
           // that fits; what keeps a burst under the ceiling is the pending
           // count at admission. Every landing leaves the map within both.
-          const room = planRoom(keyDigest, account, bearerCap, 0, 0);
+          // The account's standing is read again: a probe that answered in
+          // between is the newer word on whether it is suspended.
+          const room = planRoom(keyDigest, account, accountSuspended(account), 0, 0);
           if ('full' in room) {
             dropped = true;
             release();
@@ -1482,6 +1614,12 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
     // DELETE is still honoured, since the digest shows it is the holder.
     if (challenge && live.refused && req.method === 'GET')
       return challenged(res, refusedMessage(key));
+    // A suspended account is held to one session on its stream too, as on a
+    // notification: the stream asks the platform nothing, so only while this
+    // bearer's acceptance is cached (OPL-5452). This session is the one kept.
+    if (challenge && req.method !== 'DELETE' && isAccepted(key)) {
+      enforceAccountSuspension(live.account, sessionId);
+    }
     // The GET is the notification stream and is only noted; anything else
     // here (a DELETE, or a HEAD, which Express routes to the GET handler with
     // the method unchanged) is held for while the SDK handles it. See
@@ -1694,6 +1832,14 @@ function accountKey(keyId: string, confirmed: string | undefined): string {
   return confirmed !== undefined ? `account:${confirmed}` : `bearer:${keyId}`;
 }
 
+/**
+ * The 429 for a suspended account with nothing idle to give up (OPL-5452):
+ * its session is serving a request, or another initialize of its is in
+ * flight. An idle one would have been closed to make room.
+ */
+const SUSPENDED_ACCOUNT_FULL =
+  'This account is suspended, so it may hold only 1 session on this server across all its tokens, and none it holds is idle. Retry once its session finishes its request, or close it (DELETE /mcp).';
+
 /** The 429 for an account at its ceiling. It names the limit and nothing else. */
 function accountFullMessage(account: string, cap: number): string {
   const noun = cap === 1 ? 'session' : 'sessions';
@@ -1703,6 +1849,15 @@ function accountFullMessage(account: string, cap: number): string {
 }
 
 const always = () => true;
+
+/**
+ * The order idle sessions are closed in to make room: those whose bearer the
+ * platform has refused first, since nothing more is served on them, then the
+ * least recently seen.
+ */
+function closingOrder(a: [string, Live], b: [string, Live]): number {
+  return Number(b[1].refused) - Number(a[1].refused) || a[1].lastSeen - b[1].lastSeen;
+}
 
 /** Whether a POST body holds a JSON-RPC request, which is what opens a stream. */
 function carriesRequest(body: unknown): boolean {
