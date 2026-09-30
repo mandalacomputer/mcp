@@ -28,9 +28,10 @@ import { registerSSH } from './tools/ssh.js';
 import { registerTemplates } from './tools/templates.js';
 import type { ToolOptions } from './tools/types.js';
 import { registerWebhooks } from './tools/webhooks.js';
+import { SERVER_VERSION } from './version.js';
 
+export { SERVER_VERSION };
 export const SERVER_NAME = 'mandala-computer';
-export const SERVER_VERSION = '0.8.0';
 
 /**
  * Told to the client on connect, and shown to the model before any tool is

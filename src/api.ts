@@ -22,6 +22,7 @@ import {
   secretRouteOf,
 } from './secret-errors.js';
 import { DOCUMENTED_REASONS, type SecretStore, secretListOf, secretOf } from './secret-store.js';
+import { SERVER_VERSION } from './version.js';
 
 export { isSecretStoreRoute } from './secret-errors.js';
 
@@ -277,6 +278,13 @@ export type ApiOptions = {
   onBearerRefused?: () => void;
 };
 
+/**
+ * The `User-Agent` every request carries: this server and its version, and
+ * the Node it runs on, so the platform can tell which client and release sent
+ * a request.
+ */
+export const USER_AGENT = `mandala-computer-mcp/${SERVER_VERSION} node/${process.versions.node}`;
+
 export class Api {
   readonly baseUrl: string;
   /** The same thing parsed, so a path is joined onto the path and nothing else. */
@@ -342,6 +350,7 @@ export class Api {
     this.#headers = {
       Authorization: `Bearer ${apiKey}`,
       Accept: 'application/json',
+      'User-Agent': USER_AGENT,
     };
   }
 

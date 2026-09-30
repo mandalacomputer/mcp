@@ -173,6 +173,13 @@ Parameter and response-mode support remains a separate contract.
 `press_key`, `scroll`, `drag`, `move_mouse`, `mouse_button`, `cursor_position`,
 `wait`
 
+Every one of these that acts — all but `screenshot` and `cursor_position` —
+takes `context: true` and then answers the desktop as it stands just after the
+action: the windows `list_windows` would list and the one with focus, without a
+second call. They are read once, straight after the action, so a window still
+opening may not be listed yet; when they cannot be read the action still
+happened, and the answer says why.
+
 **Inside the guest** — `exec`, `exec_poll`, `exec_kill`, `get_execution`,
 `read_execution_output`, `open_url`,
 `list_windows`, `window_action`, `read_clipboard`, `write_clipboard`,
