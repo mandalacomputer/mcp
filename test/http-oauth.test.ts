@@ -1178,11 +1178,11 @@ describe('hosted: one account, however many bearers', () => {
     platform.state.accounts = {};
     for (let i = 0; i < 6; i++) platform.state.accounts[`mcpat_a${i}`] = active('acc-a');
     platform.state.accounts.mcpat_b = active('acc-b');
-    // The default ceiling is half the pool: 4 of 8.
+    // The default ceiling is a quarter of the pool (OPL-5454): 4 of 16.
     const { server, url } = await start({
       resourceMetadataUrl: METADATA,
       serviceSecret: SECRET,
-      maxSessions: 8,
+      maxSessions: 16,
     });
     try {
       const c = client(url);

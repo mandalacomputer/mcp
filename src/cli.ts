@@ -65,14 +65,25 @@ Environment
                        held to its account's maximum, below.
   MANDALA_MCP_MAX_SESSIONS_PER_ACCOUNT
                        --http only. How many live sessions one account may hold
-                       across all its tokens (default ${DEFAULT_MAX_SESSIONS / 2}, half the pool).
-                       Hosted (the metadata URL set), the account is the one the
-                       platform names for the token; otherwise each token is an
-                       account of its own. At it an initialize closes only the
-                       token's own idle sessions, or the account's ones whose
-                       token the platform refused, and is otherwise refused 429
-                       with Retry-After. Suspension is held per token, above,
-                       not here. A whole number from 1 to ${DEFAULT_MAX_SESSIONS}; anything
+                       across all its tokens (default ${DEFAULT_MAX_SESSIONS / 4}, a quarter of the
+                       pool). Hosted (the metadata URL set), the account is the
+                       one the platform names for the token; otherwise each
+                       token is an account of its own. At it an initialize
+                       closes only the token's own idle sessions, or the
+                       account's ones whose token the platform refused, and is
+                       otherwise refused 429 with Retry-After. A suspended
+                       account holds one session in all, whatever this says.
+                       The last quarter of the pool goes only to accounts
+                       holding less than their share of it. A whole number from
+                       1 to ${DEFAULT_MAX_SESSIONS}; anything else is refused at startup.
+  MANDALA_MCP_MAX_SESSIONS_PER_WORKSPACE
+                       --http, hosted only. How many live sessions one
+                       workspace may hold across all its tokens (default a
+                       quarter of the per-account maximum). Counted by the
+                       workspace the platform names for a workspace-scoped
+                       token; such tokens also share their account's maximum,
+                       above, with the account's own tokens and its other
+                       workspaces. A whole number from 1 to ${DEFAULT_MAX_SESSIONS}; anything
                        else is refused at startup.
 
 Flags override the environment.`;
@@ -412,7 +423,21 @@ export function maxSessionsPerToken(
 export function maxSessionsPerAccount(
   raw = env('MANDALA_MCP_MAX_SESSIONS_PER_ACCOUNT'),
 ): number | undefined {
-  return sessionCount('MANDALA_MCP_MAX_SESSIONS_PER_ACCOUNT', raw, `${DEFAULT_MAX_SESSIONS / 2}`);
+  return sessionCount('MANDALA_MCP_MAX_SESSIONS_PER_ACCOUNT', raw, `${DEFAULT_MAX_SESSIONS / 4}`);
+}
+
+/**
+ * `MANDALA_MCP_MAX_SESSIONS_PER_WORKSPACE` (OPL-5453), read exactly as the
+ * per-token variable is; see {@link sessionCount}.
+ */
+export function maxSessionsPerWorkspace(
+  raw = env('MANDALA_MCP_MAX_SESSIONS_PER_WORKSPACE'),
+): number | undefined {
+  return sessionCount(
+    'MANDALA_MCP_MAX_SESSIONS_PER_WORKSPACE',
+    raw,
+    'a quarter of the per-account maximum',
+  );
 }
 
 const list = (v: string | undefined) =>
@@ -462,6 +487,7 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
       serviceSecret: env('MANDALA_MCP_SERVICE_SECRET'),
       maxSessionsPerBearer: maxSessionsPerToken(),
       maxSessionsPerAccount: maxSessionsPerAccount(),
+      maxSessionsPerWorkspace: maxSessionsPerWorkspace(),
     });
     return;
   }

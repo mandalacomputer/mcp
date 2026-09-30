@@ -592,8 +592,14 @@ describe('the per-bearer session cap', () => {
         await t.teardown();
       }
     }
-    // And the default per-bearer 16 applies, not the unusable value.
-    const t = await setup({ maxSessionsPerBearer: Number.NaN, maxSessions: 40 });
+    // And the default per-bearer 16 applies, not the unusable value. The
+    // account ceiling is raised past it, or its default (a quarter of the
+    // pool) would bind first.
+    const t = await setup({
+      maxSessionsPerBearer: Number.NaN,
+      maxSessions: 40,
+      maxSessionsPerAccount: 40,
+    });
     try {
       const mine: string[] = [];
       for (let i = 0; i < 16; i++) mine.push(await t.open('com_alice'));
@@ -610,11 +616,12 @@ describe('the per-bearer session cap', () => {
   });
 
   // OPL-5447: a self-hosted server verifies no account, so each bearer is an
-  // account of its own, held to the account ceiling (half the pool by
-  // default) as well as its own cap; a full pool is still a 503, and nothing
-  // ever closes another bearer's session to make room.
+  // account of its own, held to the account ceiling (a quarter of the pool by
+  // default, OPL-5454: 2 of 8 here) as well as its own cap; a full pool is
+  // still a 503, and nothing ever closes another bearer's session to make
+  // room.
   it('holds each token to the account ceiling as its own account, and a full pool is a 503 with Retry-After', async () => {
-    const t = await setup({ maxSessionsPerBearer: 3, maxSessions: 4 });
+    const t = await setup({ maxSessionsPerBearer: 3, maxSessions: 8 });
     const calls: Response[] = [];
     try {
       const alice = [await t.open('com_alice'), await t.open('com_alice')];
@@ -629,16 +636,26 @@ describe('the per-bearer session cap', () => {
       );
 
       const bob = [await t.open('com_bob'), await t.open('com_bob')];
-      expect(await t.count()).toBe(4);
-      const carol = await t.send(INIT, t.as('com_carol'));
-      expect(carol.status).toBe(503);
-      expect(carol.headers.get('retry-after')).toBe('30');
-      await carol.text();
+      const carol = [await t.open('com_carol'), await t.open('com_carol')];
+      // The last quarter of the pool goes to tokens holding less than their
+      // share of the rest (OPL-5454), as these two newcomers do.
+      const dave = [await t.open('com_dave')];
+      const erin = [await t.open('com_erin')];
+      expect(await t.count()).toBe(8);
+      const frank = await t.send(INIT, t.as('com_frank'));
+      expect(frank.status).toBe(503);
+      expect(frank.headers.get('retry-after')).toBe('30');
+      expect(((await frank.json()) as { error: { message: string } }).error.message).toBe(
+        'This server is holding its maximum of 8 sessions. Retry shortly.',
+      );
 
       // Every session is still there: neither refusal closed anyone's.
       for (const [token, ids] of [
         ['com_alice', alice],
         ['com_bob', bob],
+        ['com_carol', carol],
+        ['com_dave', dave],
+        ['com_erin', erin],
       ] as const) {
         for (const id of ids) {
           const res = await t.send(LIST, t.as(token, id));
@@ -658,7 +675,7 @@ describe('the per-bearer session cap', () => {
   // ceiling (16 against a ceiling of 2 here) was refused until the sweep, and
   // a client that reconnected without a DELETE was locked out.
   it('replaces a token’s own idle session when the account ceiling is the limit that binds', async () => {
-    const t = await setup({ maxSessionsPerBearer: 16, maxSessions: 4 });
+    const t = await setup({ maxSessionsPerBearer: 16, maxSessions: 8 });
     try {
       const first = await t.open('com_alice');
       await new Promise((r) => setTimeout(r, 5));
@@ -688,11 +705,12 @@ describe('the per-bearer session cap', () => {
     }
   });
 
+  // The default is a quarter of the pool (OPL-5454): 2 of 8.
   it('reads an unusable maxSessionsPerAccount as the default, and clamps one above the pool', async () => {
     for (const bad of [Number.NaN, 0, -3]) {
       const t = await setup({
         maxSessionsPerBearer: 16,
-        maxSessions: 4,
+        maxSessions: 8,
         maxSessionsPerAccount: bad,
       });
       try {
@@ -710,14 +728,16 @@ describe('the per-bearer session cap', () => {
         await t.teardown();
       }
     }
-    const t = await setup({ maxSessionsPerBearer: 16, maxSessions: 4, maxSessionsPerAccount: 100 });
+    // A pool of 3 keeps no reserve (OPL-5454), so one token can reach the
+    // clamped ceiling of 3; unclamped, the full pool would answer 503 instead.
+    const t = await setup({ maxSessionsPerBearer: 16, maxSessions: 3, maxSessionsPerAccount: 100 });
     try {
       const calls: Response[] = [];
-      for (let i = 0; i < 4; i++) calls.push(await t.busy('com_alice', await t.open('com_alice')));
+      for (let i = 0; i < 3; i++) calls.push(await t.busy('com_alice', await t.open('com_alice')));
       const over = await t.send(INIT, t.as('com_alice'));
       expect(over.status).toBe(429);
       expect(((await over.json()) as { error: { message: string } }).error.message).toContain(
-        'per-account maximum of 4 sessions',
+        'per-account maximum of 3 sessions',
       );
       t.release();
       for (const c of calls) await c.text();
