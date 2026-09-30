@@ -22,9 +22,12 @@ are wording changes, and they are behaviour changes in the way that matters.
   call leaves out `workspace_id`; an explicit `workspace_id` wins. Their
   descriptions say so, and `list_secrets` says when the default chose the
   scope. Not applied to a key confined to a workspace, to a default saved for
-  another account, or with an explicit or environment key; an unreadable file
-  is ignored with a note on stderr. MCP never writes the file, and the hosted
-  HTTP server neither reads it nor changes its tools.
+  another account, or with an explicit or environment key. An unreadable file
+  is noted on stderr; the reading tools then use account-wide, but
+  `create_secret`, `set_secret`, `replace_secret` and `delete_secret` refuse a
+  call without `workspace_id`, sending nothing, rather than act account-wide.
+  MCP never writes the file, and the hosted HTTP server neither reads it nor
+  changes its tools.
 
 - **`create_workspace`, `rename_workspace` and `delete_workspace`**, in the
   `account` tag. They need an owner's key that is not confined to a workspace;

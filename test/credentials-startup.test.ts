@@ -577,4 +577,74 @@ describe('a saved profile default workspace', () => {
       'ignoring ~/.mandala/defaults.json: it is not valid JSON',
     );
   });
+
+  // A default nobody can read may name a workspace: a tool that writes must
+  // not quietly go account-wide, where any computer on the account can bind it.
+  const unreadable: [string, () => void, string][] = [
+    ['not JSON', () => saveDefaults('{"version":1,'), 'it is not valid JSON'],
+    [
+      'readable by others',
+      () => {
+        saveDefaults(entry(baseDocument().profiles.default.account.id));
+        fs.chmodSync(defaultsFile(), 0o644);
+      },
+      'it must be a regular file',
+    ],
+  ];
+  const writers: [string, Record<string, unknown>][] = [
+    ['create_secret', { name: 'NEW_ONE', value: 'sk-fixture-9f3k' }],
+    ['set_secret', { name: 'NEW_ONE', value: 'sk-fixture-9f3k' }],
+    [
+      'replace_secret',
+      {
+        secret_id: SECRET_LIST.secrets[0]!.id,
+        value: 'sk-fixture-9f3k',
+        revision_id: SECRET_LIST.secrets[0]!.revision_id,
+      },
+    ],
+    [
+      'delete_secret',
+      {
+        secret_id: SECRET_LIST.secrets[0]!.id,
+        revision_id: SECRET_LIST.secrets[0]!.revision_id,
+        confirm: true,
+      },
+    ],
+  ];
+  it.each(
+    unreadable.flatMap(([label, make, why]) =>
+      writers.map(([tool, args]) => ({ label, make, why, tool, args })),
+    ),
+  )(
+    'refuses $tool without workspace_id on a defaults.json $label',
+    async ({ make, why, tool, args }) => {
+      make();
+      const calls = secretsBackend();
+      const wire = await local();
+      const r = await wire.call(tool, args);
+      expect(r.result?.isError).toBe(true);
+      expect(text(r)).toContain(`~/.mandala/defaults.json cannot be read (${why}`);
+      expect(text(r)).toContain('Pass workspace_id explicitly, or fix or delete the file');
+      expect(calls).toEqual([]);
+      // Reading still goes on account-wide.
+      const listed = await wire.call('list_secrets');
+      expect(listed.result?.isError).not.toBe(true);
+      expect(calls.at(-1)!.url.searchParams.has('workspace_id')).toBe(false);
+      expect((await listDescription(wire)).arg).toContain('cannot be read');
+    },
+  );
+
+  it.each(
+    unreadable.flatMap(([label, make]) =>
+      ['create_secret', 'set_secret'].map((tool) => ({ label, make, tool })),
+    ),
+  )('lets $tool with workspace_id through on a defaults.json $label', async ({ make, tool }) => {
+    make();
+    const calls = secretsBackend();
+    const wire = await local();
+    const r = await wire.call(tool, { name: 'NEW_ONE', value: 'v', workspace_id: WSP.id });
+    expect(r.result?.isError).not.toBe(true);
+    const post = calls.find((c) => c.method === 'POST');
+    expect(post).toMatchObject({ body: { workspace_id: WSP.id } });
+  });
 });

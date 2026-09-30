@@ -251,10 +251,18 @@ const workspaceArg = z
  * workspace from `mandala workspaces use`. Every other session (an explicit
  * or environment key, and every hosted one) keeps the words it always had.
  */
-function scopeDefault(session: { defaultWorkspace?: { id: string; name: string } | null }): string {
+function scopeDefault(session: {
+  defaultWorkspace?: { id: string; name: string } | null;
+  defaultWorkspaceUnreadable?: string;
+}): string {
   const d = session.defaultWorkspace;
   if (d === undefined) return '';
-  return ` Default when left out: the saved profile's workspace from \`mandala workspaces use\`, else account-wide — here ${d ? `workspace ${d.name} (${d.id})` : 'account-wide'}.`;
+  const here = session.defaultWorkspaceUnreadable
+    ? 'unknown, because ~/.mandala/defaults.json cannot be read: list_secrets and get_secret use account-wide, and create_secret, set_secret, replace_secret and delete_secret refuse a call without workspace_id'
+    : d
+      ? `workspace ${d.name} (${d.id})`
+      : 'account-wide';
+  return ` Default when left out: the saved profile's workspace from \`mandala workspaces use\`, else account-wide — here ${here}.`;
 }
 
 /** A secret's name as a tool argument, checked for what the platform would refuse. */
@@ -389,6 +397,16 @@ export const registerSecrets: Registrar = (server, session) => {
   // A left-out workspace_id: the saved profile's default, where there is one.
   const scoped = (workspace_id: string | undefined) =>
     workspace_id ?? session.defaultWorkspace?.id ?? undefined;
+  // A tool that writes, called without workspace_id while defaults.json cannot
+  // be read: the profile's default is unknown, and account-wide is the widest
+  // scope, where any computer on the account may be bound to what is stored.
+  // Refused before any request; the reading tools go on account-wide.
+  const unknownDefault = (workspace_id: string | undefined) =>
+    workspace_id === undefined && session.defaultWorkspaceUnreadable !== undefined
+      ? refused(
+          `Nothing was sent: ~/.mandala/defaults.json cannot be read (${session.defaultWorkspaceUnreadable}), so the saved profile's default workspace is unknown and this would otherwise act account-wide. Pass workspace_id explicitly, or fix or delete the file and restart this server.`,
+        )
+      : undefined;
   const byDefault = (workspace_id: string | undefined) =>
     workspace_id === undefined && session.defaultWorkspace
       ? " (the saved profile's default from mandala workspaces use)"
@@ -559,6 +577,8 @@ export const registerSecrets: Registrar = (server, session) => {
     },
     ({ name, value, workspace_id }, extra) =>
       storeGuarded('Storing the secret', true, value, async () => {
+        const unknown = unknownDefault(workspace_id);
+        if (unknown) return unknown;
         const secret = await session.api
           .with(extra.signal)
           .secrets.create({ name, value, workspaceId: scoped(workspace_id) });
@@ -585,6 +605,8 @@ export const registerSecrets: Registrar = (server, session) => {
     },
     ({ name, value, workspace_id }, extra) =>
       storeGuarded(`Setting ${name.trim()}`, true, value, async () => {
+        const unknown = unknownDefault(workspace_id);
+        if (unknown) return unknown;
         const store = session.api.with(extra.signal).secrets;
         const workspace = scoped(workspace_id);
         for (let attempt = 0; ; attempt++) {
@@ -628,6 +650,8 @@ export const registerSecrets: Registrar = (server, session) => {
     },
     ({ secret_id, value, revision_id, workspace_id }, extra) =>
       storeGuarded(`Replacing the value of ${secret_id}`, true, value, async () => {
+        const unknown = unknownDefault(workspace_id);
+        if (unknown) return unknown;
         const secret = await session.api.with(extra.signal).secrets.replace(secret_id, {
           value,
           revisionId: revision_id,
@@ -660,6 +684,8 @@ export const registerSecrets: Registrar = (server, session) => {
     },
     ({ secret_id, revision_id, workspace_id }, extra) =>
       storeGuarded(`Deleting ${secret_id}`, true, undefined, async () => {
+        const unknown = unknownDefault(workspace_id);
+        if (unknown) return unknown;
         const workspace = scoped(workspace_id);
         try {
           await session.api

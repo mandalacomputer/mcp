@@ -21,6 +21,7 @@ export async function runStdio(cfg: StdioConfig = {}): Promise<void> {
     apiKey: credentials.apiKey,
     baseUrl: credentials.baseUrl,
     ...(defaults ? { defaultWorkspace: defaults.workspace } : {}),
+    ...(defaults?.unreadable ? { defaultWorkspaceUnreadable: defaults.unreadable } : {}),
   };
   if (defaults?.note) console.error(`mandala-computer-mcp: ${defaults.note}`);
   const server = createServer(resolved);

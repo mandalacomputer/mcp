@@ -35,6 +35,13 @@ export type SessionConfig = {
    * environment key, and every hosted session — and then nothing changes.
    */
   defaultWorkspace?: { id: string; name: string } | null;
+  /**
+   * Local stdio from a saved profile only: set, to why, when
+   * ~/.mandala/defaults.json exists but cannot be read. The profile's default
+   * is then unknown, so the secret tools that write refuse a call without
+   * workspace_id instead of acting account-wide. Absent everywhere else.
+   */
+  defaultWorkspaceUnreadable?: string;
 };
 
 /**
@@ -58,6 +65,8 @@ export class Session {
   readonly modelKey?: string;
   /** See {@link SessionConfig.defaultWorkspace}. */
   readonly defaultWorkspace?: { id: string; name: string } | null;
+  /** See {@link SessionConfig.defaultWorkspaceUnreadable}. */
+  readonly defaultWorkspaceUnreadable?: string;
   #current?: string;
   /** WIDTHxHEIGHT of the bound computer, remembered from the last read of it. */
   #screen?: string;
@@ -73,6 +82,7 @@ export class Session {
     this.events = new EventHub(this.api, cfg.webSocket);
     this.modelKey = cfg.modelKey;
     this.defaultWorkspace = cfg.defaultWorkspace;
+    this.defaultWorkspaceUnreadable = cfg.defaultWorkspaceUnreadable;
     this.#current = id(cfg.computerId);
   }
 

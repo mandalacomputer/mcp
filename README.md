@@ -68,8 +68,13 @@ stderr. MCP only reads that file, once at startup, with the same checks as
 `credentials.json`. It is not applied when the profile's key is confined to a
 workspace (that key's own scope applies), when the default was saved for
 another account than the profile is logged in to now, or with an explicit or
-environment key; a file that cannot be read is ignored with a note on stderr.
-The hosted HTTP server never reads it, and its tools are unchanged.
+environment key. A file that cannot be read (not valid JSON, another version,
+or readable by others) is noted on stderr: `list_secrets` and `get_secret` then
+use account-wide, but `create_secret`, `set_secret`, `replace_secret` and
+`delete_secret` refuse a call without `workspace_id`, sending nothing, rather
+than act account-wide; pass `workspace_id`, or fix or delete the file and
+restart the server. The hosted HTTP server never reads it, and its tools are
+unchanged.
 
 **Claude Code** — as a plugin, which installs the server and a skill together:
 

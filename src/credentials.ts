@@ -392,6 +392,14 @@ export type ResolvedWorkspaceDefault = {
   workspace: { id: string; name: string } | null;
   /** Why defaults.json, or the profile's entry in it, was ignored, for one stderr line. */
   note?: string;
+  /**
+   * Set when defaults.json exists but cannot be used (not JSON, another
+   * version, a failed permission check): why, in a few words. The profile may
+   * have a default nobody can read, so the secret tools that write refuse a
+   * call that names no workspace_id rather than act account-wide; the reading
+   * ones go on account-wide. Absent when the file is missing or was read.
+   */
+  unreadable?: string;
 };
 
 const DEFAULTS_REASONS: Record<string, string> = {
@@ -475,9 +483,11 @@ export function resolveWorkspaceDefault(
     if (!(error instanceof CredentialsError)) throw error;
     // No file: no defaults, and nothing to say.
     if (error.code === 'missing_credentials') return { workspace: null };
+    const reason = DEFAULTS_REASONS[error.code] ?? error.code;
     return {
       workspace: null,
-      note: `ignoring ~/.mandala/defaults.json: ${DEFAULTS_REASONS[error.code] ?? error.code}`,
+      note: `ignoring ~/.mandala/defaults.json: ${reason}`,
+      unreadable: reason,
     };
   }
   if (!Object.hasOwn(defaults, name)) return { workspace: null };
