@@ -764,7 +764,16 @@ export const registerGuest: Registrar = (server, session) => {
           }
           throw err;
         }
-        return said(`Wrote ${res.bytes ?? bytes.length} bytes to ${res.path ?? path}.`, res);
+        // The platform's count, or none. Substituting the local length claimed
+        // the whole upload landed when nothing said so; both SDKs answer
+        // undefined/None here, and this says so in words (OPL-5522).
+        if (typeof res.bytes !== 'number' || !Number.isFinite(res.bytes)) {
+          return said(
+            `Wrote ${res.path ?? path}. The platform answered without a byte count, so how many of the ${bytes.length} bytes sent were written is not confirmed; read_file can check.`,
+            { ...res, bytes: null },
+          );
+        }
+        return said(`Wrote ${res.bytes} bytes to ${res.path ?? path}.`, res);
       }),
   );
 

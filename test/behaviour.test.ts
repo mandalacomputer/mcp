@@ -652,7 +652,10 @@ describe('input bodies', () => {
     expect(plain.isError).toBeFalsy();
     expect(lastInput()).toEqual({ action: 'paste', text: 'Café — 東京 😀' });
     await call('paste_text', { text: 'ls', shortcut: 'ctrl+shift+v' });
-    expect(lastInput()).toEqual({ action: 'paste', text: 'ls', key: 'ctrl+shift+v' });
+    expect(lastInput()).toEqual({ action: 'paste', text: 'ls', keys: ['ctrl', 'shift', 'v'] });
+    // The default, asked for by name, is the default: nothing extra is sent.
+    await call('paste_text', { text: 'ls', shortcut: 'ctrl+v' });
+    expect(lastInput()).toEqual({ action: 'paste', text: 'ls' });
     const before = platform.calls.length;
     for (const args of [
       { text: '' },

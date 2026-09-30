@@ -2,6 +2,8 @@ import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import {
   APIError,
   MandalaError,
+  OriginTLSError,
+  OriginUnreachableError,
   outcomeUnknownOn503,
   platformSaid,
   reasonAdvice,
@@ -144,8 +146,24 @@ export function withErrorMetadata(
   };
 }
 
+/**
+ * The SDKs' wording for 521-523, 525 and 526, or `undefined` for anything else.
+ *
+ * These statuses always carry it, whatever the body says: a body behind an
+ * origin that could not be reached or handshaken with is not the platform
+ * speaking. The body stays on the error for diagnostics. Every tool that builds
+ * its own refusal from the body asks this first.
+ */
+export function originWording(error: unknown): string | undefined {
+  return error instanceof OriginTLSError || error instanceof OriginUnreachableError
+    ? error.message
+    : undefined;
+}
+
 /** Keep scalar error prose, without displaying a serialized response body as its message. */
 export function apiErrorMessage(error: APIError): string {
+  const origin = originWording(error);
+  if (origin !== undefined) return origin;
   const named = platformSaid(error.body);
   if (named !== undefined) return named;
   // An unreadable or unclassified JSON envelope can leave a bounded JSON prefix

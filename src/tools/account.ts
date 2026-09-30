@@ -1,7 +1,7 @@
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
 import { APIError } from '../errors.js';
-import { failed, said, unavailableAdvice } from '../format.js';
+import { failed, originWording, said, unavailableAdvice } from '../format.js';
 import * as P from '../paths.js';
 import { count, label, metadata, metadataCall } from './directory.js';
 import { deleteAnnotations, readAnnotations } from './results.js';
@@ -388,6 +388,9 @@ export const registerAccount: Registrar = (server, session) => {
           raw = await session.api.json('GET', P.ACCOUNT, { signal: extra.signal });
         } catch (error) {
           if (error instanceof APIError) {
+            // 521-523, 525 and 526 keep their class, so the shared refusal
+            // gives the SDKs' wording rather than the body's.
+            if (originWording(error) !== undefined) throw error;
             const refusal = z.object({ error: label.optional() }).safeParse(error.body);
             throw new APIError(
               refusal.success && refusal.data.error

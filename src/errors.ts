@@ -119,12 +119,22 @@ const REASON_CLEARS: ReadonlySet<string> = new Set(['contention', 'starting']);
  * {@link ConflictError}, which {@link isTransient} calls worth sending again, and
  * a caller looping on that would resend the same resize until it gave up.
  */
+/**
+ * `name_taken` and `stale_revision` are the secret store's two 409s: a name
+ * already used in that scope, and a `revision_id` that is no longer the
+ * secret's current one. Neither clears by waiting — the same request is refused
+ * the same way until the caller picks another name or reads the secret again —
+ * and without them here both were ordinary {@link ConflictError}s, which
+ * {@link isTransient} calls worth sending again.
+ */
 const REASON_PERMANENT: ReadonlySet<string> = new Set([
   'unavailable',
   'unsupported',
   'revoked',
   'exists',
   'running',
+  'name_taken',
+  'stale_revision',
 ]);
 
 /** Whether waiting can change a classified refusal's answer. */
@@ -209,6 +219,10 @@ export function reasonAdvice(reason: string | undefined): string | undefined {
       // there because stop_computer is a thing a model can do on its own
       // initiative, and a stop the user did not ask for ends whatever was open.
       return 'the computer is running and this needs it stopped (a resize, today). This does not clear by waiting: stop_computer first, then send it again \u2014 and say so rather than stopping a computer the user did not ask you to stop';
+    case 'name_taken':
+      return 'a secret with this name already exists in this scope; this does not clear by waiting \u2014 pick another name or replace the existing one';
+    case 'stale_revision':
+      return 'the secret changed since you read it; read it again and retry with its current revision';
     case 'revoked':
       // Reached only on a status statusAdvice has no sentence for, because the
       // formatter asks that one first and the platform sends this word on 401 and
@@ -1019,17 +1033,18 @@ export class RedirectError extends APIError {
 }
 
 /**
- * 502, 520 — a proxy had no usable answer from the platform.
+ * 520 — the platform answered a proxy with something it could not read.
  *
  * Sits between the other two and must not be filed with either, because the
- * question a caller is really asking is whether their work happened, and these
- * are the statuses whose honest answer is "unknown".
+ * question a caller is really asking is whether their work happened, and this
+ * is a status whose honest answer is "unknown".
  *
- * One class, two messages, because the two do not know the same amount. A 520 is
- * Cloudflare naming its origin's reply unreadable, so arrival is established. A
- * 502 is any proxy saying it has nothing it can use, which covers both an
- * invalid reply and no reply at all — indistinguishable from here, so it claims
- * neither. See BAD_GATEWAY_MESSAGE.
+ * A 502 shared this class until OPL-5522 and is now a bare {@link APIError},
+ * as it is in both SDKs, so a caller branching on the class gets one answer in
+ * all three clients. It keeps a message of its own, because a 520 is Cloudflare
+ * naming its origin's reply unreadable, so arrival is established, while a 502
+ * is any proxy saying it has nothing it can use — an invalid reply or no reply
+ * at all, indistinguishable from here. See BAD_GATEWAY_MESSAGE.
  *
  * A 524 means the request arrived and is still being worked on. 521-523 mean it
  * never arrived, so nothing was started. A 520 means it **did** arrive — the
@@ -1087,15 +1102,10 @@ const BY_STATUS: Record<number, typeof APIError> = {
   // Retry-After is parsed by Api and passed through errorForStatus.
   // A 429 built without headers still has the same public error class.
   429: RateLimitError,
-  // The other status a proxy writes on its own, and it was the one gap left in
-  // this range: with no entry it fell through to a bare APIError, so a model
-  // read `HTTP 502` or 500 characters of nginx's HTML — the exact failure the
-  // statuses below exist to remove. It polls through isTransientForPoll — the
-  // outcome of a 502 is unknown, and a read whose outcome is unknown can simply
-  // be read again — so the wait tools reach it and replay whichever of those two
-  // it was into their give-up text. Filed with 520 because the honest answer is the same one:
-  // unknown. See BAD_GATEWAY_MESSAGE for why it is not filed with 521-523.
-  502: OriginResponseError,
+  // 502 has no entry: it is a bare APIError, as in both SDKs (OPL-5522). It is
+  // still given BAD_GATEWAY_MESSAGE in errorForStatus rather than `HTTP 502` or
+  // 500 characters of a proxy's HTML, and it still polls through
+  // isTransientForPoll, which asks the status and not the class.
   503: UnavailableError,
   504: GatewayTimeoutError,
   // NOT OriginUnreachableError, which is the trap in this range: 520 means the
@@ -1185,7 +1195,7 @@ const ORIGIN_RESPONSE_MESSAGE =
 /**
  * What a caller is told for a 502, which is the two failures either side of it.
  *
- * Not ORIGIN_RESPONSE_MESSAGE, though it shares that class. A 520 is Cloudflare
+ * Not ORIGIN_RESPONSE_MESSAGE. A 520 is Cloudflare
  * saying the origin answered unreadably, so "the request did arrive" is known.
  * A 502 is any proxy saying it has no usable answer, and the two reasons —
  * upstream replied with something invalid, upstream could not be reached — are
@@ -1266,6 +1276,27 @@ export function platformSaid(body: unknown): string | undefined {
       : undefined;
 }
 
+/**
+ * The sentence to put in an error's message: the platform's own, else an RFC
+ * 9457 body's `detail`, then its `title`.
+ *
+ * Cloudflare answers its own 403s and 5xx in that shape to a request asking for
+ * JSON, which every request from this server does. Unrecognised, the message
+ * was up to 500 characters of raw JSON, and a model read `HTTP 403` or the
+ * serialized body instead of the one readable sentence in it. The SDKs read it
+ * the same way (OPL-5522).
+ *
+ * For the MESSAGE only. {@link platformSaid}, and so {@link platformNamed},
+ * still count only `error`: a proxy's `detail` describes the edge and cannot
+ * know what the request under it was, so on a status this file has wording for
+ * the wording still wins.
+ */
+export function messageFromBody(body: unknown): string | undefined {
+  const named = platformSaid(body);
+  if (named !== undefined || !record(body)) return named;
+  return nonblank(body.detail) ?? nonblank(body.title);
+}
+
 /** Build the error for a status, with the platform's own message when it sent one. */
 export function errorForStatus(
   status: number,
@@ -1295,16 +1326,11 @@ export function errorForStatus(
   // page, which says 500 characters of nothing. NOT for a structured message:
   // that is the one case where the response knows more than this file does.
   //
-  // The same guard on every branch below, because platformNamed already settles
-  // the question they were once split over. Two of these used to substitute
-  // unconditionally, on the reading that a 521-526 cannot carry the platform's
-  // account of itself — true, and beside the point. platformNamed does not ask
-  // whether the PLATFORM spoke; it asks whether anything did, precisely because
-  // a hop in front of a self-hosted MANDALA_BASE_URL is a hop this server has
-  // never seen and cannot outrank. An operator's own gateway answering 522 with
-  // `{"error":"backend pool empty; scale the worker group"}` knows more about
-  // that deployment than the generic outage prose here does, and discarding it
-  // was the very thing the 504 and 520 guards exist to prevent.
+  // Guarded on 502, 504, 520 and 524, where the platform could have spoken
+  // through the proxy. NOT on 521-526, which always get the wording below, as
+  // they do in both SDKs (OPL-5522): those statuses say the platform was never
+  // reached, so a body on one cannot be its account of the request, and one
+  // answer across three clients is worth more than a stranger's sentence.
   if (Cls === GatewayTimeoutError && !platformNamed(body)) {
     return new GatewayTimeoutError(
       gatewayTimeoutMessage(status),
@@ -1315,15 +1341,17 @@ export function errorForStatus(
     );
   }
   if (Cls === OriginResponseError && !platformNamed(body)) {
-    // 502 and 520 share a class and not a message: one knows the request
-    // arrived, the other cannot tell. See BAD_GATEWAY_MESSAGE.
-    const said = status === 502 ? BAD_GATEWAY_MESSAGE : ORIGIN_RESPONSE_MESSAGE;
-    return new OriginResponseError(said, status, body, retryAfterMs, metadata);
+    return new OriginResponseError(ORIGIN_RESPONSE_MESSAGE, status, body, retryAfterMs, metadata);
   }
-  if (Cls === OriginTLSError && !platformNamed(body)) {
+  // A bare APIError, as in both SDKs, but not a bare message: the model would
+  // otherwise read `HTTP 502` or a proxy's HTML. See BAD_GATEWAY_MESSAGE.
+  if (status === 502 && !platformNamed(body)) {
+    return new APIError(BAD_GATEWAY_MESSAGE, status, body, retryAfterMs, metadata);
+  }
+  if (Cls === OriginTLSError) {
     return new OriginTLSError(ORIGIN_TLS_MESSAGE, status, body, retryAfterMs, metadata);
   }
-  if (Cls === OriginUnreachableError && !platformNamed(body)) {
+  if (Cls === OriginUnreachableError) {
     return new OriginUnreachableError(
       ORIGIN_UNREACHABLE_MESSAGE,
       status,
