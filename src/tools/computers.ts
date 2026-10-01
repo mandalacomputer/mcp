@@ -24,7 +24,7 @@ import {
   withoutCredentials,
 } from '../format.js';
 import * as P from '../paths.js';
-import { heartbeat, POLL_MS, pollDelay, sleep } from '../poll.js';
+import { heartbeat, POLL_MS, pollDelay, rampDelay, sleep } from '../poll.js';
 import {
   buildIdempotencyKeyArg,
   idempotencyKeyArg,
@@ -1220,6 +1220,10 @@ export const registerComputers: Registrar = (server, session, opts) => {
           // wait held on it does not
           // end saying only "last seen running".
           let heldOn: 'egress' | 'browser' | 'desktop' | undefined;
+          // Turns on which a running computer answered "not yet" (secrets on
+          // their way, a proxy pending, no desktop session), which ramp the
+          // sleep: see rampDelay. Every other turn keeps POLL_MS or pollDelay.
+          let notYet = 0;
           while (!untilDeadline.aborted) {
             // The caller giving up ends the wait. The signal aborts the request
             // in flight, but nothing about an aborted request stops the next
@@ -1355,7 +1359,7 @@ export const registerComputers: Registrar = (server, session, opts) => {
               // platform without secrets_delivering, the receipt says instead.
               if (secretsOnTheirWay(c)) {
                 await beat(`Waiting for ${id} — running; its secrets are still on their way.`);
-                await sleep(POLL_MS, signal);
+                await sleep(rampDelay(notYet++), signal);
                 continue;
               }
               // The same gap for a browser proxy: the guest answers before the
@@ -1367,7 +1371,7 @@ export const registerComputers: Registrar = (server, session, opts) => {
                 await beat(
                   `Waiting for ${id} — running; its browser proxy is still being applied.`,
                 );
-                await sleep(POLL_MS, signal);
+                await sleep(rampDelay(notYet++), signal);
                 continue;
               }
               // And for an egress proxy whose credentials have not reached the
@@ -1378,7 +1382,7 @@ export const registerComputers: Registrar = (server, session, opts) => {
                 await beat(
                   `Waiting for ${id} — running; waiting for the egress proxy's credentials (egress_proxy_pending), which usually arrive within seconds.`,
                 );
-                await sleep(POLL_MS, signal);
+                await sleep(rampDelay(notYet++), signal);
                 continue;
               }
               // "The guest is up" is not a status the platform reports, so it is
@@ -1484,7 +1488,12 @@ export const registerComputers: Registrar = (server, session, opts) => {
                     ? `Waiting for ${id} — running; the guest answers, and its desktop session is not active yet.`
                     : `Waiting for ${id} — running; the platform could not be asked: ${blocked}`,
                 );
-                await sleep(pollDelay(err), signal);
+                // A 409 is the session not logged in yet, the ordinary answer
+                // here, so it ramps; anything else is a failed poll.
+                await sleep(
+                  err instanceof ConflictError ? rampDelay(notYet++) : pollDelay(err),
+                  signal,
+                );
                 continue;
               }
               // Only a `true` that FINISHED with 0 is evidence of a session. The
@@ -1499,7 +1508,7 @@ export const registerComputers: Registrar = (server, session, opts) => {
               await beat(
                 `Waiting for ${id} — running; the guest answers, and its desktop session is not active yet.`,
               );
-              await sleep(POLL_MS, signal);
+              await sleep(rampDelay(notYet++), signal);
               continue;
             }
             await sleep(POLL_MS, signal);

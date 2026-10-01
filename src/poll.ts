@@ -33,6 +33,22 @@ export const sleep = (ms: number, signal?: AbortSignal) =>
 /** How long these loops leave between polls. */
 export const POLL_MS = 2_000;
 
+/** The first sleep of a ramped wait; see {@link rampDelay}. */
+export const FIRST_POLL_MS = 250;
+
+/**
+ * The sleep after a wait's `turn`th ordinary "not yet" (counting from 0):
+ * 250ms, doubling, and never more than {@link POLL_MS}.
+ *
+ * For the stages of a computer coming up whose answer usually arrives within a
+ * second or two of the first read: secrets on their way, a proxy being applied,
+ * a desktop session not logged in yet. A flat interval rounded every one of
+ * those up to a whole {@link POLL_MS}. A poll that FAILED does not ramp; that
+ * is {@link pollDelay}'s business, and it still honours `Retry-After`.
+ */
+export const rampDelay = (turn: number): number =>
+  Math.min(FIRST_POLL_MS * 2 ** Math.min(turn, 30), POLL_MS);
+
 /**
  * The same interval, unless the platform asked for longer.
  *
