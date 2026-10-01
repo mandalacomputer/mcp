@@ -1508,8 +1508,26 @@ check:surface — the mirror matches the platform (N routes, N parameters, from 
 
 ## See also
 
-- [python-sdk](https://github.com/mandalacomputer/python-sdk) — the Python SDK,
-  for writing code against the same API rather than driving it from a model.
+- [typescript-sdk](https://github.com/mandalacomputer/typescript-sdk) — the
+  TypeScript SDK and the `mandala` CLI, for writing code against the same API
+  rather than driving it from a model.
+- [python-sdk](https://github.com/mandalacomputer/python-sdk) — the Python SDK
+  and the `mandala-py` CLI, for the same thing from Python.
+
+### The same operation under each client's name
+
+The clients follow their own language's naming, so one operation can go by
+several names. Where a client has no way to do it, the cell says so with —.
+
+| Operation | TypeScript SDK | Python SDK | MCP tool | `mandala` CLI | `mandala-py` CLI |
+|---|---|---|---|---|---|
+| A command in the background | `execBackground()`, then `execPoll(pid)` and `execKill(pid)` | `start_exec()`, then `background_command(pid).poll()` and `.kill()` | `exec` with `background: true`, then `exec_poll` and `exec_kill` | `computers exec --background`, then `computers exec-poll` and `computers exec-kill` | — |
+| Delete a computer with its snapshots | `delete({ deleteSnapshots: true, expect })` | `delete(delete_snapshots=True, expect=…)`; `purge_snapshots` is the deprecated name | `delete_computer` with `delete_snapshots` and `expect` | `computers delete --delete-snapshots --expect` | — |
+| Snapshot holdings (count, bytes, fingerprint) | `holdings()`, or its alias `snapshotHoldings()` | `snapshot_holdings()` | `snapshot_holdings` | `snapshots holdings` | — |
+| The usage window | `usage.read({ from, to })` | `usage.read(since=…, until=…)`, or `from_=` and `to=` | `get_usage` with `from` and `to` | `usage --from … --to …` | — |
+| Change a computer (`PATCH`) | `update({ … })` | `rename()`, `resize()`, `set_idle_suspend()`, `set_browser_proxy()`, `set_egress_proxy()` | `update_computer` | `computers rename`, `resize`, `idle-suspend`, `browser-proxy set`/`clear`, `egress-proxy set`/`clear` | `browser-proxy set`/`clear`, `egress-proxy set`/`clear` |
+| Wait until the computer is ready | `waitForGuest()`, `waitForDesktop()` | `wait_for_guest()`, `wait_for_desktop()` | `wait_for_computer` with `until: "guest"`, which on Linux also waits for the desktop session | `computers wait --until guest` or `--until desktop` | — |
+| The windows after an input action | `{ context: true }` on an input method, e.g. `click(x, y, [], { context: true })` | `context=True` on an input method, e.g. `click(x, y, context=True)` | `context: true` on an input tool | — | — |
 
 ## Security
 
