@@ -133,6 +133,10 @@ are wording changes, and they are behaviour changes in the way that matters.
   allows this server's key to manage keys: Settings → Credentials → API keys →
   the key's menu → **Allow managing keys**. They used to name a "Manage keys"
   setting, which the dashboard does not have.
+- **`run_agent_chat` reads an RFC 9457 error body as its sentence**, as every
+  other tool already does: a refusal with no `error` but a `detail` or `title`
+  now shows `detail`, then `title`, instead of "Chat request failed without a
+  usable error message". A 521-523 keeps this server's own wording.
 - **`paste_text` sends its shortcut as `keys`**, `["ctrl", "shift", "v"]`, as
   both SDKs do, instead of the string `key: "ctrl+shift+v"`. `ctrl+v`, the
   platform's default, sends nothing extra.

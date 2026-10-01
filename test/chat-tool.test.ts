@@ -546,6 +546,53 @@ describe('flat and nested chat failures', () => {
     expect(text(result)).toContain('model key is required');
     expect(platform.calls).toHaveLength(1);
   });
+  // OPL-5526: an RFC 9457 body (no `error`, a `detail` and/or `title`) is how
+  // an edge answers its own 403s and 5xx. Every other tool shows its sentence;
+  // this one used to fall back to "without a usable error message".
+  it('shows an RFC 9457 403 body detail and keeps the 403 advice', async () => {
+    answer({ title: 'Forbidden', detail: 'The edge refused this request' }, 403, {
+      'Content-Type': 'application/problem+json',
+    });
+    const result = await connection.call('run_agent_chat', task);
+    expect(result.isError).toBe(true);
+    expect(text(result)).toContain('The edge refused this request');
+    expect(text(result)).not.toContain('without a usable error message');
+    expect(text(result)).toContain('a role that changed');
+    expect(text(result)).toContain('Retrying does not help');
+    expect(text(result)).not.toContain('permission_error');
+  });
+  it('shows an RFC 9457 title when the body has no detail', async () => {
+    answer({ title: 'Forbidden by policy' }, 403, { 'Content-Type': 'application/problem+json' });
+    const result = await connection.call('run_agent_chat', task);
+    expect(result.isError).toBe(true);
+    expect(text(result)).toContain('Forbidden by policy');
+    expect(text(result)).not.toContain('without a usable error message');
+  });
+  // 521-523 mean the platform was never reached, so a body there is not its
+  // account of the request: the server's own wording wins over its detail.
+  it('keeps the origin-unreachable wording for a 522 whatever its RFC 9457 body says', async () => {
+    answer({ title: 'x', detail: 'retry immediately' }, 522, {
+      'Content-Type': 'application/problem+json',
+    });
+    const result = await connection.call('run_agent_chat', task);
+    expect(result.isError).toBe(true);
+    expect(text(result)).toContain('a proxy in front of the platform could not reach it');
+    expect(text(result)).not.toContain('retry immediately');
+    expect(text(result)).not.toContain('without a usable error message');
+  });
+  it('prefers the platform sentence over an RFC 9457 detail', async () => {
+    answer({ error: 'platform sentence', detail: 'edge detail', title: 'edge title' }, 403);
+    const result = await connection.call('run_agent_chat', task);
+    expect(text(result)).toContain('platform sentence');
+    expect(text(result)).not.toContain('edge detail');
+    expect(text(result)).not.toContain('edge title');
+  });
+  it('still falls back when a record body has no error, detail or title', async () => {
+    answer({ type: 'about:blank', status: 403 }, 403);
+    const result = await connection.call('run_agent_chat', task);
+    expect(result.isError).toBe(true);
+    expect(text(result)).toContain('Chat request failed without a usable error message');
+  });
 });
 
 describe('chat heartbeat and callback lifetime', () => {
