@@ -1,7 +1,7 @@
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
 import { MODEL_KEY_HEADER } from '../api.js';
-import { APIError, agentRunAdvice, platformSaid } from '../errors.js';
+import { APIError, agentRunAdvice, messageFromBody } from '../errors.js';
 import { apiErrorMessage, errorMetadata, failed, originWording, refused, said } from '../format.js';
 import * as P from '../paths.js';
 import { heartbeat } from '../poll.js';
@@ -152,7 +152,7 @@ function chatFailure(error: unknown): CallToolResult {
   const detail =
     (nested === undefined ? originWording(error) : undefined) ??
     (isRecord(error.body)
-      ? (platformSaid(error.body) ?? 'Chat request failed without a usable error message')
+      ? (messageFromBody(error.body) ?? 'Chat request failed without a usable error message')
       : edgeCut(error)
         ? EDGE_CUT.detail
         : apiErrorMessage(error));
