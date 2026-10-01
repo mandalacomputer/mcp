@@ -3,12 +3,13 @@
  * this server deliberately does not offer.
  */
 
+import { readFileSync } from 'node:fs';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { API_KEY, connect, installFakePlatform, WHOAMI } from './harness.js';
 
 const NO_PERMISSION =
-  'This API key cannot manage API keys. Turn on “Manage keys” for it under Credentials in the dashboard, or use a key that has it.';
+  'This API key cannot manage API keys. Allow it in the dashboard under Settings → Credentials → API keys → the key’s menu → Allow managing keys, or use a key that has it.';
 
 const connections: Awaited<ReturnType<typeof connect>>[] = [];
 let platform: ReturnType<typeof installFakePlatform>;
@@ -147,6 +148,21 @@ it('list_api_keys says minting and revoking are left out on purpose, and where t
   expect(tool?.description).toContain('deliberately not tools here');
   expect(tool?.description).toContain('a raw key never lands in this transcript');
   expect(tool?.description).toContain('mandala api-keys create / revoke');
+});
+
+it('list_api_keys and the README name the dashboard control as the dashboard does', async () => {
+  // The control is the key's menu → "Allow managing keys"; there is no
+  // "Manage keys" checkbox to send a person looking for.
+  const tool = (await (await open()).client.listTools()).tools.find(
+    (t) => t.name === 'list_api_keys',
+  );
+  expect(tool?.description).toContain(
+    "Settings → Credentials → API keys → the key's menu → Allow managing keys",
+  );
+  expect(tool?.description).not.toContain('Manage keys');
+  const readme = readFileSync(new URL('../README.md', import.meta.url), 'utf8');
+  expect(readme).not.toContain('Manage keys');
+  expect(readme.replace(/\s+/g, ' ')).toContain("the key's menu → **Allow managing keys**");
 });
 
 it('list_api_keys says so when there are none', async () => {

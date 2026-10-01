@@ -129,6 +129,10 @@ are wording changes, and they are behaviour changes in the way that matters.
 
 ### Fixed
 
+- **`list_api_keys` and the README name the real dashboard control** that
+  allows this server's key to manage keys: Settings → Credentials → API keys →
+  the key's menu → **Allow managing keys**. They used to name a "Manage keys"
+  setting, which the dashboard does not have.
 - **`paste_text` sends its shortcut as `keys`**, `["ctrl", "shift", "v"]`, as
   both SDKs do, instead of the string `key: "ctrl+shift+v"`. `ctrl+v`, the
   platform's default, sends nothing extra.
