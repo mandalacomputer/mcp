@@ -14,6 +14,15 @@ are wording changes, and they are behaviour changes in the way that matters.
 
 ## [Unreleased]
 
+### Changed
+
+- **`wait_for_computer` with `until: "guest"` returns within moments of a
+  computer's secrets landing**, rather than up to a whole poll interval later.
+  While a running computer's secrets are on their way, its browser or egress
+  proxy is pending, or its desktop session is not logged in yet, the wait now
+  polls 250ms after its first read, doubling up to the usual 2s. A poll that
+  failed still waits 2s, or the `Retry-After` the platform sent.
+
 ## [0.9.0] — 2026-09-30
 
 ### Added
