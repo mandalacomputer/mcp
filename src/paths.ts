@@ -67,8 +67,8 @@ export const SSH_KEYS = 'ssh-keys';
 /** Who the credential is (platform OPL-5053). Needs no permission. */
 export const WHOAMI = 'whoami';
 /**
- * The holder's own API keys (platform OPL-5053). Needs the key's opt-in
- * "Manage keys" permission; only the listing is exposed here — see
+ * The holder's own API keys (platform OPL-5053). Needs the key to be allowed
+ * to manage keys, an opt-in; only the listing is exposed here — see
  * tools/account.ts for why minting and revoking are not.
  */
 export const API_KEYS = 'api-keys';

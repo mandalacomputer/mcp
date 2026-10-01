@@ -435,8 +435,9 @@ app's (`prefix` `oauth`).
 `list_api_keys` lists the key holder's API keys on the account, newest first —
 never a raw key. Each carries `minted_by_key_id`: the key that minted it over
 the API, or `null` for one minted from the dashboard. Revoking a key does not
-revoke the keys it minted. It needs this server's key to have the **Manage keys**
-permission, which only a person can turn on, in the dashboard; without it the
+revoke the keys it minted. It needs this server's key to be allowed to manage
+keys, which only a person can turn on in the dashboard (Settings → Credentials →
+API keys → the key's menu → **Allow managing keys**); without it the
 tool answers the platform's 403, whose sentence says exactly that. A Connected
 app's key never has the permission.
 
