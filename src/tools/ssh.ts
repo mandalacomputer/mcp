@@ -8,10 +8,13 @@ import type { Registrar } from './types.js';
  * SSH access: the caller's public keys, and whether SSH is on for a computer.
  *
  * Keys belong to the PERSON the API key was issued to, not to the account: one
- * key identifies one person, the same list comes back whichever account the
- * key acts on, and a key added here is accepted by every SSH-on computer of
- * every account where that person is an owner or member. Viewers cannot
- * connect. A workspace-scoped API key may read keys but not add or remove them.
+ * key identifies one person, and the same list comes back whichever account the
+ * key acts on. A key added here, through an API key or a connected app, is
+ * bound to the account that credential acts on and to the credential: it is
+ * accepted by that account's SSH-on computers only, and is removed when the
+ * credential is revoked. A key added from the dashboard is accepted on every
+ * account where that person is an owner or member. Viewers cannot connect. A
+ * workspace-scoped API key may read keys but not add or remove them.
  *
  * The connection itself is ordinary OpenSSH through the platform's jump host,
  * which a model cannot open from here; these tools set it up and report on it.
@@ -124,7 +127,7 @@ export const registerSSH: Registrar = (server, session) => {
     {
       title: 'List your SSH keys',
       description:
-        'The SSH public keys registered to the person this API key belongs to — the same list whichever account the key acts on. Each is accepted by every computer with SSH on, on every account where that person is an owner or member. Shows id, type, SHA256 fingerprint and name.',
+        'The SSH public keys registered to the person this API key belongs to — the same list whichever account the key acts on. A key added from the dashboard is accepted by every computer with SSH on, on every account where that person is an owner or member; one added through an API key or connected app (add_ssh_key) only on the account that credential acts on, until the credential is revoked. Shows id, type, SHA256 fingerprint and name.',
       inputSchema: {},
       annotations: { readOnlyHint: true },
     },
@@ -158,7 +161,7 @@ export const registerSSH: Registrar = (server, session) => {
     {
       title: 'Add an SSH public key',
       description:
-        'Register an OpenSSH public key to the person this API key belongs to. Accepted: Ed25519, ECDSA (P-256, P-384, P-521), their security-key forms, and RSA of at least 3072 bits. Refused: DSA, shorter RSA, certificates, a line with SSH options in front of the key, and anything but one key on one line. A key can belong to one person only, and each person may hold eight. Never send a PRIVATE key.',
+        'Register an OpenSSH public key to the person this API key belongs to. It is accepted only by computers with SSH on in the account this credential acts on, and is removed when the credential is revoked. Accepted: Ed25519, ECDSA (P-256, P-384, P-521), their security-key forms, and RSA of at least 3072 bits. Refused: DSA, shorter RSA, certificates, a line with SSH options in front of the key, and anything but one key on one line. A key can belong to one person only, and each person may hold eight. Never send a PRIVATE key.',
       inputSchema: {
         public_key: z
           .string()
@@ -252,7 +255,7 @@ export const registerSSH: Registrar = (server, session) => {
     {
       title: 'Switch SSH on or off for a computer',
       description:
-        'Turn SSH on or off for a computer. On, the computer runs an SSH server reachable only through the platform jump host, accepting the keys of every owner and member of the account; off, the server stops and open SSH sessions are closed. No restart either way. Owners and members only.',
+        'Turn SSH on or off for a computer. On, the computer runs an SSH server reachable only through the platform jump host, accepting the keys of every owner and member of the account, except keys added through an API key or connected app on another account; off, the server stops and open SSH sessions are closed. No restart either way. Owners and members only.',
       inputSchema: {
         ...idArg,
         enabled: z.boolean().describe('true to switch SSH on, false to switch it off.'),
