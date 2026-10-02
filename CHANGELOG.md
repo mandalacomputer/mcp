@@ -16,6 +16,13 @@ are wording changes, and they are behaviour changes in the way that matters.
 
 ### Changed
 
+- **`list_ssh_keys`, `add_ssh_key` and `set_computer_ssh` say a key added
+  through the API is bound to its credential.** A key registered with
+  `add_ssh_key` now reaches only the account the API key (or connected app)
+  acts on, and is removed when that credential is revoked; a key added from the
+  dashboard still reaches every account where the person is an owner or member.
+  The tools' behaviour is unchanged.
+
 - **`wait_for_computer` with `until: "guest"` returns within moments of a
   computer's secrets landing**, rather than up to a whole poll interval later.
   While a running computer's secrets are on their way, its browser or egress

@@ -228,9 +228,11 @@ deliberately not tools — see [Who you are, and API keys](#who-you-are-and-api-
 
 **SSH access** — `list_ssh_keys`, `add_ssh_key`, `remove_ssh_key`,
 `get_computer_ssh`, `set_computer_ssh`. Keys belong to the person the API key
-was issued to, not to the account, and are accepted by every computer with SSH
-on, on every account where that person is an owner or member. A
-workspace-scoped key can read keys but not add or remove them.
+was issued to, not to the account. A key added with `add_ssh_key` (an API key
+or connected app) is accepted only by computers with SSH on in the account that
+credential acts on, and is removed when the credential is revoked; a key added
+from the dashboard is accepted on every account where that person is an owner
+or member. A workspace-scoped key can read keys but not add or remove them.
 
 **Secrets** — `list_secrets`, `get_secret`, `create_secret`, `set_secret`,
 `replace_secret`, `delete_secret` for the account's secret store, and
