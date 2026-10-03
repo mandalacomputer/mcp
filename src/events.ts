@@ -252,6 +252,23 @@ const MAX_BACKOFF_MS = 15_000;
 /** How long a connection has to reach its opening frame. */
 const CONNECT_TIMEOUT_MS = 20_000;
 
+/**
+ * How many connections in a row may fail to reach their opening frame, each
+ * after a read that said `running`, before the stream is ended as capped.
+ *
+ * The platform refuses a stream past 8 open on one computer, or 128 per
+ * account on one server, with a `409` on the upgrade and no `reason`, and
+ * waiting does not lift it until one of the caller's own streams closes. undici
+ * reports that `409` as it reports every other refused upgrade — "Received
+ * network error or non-101 status code", no status, no body — and the computer
+ * reads `running` throughout, so one such failure cannot be told from a host
+ * that dropped a connection or a credential a restart rotated. A run of them
+ * can, because those clear within an attempt or two. Five spends the backoff's
+ * first four steps, about fifteen seconds, before saying so instead of staying
+ * `connecting` for the life of the session.
+ */
+export const RUNNING_REFUSALS_TO_SETTLE = 5;
+
 type Buffered = { index: number; event: ComputerEvent };
 
 /** What a read of the buffer hands back. */
@@ -1185,6 +1202,9 @@ export class Subscription {
 
   async #loop(): Promise<void> {
     let backoff = BACKOFF_MS;
+    // Connections in a row that never reached their opening frame, each opened
+    // after a read that said `running`. See RUNNING_REFUSALS_TO_SETTLE.
+    let refusedRunning = 0;
     while (!this.#abort.signal.aborted) {
       let url: string;
       try {
@@ -1195,6 +1215,10 @@ export class Subscription {
           this.#wakeAll();
           return;
         }
+        // A read that did not say `running` — a computer still starting, a
+        // host the platform could not reach — is not the stream cap, which
+        // refuses only a running computer's upgrade. It breaks the run.
+        refusedRunning = 0;
         this.#state = { status: 'connecting' };
         await sleep(backoff, this.#abort.signal);
         backoff = Math.min(backoff * 2, MAX_BACKOFF_MS);
@@ -1229,8 +1253,33 @@ export class Subscription {
         // Recovery often closes a fallback or successful probe immediately
         // after its greeting. It still proved the host reachable, so discard
         // the failure backoff accumulated before that greeting.
-        if (reached) backoff = BACKOFF_MS;
+        if (reached) {
+          backoff = BACKOFF_MS;
+          refusedRunning = 0;
+        }
         continue;
+      }
+      // The one refusal the read before this connection cannot answer. The
+      // platform's cap on open streams refuses a running computer's upgrade,
+      // and nothing here can see that it did — but it does not lift by being
+      // asked again, so a run of unreached connections on a running computer
+      // is reported as the cap rather than retried behind `connecting` for as
+      // long as the session lives. A connection that greeted breaks the run,
+      // as does any read above that did not say `running`.
+      if (reached) {
+        refusedRunning = 0;
+      } else if (++refusedRunning >= RUNNING_REFUSALS_TO_SETTLE) {
+        this.#state = {
+          status: 'stopped',
+          reason:
+            `${this.computerId}'s event stream would not open, and it reports itself as running. ` +
+            'The platform refuses a stream past 8 open on one computer or 128 per account on one ' +
+            'server, and that refusal looks the same as a failed connection from here: close ' +
+            'another stream on this computer (each SDK waitFor/events call holds one, and so ' +
+            "does each MCP session that has asked about this computer's events), then ask again.",
+        };
+        this.#wakeAll();
+        return;
       }
       // A connection that got as far as its opening frame is not a failure,
       // however soon it died: a computer that restarts drops the socket every
@@ -1262,12 +1311,17 @@ export class Subscription {
    * socket which closes with no status and no body, which is the least
    * debuggable failure this file can produce.
    *
-   * The read is also what answers the two refusals a websocket cannot report.
-   * The reference says a suspended computer is refused with `409` and
+   * The read is also what answers two of the three refusals a websocket cannot
+   * report. The reference says a suspended computer is refused with `409` and
    * `resume_required`, and a stopped one with `409 unavailable`; neither status
    * nor body reaches a `WebSocket` client, so every client of this stream has
    * to infer them. Here they are not inferred at all — the status is on the
    * record this call already had to make for the URL.
+   *
+   * The third is a `409` with no `reason` for a stream past 8 open on one
+   * computer or 128 per account on one server, and this read cannot answer it:
+   * the computer is `running`. `#loop` counts those instead — see
+   * RUNNING_REFUSALS_TO_SETTLE.
    */
   async #url(): Promise<string> {
     let c: Computer;
