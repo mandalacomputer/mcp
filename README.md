@@ -239,9 +239,11 @@ from the dashboard is accepted on every account where that person is an owner
 or member. `list_ssh_keys` marks each key with where it works from the account
 the API key acts on: every account, this account only, or another account only
 (refused here; which account is not said). A key is registered once, so a key
-bound to another account cannot be added again here, and this API key cannot
-remove it: the person removes it from the dashboard. A workspace-scoped key can
-read keys but not add or remove them.
+bound to another account cannot be added again here. `remove_ssh_key` removes
+only a key marked this account only: one added from the dashboard (every
+account) or bound to another account answers as if there were no such key, and
+the person removes it from the dashboard. A workspace-scoped key can read keys
+but not add or remove them.
 
 **Secrets** — `list_secrets`, `get_secret`, `create_secret`, `set_secret`,
 `replace_secret`, `delete_secret` for the account's secret store, and
