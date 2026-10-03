@@ -220,7 +220,7 @@ export const PARAMETERS: ReadonlyMap<string, readonly string[]> = new Map([
   // `state` narrows the listing to the control plane's own record of a machine
   // — live, unreachable, deleting, deleted, lost (OPL-4554). Read
   // where the listing is assembled and never forwarded to a host.
-  ['GET computers', ['query:allow_partial', 'query:state']],
+  ['GET computers', ['query:allow_partial', 'query:state', 'query:workspace_id']],
   [
     'POST computers',
     [
@@ -236,6 +236,7 @@ export const PARAMETERS: ReadonlyMap<string, readonly string[]> = new Map([
       'body:secrets',
       'body:browser_proxy',
       'body:egress_proxy',
+      'body:workspace_id',
       // Every lifecycle call carries one (platform OPL-5127).
       'header:Idempotency-Key',
     ],

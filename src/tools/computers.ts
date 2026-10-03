@@ -34,6 +34,17 @@ import {
 import { FILES_DIR, secretBindingsSchema } from './secrets.js';
 import type { Registrar } from './types.js';
 
+/**
+ * A workspace id a create or a listing names (platform OPL-5543): refused
+ * here when the platform would refuse it, empty or with spaces around it.
+ */
+const workspaceIdString = z
+  .string()
+  .refine(
+    (v) => v !== '' && v.trim() === v,
+    'workspace_id must not be empty or have spaces around it',
+  );
+
 const idArg = {
   computer_id: z
     .string()
@@ -454,10 +465,15 @@ export const registerComputers: Registrar = (server, session, opts) => {
           .describe(
             "Only computers the platform's own record puts in this state — a different question from what the machine is doing, which is `status`. 'live': its host lists it. 'unreachable': its host did not answer THIS request, so the row is the identity on record and not what the machine says; the computer is most likely fine. 'deleting': a delete was sent and not answered yet. 'deleted' and 'lost' are terminal, and asking here is the ONLY way to see one — an unfiltered listing is live, unreachable and deleting, so a computer missing from it may still have a record.",
           ),
+        workspace_id: workspaceIdString
+          .optional()
+          .describe(
+            "Only the computers in this workspace (an id from list_workspaces), or 'unassigned' for the computers in no workspace. Combines with `state`. A workspace this key cannot reach — another account's, one that does not exist, or any but its own for a key confined to a workspace — is not found, and so is 'unassigned' from a confined key. Left out: every computer this key can see.",
+          ),
       },
       annotations: { readOnlyHint: true },
     },
-    ({ allow_partial, state }, extra) =>
+    ({ allow_partial, state, workspace_id }, extra) =>
       guarded(async () => {
         // listing, not json: with allow_partial the platform will hand over an
         // inventory it knows is short, and says so in X-GC-Incomplete. Reading
@@ -466,7 +482,7 @@ export const registerComputers: Registrar = (server, session, opts) => {
         const { items, incomplete } = await session.api
           .with(extra.signal)
           .listing<unknown[]>(P.COMPUTERS, {
-            query: { allow_partial: allow_partial ? 1 : undefined, state },
+            query: { allow_partial: allow_partial ? 1 : undefined, state, workspace_id },
           });
         // Checked rather than asserted. `listing<unknown[]>` is a claim about
         // what the platform sends, not a guarantee — a proxy or a future
@@ -532,9 +548,25 @@ export const registerComputers: Registrar = (server, session, opts) => {
           // arrived at from a third direction — and this one is silent, since
           // the platform answers a filter that matches nothing exactly as it
           // answers an account with nothing in it.
-          if (state) {
+          if (state || workspace_id !== undefined) {
+            const which = [
+              state ? `are ${state}` : '',
+              workspace_id === undefined
+                ? ''
+                : workspace_id === 'unassigned'
+                  ? 'are in no workspace'
+                  : `are in workspace ${workspace_id}`,
+            ]
+              .filter(Boolean)
+              .join(' and ');
+            const without = [
+              state ? '`state`' : '',
+              workspace_id === undefined ? '' : '`workspace_id`',
+            ]
+              .filter(Boolean)
+              .join(' or ');
             return said(
-              `${warning}No computers on this account are ${state}. Other computers may exist — this listing asked only for that state. Call list_computers without \`state\` to see the account.`,
+              `${warning}No computers on this account ${which}. Other computers may exist — this listing asked only for that. Call list_computers without ${without} to see the account.`,
             );
           }
           // Named only when it is there to call. Under MANDALA_NO_LIFECYCLE
@@ -1775,6 +1807,11 @@ export const registerComputers: Registrar = (server, session, opts) => {
           .optional()
           .describe(
             `${EGRESS_PROXY_ABOUT} It is in effect from the first packet the computer sends: until a proxy's credentials reach its host, connections are closed, not sent directly (wait_for_computer with until="guest" waits for them). A create carrying one is never answered from the warm pool, and a clone does not inherit it. A credentials_secret_id naming no secret, or one whose value is not user:password, is refused with 400 before anything is created. update_computer changes or removes it later.`,
+          ),
+        workspace_id: workspaceIdString
+          .optional()
+          .describe(
+            "The workspace to create the computer in, an id from list_workspaces. Its secrets and an egress proxy's credentials_secret_id are then named from that workspace's scope: its own secrets and the account-wide ones. Left out, the computer goes in this key's workspace, or in none for an account-wide key. A workspace this key cannot reach — another account's, one that does not exist, or any but its own for a key confined to a workspace — is not found, and nothing is created.",
           ),
         idempotency_key: buildIdempotencyKeyArg,
       },

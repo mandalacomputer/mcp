@@ -469,6 +469,16 @@ key confined to the workspace, whoever holds it — a person's CI or another age
 may be using one — and answers how many; the workspace's computers are kept.
 None of the three is offered to a read-only session (`MANDALA_READ_ONLY`).
 
+An account-wide key can work in one workspace without a key confined to it:
+`create_computer(workspace_id: ...)` creates the computer there, and names its
+`secrets` and an egress proxy's `credentials_secret_id` from that workspace's
+scope (its own secrets and the account-wide ones), and
+`list_computers(workspace_id: ...)` lists that workspace's computers, or with
+`'unassigned'` the ones in none. A workspace the key cannot reach is not found,
+and so is `'unassigned'` from a confined key. Left out, nothing changes: these
+two tools do not apply the saved profile's default workspace that the secret
+tools use.
+
 ### Current account quota
 
 `get_account` takes no arguments and reads `GET /api/v1/account` once with the

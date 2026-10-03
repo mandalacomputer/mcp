@@ -14,6 +14,16 @@ are wording changes, and they are behaviour changes in the way that matters.
 
 ## [Unreleased]
 
+### Added
+
+- **`create_computer` and `list_computers` take `workspace_id`.** An
+  account-wide key creates a computer in that workspace, with its secrets named
+  from that workspace's scope, and lists one workspace's computers, or with
+  `'unassigned'` the ones in none. A workspace the key cannot reach is not
+  found. An empty filtered listing says the filter matched nothing rather than
+  that the account is empty. Needs a platform that accepts `workspace_id` on
+  these two routes; an older one creates in no workspace and lists everything.
+
 ### Changed
 
 - **`list_ssh_keys` says where each key works from this account**: every
