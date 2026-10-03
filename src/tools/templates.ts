@@ -112,7 +112,7 @@ export const registerTemplates: Registrar = (server, session, opts) => {
       title: 'Publish a template document',
       description:
         `Store a document under a ref of your own, so ${launcher} can launch it by name. ` +
-        'THE NAMESPACE IS YOUR ACCOUNT: `metadata.namespace` has to be your account id, and anything else is refused rather than rewritten — `system` included. A REF IS IMMUTABLE: publishing the identical document again succeeds and changes nothing, but publishing a DIFFERENT document under the same ref is refused, and the fix is to bump `metadata.version`. What counts as different is the digest, so a changed label is a change. Check the document first — a mistake published under a version can never be corrected under that version.',
+        "THE NAMESPACE IS YOUR ACCOUNT: `metadata.namespace` has to be your account id, and anything else is refused rather than rewritten — `system` included. A REF IS IMMUTABLE: publishing the identical document again succeeds and changes nothing, but publishing a DIFFERENT document under the same ref is refused, and the fix is to bump `metadata.version`. What counts as different is the digest, so a changed label is a change. Check the document first — a mistake published under a version can never be corrected under that version. NEEDS AN ACCOUNT-WIDE KEY: templates are the account's, so a key confined to a workspace is refused (403) whatever it sends; such a key can still list_templates and launch a template by its ref.",
       inputSchema: {
         document: z
           .string()
@@ -158,7 +158,7 @@ export const registerTemplates: Registrar = (server, session, opts) => {
     {
       title: 'Read a template document',
       description:
-        'One template as the document it was written as — the lineage, the build steps and the digest, which list_templates drops. Works for your own namespace and for `system`, so you can read what you are layering onto before writing a document of your own. Without `version` this is the newest, which is also what a create naming the unpinned `namespace/name` resolves to.',
+        "One template as the document it was written as — the lineage, the build steps and the digest, which list_templates drops. Works for your own namespace and for `system`, so you can read what you are layering onto before writing a document of your own. Without `version` this is the newest, which is also what a create naming the unpinned `namespace/name` resolves to. Your account's own namespace needs an account-wide key: a key confined to a workspace is refused (403) there, because the document is the account's and may carry its build steps and scripts; it can still read `system` templates.",
       inputSchema: { ...namespaceArg, version: versionArg },
       annotations: { readOnlyHint: true },
     },
@@ -177,7 +177,7 @@ export const registerTemplates: Registrar = (server, session, opts) => {
     {
       title: 'Retire a template you published',
       description:
-        'Stop a template resolving, and give its row back against your ceiling. WITHOUT `version` THIS RETIRES EVERY VERSION OF THE NAME — that is what retiring a template means here, and it is deliberately not get_template\'s "the newest". Pass `version` to take exactly one. THIS CANNOT BE UNDONE: a retired ref is refused for ever, identical bytes included, so the version you retire can never be published again — publish the next version instead. Computers are NOT affected: a computer is built from the image the ref resolved to and holds no reference to the document, so anything already running, stopped or suspended keeps working. What a retire breaks is resolution — a NEW create naming the ref is refused. Say what it costs before you call it.',
+        'Stop a template resolving, and give its row back against your ceiling. WITHOUT `version` THIS RETIRES EVERY VERSION OF THE NAME — that is what retiring a template means here, and it is deliberately not get_template\'s "the newest". Pass `version` to take exactly one. THIS CANNOT BE UNDONE: a retired ref is refused for ever, identical bytes included, so the version you retire can never be published again — publish the next version instead. Computers are NOT affected: a computer is built from the image the ref resolved to and holds no reference to the document, so anything already running, stopped or suspended keeps working. What a retire breaks is resolution — a NEW create naming the ref is refused. Needs an account-wide key: a key confined to a workspace is refused (403) whatever it names. Say what it costs before you call it.',
       inputSchema: {
         ...namespaceArg,
         version: versionArg,
@@ -286,7 +286,7 @@ export const registerTemplates: Registrar = (server, session, opts) => {
     'build_template',
     {
       title: 'Compile a template document into an image',
-      description: `Compile a document that declares \`spec.build\` steps into a golden image. Returns IMMEDIATELY with a job — a build takes minutes, an agent image roughly fifteen — and watch_build is how you follow it. THE NAMESPACE AND THE FAMILY BOTH HAVE TO BE YOURS: \`spec.family\` is what the image is called on a hypervisor, in a directory shared with every computer on that machine, so a build may only write into \`golden-<your account id>\` or that and a \`-\` and a name of your choosing. A document with build steps must LAYER ONTO ONE OF OURS: \`spec.from\` has to name a \`system/...\` template (and spec.build or spec.env need a parent at all); anything else is a 400. \`spec.secrets\` names secrets by ID (csec-…) and the environment variable each appears as, never by value, and at most 32 of them — check_template does not check that cap. Its refusals: a 400 saying the document names a secret that does not exist in your scope is deliberately the same for a deleted secret, a missing one and another scope's, and is not worth retrying, nor is a 400 for a malformed reference or more than 32; a 409 saying a secret's value cannot be read right now, and a 503, are worth retrying. A refusal saying a host is busy is not a problem with your document — one build runs per hypervisor — and is worth retrying. After a successful build, pass the published ref to ${launcher} as \`template\`. ${launcher} may still return image preparation instructions or a capacity refusal; follow that result rather than assuming the successful build made every destination ready.`,
+      description: `Compile a document that declares \`spec.build\` steps into a golden image. Returns IMMEDIATELY with a job — a build takes minutes, an agent image roughly fifteen — and watch_build is how you follow it. THE NAMESPACE AND THE FAMILY BOTH HAVE TO BE YOURS: \`spec.family\` is what the image is called on a hypervisor, in a directory shared with every computer on that machine, so a build may only write into \`golden-<your account id>\` or that and a \`-\` and a name of your choosing. A document with build steps must LAYER ONTO ONE OF OURS: \`spec.from\` has to name a \`system/...\` template (and spec.build or spec.env need a parent at all); anything else is a 400. \`spec.secrets\` names secrets by ID (csec-…) and the environment variable each appears as, never by value, and at most 32 of them — check_template does not check that cap. They resolve among the account-wide secrets. Its refusals: a 400 saying the document names a secret that does not exist is deliberately the same for a deleted secret, a missing one, a workspace's and another account's, and is not worth retrying, nor is a 400 for a malformed reference or more than 32; a 409 saying a secret's value cannot be read right now, and a 503, are worth retrying. A refusal saying a host is busy is not a problem with your document — one build runs per hypervisor — and is worth retrying. After a successful build, pass the published ref to ${launcher} as \`template\`. ${launcher} may still return image preparation instructions or a capacity refusal; follow that result rather than assuming the successful build made every destination ready. ACCOUNT-WIDE KEYS ONLY: builds are the account's, so a key confined to a workspace is refused (403) here and by list_builds, get_build and watch_build; such a key launches a published template by its ref instead.`,
       inputSchema: {
         document: z
           .string()
@@ -336,7 +336,7 @@ export const registerTemplates: Registrar = (server, session, opts) => {
     {
       title: 'List builds',
       description:
-        'Every build this account has started that the fleet still holds a record of, newest first. A build lives on the hypervisor that ran it, so this asks all of them — and WITHOUT allow_partial, one that cannot be reached makes the platform refuse rather than answer short, so an empty or small list is the truth rather than an outage. Pass allow_partial and that stops being so: you get the short answer, opening with an INCOMPLETE line, and nothing else in the result says how much is missing.',
+        'Every build this account has started that the fleet still holds a record of, newest first. A build lives on the hypervisor that ran it, so this asks all of them — and WITHOUT allow_partial, one that cannot be reached makes the platform refuse rather than answer short, so an empty or small list is the truth rather than an outage. Pass allow_partial and that stops being so: you get the short answer, opening with an INCOMPLETE line, and nothing else in the result says how much is missing. Needs an account-wide key: a key confined to a workspace is refused (403).',
       inputSchema: {
         allow_partial: z
           .boolean()
@@ -420,7 +420,7 @@ export const registerTemplates: Registrar = (server, session, opts) => {
     {
       title: 'Get a build',
       description:
-        'What became of one build, which template it was for, and which step it is on. Reads once and returns; watch_build is what follows a running one. It stays readable after the build has finished, so this is also how you find out which step failed on a build nobody was watching.',
+        'What became of one build, which template it was for, and which step it is on. Reads once and returns; watch_build is what follows a running one. It stays readable after the build has finished, so this is also how you find out which step failed on a build nobody was watching. Needs an account-wide key: a key confined to a workspace is refused (403).',
       inputSchema: { build_id: z.string().describe('The id build_template returned.') },
       annotations: { readOnlyHint: true },
     },
@@ -511,7 +511,7 @@ export const registerTemplates: Registrar = (server, session, opts) => {
     {
       title: 'Watch a build until it finishes',
       description:
-        "Follow a build to its end and report what happened. Streams the platform's own progress — each event is sent only when something actually moved — and logs each one as it arrives, so a long build is visibly alive rather than indistinguishable from a hang. A build that FAILED is a normal answer here, not an error: read `status` and the failed step. Attaching to a build that has already finished is fine and returns immediately.",
+        "Follow a build to its end and report what happened. Streams the platform's own progress — each event is sent only when something actually moved — and logs each one as it arrives, so a long build is visibly alive rather than indistinguishable from a hang. A build that FAILED is a normal answer here, not an error: read `status` and the failed step. Attaching to a build that has already finished is fine and returns immediately. Needs an account-wide key: a key confined to a workspace is refused (403).",
       inputSchema: { build_id: z.string().trim().describe('The id build_template returned.') },
       annotations: { readOnlyHint: true, openWorldHint: true },
     },

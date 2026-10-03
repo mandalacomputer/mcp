@@ -923,12 +923,15 @@ keeps no record of which hypervisor ran which build, so a short build listing
 simply has fewer rows, an unknown number missing and nothing marking the gap.
 
 The other two append a row marked `unreachable` for each thing they could not
-reach — but only for a key that spans the account. A WORKSPACE-SCOPED key gets
-no marked rows either, because naming the missing ids would mean reading them
-out of a host cache that has no workspace column, and handing a confined
-credential ids from the workspaces it is confined away from. For such a key all
-three listings are the `INCOMPLETE:` line and nothing else, which is why that
-line is written first and in prose.
+reach, with one difference by key. A WORKSPACE-SCOPED key gets no marked
+*snapshot* rows, because naming the missing ids would mean reading them out of a
+host cache that has no workspace column, and handing a confined credential ids
+from the workspaces it is confined away from. Its *computer* listing still marks
+the rows the platform's own record holds as unreachable or being deleted, since
+that record has the workspace column the cache lacks. (Such a key cannot call
+`list_builds` at all: builds need an account-wide key.) Whatever the key, the
+`INCOMPLETE:` line is the one signal every short listing carries, which is why
+it is written first and in prose.
 
 **A computer has a lifecycle of its own, separate from what its guest is
 doing.** `state` is the platform's record of whether the machine exists —
@@ -1048,6 +1051,14 @@ It is also why `get_desktop_url` carries no `readOnlyHint` even though its route
 neither writes nor spends: hosts treat that hint as licence to call without
 asking, so keeping it would let a model pass out control of a desktop with
 nobody prompted.
+
+**Templates and builds are the account's, and need an account-wide key.** A
+key confined to a workspace is refused (403) by `publish_template`,
+`retire_template`, `get_template` on the account's own namespace, and every
+build tool — `build_template`, `list_builds`, `get_build` and `watch_build`.
+Such a key can still `list_templates`, read `system` templates and launch a
+computer from a published template by its ref. A build's `spec.secrets` resolve
+among the account-wide secrets, never a workspace's.
 
 **Retiring a template cannot be undone, and takes more than it looks.**
 `retire_template` without a `version` retires **every** version of the name —
