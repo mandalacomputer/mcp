@@ -62,20 +62,24 @@ A saved profile can also carry a default workspace, set with
 it in `~/.mandala/defaults.json`, beside `credentials.json`, which it never
 changes. Started from that profile, the secret tools (`list_secrets`,
 `get_secret`, `create_secret`, `set_secret`, `replace_secret`,
-`delete_secret`) use it when a call leaves out `workspace_id`; an explicit
-`workspace_id` always wins. Their descriptions say so and name the workspace,
-`list_secrets` says when the default chose the scope, and startup prints it on
-stderr. MCP only reads that file, once at startup, with the same checks as
+`delete_secret`), `create_computer` and `list_computers` use it when a call
+leaves out `workspace_id`, as `mandala computers create` and `computers list`
+do; an explicit `workspace_id` always wins. Their descriptions say so and name
+the workspace, `list_secrets`, `list_computers` and `create_computer` say when
+the default chose the workspace, and startup prints it on stderr. There is no
+"every workspace" value: to list elsewhere, pass another `workspace_id` (or
+`'unassigned'`), or start the server from a profile with no default. MCP
+only reads that file, once at startup, with the same checks as
 `credentials.json`. It is not applied when the profile's key is confined to a
 workspace (that key's own scope applies), when the default was saved for
 another account than the profile is logged in to now, or with an explicit or
 environment key. A file that cannot be read (not valid JSON, another version,
-or readable by others) is noted on stderr: `list_secrets` and `get_secret` then
-use account-wide, but `create_secret`, `set_secret`, `replace_secret` and
-`delete_secret` refuse a call without `workspace_id`, sending nothing, rather
-than act account-wide; pass `workspace_id`, or fix or delete the file and
-restart the server. The hosted HTTP server never reads it, and its tools are
-unchanged.
+or readable by others) is noted on stderr: `list_secrets`, `get_secret` and
+`list_computers` then use account-wide, but `create_secret`, `set_secret`,
+`replace_secret`, `delete_secret` and `create_computer` refuse a call without
+`workspace_id`, sending nothing, rather than act account-wide; pass
+`workspace_id`, or fix or delete the file and restart the server. The hosted
+HTTP server never reads it, and its tools are unchanged.
 
 **Claude Code** — as a plugin, which installs the server and a skill together:
 
@@ -483,9 +487,10 @@ An account-wide key can work in one workspace without a key confined to it:
 scope (its own secrets and the account-wide ones), and
 `list_computers(workspace_id: ...)` lists that workspace's computers, or with
 `'unassigned'` the ones in none. A workspace the key cannot reach is not found,
-and so is `'unassigned'` from a confined key. Left out, nothing changes: these
-two tools do not apply the saved profile's default workspace that the secret
-tools use.
+and so is `'unassigned'` from a confined key. Left out, these two tools apply
+the saved profile's default workspace, as the secret tools do (see above);
+with no default, the computer goes in the key's own workspace or in none, and
+the listing is every computer the key can see.
 
 ### Current account quota
 

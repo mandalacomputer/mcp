@@ -31,6 +31,7 @@ import {
   keyedFailure,
   restartIdempotencyKeyArg,
 } from './operations.js';
+import { scopeDefault, profileDefault } from './scope.js';
 import { FILES_DIR, secretBindingsSchema } from './secrets.js';
 import type { Registrar } from './types.js';
 
@@ -437,12 +438,19 @@ export const registerComputers: Registrar = (server, session, opts) => {
       guarded(async () => json(await session.api.with(extra.signal).json('GET', P.SIZES))),
   );
 
+  // A left-out workspace_id under a saved profile's default (OPL-5644).
+  const listScopeDefault = scopeDefault(
+    session,
+    'every computer this key can see',
+    'every computer this key can see is listed',
+  );
   server.registerTool(
     'list_computers',
     {
       title: 'List computers',
       description:
-        "Every computer on this account that exists or may exist. Desktop credentials are deliberately not included — use get_desktop_url for those. Read `state` before acting on a row: it is the platform's record of whether the machine exists, which is a different question from `status`, what its host says the guest is doing. A row reading `deleting` is on its way out and is not one to bind, start or wait for, and one reading `unreachable` is a row served from the record because the host did not answer — the computer is most likely fine, but nothing only its host knows is on it, `status` included. The two terminal states are not here at all: `deleted` and `lost` come back only when asked for with `state`.",
+        "Every computer on this account that exists or may exist. Desktop credentials are deliberately not included — use get_desktop_url for those. Read `state` before acting on a row: it is the platform's record of whether the machine exists, which is a different question from `status`, what its host says the guest is doing. A row reading `deleting` is on its way out and is not one to bind, start or wait for, and one reading `unreachable` is a row served from the record because the host did not answer — the computer is most likely fine, but nothing only its host knows is on it, `status` included. The two terminal states are not here at all: `deleted` and `lost` come back only when asked for with `state`." +
+        listScopeDefault,
       inputSchema: {
         allow_partial: z
           .boolean()
@@ -468,13 +476,19 @@ export const registerComputers: Registrar = (server, session, opts) => {
         workspace_id: workspaceIdString
           .optional()
           .describe(
-            "Only the computers in this workspace (an id from list_workspaces), or 'unassigned' for the computers in no workspace. Combines with `state`. A workspace this key cannot reach — another account's, one that does not exist, or any but its own for a key confined to a workspace — is not found, and so is 'unassigned' from a confined key. Left out: every computer this key can see.",
+            "Only the computers in this workspace (an id from list_workspaces), or 'unassigned' for the computers in no workspace. Combines with `state`. A workspace this key cannot reach — another account's, one that does not exist, or any but its own for a key confined to a workspace — is not found, and so is 'unassigned' from a confined key. Left out: every computer this key can see." +
+              listScopeDefault,
           ),
       },
       annotations: { readOnlyHint: true },
     },
-    ({ allow_partial, state, workspace_id }, extra) =>
+    ({ allow_partial, state, workspace_id: named }, extra) =>
       guarded(async () => {
+        // A read, so an unreadable defaults.json does not refuse it: the
+        // listing goes on unfiltered, as `mandala computers list` does.
+        const { scoped, byDefault } = profileDefault(session);
+        const workspace_id = scoped(named);
+        const chosen = byDefault(named);
         // listing, not json: with allow_partial the platform will hand over an
         // inventory it knows is short, and says so in X-GC-Incomplete. Reading
         // the body and dropping the header turns "here is part of the fleet"
@@ -555,7 +569,7 @@ export const registerComputers: Registrar = (server, session, opts) => {
                 ? ''
                 : workspace_id === 'unassigned'
                   ? 'are in no workspace'
-                  : `are in workspace ${workspace_id}`,
+                  : `are in workspace ${workspace_id}${chosen}`,
             ]
               .filter(Boolean)
               .join(' and ');
@@ -565,8 +579,13 @@ export const registerComputers: Registrar = (server, session, opts) => {
             ]
               .filter(Boolean)
               .join(' or ');
+            // Leaving workspace_id out again would pick the same default, so
+            // the way to the rest of the account is named instead.
+            const elsewhere = chosen
+              ? ` This server applies that default whenever workspace_id is left out: pass another workspace_id, or 'unassigned', to look elsewhere${state ? ', or leave out `state`' : ''}.`
+              : ` Call list_computers without ${without} to see the account.`;
             return said(
-              `${warning}No computers on this account ${which}. Other computers may exist — this listing asked only for that. Call list_computers without ${without} to see the account.`,
+              `${warning}No computers on this account ${which}. Other computers may exist — this listing asked only for that.${elsewhere}`,
             );
           }
           // Named only when it is there to call. Under MANDALA_NO_LIFECYCLE
@@ -580,8 +599,9 @@ export const registerComputers: Registrar = (server, session, opts) => {
           );
         }
         const lines = list.map((c) => `- ${describe(c as never)}`).join('\n');
+        const where = chosen ? ` in workspace ${workspace_id}${chosen}` : '';
         return said(
-          `${warning}${list.length} computer(s):\n${lines}`,
+          `${warning}${list.length} computer(s)${where}:\n${lines}`,
           list.map((c) => withoutCredentials(c as never)),
         );
       }),
@@ -1748,12 +1768,19 @@ export const registerComputers: Registrar = (server, session, opts) => {
   // model can see is a tool it will try. See ToolOptions.lifecycle.
   if (!opts.lifecycle) return;
 
+  // A left-out workspace_id under a saved profile's default (OPL-5644).
+  const createScopeDefault = scopeDefault(
+    session,
+    "this key's workspace, or none",
+    'create_computer refuses a call without workspace_id',
+  );
   server.registerTool(
     'create_computer',
     {
       title: 'Create a computer',
       description:
-        "Build a new cloud desktop and select it for this session. Creating and running a computer costs money on this account. Continue an image preparation refusal only as its result instructs, retaining all original create arguments, including template, and adding the returned preparation token as an argument. This token is not a create idempotency key. Stop after success; never automatically replay after a lost or ambiguous response without the idempotency_key that response names — with it, the same call answers the first one's result instead of building a second computer.",
+        "Build a new cloud desktop and select it for this session. Creating and running a computer costs money on this account. Continue an image preparation refusal only as its result instructs, retaining all original create arguments, including template, and adding the returned preparation token as an argument. This token is not a create idempotency key. Stop after success; never automatically replay after a lost or ambiguous response without the idempotency_key that response names — with it, the same call answers the first one's result instead of building a second computer." +
+        createScopeDefault,
       inputSchema: {
         name: z.string().optional().describe('A label. The platform picks one if you do not.'),
         size: z
@@ -1811,14 +1838,23 @@ export const registerComputers: Registrar = (server, session, opts) => {
         workspace_id: workspaceIdString
           .optional()
           .describe(
-            "The workspace to create the computer in, an id from list_workspaces. Its secrets and an egress proxy's credentials_secret_id are then named from that workspace's scope: its own secrets and the account-wide ones. Left out, the computer goes in this key's workspace, or in none for an account-wide key. A workspace this key cannot reach — another account's, one that does not exist, or any but its own for a key confined to a workspace — is not found, and nothing is created.",
+            "The workspace to create the computer in, an id from list_workspaces. Its secrets and an egress proxy's credentials_secret_id are then named from that workspace's scope: its own secrets and the account-wide ones. Left out, the computer goes in this key's workspace, or in none for an account-wide key. A workspace this key cannot reach — another account's, one that does not exist, or any but its own for a key confined to a workspace — is not found, and nothing is created." +
+              createScopeDefault,
           ),
         idempotency_key: buildIdempotencyKeyArg,
       },
       annotations: { destructiveHint: false, openWorldHint: true },
     },
-    ({ idempotency_key, ...args }, extra) =>
+    ({ idempotency_key, workspace_id: named, ...rest }, extra) =>
       guarded(async () => {
+        // A write: an unreadable defaults.json refuses it with nothing sent,
+        // rather than create the computer in no workspace, as
+        // `mandala computers create` does.
+        const { scoped, unknownDefault, byDefault } = profileDefault(session);
+        const unknown = unknownDefault(named);
+        if (unknown) return unknown;
+        const workspace_id = scoped(named);
+        const args = { ...rest, workspace_id };
         const key = idempotencyKeyFor(idempotency_key);
         let data: unknown;
         try {
@@ -1903,9 +1939,11 @@ export const registerComputers: Registrar = (server, session, opts) => {
         // error: the machine exists and is billable, so it comes back stopped
         // with the reason on it. Saying so plainly is the difference between a
         // model retrying the start and a model creating a second computer.
+        const chosen = byDefault(named);
+        const where = chosen ? ` in workspace ${workspace_id}${chosen}` : '';
         const note = c.start_error
-          ? `Created ${describe(c)}${operationClause(c)}, but it did not start: ${c.start_error}\nThe computer exists and is selected. start_computer often works on a second attempt.`
-          : `Created and selected ${describe(c)}${operationClause(c)}.`;
+          ? `Created ${describe(c)}${where}${operationClause(c)}, but it did not start: ${c.start_error}\nThe computer exists and is selected. start_computer often works on a second attempt.`
+          : `Created and selected ${describe(c)}${where}${operationClause(c)}.`;
         return said(
           args.template_transfer === undefined
             ? note

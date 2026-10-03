@@ -17,6 +17,7 @@ import {
   type Secret,
   type SecretList,
 } from '../secret-store.js';
+import { type ScopeSession, scopeDefault, profileDefault } from './scope.js';
 import type { Registrar } from './types.js';
 
 /**
@@ -253,24 +254,15 @@ const workspaceArg = z
   );
 
 /**
- * What a left-out workspace_id means, said in the tool's schema: the local
- * server started from a saved profile falls back to that profile's default
- * workspace from `mandala workspaces use`. Every other session (an explicit
- * or environment key, and every hosted one) keeps the words it always had.
+ * What a left-out workspace_id means for a secret tool, said in its schema.
+ * See {@link scopeDefault}.
  */
-function scopeDefault(session: {
-  defaultWorkspace?: { id: string; name: string } | null;
-  defaultWorkspaceUnreadable?: string;
-}): string {
-  const d = session.defaultWorkspace;
-  if (d === undefined) return '';
-  const here = session.defaultWorkspaceUnreadable
-    ? 'unknown, because ~/.mandala/defaults.json cannot be read: list_secrets and get_secret use account-wide, and create_secret, set_secret, replace_secret and delete_secret refuse a call without workspace_id'
-    : d
-      ? `workspace ${d.name} (${d.id})`
-      : 'account-wide';
-  return ` Default when left out: the saved profile's workspace from \`mandala workspaces use\`, else account-wide — here ${here}.`;
-}
+const secretScopeDefault = (session: ScopeSession): string =>
+  scopeDefault(
+    session,
+    'account-wide',
+    'list_secrets and get_secret use account-wide, and create_secret, set_secret, replace_secret and delete_secret refuse a call without workspace_id',
+  );
 
 /** A secret's name as a tool argument, checked for what the platform would refuse. */
 const nameArg = z
@@ -409,28 +401,12 @@ async function storeGuarded(
 }
 
 export const registerSecrets: Registrar = (server, session) => {
-  // A left-out workspace_id: the saved profile's default, where there is one.
-  const scoped = (workspace_id: string | undefined) =>
-    workspace_id ?? session.defaultWorkspace?.id ?? undefined;
-  // A tool that writes, called without workspace_id while defaults.json cannot
-  // be read: the profile's default is unknown, and account-wide is the widest
-  // scope, where any computer on the account may be bound to what is stored.
-  // Refused before any request; the reading tools go on account-wide.
-  const unknownDefault = (workspace_id: string | undefined) =>
-    workspace_id === undefined && session.defaultWorkspaceUnreadable !== undefined
-      ? refused(
-          `Nothing was sent: ~/.mandala/defaults.json cannot be read (${session.defaultWorkspaceUnreadable}), so the saved profile's default workspace is unknown and this would otherwise act account-wide. Pass workspace_id explicitly, or fix or delete the file and restart this server.`,
-        )
-      : undefined;
-  const byDefault = (workspace_id: string | undefined) =>
-    workspace_id === undefined && session.defaultWorkspace
-      ? " (the saved profile's default from mandala workspaces use)"
-      : '';
+  const { scoped, unknownDefault, byDefault } = profileDefault(session);
   const scopeArg = (text?: string) =>
     workspaceArg.describe(
       (text ??
         'The workspace the secret belongs to. Leave it out for an account-wide secret. A secret in a workspace is found only with its workspace_id.') +
-        scopeDefault(session),
+        secretScopeDefault(session),
     );
   server.registerTool(
     'get_computer_secrets',
@@ -530,7 +506,7 @@ export const registerSecrets: Registrar = (server, session) => {
       title: "List the account's secrets",
       description:
         "The secrets stored on this account, in one scope: the account-wide ones by default, or one workspace's with workspace_id. For each: its name, its id (what set_computer_secrets binds), its current revision_id (what replace_secret and delete_secret need), its scope and when it was last delivered to a computer. Values are NEVER shown — no route returns one. Also says whether binding secrets to computers is switched on here, and the store's limits. Owners and members may read; a viewer is refused. An API key confined to a workspace lists that workspace's secrets, and naming another scope is refused." +
-        scopeDefault(session),
+        secretScopeDefault(session),
       inputSchema: {
         workspace_id: scopeArg('The workspace to list. Leave it out for the account-wide secrets.'),
       },
@@ -580,7 +556,7 @@ export const registerSecrets: Registrar = (server, session) => {
     'create_secret',
     {
       title: 'Store a new secret',
-      description: `Store a value under a name on this account, encrypted, for binding to computers with set_computer_secrets (or the secrets field of a create). The value is sent once and NEVER shown again: this answer, every other tool and every route give back only the name, id and revision. Do not put the value anywhere else — not in a command line, a file or a message — when a binding can deliver it. Owners only. A name is unique within its scope (up to ${SECRET_NAME_MAX_CHARS} characters, no control characters); a taken name is refused with 409. The account holds at most 100 secrets at once and may create at most 1000 over its lifetime — list_secrets reports both. Without workspace_id the secret is account-wide and any computer on the account may be bound to it. NOT safe to repeat blind: if the answer is lost, list_secrets before creating again, since the secret may exist.${scopeDefault(session)}`,
+      description: `Store a value under a name on this account, encrypted, for binding to computers with set_computer_secrets (or the secrets field of a create). The value is sent once and NEVER shown again: this answer, every other tool and every route give back only the name, id and revision. Do not put the value anywhere else — not in a command line, a file or a message — when a binding can deliver it. Owners only. A name is unique within its scope (up to ${SECRET_NAME_MAX_CHARS} characters, no control characters); a taken name is refused with 409. The account holds at most 100 secrets at once and may create at most 1000 over its lifetime — list_secrets reports both. Without workspace_id the secret is account-wide and any computer on the account may be bound to it. NOT safe to repeat blind: if the answer is lost, list_secrets before creating again, since the secret may exist.${secretScopeDefault(session)}`,
       inputSchema: {
         name: nameArg,
         value: valueArg('The value'),

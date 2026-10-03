@@ -5,7 +5,7 @@
  */
 
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
-import { afterEach, beforeEach, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { reasonAdvice } from '../src/errors.js';
 import { connect, installFakePlatform, WORKSPACE, WORKSPACE_MEMBER } from './harness.js';
 
@@ -257,3 +257,127 @@ it.each(['', ' wsp-0123456789ab'])(
     expect(platform.calls.filter((c) => c.path === '/computers')).toEqual([]);
   },
 );
+
+// The saved profile's default workspace from `mandala workspaces use`
+// (OPL-5644): create_computer and list_computers apply it to a call that leaves
+// workspace_id out, as `mandala computers create` and `computers list` do and as
+// the secret tools here already did. Otherwise a secret created in the default
+// workspace could not be bound to a computer this created in none.
+describe("a saved profile's default workspace", () => {
+  const OTHER = 'wsp-ba9876543210';
+  async function withDefault(cfg: {
+    defaultWorkspace?: { id: string; name: string } | null;
+    defaultWorkspaceUnreadable?: string;
+  }) {
+    const connection = await connect({ computerId: undefined, modelKey: undefined, ...cfg });
+    connections.push(connection);
+    return connection;
+  }
+  const creates = () =>
+    platform.calls.filter((c) => c.method === 'POST' && c.path === '/computers');
+  const lists = () => platform.calls.filter((c) => c.method === 'GET' && c.path === '/computers');
+  const described = async (connection: Awaited<ReturnType<typeof connect>>, name: string) => {
+    const tool = (await connection.client.listTools()).tools.find((t) => t.name === name)!;
+    const arg = (tool.inputSchema.properties as Record<string, { description?: string }>)
+      .workspace_id;
+    return { tool: tool.description ?? '', arg: arg?.description ?? '' };
+  };
+
+  it('create_computer creates in the default when workspace_id is left out, and says so', async () => {
+    const connection = await withDefault({ defaultWorkspace: { id: WORKSPACE.id, name: 'ci' } });
+    const made = await connection.call('create_computer', { template: 'base' });
+    expect(made.isError).toBeFalsy();
+    expect(creates()[0]?.body).toMatchObject({ template: 'base', workspace_id: WORKSPACE.id });
+    expect(text(made)).toContain(
+      `in workspace ${WORKSPACE.id} (the saved profile's default from mandala workspaces use)`,
+    );
+    // An explicit workspace_id always wins, and is not called the default.
+    const elsewhere = await connection.call('create_computer', {
+      template: 'base',
+      workspace_id: OTHER,
+    });
+    expect(creates()[1]?.body).toMatchObject({ workspace_id: OTHER });
+    expect(text(elsewhere)).not.toContain("the saved profile's default");
+    const { tool, arg } = await described(connection, 'create_computer');
+    for (const said of [tool, arg])
+      expect(said).toContain(
+        `Default when left out: the saved profile's workspace from \`mandala workspaces use\`, else this key's workspace, or none — here workspace ci (${WORKSPACE.id}).`,
+      );
+  });
+
+  it('list_computers lists the default when workspace_id is left out, and says so', async () => {
+    const connection = await withDefault({ defaultWorkspace: { id: WORKSPACE.id, name: 'ci' } });
+    const listed = await connection.call('list_computers');
+    expect(listed.isError).toBeFalsy();
+    expect(lists().at(-1)?.query.get('workspace_id')).toBe(WORKSPACE.id);
+    expect(text(listed)).toMatch(
+      new RegExp(
+        `^1 computer\\(s\\) in workspace ${WORKSPACE.id} \\(the saved profile's default from mandala workspaces use\\):`,
+      ),
+    );
+    await connection.call('list_computers', { workspace_id: 'unassigned' });
+    expect(lists().at(-1)?.query.get('workspace_id')).toBe('unassigned');
+    const { tool, arg } = await described(connection, 'list_computers');
+    for (const said of [tool, arg]) expect(said).toContain(`here workspace ci (${WORKSPACE.id})`);
+  });
+
+  it('an empty default listing names another workspace_id, not leaving it out', async () => {
+    const connection = await withDefault({ defaultWorkspace: { id: WORKSPACE.id, name: 'ci' } });
+    respond([]);
+    const res = await connection.call('list_computers');
+    expect(text(res)).toContain(
+      `No computers on this account are in workspace ${WORKSPACE.id} (the saved profile's default`,
+    );
+    expect(text(res)).toContain("pass another workspace_id, or 'unassigned'");
+    expect(text(res)).not.toContain('without `workspace_id`');
+    expect(text(res)).not.toContain('create_computer makes one');
+  });
+
+  it('create_computer is refused with nothing sent on an unreadable defaults.json; list_computers goes on unfiltered', async () => {
+    const why = 'it is not valid JSON';
+    const connection = await withDefault({
+      defaultWorkspace: null,
+      defaultWorkspaceUnreadable: why,
+    });
+    const refused = await connection.call('create_computer', { template: 'base' });
+    expect(refused.isError).toBe(true);
+    expect(text(refused)).toContain(`~/.mandala/defaults.json cannot be read (${why})`);
+    expect(text(refused)).toContain('Pass workspace_id explicitly');
+    expect(platform.calls).toEqual([]);
+    // Named explicitly, it goes through.
+    const made = await connection.call('create_computer', {
+      template: 'base',
+      workspace_id: WORKSPACE.id,
+    });
+    expect(made.isError).toBeFalsy();
+    expect(creates()[0]?.body).toMatchObject({ workspace_id: WORKSPACE.id });
+    const listed = await connection.call('list_computers');
+    expect(listed.isError).toBeFalsy();
+    expect(lists().at(-1)?.query.has('workspace_id')).toBe(false);
+    expect((await described(connection, 'create_computer')).arg).toContain(
+      'create_computer refuses a call without workspace_id',
+    );
+    expect((await described(connection, 'list_computers')).arg).toContain('cannot be read');
+  });
+
+  it.each([
+    ['no saved default', { defaultWorkspace: null }],
+    ['an explicit or environment key', {}],
+  ])('changes nothing with %s', async (_label, cfg) => {
+    const connection = await withDefault(cfg);
+    const made = await connection.call('create_computer', { template: 'base' });
+    expect(creates()[0]?.body).not.toHaveProperty('workspace_id');
+    expect(text(made)).not.toContain("the saved profile's default");
+    const listed = await connection.call('list_computers');
+    expect(lists().at(-1)?.query.has('workspace_id')).toBe(false);
+    expect(text(listed)).toMatch(/^1 computer\(s\):/);
+  });
+
+  it('no default leaves the descriptions as they were', async () => {
+    const connection = await withDefault({});
+    for (const name of ['create_computer', 'list_computers']) {
+      const { tool, arg } = await described(connection, name);
+      expect(tool + arg).not.toContain('mandala workspaces use');
+    }
+  });
+});
