@@ -223,7 +223,7 @@ export const registerSSH: Registrar = (server, session) => {
     {
       title: 'Remove an SSH public key',
       description:
-        'Remove one of your SSH keys. New connections with it are refused at once, and it is removed from the computers it was written into within moments; a session already open goes on until it disconnects. A key list_ssh_keys marks another account only cannot be removed with this API key: that answers as if there were no such key.',
+        'Remove one of your SSH keys. New connections with it are refused at once, and it is removed from the computers it was written into within moments; a session already open goes on until it disconnects. Only a key bound to the account this API key acts on, one list_ssh_keys marks "this account only", can be removed here. Any other key, one added from the dashboard ("every account") or one bound to another account ("another account only"), answers as if there were no such key, and is removed from the dashboard.',
       inputSchema: {
         ...keyIdArg,
         confirm: z.literal(true).describe('Must be true. This stops the key opening connections.'),
@@ -238,7 +238,7 @@ export const registerSSH: Registrar = (server, session) => {
         } catch (err) {
           if (!(err instanceof NotFoundError)) throw err;
           return said(
-            `Nothing was removed: there is no SSH key with the id ${key_id} that this API key can remove. Either it was already removed, the id is wrong and a key you meant may still be registered, or it is bound to another account (list_ssh_keys marks it ANOTHER ACCOUNT ONLY), which only the dashboard or a credential on that account can remove — list_ssh_keys says which.`,
+            `Nothing was removed: either you have no SSH key with the id ${key_id}, or it is a key this connection cannot remove — one added from the dashboard (list_ssh_keys marks it "every account") or one bound to another account ("another account only"). Only a key marked "this account only" can be removed here; any other key is removed from the dashboard. list_ssh_keys shows each key's reach.`,
           );
         }
         return said(`Removed ${key_id}. It can no longer open connections.`, res);

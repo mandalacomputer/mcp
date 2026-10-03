@@ -43,6 +43,16 @@ are wording changes, and they are behaviour changes in the way that matters.
   `remove_ssh_key`'s not-found answer now includes a key bound to another
   account, which an API key cannot remove.
 
+- **`remove_ssh_key` says it removes only a key bound to this account.** The
+  platform now removes, for an API key or connected app, only a key that
+  `list_ssh_keys` marks "this account only". A key added from the dashboard
+  ("every account") answers as if there were no such key, like one bound to
+  another account, so a leaked credential cannot take away SSH access the
+  person uses on other accounts. The tool's description says so, and its
+  not-found answer no longer says the key may already be gone or the id wrong:
+  it says nothing was removed, names the keys this connection cannot remove,
+  and that those are removed from the dashboard.
+
 - **`list_ssh_keys`, `add_ssh_key` and `set_computer_ssh` say a key added
   through the API is bound to its credential.** A key registered with
   `add_ssh_key` now reaches only the account the API key (or connected app)

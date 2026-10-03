@@ -155,7 +155,12 @@ describe('the SSH tools over answers they cannot trust', () => {
     });
     expect(res.isError).toBeFalsy();
     expect(textOf(res)).toContain('Nothing was removed');
+    // A 404 is also the answer for a key this connection may not remove, so
+    // it must not say the key is gone or the id is wrong.
+    expect(textOf(res)).toContain('added from the dashboard');
     expect(textOf(res)).toContain('bound to another account');
+    expect(textOf(res)).toContain('removed from the dashboard');
+    expect(textOf(res)).not.toMatch(/already removed|id is wrong/);
     expect(textOf(res)).not.toMatch(/^Removed/);
   });
 
