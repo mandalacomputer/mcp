@@ -472,7 +472,9 @@ need an owner's key that is not confined to a workspace: any key confined to
 one is refused (403), so none of them can touch the workspace this server's own
 key stands in. `delete_workspace` needs `confirm: true` and REVOKES every API
 key confined to the workspace, whoever holds it — a person's CI or another agent
-may be using one — and answers how many; the workspace's computers are kept.
+may be using one — and answers how many. Only an empty workspace can be
+deleted: one that still holds computers is refused (409), saying how many, and
+nothing is deleted or revoked.
 None of the three is offered to a read-only session (`MANDALA_READ_ONLY`).
 
 An account-wide key can work in one workspace without a key confined to it:

@@ -34,6 +34,13 @@ are wording changes, and they are behaviour changes in the way that matters.
 
 ### Changed
 
+- **`delete_workspace` says only an empty workspace can be deleted.** Its
+  description, its success text and the README said a deleted workspace's
+  computers were kept, and an agent that trusted it was then told by the
+  platform's 409 to delete computers it had been told would survive. The
+  platform refuses to delete a workspace that still holds computers (409,
+  saying how many) and deletes and revokes nothing. Documentation only.
+
 - **`list_ssh_keys` says where each key works from this account**: every
   account, this account only, or another account only, from the key's `reach`
   (which other account is never said). When a listed key is bound to another
