@@ -42,6 +42,18 @@ are wording changes, and they are behaviour changes in the way that matters.
   dashboard still reaches every account where the person is an owner or member.
   The tools' behaviour is unchanged.
 
+- **The template and build tools say which need an account-wide key.**
+  `publish_template`, `get_template` (on the account's own namespace),
+  `retire_template`, `build_template`, `list_builds`, `get_build` and
+  `watch_build` now say the platform refuses a key confined to a workspace
+  with a 403; such a key can still list templates, read `system` ones and
+  launch a template by its ref. `build_template` says its secrets resolve among
+  the account-wide ones, no longer "in your scope". The README's partial-listing
+  section no longer says a workspace-scoped key gets no marked rows on any
+  listing: its computer listing marks the rows the platform's record holds as
+  unreachable or being deleted, and it cannot list builds at all. The tools'
+  behaviour is unchanged.
+
 - **`wait_for_computer` with `until: "guest"` returns within moments of a
   computer's secrets landing**, rather than up to a whole poll interval later.
   While a running computer's secrets are on their way, its browser or egress
