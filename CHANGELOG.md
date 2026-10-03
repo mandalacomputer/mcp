@@ -107,6 +107,11 @@ are wording changes, and they are behaviour changes in the way that matters.
 
 ### Fixed
 
+- **`list_operations` no longer says dashboard calls record none.** The
+  platform records the dashboard's lifecycle calls the same way and lists them
+  with the API's, all but a move; the tool's description now says it lists the
+  operations started on the account from either.
+
 - **An event stream refused for the open-stream cap now stops and says so,
   instead of staying `connecting`.** The platform refuses a stream past 8 open
   on one computer or 128 per account on one server with a 409 and no reason,
