@@ -313,6 +313,95 @@ describe('move rows that do not establish an outcome', () => {
   });
 });
 
+// OPL-5656. The platform keeps ONE move row per computer and writes a move with
+// INSERT OR REPLACE, so once a move finishes another caller can start a second
+// move of the same computer and replace the row. Polling by computer id alone
+// then reported the second move's outcome as the first's. The 202's started_at
+// is the anchor.
+describe('a move whose row a newer move replaced', () => {
+  const real = globalThis.fetch;
+  afterEach(() => {
+    vi.useRealTimers();
+    globalThis.fetch = real;
+  });
+
+  const OURS = '2026-08-23T02:00:12.699Z';
+  const NEWER = '2026-08-23T02:05:00.000Z';
+  const started = {
+    computer_id: 'vm-1',
+    state: 'moving',
+    live: true,
+    ram_mb: 26000,
+    started_at: OURS,
+  };
+
+  /** The platform: the 202 for `post`, then each poll's rows in turn (the last repeats). */
+  const platform = (post: Record<string, unknown>, polls: Record<string, unknown>[][]) => {
+    let reads = 0;
+    globalThis.fetch = (async (_input: string | URL | Request, init?: RequestInit) => {
+      if ((init?.method ?? 'GET') === 'POST') return Response.json(post, { status: 202 });
+      const rows = polls[Math.min(reads, polls.length - 1)];
+      reads++;
+      return Response.json({ moves: rows });
+    }) as typeof fetch;
+    return () => reads;
+  };
+
+  it('refuses at once, naming the newer move, instead of reporting its outcome', async () => {
+    const reads = platform(started, [
+      [{ ...started, state: 'failed', live: false, ram_mb: 4096, started_at: NEWER }],
+    ]);
+    const { call, close } = await connect();
+    const res = await call('move_computer', { computer_id: 'vm-1', ram_mb: 26000 });
+    await close();
+
+    expect(res.isError).toBe(true);
+    expect(textOf(res)).toContain(
+      `A newer move of vm-1 (started ${NEWER}) replaced this one's row; this move's outcome is ` +
+        'no longer recorded. list_moves shows the newer move.',
+    );
+    // Not the newer move's `failed` read as this one's.
+    expect(textOf(res)).not.toContain('where it was, untouched');
+    expect(reads()).toBe(1);
+  });
+
+  it('refuses a live replacement too, rather than waiting on it', async () => {
+    platform(started, [[{ ...started, started_at: NEWER }]]);
+    const { call, close } = await connect();
+    const res = await call('move_computer', { computer_id: 'vm-1', ram_mb: 26000, timeout_s: 5 });
+    await close();
+    expect(res.isError).toBe(true);
+    expect(textOf(res)).toContain('A newer move of vm-1');
+  });
+
+  it('follows the row that carries its own started_at to the outcome', async () => {
+    const reads = platform(started, [
+      [started, { computer_id: 'vm-other', state: 'done', live: false, started_at: NEWER }],
+      [{ ...started, state: 'done', live: false }],
+    ]);
+    vi.useFakeTimers();
+    const { call, close } = await connect();
+    const pending = call('move_computer', { computer_id: 'vm-1', ram_mb: 26000, timeout_s: 30 });
+    await vi.advanceTimersByTimeAsync(10_000);
+    const res = await pending;
+    await close();
+
+    expect(res.isError).toBeFalsy();
+    expect(textOf(res)).toContain('moved and is now');
+    expect(reads()).toBe(2);
+  });
+
+  it('keeps matching by computer alone when the 202 carried no started_at', async () => {
+    const { started_at: _omitted, ...bare } = started;
+    platform(bare, [[{ ...started, state: 'done', live: false, started_at: NEWER }]]);
+    const { call, close } = await connect();
+    const res = await call('move_computer', { computer_id: 'vm-1', ram_mb: 26000 });
+    await close();
+    expect(res.isError).toBeFalsy();
+    expect(textOf(res)).toContain('moved and is now');
+  });
+});
+
 describe('list_moves', () => {
   let platform: ReturnType<typeof installFakePlatform>;
   beforeEach(() => {

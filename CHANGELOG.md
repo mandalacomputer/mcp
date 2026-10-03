@@ -107,6 +107,17 @@ are wording changes, and they are behaviour changes in the way that matters.
 
 ### Fixed
 
+- **`move_computer` reports the outcome of the move it started, not a later
+  one.** The platform keeps one move row per computer, so once a move has
+  finished another caller can start a second and replace the row, and the
+  tool's wait matched the row by computer id alone. It now matches the row
+  whose `started_at` equals the one the platform answered the move with, and
+  when this computer's row carries a different one it refuses, saying a newer
+  move (started at that time) replaced it and that `list_moves` shows it,
+  instead of reporting the newer move's outcome as this one's. A move answered
+  with no `started_at` is still matched by computer id. This matches
+  `waitForMove(move)` in `mandala-computer` for TypeScript.
+
 - **`add_ssh_key` takes a .pub file as read, trailing newline and all.** The
   platform refuses a `public_key` holding any line break, and the tool sent its
   argument untouched, so the contents of a .pub file (which end in a newline)
