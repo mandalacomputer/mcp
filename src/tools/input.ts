@@ -52,6 +52,11 @@ const contextArg = {
  * was typed into it, not what it is for. Either alone when the other is empty
  * or the same.
  *
+ * Every string the page wrote (role, text, name, href) is a JSON string
+ * literal in the line, so a page cannot close a bracket or a quote and write a
+ * click of its own: only the tag, which the platform holds to an element
+ * name's characters, and the numbers are bare.
+ *
  * Undefined for an element that is not one, which is left out rather than
  * guessed at; the platform reads the page strictly, so this is a backstop.
  */
@@ -60,7 +65,7 @@ const elementLine = (e: unknown): string | undefined => {
   const { tag, role, name, text, href, x, y, width, height } = e as Record<string, unknown>;
   if (typeof tag !== 'string' || ![x, y, width, height].every(Number.isInteger)) return undefined;
   const [bx, by, bw, bh] = [x, y, width, height] as number[];
-  const kind = typeof role === 'string' && role ? `${tag}[role=${role}]` : tag;
+  const kind = typeof role === 'string' && role ? `${tag}[role=${JSON.stringify(role)}]` : tag;
   const said = typeof text === 'string' && text !== '' ? text : undefined;
   const named = typeof name === 'string' && name !== '' ? name : undefined;
   const label = said ?? named;
@@ -68,7 +73,7 @@ const elementLine = (e: unknown): string | undefined => {
     label === undefined
       ? ''
       : ` ${JSON.stringify(label)}${said !== undefined && named !== undefined && named !== said ? ` (name ${JSON.stringify(named)})` : ''}`;
-  const to = typeof href === 'string' && href ? ` -> ${href}` : '';
+  const to = typeof href === 'string' && href ? ` -> ${JSON.stringify(href)}` : '';
   return `${kind}${quoted} — click ${bx + Math.floor(bw / 2)},${by + Math.floor(bh / 2)} (box ${bx},${by} ${bw}x${bh})${to}`;
 };
 
