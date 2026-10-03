@@ -213,6 +213,7 @@ export const SSH_KEY = {
   key_type: 'ssh-ed25519',
   created_at: '2026-09-16T12:00:00Z',
   last_used_at: null,
+  reach: 'everywhere',
 };
 
 /** One computer's SSH setting, as a read and a write both answer it. */
