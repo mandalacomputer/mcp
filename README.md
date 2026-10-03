@@ -899,9 +899,11 @@ application that failed to start from one that has not painted yet. Match on
 
 **The clipboard is two tools, not a shell recipe.** `read_clipboard` and
 `write_clipboard` reach the desktop's `CLIPBOARD` selection — what Ctrl-C writes
-and Ctrl-V pastes — on Linux computers whose desktop image includes `xclip`.
-An older or custom image without `xclip` gets a permanent 400 from both tools;
-changing the computer's runtime state or retrying cannot fix that image dependency.
+and Ctrl-V pastes — on Linux computers whose desktop image includes its
+desktop's clipboard tool: `xclip` on X11, or `wl-clipboard` (`wl-paste`/`wl-copy`)
+on a Wayland image such as Omarchy. An image without that tool gets a permanent
+400 from both tools that names it; changing the computer's runtime state or
+retrying cannot fix that image dependency.
 Pair `write_clipboard` with `press_key` and `keys: ["ctrl","v"]` — two key
 names, not the string `"ctrl+v"` — to get the text into whatever has focus. Do not reach for `xclip` through `exec` instead:
 `exec` runs a login shell, so the guest user's profile prints onto the same

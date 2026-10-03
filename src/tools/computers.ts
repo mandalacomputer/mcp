@@ -1758,9 +1758,11 @@ export const registerComputers: Registrar = (server, session, opts) => {
                 'desktop. Of the tools here, restart_computer is the only one that ends it: a stop ' +
                 'and a start leave it working, so a restart is what revokes one that has leaked.\n\n' +
                 'TO MOVE TEXT, use read_clipboard and write_clipboard. They need nothing of the ' +
-                'hardware, but they require a Linux desktop image with xclip installed. An older or ' +
-                'custom image without xclip gets a permanent 400 from both tools; changing runtime ' +
-                'state or retrying cannot fix that image dependency. Where it is present, prefer the ' +
+                "hardware, but they require a Linux desktop image with its desktop's clipboard tool " +
+                'installed: xclip on X11, wl-clipboard (wl-paste/wl-copy) on Wayland images such as ' +
+                'Omarchy. An image without that tool gets a permanent 400 from both tools that names ' +
+                'it; changing runtime state or retrying cannot fix that image dependency. Where it is ' +
+                'present, prefer the ' +
                 'tools, and do not start by asking a person to paste into the desktop. They are ' +
                 'refused outright on Windows. Do NOT reach for xclip through exec instead: exec runs a login shell, so ' +
                 "the guest user's profile prints onto the same output your command does, ahead of it, " +
