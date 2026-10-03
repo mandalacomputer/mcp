@@ -39,9 +39,29 @@ const shapeOf = (v: unknown): string =>
 
 const text = (v: unknown): string | undefined => (typeof v === 'string' && v ? v : undefined);
 
-/** One key in a line: what a person recognises it by. */
+/**
+ * Where a key works, from the account this API key acts on (platform
+ * OPL-5617): `everywhere`, `this_account` or `another_account`, never which
+ * other account. Absent from a platform that predates it, and then not shown.
+ */
+const reachNote = (reach: unknown): string => {
+  if (reach === 'everywhere') return '  [every account]';
+  if (reach === 'this_account') return '  [this account only]';
+  if (reach === 'another_account') return '  [ANOTHER ACCOUNT ONLY: refused here]';
+  return typeof reach === 'string' && reach ? `  [reach: ${reach}]` : '';
+};
+
+/** One key in a line: what a person recognises it by, and where it works. */
 const keyLine = (k: Record<string, unknown>): string =>
-  `${text(k.id) ?? '?'}  ${text(k.key_type) ?? '?'}  ${text(k.fingerprint) ?? '?'}  ${text(k.name) ?? ''}`.trimEnd();
+  `${`${text(k.id) ?? '?'}  ${text(k.key_type) ?? '?'}  ${text(k.fingerprint) ?? '?'}  ${text(k.name) ?? ''}`.trimEnd()}${reachNote(k.reach)}`;
+
+/**
+ * What a model is told when a listed key is bound to another account: it is
+ * refused on this account's computers, adding it again is a conflict (a key is
+ * registered once), and this credential cannot remove it.
+ */
+const ELSEWHERE =
+  'A key marked ANOTHER ACCOUNT ONLY was added through an API key or connected app on a different account, and computers on this account refuse it. Adding it again is a conflict, since a key is registered once, and this API key cannot remove it. To use it on every account, the person removes it and adds it again from the dashboard; otherwise add a separate key with add_ssh_key.';
 
 /** The setting of one computer, checked: every field the sentence reads, or nothing. */
 type Setting = {
@@ -127,7 +147,7 @@ export const registerSSH: Registrar = (server, session) => {
     {
       title: 'List your SSH keys',
       description:
-        'The SSH public keys registered to the person this API key belongs to — the same list whichever account the key acts on. A key added from the dashboard is accepted by every computer with SSH on, on every account where that person is an owner or member; one added through an API key or connected app (add_ssh_key) only on the account that credential acts on, until the credential is revoked. Shows id, type, SHA256 fingerprint and name.',
+        "The SSH public keys registered to the person this API key belongs to — the same list whichever account the key acts on. A key added from the dashboard is accepted by every computer with SSH on, on every account where that person is an owner or member; one added through an API key or connected app (add_ssh_key) only on the account that credential acts on, until the credential is revoked. Shows id, type, SHA256 fingerprint, name and reach: every account, this account only, or another account only (refused on this account's computers; which account is not said).",
       inputSchema: {},
       annotations: { readOnlyHint: true },
     },
@@ -149,8 +169,9 @@ export const registerSSH: Registrar = (server, session) => {
         }
         if (!rows.length)
           return said('No SSH keys are registered to you. add_ssh_key adds one.', body);
+        const elsewhere = rows.some((k) => k.reach === 'another_account');
         return said(
-          `${rows.length} SSH key${rows.length === 1 ? '' : 's'}, oldest first:\n${rows.map(keyLine).join('\n')}`,
+          `${rows.length} SSH key${rows.length === 1 ? '' : 's'}, oldest first:\n${rows.map(keyLine).join('\n')}${elsewhere ? `\n${ELSEWHERE}` : ''}`,
           body,
         );
       }),
@@ -202,7 +223,7 @@ export const registerSSH: Registrar = (server, session) => {
     {
       title: 'Remove an SSH public key',
       description:
-        'Remove one of your SSH keys. New connections with it are refused at once, and it is removed from the computers it was written into within moments; a session already open goes on until it disconnects.',
+        'Remove one of your SSH keys. New connections with it are refused at once, and it is removed from the computers it was written into within moments; a session already open goes on until it disconnects. A key list_ssh_keys marks another account only cannot be removed with this API key: that answers as if there were no such key.',
       inputSchema: {
         ...keyIdArg,
         confirm: z.literal(true).describe('Must be true. This stops the key opening connections.'),
@@ -217,7 +238,7 @@ export const registerSSH: Registrar = (server, session) => {
         } catch (err) {
           if (!(err instanceof NotFoundError)) throw err;
           return said(
-            `Nothing was removed: you have no SSH key with the id ${key_id}. Either it was already removed, or the id is wrong and a key you meant may still be registered — list_ssh_keys says which.`,
+            `Nothing was removed: there is no SSH key with the id ${key_id} that this API key can remove. Either it was already removed, the id is wrong and a key you meant may still be registered, or it is bound to another account (list_ssh_keys marks it ANOTHER ACCOUNT ONLY), which only the dashboard or a credential on that account can remove — list_ssh_keys says which.`,
           );
         }
         return said(`Removed ${key_id}. It can no longer open connections.`, res);

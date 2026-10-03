@@ -232,7 +232,12 @@ was issued to, not to the account. A key added with `add_ssh_key` (an API key
 or connected app) is accepted only by computers with SSH on in the account that
 credential acts on, and is removed when the credential is revoked; a key added
 from the dashboard is accepted on every account where that person is an owner
-or member. A workspace-scoped key can read keys but not add or remove them.
+or member. `list_ssh_keys` marks each key with where it works from the account
+the API key acts on: every account, this account only, or another account only
+(refused here; which account is not said). A key is registered once, so a key
+bound to another account cannot be added again here, and this API key cannot
+remove it: the person removes it from the dashboard. A workspace-scoped key can
+read keys but not add or remove them.
 
 **Secrets** — `list_secrets`, `get_secret`, `create_secret`, `set_secret`,
 `replace_secret`, `delete_secret` for the account's secret store, and

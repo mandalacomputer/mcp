@@ -16,6 +16,15 @@ are wording changes, and they are behaviour changes in the way that matters.
 
 ### Changed
 
+- **`list_ssh_keys` says where each key works from this account**: every
+  account, this account only, or another account only, from the key's `reach`
+  (which other account is never said). When a listed key is bound to another
+  account it says that this account's computers refuse it, that adding it
+  again is a conflict and this API key cannot remove it, and what to do:
+  remove it and add it again from the dashboard, or add a separate key.
+  `remove_ssh_key`'s not-found answer now includes a key bound to another
+  account, which an API key cannot remove.
+
 - **`list_ssh_keys`, `add_ssh_key` and `set_computer_ssh` say a key added
   through the API is bound to its credential.** A key registered with
   `add_ssh_key` now reaches only the account the API key (or connected app)

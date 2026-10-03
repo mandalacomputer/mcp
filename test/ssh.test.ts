@@ -49,7 +49,10 @@ describe('the SSH tools', () => {
     const { call, close } = await connect();
     const text = textOf(await call('list_ssh_keys', {}));
     expect(text).toContain('1 SSH key, oldest first');
-    expect(text).toContain(`${SSH_KEY.id}  ssh-ed25519  ${SSH_KEY.fingerprint}  laptop`);
+    expect(text).toContain(
+      `${SSH_KEY.id}  ssh-ed25519  ${SSH_KEY.fingerprint}  laptop  [every account]`,
+    );
+    expect(text).not.toContain('ANOTHER ACCOUNT ONLY');
     await close();
   });
 
@@ -121,6 +124,24 @@ describe('the SSH tools over answers they cannot trust', () => {
     expect(textOf(empty)).toContain('No SSH keys are registered to you');
   });
 
+  it('says which keys this account refuses, and what to do about them (OPL-5617)', async () => {
+    const rows = [
+      SSH_KEY,
+      { ...SSH_KEY, id: 'sshk-0000000000000002', name: 'ci', reach: 'this_account' },
+      { ...SSH_KEY, id: 'sshk-0000000000000003', name: 'other', reach: 'another_account' },
+      { ...SSH_KEY, id: 'sshk-0000000000000004', name: 'old', reach: undefined },
+    ];
+    const text = textOf(await over(rows, 200, 'list_ssh_keys', {}));
+    expect(text).toContain('4 SSH keys, oldest first');
+    expect(text).toContain('laptop  [every account]');
+    expect(text).toContain('ci  [this account only]');
+    expect(text).toContain('other  [ANOTHER ACCOUNT ONLY: refused here]');
+    expect(text).toMatch(/ssh-ed25519 {2}\S+ {2}old$/m);
+    expect(text).toContain('computers on this account refuse it');
+    expect(text).toContain('removes it and adds it again from the dashboard');
+    expect(text).toContain('add a separate key with add_ssh_key');
+  });
+
   it('says an add may have happened when the answer carries no id', async () => {
     const res = await over({}, 201, 'add_ssh_key', { public_key: SSH_PUBLIC_KEY });
     expect(res.isError).toBe(true);
@@ -134,6 +155,7 @@ describe('the SSH tools over answers they cannot trust', () => {
     });
     expect(res.isError).toBeFalsy();
     expect(textOf(res)).toContain('Nothing was removed');
+    expect(textOf(res)).toContain('bound to another account');
     expect(textOf(res)).not.toMatch(/^Removed/);
   });
 
