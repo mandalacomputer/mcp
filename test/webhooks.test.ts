@@ -142,6 +142,32 @@ describe('the webhooks CRUD', () => {
     expect(text).not.toMatch(/PATCH/);
   });
 
+  // OPL-5647: the platform also disables a subscription when the account moves
+  // to a plan without webhooks (`plan`), and re-enables it itself when a plan
+  // with webhooks is chosen. Every reason that was not `failing` used to read
+  // "disabled by you", telling the model its user turned off what the platform
+  // did.
+  it('says a plan disable is the platform’s, and names a reason it does not know', async () => {
+    const disabled = (reason: unknown) =>
+      over(
+        { ...WEBHOOK, enabled: false, disabled_reason: reason, disabled_at: WEBHOOK.updated_at },
+        200,
+        'get_webhook',
+        { webhook_id: WEBHOOK.id },
+      ).then(textOf);
+
+    const plan = await disabled('plan');
+    expect(plan).toMatch(/DISABLED BY THE PLATFORM because the account's plan/);
+    expect(plan).toContain('refused (402)');
+    expect(plan).not.toContain('disabled by you');
+
+    const unknown = await disabled('x');
+    expect(unknown).toContain('disabled (reason: x)');
+    expect(unknown).not.toContain('disabled by you');
+
+    expect(await disabled('customer')).toContain('disabled by you');
+  });
+
   it('orders the last success and the last failure by the clock, not by the string', async () => {
     // A success on the second and a failure 100 ms later, spelled the way two
     // timestamps from one platform can be: one without fractional seconds and
