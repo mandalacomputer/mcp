@@ -34,6 +34,13 @@ are wording changes, and they are behaviour changes in the way that matters.
 
 ### Changed
 
+- **`remove_ssh_key` and `set_computer_ssh` say what the platform does.**
+  `remove_ssh_key` said a session already open with the removed key goes on
+  until it disconnects; the platform closes any session opened with it as each
+  computer receives the new key list, within moments. `set_computer_ssh` now
+  also says the keys of a member whose seat is suspended do not log in.
+  Wording only.
+
 - **`delete_workspace` says only an empty workspace can be deleted.** Its
   description, its success text and the README said a deleted workspace's
   computers were kept, and an agent that trusted it was then told by the

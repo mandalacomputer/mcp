@@ -223,7 +223,7 @@ export const registerSSH: Registrar = (server, session) => {
     {
       title: 'Remove an SSH public key',
       description:
-        'Remove one of your SSH keys. New connections with it are refused at once, and it is removed from the computers it was written into within moments; a session already open goes on until it disconnects. Only a key bound to the account this API key acts on, one list_ssh_keys marks "this account only", can be removed here. Any other key, one added from the dashboard ("every account") or one bound to another account ("another account only"), answers as if there were no such key, and is removed from the dashboard.',
+        'Remove one of your SSH keys. New connections with it are refused at once, and it is removed from the computers it was written into within moments, and any session opened with it is closed as each computer receives the new key list. Only a key bound to the account this API key acts on, one list_ssh_keys marks "this account only", can be removed here. Any other key, one added from the dashboard ("every account") or one bound to another account ("another account only"), answers as if there were no such key, and is removed from the dashboard.',
       inputSchema: {
         ...keyIdArg,
         confirm: z.literal(true).describe('Must be true. This stops the key opening connections.'),
@@ -276,7 +276,7 @@ export const registerSSH: Registrar = (server, session) => {
     {
       title: 'Switch SSH on or off for a computer',
       description:
-        'Turn SSH on or off for a computer. On, the computer runs an SSH server reachable only through the platform jump host, accepting the keys of every owner and member of the account, except keys added through an API key or connected app on another account; off, the server stops and open SSH sessions are closed. No restart either way. Owners and members only.',
+        'Turn SSH on or off for a computer. On, the computer runs an SSH server reachable only through the platform jump host, accepting the keys of every owner and member of the account, except keys added through an API key or connected app on another account, and keys of a member whose seat is suspended; off, the server stops and open SSH sessions are closed. No restart either way. Owners and members only.',
       inputSchema: {
         ...idArg,
         enabled: z.boolean().describe('true to switch SSH on, false to switch it off.'),
