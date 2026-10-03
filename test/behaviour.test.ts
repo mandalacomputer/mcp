@@ -952,7 +952,11 @@ describe('the clipboard', () => {
   });
   afterEach(() => platform.restore());
 
-  it('states the xclip image requirement everywhere it recommends the tools', async () => {
+  it('states the image requirement for both desktops everywhere it recommends the tools', async () => {
+    // xclip is only the X11 half: a Wayland image drives wl-paste/wl-copy from
+    // wl-clipboard, and the platform's permanent 400 there names that tool. A
+    // 400 sentence about an image "without xclip" sends a Wayland agent after a
+    // tool its compositor never uses.
     const { client, call, close } = await connect({ computerId: 'vm-1' });
     const tools = new Map((await client.listTools()).tools.map((tool) => [tool.name, tool]));
     const guidance = [
@@ -962,6 +966,9 @@ describe('the clipboard', () => {
     ];
     for (const text of guidance) {
       expect(text).toMatch(/image.+xclip|xclip.+image/);
+      expect(text).toMatch(/image.+wl-clipboard|wl-clipboard.+image/);
+      expect(text).toMatch(/Wayland/);
+      expect(text).not.toMatch(/without xclip/);
       expect(text).toContain('400');
     }
     await close();

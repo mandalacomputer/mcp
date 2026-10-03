@@ -46,6 +46,13 @@ are wording changes, and they are behaviour changes in the way that matters.
 
 ### Changed
 
+- **The clipboard guidance names the Wayland tool.** `read_clipboard`,
+  `write_clipboard` and `get_desktop_url` with `control: true` said the
+  clipboard tools need `xclip` in the image, which is only the X11 half: a
+  Wayland image such as Omarchy needs `wl-clipboard` (`wl-paste`/`wl-copy`)
+  instead, and the platform's permanent 400 there names that tool. They now
+  name the tool each desktop needs, and so does the README. Wording only.
+
 - **`remove_ssh_key` and `set_computer_ssh` say what the platform does.**
   `remove_ssh_key` said a session already open with the removed key goes on
   until it disconnects; the platform closes any session opened with it as each
