@@ -115,6 +115,19 @@ describe('list_operations', () => {
     expect(text(result)).toContain('cursor=op_00000000000000000000000a');
   });
 
+  // Since platform OPL-5467 the dashboard's lifecycle calls record operations
+  // too, and all but a move are in this listing (OPL-5652).
+  it('says the listing holds dashboard-started operations too, all but a move', async () => {
+    const tool = (await (await open()).client.listTools()).tools.find(
+      (t) => t.name === 'list_operations',
+    );
+    const said = tool?.description ?? '';
+    expect(said).toContain('started on this account, from the API or the dashboard');
+    expect(said).toContain('Calls made from the dashboard are listed too, except a move.');
+    expect(said).not.toContain('record none');
+    expect(said).not.toContain("this account's API calls started");
+  });
+
   it('does not default computer_id to the selected computer', async () => {
     await (await open({ computerId: 'vm-1' })).call('list_operations');
     const sent = platform.calls.find((c) => c.path === '/operations');

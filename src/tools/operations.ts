@@ -204,7 +204,7 @@ export const registerOperations: Registrar = (server, session) => {
     {
       title: 'List lifecycle operations',
       description:
-        "The lifecycle operations this account's API calls started, newest first, a page at a time: kind, computer_id, state, error and timestamps. computer_id keeps one computer's (for a clone, the new computer's) — omitted, it is the whole account's, not the selected computer's. Pass next_cursor back as cursor for the next page; it is null on the last. Calls made from the dashboard record none.",
+        "The lifecycle operations started on this account, from the API or the dashboard, newest first, a page at a time: kind, computer_id, state, error and timestamps. computer_id keeps one computer's (for a clone, the new computer's) — omitted, it is the whole account's, not the selected computer's. Pass next_cursor back as cursor for the next page; it is null on the last. Calls made from the dashboard are listed too, except a move.",
       inputSchema: {
         computer_id: z
           .string()
