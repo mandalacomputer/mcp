@@ -1016,6 +1016,15 @@ export const registerComputers: Registrar = (server, session, opts) => {
         // onto each one this wait reports.
         const operation = operationIdOf(started);
         const tagged = (m: Move): Move => (operation ? { ...m, operation_id: operation } : m);
+        // The anchor. The platform keeps ONE move row per computer and writes a
+        // move with INSERT OR REPLACE, so once this move finishes another caller
+        // can start a second move of the same computer and replace its row.
+        // Matching by computer id alone then reports the second move's outcome
+        // as this one's; matching the 202's own started_at, the same stored
+        // string the row carries, cannot. A 202 without one keeps the old
+        // id-only match, since there is nothing to anchor to.
+        const startedAt = (started as { started_at?: unknown } | null)?.started_at;
+        const anchor = typeof startedAt === 'string' && startedAt !== '' ? startedAt : undefined;
 
         // The keepalive. A disk crossing between two hosts is minutes, and a
         // tool that says nothing for minutes is one a client cancels — see
@@ -1077,7 +1086,24 @@ export const registerComputers: Registrar = (server, session, opts) => {
               continue;
             }
             blocked = undefined;
-            const mine = table.moves.find((m) => m.computer_id === id);
+            const ours = table.moves.filter((m) => m.computer_id === id);
+            const mine = anchor === undefined ? ours[0] : ours.find((m) => m.started_at === anchor);
+            // A row for this computer that is NOT this move: another move took
+            // the row over, and this move's outcome is no longer recorded
+            // anywhere. Refused at once rather than polled, because that does not
+            // un-happen — and before the unreadable-rows check below, because
+            // with this computer's one row readable, this move cannot be hiding
+            // among the rows that were not.
+            if (!mine && anchor !== undefined && ours.length > 0) {
+              const other = ours
+                .map((m) => (typeof m.started_at === 'string' && m.started_at) || '(none)')
+                .join(', ');
+              return refused(
+                `A newer move of ${id} (started ${other}) replaced this one's row; this move's outcome ` +
+                  `is no longer recorded. list_moves shows the newer move.`,
+                last,
+              );
+            }
             // A move that is no longer listed is one the platform reaped, and it
             // reaps for one reason: the computer was deleted. Not a state to keep
             // polling for.
