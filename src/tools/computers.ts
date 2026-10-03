@@ -31,7 +31,7 @@ import {
   keyedFailure,
   restartIdempotencyKeyArg,
 } from './operations.js';
-import { scopeDefault, profileDefault } from './scope.js';
+import { profileDefault, scopeDefault } from './scope.js';
 import { FILES_DIR, secretBindingsSchema } from './secrets.js';
 import type { Registrar } from './types.js';
 

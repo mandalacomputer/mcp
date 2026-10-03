@@ -17,7 +17,7 @@ import {
   type Secret,
   type SecretList,
 } from '../secret-store.js';
-import { type ScopeSession, scopeDefault, profileDefault } from './scope.js';
+import { profileDefault, type ScopeSession, scopeDefault } from './scope.js';
 import type { Registrar } from './types.js';
 
 /**
