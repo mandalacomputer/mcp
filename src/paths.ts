@@ -318,6 +318,8 @@ export function createBody(args: {
   } | null;
   /** Checked for shape by the tool's schema; the rules on values are the platform's. */
   egress_proxy?: { server: string; credentials_secret_id?: string | null };
+  /** The workspace to create in; checked by the tool's schema. */
+  workspace_id?: string;
 }): Json {
   if (args.template_transfer !== undefined) {
     if (typeof args.template_transfer !== 'string' || !args.template_transfer.trim()) {

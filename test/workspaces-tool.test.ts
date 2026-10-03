@@ -199,3 +199,53 @@ it.each([
     expect(text(result)).not.toContain(retry as string);
   }
 });
+
+// Creating into a workspace and listing one (platform OPL-5543): an
+// account-wide key names the workspace with workspace_id on create_computer,
+// and narrows list_computers to one workspace or to 'unassigned'.
+
+it('create_computer sends workspace_id on the create, and only when given', async () => {
+  const { call } = await open();
+  const made = await call('create_computer', { template: 'base', workspace_id: WORKSPACE.id });
+  expect(made.isError).toBeFalsy();
+  const creates = () =>
+    platform.calls.filter((c) => c.method === 'POST' && c.path === '/computers');
+  expect(creates()[0]?.body).toMatchObject({ template: 'base', workspace_id: WORKSPACE.id });
+  await call('create_computer', { template: 'base' });
+  expect(creates()[1]?.body).not.toHaveProperty('workspace_id');
+});
+
+it('list_computers sends workspace_id as the query, an id or unassigned', async () => {
+  const { call } = await open();
+  const lists = () => platform.calls.filter((c) => c.method === 'GET' && c.path === '/computers');
+  await call('list_computers', { workspace_id: WORKSPACE.id });
+  expect(lists().at(-1)?.query.get('workspace_id')).toBe(WORKSPACE.id);
+  await call('list_computers', { workspace_id: 'unassigned', state: 'live' });
+  expect(Object.fromEntries(lists().at(-1)!.query)).toEqual({
+    workspace_id: 'unassigned',
+    state: 'live',
+  });
+  await call('list_computers', {});
+  expect(lists().at(-1)?.query.has('workspace_id')).toBe(false);
+});
+
+it('an empty workspace listing is not an empty account', async () => {
+  const { call } = await open();
+  respond([]);
+  const res = await call('list_computers', { workspace_id: 'unassigned' });
+  expect(text(res)).toContain('No computers on this account are in no workspace');
+  expect(text(res)).toContain('without `workspace_id`');
+  expect(text(res)).not.toContain('create_computer makes one');
+});
+
+it.each(['', ' wsp-0123456789ab'])(
+  'refuses a workspace_id the platform would refuse (%j), sending nothing',
+  async (bad) => {
+    const { call } = await open();
+    const made = await call('create_computer', { template: 'base', workspace_id: bad });
+    const listed = await call('list_computers', { workspace_id: bad });
+    expect(made.isError).toBe(true);
+    expect(listed.isError).toBe(true);
+    expect(platform.calls.filter((c) => c.path === '/computers')).toEqual([]);
+  },
+);

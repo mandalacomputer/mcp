@@ -75,7 +75,14 @@ export const EXERCISE: Record<string, Record<string, unknown>[]> = {
   list_sizes: [{}],
   // The third shape is `state` (OPL-4554): a filter the control plane
   // reads off the listing, and one no other call would send.
-  list_computers: [{}, { allow_partial: true }, { state: 'deleted' }],
+  list_computers: [
+    {},
+    { allow_partial: true },
+    { state: 'deleted' },
+    // One workspace's computers, and the ones in none (OPL-5543).
+    { workspace_id: 'wsp-0123456789ab' },
+    { workspace_id: 'unassigned' },
+  ],
   get_computer: [{}],
   use_computer: [{ computer_id: 'vm-1' }],
   // resume_only is the one parameter only start sends (OPL-5323).
@@ -247,6 +254,8 @@ export const EXERCISE: Record<string, Record<string, unknown>[]> = {
     { template: 'base', browser_proxy: { server: 'socks5://127.0.0.1:1080' } },
     // An egress proxy at create (OPL-5246).
     { template: 'base', egress_proxy: { server: 'socks5://proxy.example.com:1080' } },
+    // Into a workspace, by an account-wide key (OPL-5543).
+    { template: 'base', workspace_id: 'wsp-0123456789ab' },
   ],
   clone_computer: [{ name: 'copy' }],
   delete_computer: [
