@@ -107,6 +107,14 @@ are wording changes, and they are behaviour changes in the way that matters.
 
 ### Fixed
 
+- **`add_ssh_key` takes a .pub file as read, trailing newline and all.** The
+  platform refuses a `public_key` holding any line break, and the tool sent its
+  argument untouched, so the contents of a .pub file (which end in a newline)
+  were refused with a 400 "public_key must be one line holding one key".
+  Surrounding whitespace is now dropped before the key is sent, as both SDKs
+  already do; a key that is blank once trimmed is refused without sending
+  anything. A line break inside the key is still sent, and still refused.
+
 - **`list_operations` no longer says dashboard calls record none.** The
   platform records the dashboard's lifecycle calls the same way and lists them
   with the API's, all but a move; the tool's description now says it lists the

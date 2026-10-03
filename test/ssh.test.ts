@@ -34,6 +34,35 @@ describe('the SSH tools', () => {
     await close();
   });
 
+  it('drops surrounding whitespace, so a .pub file can be passed as read (OPL-5654)', async () => {
+    // The platform refuses any \r or \n in public_key before it trims, so the
+    // trailing newline a .pub file ends in has to go here, as both SDKs do.
+    const { call, close } = await connect();
+    const added = await call('add_ssh_key', { public_key: `  ${SSH_PUBLIC_KEY}\r\n` });
+    expect(added.isError).toBeFalsy();
+    const sent = platform.calls.filter((c) => c.method === 'POST' && c.path === '/ssh-keys');
+    expect(sent.map((c) => c.body)).toEqual([{ public_key: SSH_PUBLIC_KEY }]);
+    await close();
+  });
+
+  it('refuses a blank key without sending anything (OPL-5654)', async () => {
+    const { call, close } = await connect();
+    const res = await call('add_ssh_key', { public_key: ' \n\t ' });
+    expect(res.isError).toBe(true);
+    expect(textOf(res)).toContain('public_key must not be empty');
+    expect(platform.calls.filter((c) => c.path === '/ssh-keys')).toEqual([]);
+    await close();
+  });
+
+  it('leaves an interior newline for the platform to refuse (OPL-5654)', async () => {
+    const { call, close } = await connect();
+    const twoLines = `${SSH_PUBLIC_KEY}\n${SSH_PUBLIC_KEY}`;
+    await call('add_ssh_key', { public_key: `${twoLines}\n` });
+    const sent = platform.calls.filter((c) => c.method === 'POST' && c.path === '/ssh-keys');
+    expect(sent.map((c) => c.body)).toEqual([{ public_key: twoLines }]);
+    await close();
+  });
+
   it('refuses a private key without sending anything', async () => {
     const { call, close } = await connect();
     const res = await call('add_ssh_key', {
