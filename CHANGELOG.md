@@ -19,7 +19,8 @@ are wording changes, and they are behaviour changes in the way that matters.
 - **An input tool's `context` includes the page in Chromium.** When the
   focused window is Chromium the answer carries `page`: its URL, title and one
   line per interactive element visible in it, saying what it is, what it says
-  and the point to click. When there is no page, `page_not_read` gives the
+  (with its accessible name too when that differs, so two "×" buttons are
+  told apart) and the point to click. When there is no page, `page_not_read` gives the
   platform's reason (another window focused, Chromium not listening, an older
   computer image) beside the windows, which used to be dropped.
 

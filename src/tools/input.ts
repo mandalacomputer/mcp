@@ -46,6 +46,12 @@ const contextArg = {
  * One element of the page in a context, as a line a model reads at a glance:
  * what it is, what it says, and the centre of its box to click.
  *
+ * What it says is its text, and its accessible name too when that is
+ * something else: two icon buttons both showing "×" differ only in their names
+ * ("Close dialog", "Delete project"), and a filled search box's text is what
+ * was typed into it, not what it is for. Either alone when the other is empty
+ * or the same.
+ *
  * Undefined for an element that is not one, which is left out rather than
  * guessed at; the platform reads the page strictly, so this is a backstop.
  */
@@ -55,8 +61,13 @@ const elementLine = (e: unknown): string | undefined => {
   if (typeof tag !== 'string' || ![x, y, width, height].every(Number.isInteger)) return undefined;
   const [bx, by, bw, bh] = [x, y, width, height] as number[];
   const kind = typeof role === 'string' && role ? `${tag}[role=${role}]` : tag;
-  const label = [text, name].find((s): s is string => typeof s === 'string' && s !== '');
-  const quoted = label === undefined ? '' : ` ${JSON.stringify(label)}`;
+  const said = typeof text === 'string' && text !== '' ? text : undefined;
+  const named = typeof name === 'string' && name !== '' ? name : undefined;
+  const label = said ?? named;
+  const quoted =
+    label === undefined
+      ? ''
+      : ` ${JSON.stringify(label)}${said !== undefined && named !== undefined && named !== said ? ` (name ${JSON.stringify(named)})` : ''}`;
   const to = typeof href === 'string' && href ? ` -> ${href}` : '';
   return `${kind}${quoted} — click ${bx + Math.floor(bw / 2)},${by + Math.floor(bh / 2)} (box ${bx},${by} ${bw}x${bh})${to}`;
 };

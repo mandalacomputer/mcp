@@ -95,6 +95,72 @@ describe('page context', () => {
     expect(text).not.toContain('page_not_read');
   });
 
+  it('keeps both the text and the name when they differ', async () => {
+    restore = answerInput({
+      ok: true,
+      context: {
+        windows: [CHROMIUM],
+        focused: CHROMIUM,
+        dom: {
+          ...DOM,
+          elements: [
+            {
+              tag: 'button',
+              role: '',
+              name: 'Close dialog',
+              text: '×',
+              x: 0,
+              y: 0,
+              width: 10,
+              height: 10,
+            },
+            {
+              tag: 'button',
+              role: '',
+              name: 'Delete project',
+              text: '×',
+              x: 20,
+              y: 0,
+              width: 10,
+              height: 10,
+            },
+            {
+              tag: 'input',
+              role: '',
+              name: 'Search',
+              text: 'hello',
+              x: 40,
+              y: 0,
+              width: 10,
+              height: 10,
+            },
+            {
+              tag: 'button',
+              role: '',
+              name: 'Save',
+              text: 'Save',
+              x: 60,
+              y: 0,
+              width: 10,
+              height: 10,
+            },
+          ],
+        },
+      },
+    });
+    const { call, close } = await connect();
+    const res = await call('press_key', { keys: ['ctrl', 'l'], context: true });
+    await close();
+    const text = textOf(res);
+    // Two icon buttons that say the same thing are told apart by their names.
+    expect(text).toContain('button \\"×\\" (name \\"Close dialog\\") — click 5,5');
+    expect(text).toContain('button \\"×\\" (name \\"Delete project\\") — click 25,5');
+    // A filled field says what was typed and what it is.
+    expect(text).toContain('input \\"hello\\" (name \\"Search\\") — click 45,5');
+    // The same string twice is said once.
+    expect(text).toContain('button \\"Save\\" — click 65,5');
+  });
+
   it('passes the reason through beside the windows when there is no page', async () => {
     const said = 'the focused window is not Chromium, so no page elements were read';
     restore = answerInput({
