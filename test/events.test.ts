@@ -1,7 +1,7 @@
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Api } from '../src/api.js';
-import { EventHub, MAX_BUFFERED } from '../src/events.js';
+import { EventHub, MAX_BUFFERED, RUNNING_REFUSALS_TO_SETTLE } from '../src/events.js';
 import { Session } from '../src/session.js';
 import { registerEvents } from '../src/tools/events.js';
 import { BASE, connect, FakeSocket, fakeEvents, HELLO, installFakePlatform } from './harness.js';
@@ -1368,6 +1368,129 @@ describe('an event stream and a start already admitted', () => {
       }
     } finally {
       restore();
+    }
+  });
+});
+
+describe("a stream past the platform's cap on open streams (OPL-5643)", () => {
+  // The platform refuses a stream past 8 open on one computer, or 128 per
+  // account on one server, with a 409 on the upgrade and no reason, and
+  // waiting does not lift it until one of the caller's own streams closes.
+  // undici reports that 409 as every other refused upgrade, and the computer
+  // reads `running` — so this loop used to back off and retry for the life of
+  // the session, with poll_events answering `connecting` the whole time.
+  let platform: ReturnType<typeof installFakePlatform>;
+  beforeEach(() => {
+    platform = installFakePlatform();
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+    platform.restore();
+  });
+
+  /** Sockets scripted per connection, numbered from 1. */
+  const scripted = (plan: (n: number) => 'refuse' | 'greet' | 'greet-and-drop') => {
+    const sockets: FakeSocket[] = [];
+    const factory = (url: string) => {
+      const socket = new FakeSocket(url);
+      const n = sockets.push(socket);
+      // On a later turn, because the server attaches its listeners after the
+      // factory returns.
+      setTimeout(() => {
+        if (socket.closed) return;
+        const step = plan(n);
+        if (step === 'refuse') return socket.fail();
+        socket.open();
+        socket.send({ ...HELLO, ready: false });
+        if (step === 'greet-and-drop') socket.close();
+      }, 0);
+      return socket;
+    };
+    return { factory, sockets };
+  };
+
+  const reasonOf = (sub: { state: { status: string; reason?: string } }) =>
+    sub.state.status === 'stopped' ? String(sub.state.reason ?? '') : '';
+
+  it('stops with the cap after a run of refusals on a running computer', async () => {
+    const ev = scripted(() => 'refuse');
+    const hub = new EventHub(new Api('com_test', BASE), ev.factory);
+    try {
+      const sub = hub.open('vm-1');
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(sub.state.status).toBe('stopped');
+      expect(reasonOf(sub)).toContain('past 8 open on one computer or 128 per account');
+      expect(reasonOf(sub)).toContain('close another stream on this computer');
+      expect(ev.sockets).toHaveLength(RUNNING_REFUSALS_TO_SETTLE);
+    } finally {
+      hub.closeAll();
+    }
+  });
+
+  it('says so through poll_events instead of staying connecting', async () => {
+    const ev = scripted(() => 'refuse');
+    const { call, close } = await connect({ webSocket: ev.factory });
+    const pending = call('poll_events');
+    await vi.advanceTimersByTimeAsync(60_000);
+    const res = await pending;
+    expect(textOf(res)).toContain('128 per account on one server');
+    expect(ev.sockets).toHaveLength(RUNNING_REFUSALS_TO_SETTLE);
+    await close();
+  });
+
+  it('still connects after refusals that stop short of the run', async () => {
+    const ev = scripted((n) => (n < RUNNING_REFUSALS_TO_SETTLE ? 'refuse' : 'greet'));
+    const hub = new EventHub(new Api('com_test', BASE), ev.factory);
+    try {
+      const sub = hub.open('vm-1');
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(sub.state.status).toBe('open');
+      expect(ev.sockets).toHaveLength(RUNNING_REFUSALS_TO_SETTLE);
+    } finally {
+      hub.closeAll();
+    }
+  });
+
+  it('counts only refusals in a row: a connection that greeted starts again', async () => {
+    // Four refusals, one connection that greets and drops, four more, then
+    // one that stays: never five in a row.
+    const ev = scripted((n) => (n === 5 ? 'greet-and-drop' : n < 10 ? 'refuse' : 'greet'));
+    const hub = new EventHub(new Api('com_test', BASE), ev.factory);
+    try {
+      const sub = hub.open('vm-1');
+      await vi.advanceTimersByTimeAsync(120_000);
+      expect(sub.state.status).toBe('open');
+      expect(ev.sockets).toHaveLength(10);
+    } finally {
+      hub.closeAll();
+    }
+  });
+
+  it('starts the count again when a read does not say running', async () => {
+    // A computer between states is not the cap, which refuses only a running
+    // computer's upgrade. The fifth read answers `building`, which opens no
+    // socket and breaks the run.
+    let reads = 0;
+    const faked = globalThis.fetch;
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(typeof input === 'string' ? input : input.toString());
+      if (url.pathname.endsWith('/computers/vm-1') && (init?.method ?? 'GET') === 'GET') {
+        reads += 1;
+        platform.state.status = reads === 5 ? 'building' : 'running';
+      }
+      return faked(input as never, init);
+    }) as typeof fetch;
+    const ev = scripted((n) => (n < 9 ? 'refuse' : 'greet'));
+    const hub = new EventHub(new Api('com_test', BASE), ev.factory);
+    try {
+      const sub = hub.open('vm-1');
+      await vi.advanceTimersByTimeAsync(120_000);
+      expect(reads).toBeGreaterThan(5);
+      expect(sub.state.status).toBe('open');
+      expect(ev.sockets).toHaveLength(9);
+    } finally {
+      hub.closeAll();
     }
   });
 });

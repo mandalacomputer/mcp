@@ -93,6 +93,19 @@ are wording changes, and they are behaviour changes in the way that matters.
   polls 250ms after its first read, doubling up to the usual 2s. A poll that
   failed still waits 2s, or the `Retry-After` the platform sent.
 
+### Fixed
+
+- **An event stream refused for the open-stream cap now stops and says so,
+  instead of staying `connecting`.** The platform refuses a stream past 8 open
+  on one computer or 128 per account on one server with a 409 and no reason,
+  which a websocket sees as an ordinary failed connection on a running
+  computer, so the event tools retried it for the life of the session. After
+  five connections in a row fail to open on a computer that reads `running`,
+  the stream stops, and `poll_events` and `wait_for_event` say to close another
+  stream on that computer. A connection that opens, or a read that does not say
+  `running`, starts the count again, so a briefly unreachable server still
+  recovers.
+
 ## [0.9.0] — 2026-09-30
 
 ### Added

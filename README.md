@@ -638,6 +638,15 @@ to read an answer wrongly:
   two it was. Adding a watch can never cost you the window and process events
   you already had.
 
+**A computer holds at most 8 event streams at once, and an account 128 on one
+server.** A stream past either is refused with a 409 and no reason, and waiting
+does not lift it until another stream closes. A websocket client is told
+nothing about that refusal, and the computer still reads `running`, so this
+server reports it after five failed connections in a row: the stream stops and
+`poll_events` says to close another stream on that computer. Each SDK
+`waitFor`/`events` call holds one, and so does each MCP session that has asked
+about the computer's events.
+
 Not everything else is an event, though. A click landing and a page painting are
 not, and no amount of waiting will produce one — `screenshot`, `list_windows`
 and `exec_poll` are still the answers there. `wait_for_event` refuses at once,
