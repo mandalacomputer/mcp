@@ -187,7 +187,7 @@ export const registerSSH: Registrar = (server, session) => {
         public_key: z
           .string()
           .describe(
-            'One line from a .pub file: "<type> <base64> [comment]". The comment is dropped.',
+            'One line from a .pub file: "<type> <base64> [comment]". The file\'s contents can be passed as read: surrounding whitespace, including a trailing newline, is dropped. The comment is dropped too.',
           ),
         name: z
           .string()
@@ -197,13 +197,22 @@ export const registerSSH: Registrar = (server, session) => {
     },
     ({ public_key, name }, extra) =>
       guarded(async () => {
-        if (/PRIVATE KEY/.test(public_key)) {
+        // The platform refuses any \r or \n in public_key before it trims, so
+        // the newline a .pub file ends in is dropped here, as both SDKs do. An
+        // interior newline is still sent, and the platform refuses it.
+        const key = public_key.trim();
+        if (/PRIVATE KEY/.test(key)) {
           return refused(
             'That is a private key. Nothing was sent. Send the contents of the matching .pub file instead, and treat the private key as exposed.',
           );
         }
+        if (!key) {
+          return refused(
+            'public_key must not be empty. Nothing was sent. Send the contents of a .pub file.',
+          );
+        }
         const body = await session.api.with(extra.signal).json<unknown>('POST', P.SSH_KEYS, {
-          body: { public_key, ...(name === undefined ? {} : { name }) },
+          body: { public_key: key, ...(name === undefined ? {} : { name }) },
         });
         if (!isRecord(body) || !text(body.id)) {
           return refused(
