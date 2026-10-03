@@ -163,9 +163,18 @@ const recordOf = (body: unknown): Record<string, unknown> | undefined =>
  */
 function health(w: Webhook): string {
   if (w.enabled === false) {
-    return w.disabled_reason === 'failing'
-      ? 'DISABLED BY THE PLATFORM after a day of failures — update_webhook with enabled: true to start it again'
-      : 'disabled by you';
+    // The reason is a plain string the platform may add to; a value this
+    // server does not know is named, never folded into "disabled by you".
+    switch (w.disabled_reason) {
+      case 'failing':
+        return 'DISABLED BY THE PLATFORM after a day of failures — update_webhook with enabled: true to start it again';
+      case 'plan':
+        return "DISABLED BY THE PLATFORM because the account's plan does not include webhooks — it is enabled again automatically (oldest first, up to the plan's allowance) when a plan with webhooks is chosen; update_webhook with enabled: true is refused (402) until then";
+      case 'customer':
+        return 'disabled by you';
+      default:
+        return `disabled (reason: ${w.disabled_reason ?? 'not given'})`;
+    }
   }
   const success = instant(w.last_success_at);
   const failure = instant(w.last_failure_at);
@@ -346,7 +355,7 @@ export const registerWebhooks: Registrar = (server, session) => {
     {
       title: 'Change a webhook subscription',
       description:
-        'Change the endpoint, the description, the filters, or whether it is enabled. Fields you leave out are kept as they are; name at least one. A new url is checked exactly as on create. enabled: true clears a disable the platform imposed for failures and starts fresh; enabled: false stops deliveries and records that you chose to. The secret does not change — rotate_webhook_secret is for that.',
+        'Change the endpoint, the description, the filters, or whether it is enabled. Fields you leave out are kept as they are; name at least one. A new url is checked exactly as on create. enabled: true clears a disable the platform imposed for failures and starts fresh; enabled: false stops deliveries and records that you chose to. While the account’s plan includes no webhooks, enabled: true (and a new url) is refused with 402. The secret does not change — rotate_webhook_secret is for that.',
       inputSchema: {
         ...webhookIdArg,
         url: z

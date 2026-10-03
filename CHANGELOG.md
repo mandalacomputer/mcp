@@ -106,6 +106,16 @@ are wording changes, and they are behaviour changes in the way that matters.
   `running`, starts the count again, so a briefly unreachable server still
   recovers.
 
+- **A webhook the platform disabled for the account's plan no longer reads
+  "disabled by you".** When the account moves to a plan without webhooks the
+  platform disables its subscriptions with `disabled_reason: "plan"`, and
+  enables them again itself, oldest first up to the plan's allowance, when a
+  plan with webhooks is chosen. `list_webhooks` and `get_webhook` called every
+  disable that was not `failing` "disabled by you"; they now say the platform
+  did it because of the plan, and that `update_webhook` with `enabled: true` is
+  refused (402) until then. A reason this server does not know is named
+  (`disabled (reason: …)`). `update_webhook`'s description says the same 402.
+
 ## [0.9.0] — 2026-09-30
 
 ### Added
