@@ -125,6 +125,8 @@ it('delete_workspace needs confirm: true, and says how many keys were revoked', 
   });
   expect(result.isError).not.toBe(true);
   expect(text(result)).toMatch(/2 API keys confined to it were revoked/);
+  // Only an empty workspace is deleted (OPL-5639): nothing is left to keep.
+  expect(text(result)).not.toMatch(/kept/);
   expect(data(result)).toEqual({ ok: true, revoked_keys: 2 });
   expect(platform.calls.map((c) => [c.method, c.path])).toEqual([
     ['DELETE', `/workspaces/${WORKSPACE.id}`],
@@ -136,6 +138,12 @@ it('describes the writes honestly and hides them from a read-only session', asyn
   const tools = (await connection.client.listTools()).tools;
   const byName = (name: string) => tools.find((t) => t.name === name);
   expect(byName('delete_workspace')?.description).toMatch(/REVOKES every API key confined to it/);
+  // The platform refuses (409) a workspace that still holds computers, so the
+  // description must not promise they survive the delete (OPL-5639).
+  expect(byName('delete_workspace')?.description).toMatch(
+    /Only an empty workspace can be deleted: one that still holds computers is refused \(409\)/,
+  );
+  expect(byName('delete_workspace')?.description).not.toMatch(/kept|NOT deleted|not touched/);
   expect(byName('delete_workspace')?.annotations).toMatchObject({
     readOnlyHint: false,
     destructiveHint: true,

@@ -347,7 +347,7 @@ export const registerAccount: Registrar = (server, session) => {
     'delete_workspace',
     {
       title: 'Delete a workspace',
-      description: `Permanently delete a workspace. It REVOKES every API key confined to it, whoever holds it, in the same step: anything using one of those keys — a person's CI, another agent — is refused from its next request, and this cannot be undone. The answer says how many were revoked. The computers in it are NOT deleted, stopped or moved: they keep the deleted workspace's id, and account-wide keys reach them as before. Needs confirm: true. ${OWNER_ACCOUNT_WIDE}`,
+      description: `Permanently delete a workspace. It REVOKES every API key confined to it, whoever holds it, in the same step: anything using one of those keys — a person's CI, another agent — is refused from its next request, and this cannot be undone. The answer says how many were revoked. Only an empty workspace can be deleted: one that still holds computers is refused (409), saying how many, and nothing is deleted or revoked; delete those computers first. Needs confirm: true. ${OWNER_ACCOUNT_WIDE}`,
       inputSchema: z
         .object({
           workspace_id: workspaceIdArg,
@@ -366,7 +366,7 @@ export const registerAccount: Registrar = (server, session) => {
         );
         const n = data.revoked_keys;
         return said(
-          `Deleted workspace ${workspace_id}; ${n} API key${n === 1 ? '' : 's'} confined to it ${n === 1 ? 'was' : 'were'} revoked. Its computers are kept.`,
+          `Deleted workspace ${workspace_id}; ${n} API key${n === 1 ? '' : 's'} confined to it ${n === 1 ? 'was' : 'were'} revoked.`,
           data,
         );
       }),
