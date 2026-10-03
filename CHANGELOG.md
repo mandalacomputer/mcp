@@ -32,6 +32,18 @@ are wording changes, and they are behaviour changes in the way that matters.
   that the account is empty. Needs a platform that accepts `workspace_id` on
   these two routes; an older one creates in no workspace and lists everything.
 
+- **`create_computer` and `list_computers` use the saved profile's default
+  workspace.** Started from a profile with a default from
+  `mandala workspaces use`, a call that leaves out `workspace_id` creates in,
+  or lists, that workspace, as `mandala computers create` and `computers list`
+  and the secret tools already did; an explicit `workspace_id` always wins. A
+  secret created in the default workspace could not be bound to a computer
+  created here, which landed in none. Both say when the default chose the
+  workspace. When `~/.mandala/defaults.json` cannot be read, `create_computer`
+  without `workspace_id` is refused with nothing sent, and `list_computers`
+  lists unfiltered. Explicit and environment keys, and the hosted server, are
+  unchanged.
+
 ### Changed
 
 - **`remove_ssh_key` and `set_computer_ssh` say what the platform does.**
