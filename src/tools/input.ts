@@ -38,8 +38,43 @@ const contextArg = {
     .boolean()
     .default(false)
     .describe(
-      "Answer the desktop's windows, and which one has focus, as they stand just after the action — what list_windows would say, without a second call. Read at once, so a window still opening may not be listed yet. If they cannot be read the action still happened, and the answer says why.",
+      "Answer the desktop's windows, and which one has focus, as they stand just after the action — what list_windows would say, without a second call — and, when the focused window is Chromium, the page on screen: its URL, title and the interactive elements visible in it, each with the point to click. Read at once, so a window still opening may not be listed yet. If they cannot be read the action still happened, and the answer says why.",
     ),
+};
+
+/**
+ * One element of the page in a context, as a line a model reads at a glance:
+ * what it is, what it says, and the centre of its box to click.
+ *
+ * What it says is its text, and its accessible name too when that is
+ * something else: two icon buttons both showing "×" differ only in their names
+ * ("Close dialog", "Delete project"), and a filled search box's text is what
+ * was typed into it, not what it is for. Either alone when the other is empty
+ * or the same.
+ *
+ * Every string the page wrote (role, text, name, href) is a JSON string
+ * literal in the line, so a page cannot close a bracket or a quote and write a
+ * click of its own: only the tag, which the platform holds to an element
+ * name's characters, and the numbers are bare.
+ *
+ * Undefined for an element that is not one, which is left out rather than
+ * guessed at; the platform reads the page strictly, so this is a backstop.
+ */
+const elementLine = (e: unknown): string | undefined => {
+  if (!e || typeof e !== 'object') return undefined;
+  const { tag, role, name, text, href, x, y, width, height } = e as Record<string, unknown>;
+  if (typeof tag !== 'string' || ![x, y, width, height].every(Number.isInteger)) return undefined;
+  const [bx, by, bw, bh] = [x, y, width, height] as number[];
+  const kind = typeof role === 'string' && role ? `${tag}[role=${JSON.stringify(role)}]` : tag;
+  const said = typeof text === 'string' && text !== '' ? text : undefined;
+  const named = typeof name === 'string' && name !== '' ? name : undefined;
+  const label = said ?? named;
+  const quoted =
+    label === undefined
+      ? ''
+      : ` ${JSON.stringify(label)}${said !== undefined && named !== undefined && named !== said ? ` (name ${JSON.stringify(named)})` : ''}`;
+  const to = typeof href === 'string' && href ? ` -> ${JSON.stringify(href)}` : '';
+  return `${kind}${quoted} — click ${bx + Math.floor(bw / 2)},${by + Math.floor(bh / 2)} (box ${bx},${by} ${bw}x${bh})${to}`;
 };
 
 /**
@@ -49,15 +84,37 @@ const contextArg = {
  * or the reason the platform gave for not reading them. The action happened
  * either way, so neither is an error. One renderer, so every input tool says
  * it the same way.
+ *
+ * The platform's `dom` — the page in a focused Chromium — is rendered as
+ * `page`, one line per element. When there is none, the platform's reason
+ * (`context_error` beside a context: another window focused, Chromium not
+ * listening, an older image) is passed through as `page_not_read`.
  */
 const withContext = (line: string, res: Record<string, unknown> | undefined): CallToolResult => {
   const ctx = res?.context;
-  if (ctx && typeof ctx === 'object') return said(`${line} The desktop now:`, ctx);
   const why =
-    typeof res?.context_error === 'string' && res.context_error
-      ? res.context_error
-      : 'the platform answered no context';
-  return said(`${line} Its windows could not be read (${why}); screenshot to see the result.`);
+    typeof res?.context_error === 'string' && res.context_error ? res.context_error : undefined;
+  if (ctx && typeof ctx === 'object') {
+    const { dom, ...desktop } = ctx as Record<string, unknown>;
+    const out: Record<string, unknown> = { ...desktop };
+    if (dom && typeof dom === 'object') {
+      const d = dom as Record<string, unknown>;
+      out.page = {
+        url: d.url,
+        title: d.title,
+        elements: Array.isArray(d.elements)
+          ? d.elements.map(elementLine).filter((l) => l !== undefined)
+          : [],
+        ...(d.truncated === true ? { truncated: true } : {}),
+      };
+    } else if (why) {
+      out.page_not_read = why;
+    }
+    return said(`${line} The desktop now:`, out);
+  }
+  return said(
+    `${line} Its windows could not be read (${why ?? 'the platform answered no context'}); screenshot to see the result.`,
+  );
 };
 
 /**

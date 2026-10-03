@@ -16,6 +16,14 @@ are wording changes, and they are behaviour changes in the way that matters.
 
 ### Added
 
+- **An input tool's `context` includes the page in Chromium.** When the
+  focused window is Chromium the answer carries `page`: its URL, title and one
+  line per interactive element visible in it, saying what it is, what it says
+  (with its accessible name too when that differs, so two "×" buttons are
+  told apart) and the point to click. When there is no page, `page_not_read` gives the
+  platform's reason (another window focused, Chromium not listening, an older
+  computer image) beside the windows, which used to be dropped.
+
 - **`create_computer` and `list_computers` take `workspace_id`.** An
   account-wide key creates a computer in that workspace, with its secrets named
   from that workspace's scope, and lists one workspace's computers, or with
