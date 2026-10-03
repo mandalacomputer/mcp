@@ -178,7 +178,11 @@ takes `context: true` and then answers the desktop as it stands just after the
 action: the windows `list_windows` would list and the one with focus, without a
 second call. They are read once, straight after the action, so a window still
 opening may not be listed yet; when they cannot be read the action still
-happened, and the answer says why.
+happened, and the answer says why. When the focused window is Chromium the
+answer also carries `page`: the page's URL and title and one line per
+interactive element visible in it — what it is, what it says, and the point to
+click. Firefox, the default browser, has no `page`; then `page_not_read` gives
+the platform's reason beside the windows.
 
 **Inside the guest** — `exec`, `exec_poll`, `exec_kill`, `get_execution`,
 `read_execution_output`, `open_url`,
