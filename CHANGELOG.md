@@ -14,6 +14,15 @@ are wording changes, and they are behaviour changes in the way that matters.
 
 ## [Unreleased]
 
+## [0.11.0] — 2026-10-08
+
+### Changed
+
+- **No change to the tools.** Released alongside `mandala-computer` 0.11.0 so
+  the two keep one version. The screenshot route's new `capture` parameter,
+  which cuts a picture from the capture an earlier screenshot named, is not
+  offered by `screenshot` here yet.
+
 ## [0.10.0] — 2026-10-03
 
 ### Added
@@ -967,6 +976,7 @@ No effect on the tool surface, listed because it is most of the window.
 - Several parser fixes landed before that scanner was retired, each ported to
   and from the TypeScript SDK's byte-identical copy.
 
+[0.11.0]: https://github.com/mandalacomputer/mcp/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/mandalacomputer/mcp/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/mandalacomputer/mcp/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/mandalacomputer/mcp/compare/v0.7.0...v0.8.0
