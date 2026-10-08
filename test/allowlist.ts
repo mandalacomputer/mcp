@@ -273,7 +273,15 @@ export const PARAMETERS: ReadonlyMap<string, readonly string[]> = new Map([
   // Computer use.
   [
     'GET computers/:id/screenshot',
-    ['query:w', 'query:fresh', 'query:format', 'query:quality', 'query:region', 'query:scale'],
+    [
+      'query:w',
+      'query:fresh',
+      'query:format',
+      'query:quality',
+      'query:region',
+      'query:scale',
+      'query:capture',
+    ],
   ],
   [
     'POST computers/:id/input',
@@ -490,6 +498,11 @@ export const UNIMPLEMENTED_PARAMETERS: ReadonlySet<string> = new Set([
   'POST computers/:id/input  body:button',
   // DECISION. `amount` is sent instead. Same value, two names.
   'POST computers/:id/input  body:scroll_amount',
+  // GAP (OPL-5852). `capture` cuts a screenshot from the capture an earlier
+  // one named in X-GC-Capture, so a crop is of the pixels it was worked out
+  // on. The screenshot tool takes a region but hands the model no capture
+  // name to send back, so it cannot pin one yet.
+  'GET computers/:id/screenshot  query:capture',
 ]);
 
 export const key = (route: Route) => `${route.method} ${route.pattern}`;
