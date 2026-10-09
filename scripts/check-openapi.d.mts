@@ -6,13 +6,17 @@ export function parseOperations(document: unknown): Contract;
 export function compareCoverage(
   contract: Contract,
   evidence: Evidence,
-  options?: { unsent?: Iterable<string> },
+  options?: {
+    unsent?: Iterable<string>;
+    prepublication?: Iterable<{ operation: string; expiresAt: string }>;
+  },
 ): {
   operations: number;
   requests: number;
   tools: number;
   excluded: string[];
   unsent: string[];
+  awaitingPublication: { operation: string; expiresAt: string }[];
 };
 export class PublicationError extends Error {
   classification: string;

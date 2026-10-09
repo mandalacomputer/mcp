@@ -137,9 +137,10 @@ function routeShape(method, path) {
  * so a gap is written down once. A published operation on that list is
  * reported rather than failed; every other one must still be exercised.
  */
-export function compareCoverage(contract, evidence, { unsent = [] } = {}) {
+export function compareCoverage(contract, evidence, { unsent = [], prepublication = [] } = {}) {
+  const unsentNames = new Set(unsent);
   const pending = new Set(
-    [...unsent].map((entry) => {
+    [...unsentNames].map((entry) => {
       const [method, pattern] = String(entry).split(' ');
       // The mirror spells a route without a leading or trailing slash and never
       // names the API root, so an exemption cannot reach the root or a slash
@@ -191,7 +192,29 @@ export function compareCoverage(contract, evidence, { unsent = [] } = {}) {
   // nothing is drift — a published operation renamed or dropped — and passing
   // it silently would read as coverage resolved.
   const published = new Set(contract.operations.map((op) => routeShape(op.method, op.path)));
-  const stale = [...pending].filter((shape) => !published.has(shape)).sort();
+  // A mirror must land before its API can deploy. Admit only explicitly named,
+  // time-bounded rollout entries, never an intersection that hides stale gaps.
+  // Once the deadline passes, these have the same stale detection as all other
+  // unsent operations, including when a previously published route disappears.
+  const planned = new Set();
+  const awaitingPublication = [];
+  for (const entry of prepublication) {
+    if (!record(entry) || !unsentNames.has(entry.operation) || typeof entry.expiresAt !== 'string')
+      throw new Error('Prepublication operation must name an unsent operation and expiry');
+    const expiry = Date.parse(entry.expiresAt);
+    if (!Number.isFinite(expiry) || new Date(expiry).toISOString() !== entry.expiresAt)
+      throw new Error('Invalid prepublication expiry');
+    const [method, path] = entry.operation.split(' ');
+    const shape = routeShape(method, path);
+    if (planned.has(shape)) throw new Error('Duplicate prepublication operation');
+    planned.add(shape);
+    if (!published.has(shape)) {
+      if (Date.now() >= expiry)
+        throw new Error(`Prepublication deadline passed: ${entry.operation}`);
+      awaitingPublication.push({ operation: entry.operation, expiresAt: entry.expiresAt });
+    }
+  }
+  const stale = [...pending].filter((shape) => !published.has(shape) && !planned.has(shape)).sort();
   if (stale.length)
     throw new Error(`Not-yet-sent operations absent from the publication:\n${stale.join('\n')}`);
   const uncovered = contract.operations.filter((op) => !seen.has(op.key));
@@ -210,6 +233,7 @@ export function compareCoverage(contract, evidence, { unsent = [] } = {}) {
     tools: evidence.length,
     excluded: contract.excluded,
     unsent: notYetSent,
+    awaitingPublication: awaitingPublication.sort((a, b) => a.operation.localeCompare(b.operation)),
   };
 }
 

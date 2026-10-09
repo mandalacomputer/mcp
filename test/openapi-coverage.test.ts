@@ -120,6 +120,52 @@ it('requires exact registered/exercise inventory in both directions', () => {
   );
 });
 
+it('reports only explicit prepublication gaps and enforces their deadline', () => {
+  vi.useFakeTimers();
+  vi.setSystemTime(new Date('2026-10-09T00:00:00.000Z'));
+  const old = parseOperations(document({ '/one': { get: operation() } }));
+  const observed = evidence('GET', '/api/v1/one');
+  const marker = { operation: 'POST future/:id', expiresAt: '2026-10-16T00:00:00.000Z' };
+  const options = { unsent: [marker.operation], prepublication: [marker] };
+  expect(compareCoverage(old, observed, options).awaitingPublication).toEqual([marker]);
+  expect(() => compareCoverage(old, observed, { unsent: options.unsent })).toThrow(
+    'Not-yet-sent operations absent',
+  );
+  expect(() =>
+    compareCoverage(old, observed, { ...options, unsent: [...options.unsent, 'DELETE removed'] }),
+  ).toThrow('DELETE /removed');
+  expect(() => compareCoverage(old, observed, { prepublication: [marker] })).toThrow(
+    'must name an unsent operation',
+  );
+  expect(() =>
+    compareCoverage(old, observed, { ...options, prepublication: [marker, marker] }),
+  ).toThrow('Duplicate prepublication');
+  expect(() =>
+    compareCoverage(old, observed, {
+      ...options,
+      prepublication: [{ ...marker, expiresAt: 'not a date' }],
+    }),
+  ).toThrow('Invalid prepublication expiry');
+  const deployed = parseOperations(
+    document({ '/one': { get: operation() }, '/future/{id}': { post: operation() } }),
+  );
+  const summary = compareCoverage(deployed, observed, options);
+  expect(summary.awaitingPublication).toEqual([]);
+  expect(summary.unsent).toEqual(['POST /api/v1/future/{id}']);
+  const another = parseOperations(
+    document({ '/one': { get: operation() }, '/other': { post: operation() } }),
+  );
+  expect(() => compareCoverage(another, observed, options)).toThrow(
+    'Missing published operations:\nPOST /api/v1/other',
+  );
+  expect(() => compareCoverage(old, [], options)).toThrow('No tool request evidence');
+  vi.setSystemTime(new Date(marker.expiresAt));
+  expect(() => compareCoverage(old, observed, options)).toThrow('Prepublication deadline passed');
+  expect(compareCoverage(deployed, observed, options).unsent).toEqual(['POST /api/v1/future/{id}']);
+  // Expired markers cannot hide a later removal, even if cleanup was missed.
+  expect(() => compareCoverage(old, observed, options)).toThrow('Prepublication deadline passed');
+});
+
 it.each(['error', 'protocol', 'no-request'] as const)(
   'fails and cleans up a real-tool exercise with %s',
   async (kind) => {
