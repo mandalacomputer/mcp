@@ -368,6 +368,7 @@ export const PARAMETERS: ReadonlyMap<string, readonly string[]> = new Map([
   [
     'POST computers/:id/agent',
     [
+      'body:max_cost_usd',
       'header:X-Model-Key',
       'body:prompt',
       'body:system',
@@ -497,6 +498,8 @@ export const PARAMETERS: ReadonlyMap<string, readonly string[]> = new Map([
  * would say nothing that route's own line does not.
  */
 export const UNIMPLEMENTED_PARAMETERS: ReadonlySet<string> = new Set([
+  // OPL-5866 adds funded-agent options; this client currently sends its own model key.
+  'POST computers/:id/agent  body:max_cost_usd',
   // DECISION. `keys: ['ctrl', 'c']` is sent instead, as both SDKs send it. The
   // chord-as-one-string form cannot express a key whose own name contains the
   // separator.
