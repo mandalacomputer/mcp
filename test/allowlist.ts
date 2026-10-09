@@ -57,6 +57,8 @@ export const V1_ROUTES: Route[] = [
   r('GET', 'computers/:id/screenshot'),
   r('POST', 'computers/:id/input'),
   r('POST', 'computers/:id/exec'),
+  r('POST', 'computers/:id/browser-connections'),
+  r('DELETE', 'computers/:id/browser-connections/:connection'),
   r('GET', 'computers/:id/exec/:pid'),
   r('DELETE', 'computers/:id/exec/:pid'),
   r('GET', 'computers/:id/executions/:executionId'),
@@ -191,6 +193,8 @@ export const V1_ROUTES: Route[] = [
  * comparison is against what the platform actually reads.
  */
 export const PARAMETERS: ReadonlyMap<string, readonly string[]> = new Map([
+  ['POST computers/:id/browser-connections', []],
+  ['DELETE computers/:id/browser-connections/:connection', []],
   ['GET templates', []],
   // Neither takes a query parameter or a header. The validate route's body is
   // the document itself, raw rather than a JSON envelope with named fields, so
@@ -513,6 +517,10 @@ export const ALLOWED = new Set(V1_ROUTES.map(key));
  * be exercised; parameter exceptions stay separate.
  */
 export const UNIMPLEMENTED = new Set<string>([
+  // GAP (OPL-5878): browser connection lifecycle currently uses direct HTTP.
+  // No MCP tool returns the raw browser capability to model context.
+  'POST computers/:id/browser-connections',
+  'DELETE computers/:id/browser-connections/:connection',
   // The account's secret store left this list in OPL-5026, reached by
   // list_secrets, get_secret, create_secret, replace_secret and delete_secret.
   // An operation left out on purpose goes here with its reason.
@@ -524,6 +532,14 @@ export const UNIMPLEMENTED = new Set<string>([
   'POST api-keys',
   'DELETE api-keys/:id',
 ]);
+
+// The mirror precedes deployment. Remove these markers once both operations
+// appear in the published contract. Absent operations fail after this deadline,
+// so rollout markers cannot silently exempt a future removal indefinitely.
+export const PREPUBLICATION = [
+  'POST computers/:id/browser-connections',
+  'DELETE computers/:id/browser-connections/:connection',
+].map((operation) => ({ operation, expiresAt: '2026-10-16T00:00:00.000Z' }));
 
 /**
  * Reduce a concrete path to its route pattern, exactly as `patternFor` in the
@@ -560,6 +576,8 @@ export function patternFor(path: string): string {
       if (i === 3 && parts[0] === 'computers' && parts[2] === 'activities') return ':activity';
       if (i === 3 && parts[0] === 'computers' && parts[2] === 'windows') return ':window';
       if (i === 3 && parts[0] === 'computers' && parts[2] === 'exec') return ':pid';
+      if (i === 3 && parts[0] === 'computers' && parts[2] === 'browser-connections')
+        return ':connection';
       if (i === 3 && parts[0] === 'computers' && parts[2] === 'executions') return ':executionId';
       if (i === 3 && parts[0] === 'computers' && parts[2] === 'results') return ':resultId';
       if (i === 3 && parts[0] === 'computers' && parts[2] === 'artifacts') return ':artifactId';
