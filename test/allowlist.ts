@@ -112,6 +112,7 @@ export const V1_ROUTES: Route[] = [
   // a related reason: the figures include computers that have since been
   // deleted, which is precisely the line an unexplained invoice is about.
   r('GET', 'usage'),
+  r('GET', 'credits'),
   // How long the automatic snapshots a schedule takes are kept. Account-scoped
   // like `usage` and `moves`, and read-only on every surface: the plan owns
   // retention.
@@ -413,6 +414,7 @@ export const PARAMETERS: ReadonlyMap<string, readonly string[]> = new Map([
   // Both bounds, and both optional: with neither, the platform answers over the
   // account's current billing period.
   ['GET usage', ['query:from', 'query:to']],
+  ['GET credits', ['query:before', 'query:limit']],
 
   ['GET retention', []],
 
@@ -525,6 +527,8 @@ export const ALLOWED = new Set(V1_ROUTES.map(key));
  * be exercised; parameter exceptions stay separate.
  */
 export const UNIMPLEMENTED = new Set<string>([
+  // OPL-5864: direct HTTP is available; this contract prerequisite adds no wrapper.
+  'GET credits',
   // GAP (OPL-5878): browser connection lifecycle currently uses direct HTTP.
   // No MCP tool returns the raw browser capability to model context.
   'POST computers/:id/browser-connections',
