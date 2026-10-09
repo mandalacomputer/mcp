@@ -533,14 +533,6 @@ export const UNIMPLEMENTED = new Set<string>([
   'DELETE api-keys/:id',
 ]);
 
-// The mirror precedes deployment. Remove these markers once both operations
-// appear in the published contract. Absent operations fail after this deadline,
-// so rollout markers cannot silently exempt a future removal indefinitely.
-export const PREPUBLICATION = [
-  'POST computers/:id/browser-connections',
-  'DELETE computers/:id/browser-connections/:connection',
-].map((operation) => ({ operation, expiresAt: '2026-10-16T00:00:00.000Z' }));
-
 /**
  * Reduce a concrete path to its route pattern, exactly as `patternFor` in the
  * platform's surface.ts does — by position and by parent, never by a regex over
