@@ -59,6 +59,7 @@ export const V1_ROUTES: Route[] = [
   r('POST', 'computers/:id/exec'),
   r('POST', 'computers/:id/browser-connections'),
   r('DELETE', 'computers/:id/browser-connections/:connection'),
+  r('POST', 'computers/:id/browser-connections/:connection/renew'),
   r('GET', 'computers/:id/exec/:pid'),
   r('DELETE', 'computers/:id/exec/:pid'),
   r('GET', 'computers/:id/executions/:executionId'),
@@ -193,7 +194,11 @@ export const V1_ROUTES: Route[] = [
  * comparison is against what the platform actually reads.
  */
 export const PARAMETERS: ReadonlyMap<string, readonly string[]> = new Map([
-  ['POST computers/:id/browser-connections', []],
+  [
+    'POST computers/:id/browser-connections',
+    ['body:lifecycle_version', 'body:lease_seconds', 'body:max_duration_seconds'],
+  ],
+  ['POST computers/:id/browser-connections/:connection/renew', []],
   ['DELETE computers/:id/browser-connections/:connection', []],
   ['GET templates', []],
   // Neither takes a query parameter or a header. The validate route's body is
@@ -521,6 +526,8 @@ export const UNIMPLEMENTED = new Set<string>([
   // No MCP tool returns the raw browser capability to model context.
   'POST computers/:id/browser-connections',
   'DELETE computers/:id/browser-connections/:connection',
+  // OPL-5880: renewal belongs to the authenticated browser driver, not model context.
+  'POST computers/:id/browser-connections/:connection/renew',
   // The account's secret store left this list in OPL-5026, reached by
   // list_secrets, get_secret, create_secret, replace_secret and delete_secret.
   // An operation left out on purpose goes here with its reason.
