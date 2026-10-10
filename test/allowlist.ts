@@ -296,6 +296,10 @@ export const PARAMETERS: ReadonlyMap<string, readonly string[]> = new Map([
   [
     'POST computers/:id/input',
     [
+      'body:type',
+      'body:path',
+      'body:scroll_x',
+      'body:scroll_y',
       'body:action',
       'body:x',
       'body:y',
@@ -500,6 +504,12 @@ export const PARAMETERS: ReadonlyMap<string, readonly string[]> = new Map([
  * would say nothing that route's own line does not.
  */
 export const UNIMPLEMENTED_PARAMETERS: ReadonlySet<string> = new Set([
+  // OPL-4396: raw OpenAI dialect; typed helpers retain their action vocabulary.
+  'POST computers/:id/input  body:type',
+  'POST computers/:id/input  body:path',
+  'POST computers/:id/input  body:scroll_x',
+  'POST computers/:id/input  body:scroll_y',
+
   // OPL-5866 adds funded-agent options; this client currently sends its own model key.
   'POST computers/:id/agent  body:max_cost_usd',
   // DECISION. `keys: ['ctrl', 'c']` is sent instead, as both SDKs send it. The
