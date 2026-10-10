@@ -581,9 +581,12 @@ export const registerInput: Registrar = (server, session) => {
             `That screenshot came back as ${shot.contentType}, not one of the image types this can hand over (${[...INLINE_IMAGE_TYPES].join(', ')}) — ${shot.bytes.length} bytes. Something between here and the guest answered in place of the capture; nothing was returned rather than passing it off as a picture.`,
           );
         }
-        if (capture !== undefined && (shot.capture !== capture || shot.frame === 'suspended')) {
+        if (
+          capture !== undefined &&
+          (shot.capture !== capture || !shot.captureSize || shot.frame === 'suspended')
+        ) {
           return refused(
-            'The screenshot response did not confirm the requested live capture. Nothing was returned. Take a new screenshot without capture or region, then remeasure the region and use its new capture name.',
+            'The screenshot response did not confirm the requested live capture and its original size. Nothing was returned. Take a new screenshot without capture or region, then remeasure the region and use its new capture name.',
           );
         }
         // A suspended computer answers fresh: false with the JPEG it saved
@@ -605,12 +608,15 @@ export const registerInput: Registrar = (server, session) => {
         // computer: session.screen belongs to that machine, not an explicit id.
         const screen = shot.captureSize
           ? `Capture size is ${shot.captureSize.width}x${shot.captureSize.height} pixels before cropping or scaling.`
-          : id === session.current && session.screen
-            ? `Screen is ${session.screen}.`
+          : shot.capture
+            ? "Original capture size is unavailable. Take a new screenshot before measuring a region; the computer record does not establish this image's dimensions."
+            : id === session.current && session.screen
+              ? `Screen is ${session.screen}.`
+              : '';
+        const named =
+          shot.capture && shot.captureSize
+            ? `Capture: ${shot.capture}. Reuse this name as capture to crop this same frame.`
             : '';
-        const named = shot.capture
-          ? `Capture: ${shot.capture}. Reuse this name as capture to crop this same frame.`
-          : '';
         return image(
           shot.bytes,
           shot.contentType,

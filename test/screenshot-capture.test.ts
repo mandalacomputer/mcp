@@ -1,5 +1,6 @@
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { errorForStatus, isTransient, reasonKind } from '../src/errors.js';
 import { connect, installFakePlatform } from './harness.js';
 
 const CAPTURE = '0123456789abcdef';
@@ -28,6 +29,12 @@ describe('screenshots pinned to the capture that was measured (OPL-5856)', () =>
       headers: { 'Content-Type': 'image/png', ...headers },
     });
   const shots = () => platform.calls.filter((c) => c.path.endsWith('/screenshot'));
+
+  it('does not tell direct API callers to retry an evicted capture', () => {
+    const error = errorForStatus(409, 'capture is no longer held', { reason: 'stale_capture' });
+    expect(reasonKind('stale_capture')).toBe('permanent');
+    expect(isTransient(error)).toBe(false);
+  });
 
   it('surfaces the original dimensions and reuses the named capture after a newer frame exists', async () => {
     let current = CAPTURE;
@@ -134,7 +141,9 @@ describe('screenshots pinned to the capture that was measured (OPL-5856)', () =>
   it.each<Record<string, string>>([
     {},
     { 'X-GC-Capture': NEW_CAPTURE },
-    { 'X-GC-Capture': CAPTURE, 'X-GC-Frame': 'suspended' },
+    { 'X-GC-Capture': CAPTURE },
+    { 'X-GC-Capture': CAPTURE, 'X-GC-Capture-Size': '0x900' },
+    { 'X-GC-Capture': CAPTURE, 'X-GC-Capture-Size': '1600x900', 'X-GC-Frame': 'suspended' },
   ])('refuses an image that does not confirm the requested live capture (%j)', async (headers) => {
     answer((_, response) => withHeaders(response, headers));
     const { call, close } = await connect();
@@ -166,6 +175,29 @@ describe('screenshots pinned to the capture that was measured (OPL-5856)', () =>
       await close();
     }
   });
+
+  it.each(['', '0x900'])(
+    'does not pair a reusable capture with the computer record when its size is %j',
+    async (size) => {
+      answer((_, response) =>
+        withHeaders(response, {
+          'X-GC-Capture': CAPTURE,
+          ...(size ? { 'X-GC-Capture-Size': size } : {}),
+        }),
+      );
+      const { call, close } = await connect();
+      try {
+        await call('get_computer');
+        const result = await call('screenshot');
+        expect(result.isError).toBeFalsy();
+        expect(textOf(result)).not.toContain(CAPTURE);
+        expect(textOf(result)).not.toContain('1280x800');
+        expect(textOf(result)).toContain('Original capture size is unavailable');
+      } finally {
+        await close();
+      }
+    },
+  );
 
   it('never advertises suspended frames as reusable live captures', async () => {
     answer((_, response) =>
