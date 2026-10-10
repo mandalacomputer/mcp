@@ -28,7 +28,7 @@ export { isSecretStoreRoute } from './secret-errors.js';
 
 export const DEFAULT_BASE_URL = 'https://app.mandala.computer/api/v1';
 
-/** Anthropic's own key, forwarded for the one route that runs a model. */
+/** The caller's provider key, forwarded for the hosted agent routes. */
 export const MODEL_KEY_HEADER = 'X-Model-Key';
 
 /**

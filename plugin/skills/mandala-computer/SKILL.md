@@ -57,7 +57,7 @@ port. A session keeps its chosen key/base until restarted.
 - `MANDALA_API_KEY` — optional API key from **Settings → Credentials → API
   keys** at https://app.mandala.computer. Treat it as a password. It may cover the account
   or only one workspace, which is why a 404 below is not always what it looks like.
-- `MANDALA_MODEL_KEY` — optional Anthropic key, enabling `run_agent` and
+- `MANDALA_MODEL_KEY` — optional Anthropic or OpenAI key, enabling `run_agent` and
   `run_agent_chat` when filters permit them. Without it neither is registered.
   The platform stores no copy and model work is billed to that key. It is
   separate from the saved Mandala API credentials.
@@ -138,9 +138,9 @@ claude mcp add --transport http mandala https://mcp.example.com/mcp \
 
 HTTP never loads the local credential store and ignores `MANDALA_API_KEY`,
 `MANDALA_PROFILE` and `--profile`. Over HTTP it also ignores `MANDALA_MODEL_KEY`
-and `MANDALA_COMPUTER_ID`, rather than lending the operator's Anthropic key and the operator's machine to
+and `MANDALA_COMPUTER_ID`, rather than lending the operator's model-provider key and the operator's machine to
 everyone who connects. A caller who wants `run_agent` there sends their own
-Anthropic key as an `X-Model-Key` header, and `run_agent` is registered for
+Anthropic or OpenAI key as an `X-Model-Key` header, and both agent tools are registered for
 that session only if they did and the filters permit it.
 
 ## The shape of a session
@@ -211,11 +211,18 @@ header rather than the operator's environment variable.
   upgrade their plan.
 
 **`run_agent_chat` uses textual OpenAI-shaped messages and JSON-only results.**
-It drives the same BYOK Anthropic loop, not hosted inference or a chat UI.
+It drives the same BYOK Anthropic or OpenAI loop, not hosted inference or a chat UI.
 The last user message is the task; system messages supply standing instructions.
 Previous user/assistant conversation is not replayed. String text and text-part
-arrays are supported. Optional `model` must name an Anthropic model and is sent
-unchanged. JSON (`stream:false`) preserves `agent.stop`, step count and usage.
+arrays are supported. Optional `model` selects a computer-capable Anthropic or
+OpenAI model. Both agent tools infer the provider from recognized model names;
+custom names require `provider: "anthropic"` or `provider: "openai"`.
+`provider: "openai"` without a model selects `gpt-6.1-sol`; omitting both keeps
+the Anthropic default. The supplied key must match. OpenAI is BYOK only, stores
+Responses continuations at OpenAI, and receives task text, screenshots and tool
+results. An OpenAI batch must fit the remaining step and API budget before it
+starts; partial failure stops the run without replaying input.
+JSON (`stream:false`) preserves `agent.stop`, step count and usage.
 Only an explicit, consistent `end_turn` result establishes completion. Treat
 limits, refusals, malformed responses and conflicting stop fields as incomplete;
 inspect any partial billed work before doing more. It never starts the computer

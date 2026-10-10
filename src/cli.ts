@@ -23,7 +23,8 @@ Environment
   MANDALA_COMPUTER_ID  bind a computer at startup, so use_computer is not needed.
                        stdio only — over HTTP it is ignored rather than bound
                        into every caller's session
-  MANDALA_MODEL_KEY    an Anthropic key; enables the run_agent tool. stdio only
+  MANDALA_MODEL_KEY    Anthropic or OpenAI key; enables run_agent and run_agent_chat.
+                       stdio only
                        — over HTTP each caller sends their own X-Model-Key, and
                        this is ignored rather than spent on their runs
   MANDALA_NO_LIFECYCLE 1, true, yes or on to withhold create_computer,

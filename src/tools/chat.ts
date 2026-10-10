@@ -201,7 +201,7 @@ export const registerChat: Registrar = (server, session) => {
     {
       title: 'Drive the computer with BYOK textual chat',
       description:
-        "Run the same Anthropic computer agent using OpenAI-shaped textual messages and JSON-only results (stream:false). The last user message is the task; system messages provide standing instructions. Previous user/assistant conversation is not replayed. This is BYOK computer control, not hosted inference or a chat UI. The computer must already be running. Bills the caller's Anthropic key. A supplied model must be an Anthropic model name. SHORT TASKS ONLY: on the hosted API a request that does not stream is cut at the edge after about 120 seconds (HTTP 524), which stops the run and loses its result, usage and steps, and the default 20 steps can take longer than that. Use run_agent, which streams, for anything longer. Progress counts waiting heartbeats, not completed actions; progressToken plus resetTimeoutOnProgress keeps only the MCP client waiting, not the edge. Never automatically replay a failed run.",
+        "Run the same hosted computer agent using OpenAI-shaped textual messages and JSON-only results (stream:false). The last user message is the task; system messages provide standing instructions. Previous user/assistant conversation is not replayed. This is BYOK computer control, not hosted inference or a chat UI. The computer must already be running. Bills the caller's configured Anthropic or OpenAI key. A GPT or o-series model selects OpenAI; a Claude model selects Anthropic. SHORT TASKS ONLY: on the hosted API a request that does not stream is cut at the edge after about 120 seconds (HTTP 524), which stops the run and loses its result, usage and steps, and the default 20 steps can take longer than that. Use run_agent, which streams, for anything longer. Progress counts waiting heartbeats, not completed actions; progressToken plus resetTimeoutOnProgress keeps only the MCP client waiting, not the edge. Never automatically replay a failed run.",
       inputSchema: {
         computer_id: computerSchema,
         messages: z
@@ -217,6 +217,12 @@ export const registerChat: Registrar = (server, session) => {
               ).trim().length > 0
             );
           }, 'The last user message must contain text.'),
+        provider: z
+          .enum(['anthropic', 'openai'])
+          .optional()
+          .describe(
+            'Inferred from model when omitted. Select openai to use gpt-6.1-sol by default. The configured MANDALA_MODEL_KEY must match the provider.',
+          ),
         model: z
           .string()
           .refine((v) => v.trim().length > 0, 'model must not be blank')
@@ -225,12 +231,12 @@ export const registerChat: Registrar = (server, session) => {
       },
       annotations: { openWorldHint: true },
     },
-    async ({ computer_id, messages, model, max_steps }, extra) => {
+    async ({ computer_id, messages, model, provider, max_steps }, extra) => {
       let beat: ReturnType<typeof heartbeat> | undefined;
       try {
         const id = session.resolve(computer_id);
         extra.signal.throwIfAborted();
-        const body = P.chatBody({ computer_id: id, messages, model, max_steps });
+        const body = P.chatBody({ computer_id: id, messages, model, provider, max_steps });
         beat = heartbeat(extra, server.server);
         await beat(
           'Waiting for the chat agent result; progress counts heartbeats, not completed actions.',

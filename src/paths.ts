@@ -922,8 +922,9 @@ export function agentBody(args: {
   prompt: string;
   max_steps?: number;
   system?: string;
-  /** An Anthropic model id; the platform picks one when it is left out. */
+  /** A computer-capable Anthropic or OpenAI model id; the platform picks one when it is left out. */
   model?: string;
+  provider?: 'anthropic' | 'openai';
   stream: boolean;
 }): Json {
   return omitUndefined({ ...args } as Json);
@@ -1044,6 +1045,7 @@ export function chatBody(args: {
   computer_id: string;
   messages: unknown[];
   model?: string;
+  provider?: 'anthropic' | 'openai';
   max_steps: number;
 }): Json {
   return omitUndefined({ ...args, stream: false });

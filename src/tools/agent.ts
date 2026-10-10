@@ -16,7 +16,7 @@ import type { Registrar } from './types.js';
  *
  * Worth having even though the caller is already a model with eyes. The outer
  * agent pays for every screenshot in context; this route runs the pixel-level
- * loop inside the platform on the caller's own Anthropic key and hands back a
+ * loop inside the platform on the caller's own model-provider key and hands back a
  * sentence. Ten clicks stop being ten images.
  */
 export const registerAgent: Registrar = (server, session) => {
@@ -27,7 +27,7 @@ export const registerAgent: Registrar = (server, session) => {
     {
       title: 'Have the platform drive the computer',
       description:
-        'Give the computer a task in plain language and let the platform drive it — screenshot, decide, click, type, repeat — until it is done. Runs on the Anthropic key this server was configured with, and bills that key for every step. Use it to delegate a long stretch of pixel work; drive with the individual tools when you want to see each frame yourself. The computer must already be running. A run is MINUTES, not seconds: it reports progress on every step so a client that sends a progressToken and sets resetTimeoutOnProgress can hold the request open, and a client that cannot should lower max_steps rather than watch its own default timeout cancel a run it is already paying for.',
+        'Give the computer a task in plain language and let the platform drive it — screenshot, decide, click, type, repeat — until it is done. Runs on the Anthropic or OpenAI key this server was configured with, and bills that key for every step. Use it to delegate a long stretch of pixel work; drive with the individual tools when you want to see each frame yourself. The computer must already be running. A run is MINUTES, not seconds: it reports progress on every step so a client that sends a progressToken and sets resetTimeoutOnProgress can hold the request open, and a client that cannot should lower max_steps rather than watch its own default timeout cancel a run it is already paying for.',
       inputSchema: {
         computer_id: z
           .string()
@@ -35,12 +35,18 @@ export const registerAgent: Registrar = (server, session) => {
           .describe('Which computer. Defaults to the one selected with use_computer.'),
         prompt: z.string().describe('The task, in plain language.'),
         system: z.string().optional().describe('Standing instructions carried into the run.'),
+        provider: z
+          .enum(['anthropic', 'openai'])
+          .optional()
+          .describe(
+            'Inferred from model when omitted. Select openai to use gpt-6.1-sol by default. The configured MANDALA_MODEL_KEY must match the provider.',
+          ),
         model: z
           .string()
           .refine((v) => v.trim().length > 0, 'model must not be blank')
           .optional()
           .describe(
-            'An Anthropic model id to run with. Omit it for the one the platform picks. The configured key must be able to use it; a model it cannot use fails the run.',
+            'A computer-capable Anthropic or OpenAI model id to run with. Omit it for the one the platform picks. The configured key must be able to use it; a model it cannot use fails the run.',
           ),
         max_steps: z
           .number()
@@ -54,7 +60,7 @@ export const registerAgent: Registrar = (server, session) => {
       },
       annotations: { openWorldHint: true },
     },
-    ({ computer_id, prompt, system, model, max_steps }, extra) =>
+    ({ computer_id, prompt, system, model, provider, max_steps }, extra) =>
       guarded(async () => {
         const id = session.resolve(computer_id);
         const steps: string[] = [];
@@ -65,7 +71,7 @@ export const registerAgent: Registrar = (server, session) => {
         const progressToken = extra._meta?.progressToken;
 
         for await (const ev of session.api.sse('POST', P.computerAction(id, 'agent'), {
-          body: P.agentBody({ prompt, system, model, max_steps, stream: true }),
+          body: P.agentBody({ prompt, system, model, provider, max_steps, stream: true }),
           headers: { [MODEL_KEY_HEADER]: session.modelKey as string },
           signal: extra.signal,
         })) {
@@ -80,7 +86,7 @@ export const registerAgent: Registrar = (server, session) => {
             // touches it. This tool had only the logging half, so a run of the
             // default 20 steps, most of them a model call and a screenshot, sailed past
             // the client's 60s default and was cancelled while the platform went
-            // on driving the desktop on the caller's own Anthropic key.
+            // on driving the desktop on the caller's own model-provider key.
             //
             // Not sufficient on its own, and the same caveat applies here as
             // there: protocol.js reads `options?.resetTimeoutOnProgress ?? false`,
