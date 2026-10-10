@@ -1381,7 +1381,7 @@ address.
 | `MANDALA_PROFILE` | Local saved profile; `--profile` overrides it. Otherwise the file default is selected. Ignored by HTTP. |
 | `MANDALA_BASE_URL` | With a saved profile, must match its stored base. Otherwise defaults to `https://app.mandala.computer/api/v1`. |
 | `MANDALA_COMPUTER_ID` | Bind a computer at startup, so `use_computer` is not needed. **stdio only** — under `--http` it is ignored rather than bound into every caller's session, since it names a machine on the operator's account. |
-| `MANDALA_MODEL_KEY` | An Anthropic key. Enables `run_agent` and `run_agent_chat` when filters permit them, which runs the platform's own loop on that key. **stdio only** — under `--http` each caller sends their own as `X-Model-Key`, and this variable is ignored. |
+| `MANDALA_MODEL_KEY` | An Anthropic or OpenAI key. Enables `run_agent` and `run_agent_chat` when filters permit them, which runs the platform's own loop on that key. **stdio only** — under `--http` each caller sends their own as `X-Model-Key`, and this variable is ignored. |
 | `MANDALA_NO_LIFECYCLE` | `1`, `true`, `yes` or `on` withholds `create_computer`, `clone_computer`, `clone_snapshot`, `delete_computer` and `delete_snapshot` — every tool that makes a computer or destroys one. `0`, `false`, `no`, `off` or unset leaves them registered. Any other value is **refused at startup** rather than read as off: a typo here would otherwise leave those tools in place on a server whose operator believes they are gone. The `--no-lifecycle` flag reads the same vocabulary and refuses the same way, except that it has no spelling for *unset*: `--no-lifecycle=` is refused rather than ignored, so a launcher template whose variable did not expand stops instead of quietly leaving the tools registered. |
 | `PORT`, `HOST` | For `--http`. Default `3000`, `127.0.0.1`. |
 | `MANDALA_READ_ONLY` | Keep only tools annotated `readOnlyHint: true`; strict boolean parsing as described under Tool filters. |
@@ -1406,8 +1406,17 @@ none of which is true of `MANDALA_API_KEY`.
 `run_agent` deserves a note. It hands a task to the platform's own agent loop,
 which drives the computer inside the platform and answers with a sentence. Worth
 it when a stretch of pixel work would otherwise cost the calling model a
-screenshot per step — ten clicks stop being ten images. It bills your Anthropic
+screenshot per step — ten clicks stop being ten images. It bills your selected provider
 key, and the platform never stores that key.
+
+Both `run_agent` and `run_agent_chat` accept `provider: "openai"` to use
+`gpt-6.1-sol` by default, or infer OpenAI from a recognized GPT model name.
+Set `MANDALA_MODEL_KEY` (stdio) or `X-Model-Key` (HTTP) to the matching provider
+key. Custom model names require an explicit `provider`; omitting model and
+provider preserves the Anthropic default. OpenAI is BYOK only and stores
+Responses continuations at OpenAI; tasks, screenshots and tool results go to
+that provider. A native OpenAI action batch must fit the remaining step and
+API budget before it begins. Partial failures stop the run without replaying input.
 
 ### Passive directories, activity history and signals
 
@@ -1450,14 +1459,14 @@ or that a task succeeded. Unsupported (501) and unavailable (503) responses
 remain errors, never empty history or new checkpoints. There is no watcher,
 guest action, retry loop or automatic checkpoint cache in this tool.
 
-### JSON chat with your own Anthropic key
+### JSON chat with your own model key
 
-`run_agent_chat` drives the selected computer using the same BYOK Anthropic loop
+`run_agent_chat` drives the selected computer using the same BYOK Anthropic or OpenAI loop
 as `run_agent`. It accepts a nonempty array of textual OpenAI-shaped `messages`,
 including string content or arrays of `{type:"text",text:"..."}` parts. The
 **last user message** supplies the task; system messages supply standing
 instructions. Earlier user/assistant conversation is not replayed. Optional
-`model` is sent unchanged and must name an Anthropic model. `max_steps` is 1–100,
+`model` selects a computer-capable Anthropic or OpenAI model. `max_steps` is 1–100,
 default 20. This is computer control, not hosted general-purpose inference or a
 chat UI; it adds no key storage or model billing service.
 

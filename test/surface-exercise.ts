@@ -384,13 +384,20 @@ export const EXERCISE: Record<string, Record<string, unknown>[]> = {
         { role: 'system', content: 'be brief' },
         { role: 'user', content: [{ type: 'text', text: 'open firefox' }] },
       ],
+      provider: 'anthropic',
       model: 'claude-test',
       max_steps: 3,
     },
   ],
   run_agent: [
     { prompt: 'open firefox' },
-    { prompt: 'open firefox', system: 'be brief', max_steps: 3, model: 'claude-test' },
+    {
+      prompt: 'open firefox',
+      system: 'be brief',
+      max_steps: 3,
+      provider: 'anthropic',
+      model: 'claude-test',
+    },
   ],
 };
 

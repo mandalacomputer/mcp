@@ -33,3 +33,28 @@ it('refuses a blank model before any request', async () => {
   expect(platform.calls.length).toBe(before);
   await close();
 });
+
+it.each(['run_agent', 'run_agent_chat'])(
+  'forwards provider from %s and rejects unknown providers before HTTP',
+  async (tool) => {
+    const { call, close } = await connect({ modelKey: 'sk-test' });
+    const task =
+      tool === 'run_agent' ? { prompt: 'go' } : { messages: [{ role: 'user', content: 'go' }] };
+    try {
+      const chosen = await call(tool, { ...task, provider: 'openai', model: 'custom-model' });
+      expect(chosen.isError).toBeFalsy();
+      expect(platform.calls.at(-1)?.body).toMatchObject({
+        provider: 'openai',
+        model: 'custom-model',
+      });
+      const before = platform.calls.length;
+      const invalid = await call(tool, { ...task, provider: 'typo' });
+      expect(invalid.isError).toBe(true);
+      expect(platform.calls).toHaveLength(before);
+      await call(tool, task);
+      expect(platform.calls.at(-1)?.body).not.toHaveProperty('provider');
+    } finally {
+      await close();
+    }
+  },
+);
