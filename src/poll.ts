@@ -116,7 +116,7 @@ export type Heartbeat = ((line: string) => Promise<void>) & { stop: () => Promis
  * written to give it. Observed, not theorised — a live capture took 107s and
  * was cancelled at 60 (OPL-4579), and `run_agent` had the same defect before
  * OPL-4419, where a twenty-step run was cancelled mid-way while still billing
- * the caller's own Anthropic key.
+ * the caller's own model-provider key.
  *
  * IT IS NOT SUFFICIENT ON ITS OWN and no description may claim it is.
  * protocol.js reads `options?.resetTimeoutOnProgress ?? false`, so the reset
