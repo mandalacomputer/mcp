@@ -266,6 +266,7 @@ export const EXERCISE: Record<string, Record<string, unknown>[]> = {
   screenshot: [
     {},
     { width: 800, fresh: true },
+    { capture: '0123456789abcdef', region: { x: 0, y: 0, width: 1, height: 1 } },
     {
       region: { x: 0, y: 0, width: 640, height: 400 },
       scale: 0.5,

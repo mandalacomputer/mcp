@@ -625,7 +625,12 @@ function respond(
   if (path.endsWith('/screenshot')) {
     // A one-pixel PNG, so the image content the tool builds is a real image.
     return new Response(Buffer.from(PNG_1PX, 'base64'), {
-      headers: { 'Content-Type': 'image/png' },
+      headers: {
+        'Content-Type': 'image/png',
+        ...(query.has('capture')
+          ? { 'X-GC-Capture': query.get('capture')!, 'X-GC-Capture-Size': '1x1' }
+          : {}),
+      },
     });
   }
   if (path.endsWith('/agent')) {

@@ -146,7 +146,19 @@ export type Bytes = {
    * than a capture of its screen.
    */
   frame?: string;
+  /** X-GC-Capture: the live screenshot's reusable capture name. */
+  capture?: string;
+  /** X-GC-Capture-Size: the capture's own pixels, before cropping or scaling. */
+  captureSize?: { width: number; height: number };
 };
+
+function captureSizeFrom(value: string | null): Bytes['captureSize'] {
+  if (!value || !/^[1-9]\d*x[1-9]\d*$/.test(value)) return undefined;
+  const [width, height] = value.split('x').map(Number);
+  return Number.isSafeInteger(width) && Number.isSafeInteger(height)
+    ? { width, height }
+    : undefined;
+}
 
 /**
  * How much of an event stream will be held while waiting for a boundary.
@@ -1022,6 +1034,8 @@ export class Api {
       unrangeable: (resp.headers.get('accept-ranges') ?? '').trim().toLowerCase() === 'none',
       window,
       frame: resp.headers.get('x-gc-frame')?.trim().toLowerCase() || undefined,
+      capture: resp.headers.get('x-gc-capture')?.match(/^[a-f0-9]{16}$/)?.[0],
+      captureSize: captureSizeFrom(resp.headers.get('x-gc-capture-size')),
     };
   }
 

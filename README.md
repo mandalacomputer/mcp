@@ -552,10 +552,19 @@ refuses a suspended computer and names `start_computer`, where the SDKs'
 `waitForGuest` resumes it.
 
 **A screenshot need not be the whole screen.** `screenshot` takes `region` (a
-crop, in the screen pixels `click` takes, before any scaling), `scale` (0 to 1),
+crop, in full-size capture pixels before any scaling), `scale` (0 to 1),
 `format` (`png` or `jpeg`) and `quality` (JPEG, 1-100). A cropped or scaled
 picture is in its own pixel space, so the tool says alongside it how to turn a
 position in it back into screen coordinates.
+
+Live screenshots also return a `capture` name and the capture's original size,
+before cropping or scaling. Use that size instead of the computer record's
+`resolution`, which can differ. To crop a frame you already measured, send its
+`capture` with `region`; omit `fresh` or set it to `false`. Without `capture`,
+screenshots remain fresh by default. `fresh: true` cannot be combined with
+`capture`. If the capture is no longer held (`stale_capture`), take a new
+screenshot without `capture` or `region`, then remeasure the region and use the
+new capture name. Saved frames of suspended computers cannot be pinned this way.
 
 **Ten clicks need not be ten screenshots.** Driving the desktop one tool at a
 time — `screenshot`, `click`, `screenshot` — puts an image in the calling

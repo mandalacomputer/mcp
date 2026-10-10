@@ -398,7 +398,7 @@ export const registerInput: Registrar = (server, session) => {
     {
       title: 'Screenshot the desktop',
       description:
-        'A picture of what is on the screen right now, returned as an image. Coordinates in this picture are the ones click, drag and scroll take — except a saved frame of a suspended computer (served with fresh: false), which is labelled as one: a downscaled picture of the screen as it was, not in click coordinates.',
+        'A picture of the screen, returned as an image with its capture name and original size when available. Fresh by default; give capture to crop the earlier frame you measured. Full-size capture pixels are the coordinates click, drag and scroll take; cropped or scaled pictures include a mapping. A saved frame of a suspended computer (served with fresh: false) is labelled as one: a downscaled picture of the screen as it was, not in click coordinates.',
       inputSchema: {
         ...idArg,
         width: z
@@ -412,9 +412,16 @@ export const registerInput: Registrar = (server, session) => {
           ),
         fresh: z
           .boolean()
-          .default(true)
+          .optional()
           .describe(
-            'Skip the platform\'s frame cache, which serves any capture under 1.5s old — up to 30s old while the computer is busy with another operation. True by default: after a click, a cached frame can predate the action entirely, and a model reading it concludes the click missed and clicks again. A capture needs a computer that is awake, so on a suspended one this is refused rather than answered — pass false to ask for the last saved frame instead, which is refused in turn when there is no saved frame to serve. A saved frame answers "what was on the screen" and cannot answer "did my click land".',
+            'Skip the platform\'s frame cache, which serves any capture under 1.5s old — up to 30s old while the computer is busy with another operation. True by default unless capture is given; fresh: true and capture cannot be combined. After a click, a cached frame can predate the action entirely. A new capture needs a computer that is awake, so on a suspended one this is refused rather than answered — pass false without capture to ask for the last saved frame instead, which is refused in turn when there is no saved frame to serve. A saved frame answers "what was on the screen" and cannot answer "did my click land".',
+          ),
+        capture: z
+          .string()
+          .regex(/^[a-f0-9]{16}$/)
+          .optional()
+          .describe(
+            'Reuse the capture name returned by an earlier screenshot of this computer, so a region is cut from the frame it was measured on. Omit fresh or set it to false. If the capture is no longer held, take a new screenshot without capture and remeasure the region; never reuse the old crop on an unseen frame.',
           ),
         region: z
           .object({
@@ -425,7 +432,7 @@ export const registerInput: Registrar = (server, session) => {
           })
           .optional()
           .describe(
-            'Crop to this rectangle of the screen. x, y, width and height are SCREEN pixels, the ones click takes, measured before any scaling. It has to lie inside the screen: one that reaches past an edge is refused with the screen size rather than clipped. The picture that comes back starts at (0, 0), so add x and y to a position in it before clicking there.',
+            "Crop to this rectangle of the capture. x, y, width and height are full-size capture pixels, measured before any scaling; use the returned capture size, which can differ from the computer record's resolution. Give capture to pin the crop to the frame you measured. A region outside it is refused rather than clipped. The picture that comes back starts at (0, 0), so add x and y to a position in it before clicking there.",
           ),
         scale: z
           .number()
@@ -453,13 +460,19 @@ export const registerInput: Registrar = (server, session) => {
       },
       annotations: { readOnlyHint: true },
     },
-    ({ computer_id, width, fresh, region, scale, format, quality }, extra) =>
+    ({ computer_id, width, fresh, capture, region, scale, format, quality }, extra) =>
       guarded(async () => {
         const shape: Shape = { region, scale, format, quality };
-        // The two refusals the platform would make that are knowable from the
+        // The refusals the platform would make that are knowable from the
         // arguments alone, made here so the answer names this tool's own
         // parameters and costs no round trip. Everything else about a shape —
         // chiefly whether a region fits the screen — is the platform's to say.
+        if (capture !== undefined && fresh === true) {
+          return refused(
+            'Give capture or fresh: true, not both: capture reuses an earlier frame. Omit fresh to pin this screenshot. Nothing was sent.',
+          );
+        }
+        const takeFresh = fresh ?? capture === undefined;
         if (width !== undefined && scale !== undefined) {
           return refused(
             'Give width or scale, not both: each sets the size of the picture. Nothing was sent.',
@@ -479,7 +492,8 @@ export const registerInput: Registrar = (server, session) => {
             {
               query: {
                 w: width,
-                fresh: fresh ? 1 : undefined,
+                fresh: takeFresh ? 1 : undefined,
+                capture,
                 region: region && `${region.x},${region.y},${region.width},${region.height}`,
                 scale,
                 format,
@@ -489,6 +503,18 @@ export const registerInput: Registrar = (server, session) => {
             MAX_INLINE_IMAGE_BYTES,
           );
         } catch (err) {
+          // A pinned request must never become an unpinned/saved-frame retry.
+          if (capture !== undefined) {
+            if (err instanceof ConflictError && err.reason === 'stale_capture') {
+              const result = failed(err);
+              result.content.push({
+                type: 'text',
+                text: 'That capture is no longer held. Take a new screenshot without capture or region, then remeasure the region on that image and use its new capture name. Do not apply the old crop to an unseen frame.',
+              });
+              return result;
+            }
+            throw err;
+          }
           // The refusal whose next step is a PARAMETER, caught here for the
           // reason `backgroundFull` is caught in exec: the answer names one of
           // this tool's own arguments, and the error classes are shared with
@@ -508,11 +534,11 @@ export const registerInput: Registrar = (server, session) => {
           if (
             err instanceof ConflictError &&
             asked.length > 0 &&
-            (fresh || err.reason === 'unavailable')
+            (takeFresh || err.reason === 'unavailable')
           ) {
-            return fresh ? cachedFrameOffered(err, asked) : shapeRefused(err, asked);
+            return takeFresh ? cachedFrameOffered(err, asked) : shapeRefused(err, asked);
           }
-          if (fresh && err instanceof ConflictError) return cachedFrameOffered(err);
+          if (takeFresh && err instanceof ConflictError) return cachedFrameOffered(err);
           throw err;
         }
         // The bound `read_file` observes, observed here too. A 3840x2160 capture
@@ -555,6 +581,11 @@ export const registerInput: Registrar = (server, session) => {
             `That screenshot came back as ${shot.contentType}, not one of the image types this can hand over (${[...INLINE_IMAGE_TYPES].join(', ')}) — ${shot.bytes.length} bytes. Something between here and the guest answered in place of the capture; nothing was returned rather than passing it off as a picture.`,
           );
         }
+        if (capture !== undefined && (shot.capture !== capture || shot.frame === 'suspended')) {
+          return refused(
+            'The screenshot response did not confirm the requested live capture. Nothing was returned. Take a new screenshot without capture or region, then remeasure the region and use its new capture name.',
+          );
+        }
         // A suspended computer answers fresh: false with the JPEG it saved
         // when it suspended (OPL-5323), labelled X-GC-Frame: suspended. It is
         // downscaled and old, so neither the screen size nor a shape note
@@ -569,15 +600,22 @@ export const registerInput: Registrar = (server, session) => {
           );
         }
         const shaped = shapeNote(width, shape);
-        const scaled = shaped ? ` ${shaped}` : '';
-        // Only for the bound computer. session.screen is definitionally the
-        // bound machine's geometry — noteResolution refuses to update it for
-        // any other id — so printing it beside a screenshot of a computer named
-        // explicitly would state the wrong coordinate space, in the one tool
-        // whose whole job is to establish that space.
-        const screen =
-          id === session.current && session.screen ? `Screen is ${session.screen}.` : '';
-        return image(shot.bytes, shot.contentType, `${screen}${scaled}`.trim() || undefined);
+        // The response knows this capture's actual geometry. Fall back to the
+        // computer record only for older responses and only for the bound
+        // computer: session.screen belongs to that machine, not an explicit id.
+        const screen = shot.captureSize
+          ? `Capture size is ${shot.captureSize.width}x${shot.captureSize.height} pixels before cropping or scaling.`
+          : id === session.current && session.screen
+            ? `Screen is ${session.screen}.`
+            : '';
+        const named = shot.capture
+          ? `Capture: ${shot.capture}. Reuse this name as capture to crop this same frame.`
+          : '';
+        return image(
+          shot.bytes,
+          shot.contentType,
+          [named, screen, shaped].filter(Boolean).join(' ') || undefined,
+        );
       }),
   );
 
