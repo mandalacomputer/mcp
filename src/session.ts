@@ -10,8 +10,8 @@ export type SessionConfig = {
   /**
    * The caller's model-provider key, for the hosted agent routes.
    *
-   * Absent is the ordinary case and is not an error: the `run_agent` tool is
-   * simply not registered, rather than being offered and then failing on use.
+   * Absent is the ordinary case and is not an error: `run_agent` and
+   * `run_agent_chat` are not registered, rather than offered and failing on use.
    * A tool a model can see is a tool it will try.
    */
   modelKey?: string;
