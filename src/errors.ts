@@ -135,6 +135,8 @@ const REASON_PERMANENT: ReadonlySet<string> = new Set([
   'running',
   'name_taken',
   'stale_revision',
+  // An evicted screenshot cannot be recovered by replaying its capture name.
+  'stale_capture',
 ]);
 
 /** Whether waiting can change a classified refusal's answer. */

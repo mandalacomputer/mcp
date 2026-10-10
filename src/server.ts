@@ -54,7 +54,7 @@ How to work with one:
 1. ${lifecycle ? 'use_computer (or create_computer) binds' : 'use_computer binds'} a machine to this session. Every other tool then leaves computer_id out.
 2. wait_for_computer with until="guest" before the first screenshot or exec. A computer that reports "running" is a VM the hypervisor has started; the desktop inside it comes up seconds later.
 3. screenshot, look, act, screenshot again. The desktop does not tell you whether a click landed — the only way to know is to look. Take a fresh screenshot after anything you expect to change the screen.
-4. Coordinates are the pixels of the full-size screenshot, and the screen size is on the computer record as "resolution".
+4. Coordinates are the pixels of the full-size capture. Use the capture size returned with screenshot; it can differ from the computer record's "resolution". To crop a frame you measured, pass its capture name with region. If it has expired, take a new screenshot and remeasure the region.
 
 Things that are true here and are not obvious:
 
