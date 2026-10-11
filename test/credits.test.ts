@@ -517,6 +517,117 @@ describe('the hosted transport', () => {
     expect(platform.calls.filter((c) => c.path === '/whoami')).toHaveLength(asked + 1);
   });
 
+  describe('a bearer the credits read refuses, hosted', () => {
+    const hosted = () =>
+      serve({
+        resourceMetadataUrl:
+          'https://app.mandala.computer/.well-known/oauth-protected-resource/mcp',
+        serviceSecret: 'svc-0123456789abcdef',
+      });
+    const initialize = (url: URL, bearer: string, signal?: AbortSignal) =>
+      fetch(url, {
+        method: 'POST',
+        signal,
+        headers: {
+          Authorization: `Bearer ${bearer}`,
+          'Content-Type': 'application/json',
+          Accept: 'application/json, text/event-stream',
+        },
+        body: JSON.stringify({
+          jsonrpc: '2.0',
+          id: 1,
+          method: 'initialize',
+          params: {
+            protocolVersion: '2025-06-18',
+            capabilities: {},
+            clientInfo: { name: 'refused', version: '0' },
+          },
+        }),
+      });
+    const whoamis = () => platform.calls.filter((c) => c.path === '/whoami').length;
+    /** A credits 401 refusing the bearer; with `hang`, its body never ends until cancelled. */
+    const refusing = (hang = false, onRefuse: () => void = () => {}) => {
+      const fake = globalThis.fetch;
+      globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+        if (!new URL(String(input)).pathname.endsWith('/credits'))
+          return fake(input as never, init);
+        onRefuse();
+        const body = hang
+          ? new ReadableStream({
+              start(controller) {
+                init?.signal?.addEventListener(
+                  'abort',
+                  () => controller.error(init.signal?.reason),
+                  { once: true },
+                );
+              },
+            })
+          : JSON.stringify({ error: 'invalid or expired access token' });
+        return new Response(body, {
+          status: 401,
+          headers: {
+            'Content-Type': 'application/json',
+            'WWW-Authenticate': 'Bearer error="invalid_token"',
+          },
+        });
+      }) as typeof fetch;
+      return () => {
+        globalThis.fetch = fake;
+      };
+    };
+
+    it('drops its acceptance even when the caller leaves mid-refusal', async () => {
+      const url = await hosted();
+      let reached = () => {};
+      const arrived = new Promise<void>((resolve) => {
+        reached = resolve;
+      });
+      const restore = refusing(true, reached);
+      const gone = new AbortController();
+      const first = initialize(url, 'mcpat_stale', gone.signal).catch(() => undefined);
+      await arrived;
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      gone.abort();
+      await first;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      restore();
+      // The next initialize does not ride the stale acceptance: whoami is asked again.
+      const asked = whoamis();
+      const next = await initialize(url, 'mcpat_stale');
+      expect(next.status).toBe(200);
+      await next.text();
+      expect(whoamis()).toBe(asked + 1);
+    });
+
+    it("marks the bearer's open sessions refused", async () => {
+      const url = await hosted();
+      const opened = await initialize(url, 'mcpat_stale');
+      expect(opened.status).toBe(200);
+      const id = opened.headers.get('mcp-session-id')!;
+      await opened.text();
+      const restore = refusing();
+      const refused = await initialize(url, 'mcpat_stale');
+      expect(refused.status).toBe(401);
+      await refused.text();
+      restore();
+      // The open session's next request is answered as a refused bearer's.
+      const call = await fetch(url, {
+        method: 'POST',
+        headers: {
+          Authorization: 'Bearer mcpat_stale',
+          'mcp-session-id': id,
+          'mcp-protocol-version': '2025-06-18',
+          'Content-Type': 'application/json',
+          Accept: 'application/json, text/event-stream',
+        },
+        body: JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/list' }),
+      });
+      expect(call.status).toBe(401);
+      expect(call.headers.get('www-authenticate')).toContain('resource_metadata=');
+      await call.text();
+    });
+  });
+
   it('never takes funded from the operator configuration', async () => {
     const url = await serve({ funded: true });
     const caller = await session(url, { Authorization: 'Bearer com_unfunded' });

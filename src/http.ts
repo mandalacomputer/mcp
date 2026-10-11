@@ -1661,10 +1661,13 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
       // sessions this initialize planned to make room with — under an id
       // nobody received, holding its slots until the idle sweep (Codex review).
       //
-      // Hosted, a refusal of the bearer itself is not just "unfunded": the
-      // token's cached acceptance is stale, so it is dropped and this
-      // initialize answered as any refused one is — the 401 an OAuth client
-      // refreshes on — rather than given a session (Codex review).
+      // Hosted, a refusal of the bearer itself is not just "unfunded". It is
+      // recorded the moment it is seen, whatever then becomes of this request:
+      // the token's cached acceptance is dropped, the refused initialize
+      // counted against its address, and the token's existing sessions marked
+      // refused, so their idle ones make room for a refreshed token. Then this
+      // initialize is answered as any refused one is — the 401 an OAuth
+      // client refreshes on — rather than given a session (Codex review).
       const left = new AbortController();
       const leave = () => left.abort();
       res.once('close', leave);
@@ -1680,7 +1683,12 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
               serviceSecret,
               onBearerRefused: challenge
                 ? () => {
+                    if (bearerRefused) return;
                     bearerRefused = true;
+                    accepted.delete(keyId);
+                    noteFailure(req);
+                    for (const live of sessions.values())
+                      if (sameKey(live.keyDigest, key)) live.refused = true;
                   }
                 : undefined,
             },
@@ -1690,11 +1698,7 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
         res.off('close', leave);
       }
       if (left.signal.aborted || res.destroyed) return;
-      if (bearerRefused) {
-        accepted.delete(keyId);
-        noteFailure(req);
-        return challenged(res, refusedMessage(key), rpcId(req));
-      }
+      if (bearerRefused) return challenged(res, refusedMessage(key), rpcId(req));
       const t = new StreamableHTTPServerTransport({
         sessionIdGenerator: () => randomUUID(),
         ...(cfg.sseKeepAliveMs !== undefined ? { keepAliveMs: cfg.sseKeepAliveMs } : {}),
