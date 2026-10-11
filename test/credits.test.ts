@@ -353,6 +353,25 @@ describe('run_agent on credits: what a failure means (parity with the SDKs)', ()
     expect(said).not.toContain('billing_error');
   });
 
+  it.each([
+    ['an empty body', () => new Response(null, { status: 402 })],
+    [
+      'a plain-text body',
+      () =>
+        new Response('Payment Required', {
+          status: 402,
+          headers: { 'Content-Type': 'text/plain' },
+        }),
+    ],
+    ['a JSON null', () => json(null, 402)],
+  ])('reads a funded 402 before the stream with %s as the AI service', async (_label, answer) => {
+    agentAnswers(answer);
+    const { call } = await open({ funded: true });
+    const said = textOf(await call('run_agent', { prompt: 'go' }));
+    expect(said).toContain("the platform's AI service could not serve this run");
+    expect(said).not.toContain('plan on this account');
+  });
+
   it('keeps the revoked reading of the platform credential check on a funded run', async () => {
     failing({ status: 403, error: 'API key revoked', reason: 'revoked' });
     const { call } = await open({ funded: true });

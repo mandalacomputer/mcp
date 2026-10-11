@@ -404,8 +404,9 @@ const INSUFFICIENT_CREDITS = 'insufficient_credits';
  * for, whose statuses keep their own readings.
  */
 function fundedOutage(funded: boolean, status: unknown, body: unknown): boolean {
-  if (!funded || !isRecord(body)) return false;
-  return body.error === FUNDED_UNAVAILABLE || status === 402;
+  if (!funded) return false;
+  // A 402 whatever its body, which need not be JSON at all.
+  return status === 402 || (isRecord(body) && body.error === FUNDED_UNAVAILABLE);
 }
 
 /**
