@@ -153,7 +153,7 @@ describe('deciding whether the account is funded', () => {
         init?.signal?.addEventListener('abort', () => reject(init.signal?.reason), { once: true });
       })) as typeof fetch;
     const started = Date.now();
-    expect(await fundedAccount('com_test', BASE, {}, 50)).toBe(false);
+    expect(await fundedAccount('com_test', BASE, {}, { timeoutMs: 50 })).toBe(false);
     expect(Date.now() - started).toBeLessThan(2000);
   });
 });
@@ -392,6 +392,71 @@ describe('the hosted transport', () => {
     });
     expect(await names(keyed)).toEqual(expect.arrayContaining(['run_agent', 'run_agent_chat']));
     expect(platform.calls.filter((c) => c.path === '/credits')).toEqual([]);
+  });
+
+  it('builds nothing for a caller that leaves during the credits read', async () => {
+    // One session per bearer, so the second initialize has to make room by
+    // closing the first, idle one — which it must not do for nobody.
+    const url = await serve({ maxSessionsPerBearer: 1 });
+    const kept = await session(url, { Authorization: 'Bearer com_same' });
+    expect(await names(kept)).toContain('get_credits');
+
+    let release = () => {};
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let reached = () => {};
+    const arrived = new Promise<void>((resolve) => {
+      reached = resolve;
+    });
+    const fake = globalThis.fetch;
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      if (!new URL(String(input)).pathname.endsWith('/credits')) return fake(input as never, init);
+      reached();
+      const signal = init?.signal;
+      await Promise.race([
+        held,
+        new Promise((_resolve, reject) =>
+          signal?.addEventListener('abort', () => reject(signal.reason), { once: true }),
+        ),
+      ]);
+      return json(FUNDED_CREDITS);
+    }) as typeof fetch;
+
+    const gone = new AbortController();
+    const initialize = fetch(url, {
+      method: 'POST',
+      signal: gone.signal,
+      headers: {
+        Authorization: 'Bearer com_same',
+        'Content-Type': 'application/json',
+        Accept: 'application/json, text/event-stream',
+      },
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'initialize',
+        params: {
+          protocolVersion: '2025-06-18',
+          capabilities: {},
+          clientInfo: { name: 'gone', version: '0' },
+        },
+      }),
+    }).catch(() => undefined);
+    await arrived;
+    gone.abort();
+    await initialize;
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    release();
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    globalThis.fetch = fake;
+
+    // The first session is still there, and still the only one.
+    expect(await names(kept)).toContain('get_credits');
+    const health = (await (await fetch(url.toString().replace(/\/mcp$/, '/healthz'))).json()) as {
+      sessions: number;
+    };
+    expect(health.sessions).toBe(1);
   });
 
   it('never takes funded from the operator configuration', async () => {

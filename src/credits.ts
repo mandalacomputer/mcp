@@ -95,10 +95,23 @@ export async function fundedAccount(
   apiKey: string,
   baseUrl: string | undefined,
   options: ApiOptions = {},
-  timeoutMs = CREDITS_CHECK_TIMEOUT_MS,
+  {
+    timeoutMs = CREDITS_CHECK_TIMEOUT_MS,
+    signal,
+  }: {
+    timeoutMs?: number;
+    /** Ends the read early, as a no: the hosted transport's caller went away. */
+    signal?: AbortSignal;
+  } = {},
 ): Promise<boolean> {
   try {
-    const api = new Api(apiKey, baseUrl, AbortSignal.timeout(timeoutMs), options);
+    const deadline = AbortSignal.timeout(timeoutMs);
+    const api = new Api(
+      apiKey,
+      baseUrl,
+      signal ? AbortSignal.any([deadline, signal]) : deadline,
+      options,
+    );
     // One journal entry, the fewest the route allows: only the summary matters.
     const parsed = creditsSchema.safeParse(
       await api.json('GET', P.CREDITS, { query: { limit: 1 } }),

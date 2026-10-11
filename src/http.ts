@@ -1655,9 +1655,23 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
       // caller. Inside the reservation, so a burst is bounded by the same caps
       // as the sessions it would build. Never cfg.funded: nothing but this
       // read turns it on, and any failure of it leaves run_agent out.
-      const funded =
-        offersFundedAgent({ ...cfg, modelKey }) &&
-        (await fundedAccount(key, cfg.baseUrl, { serviceSecret }));
+      //
+      // And abandoned when the caller goes away meanwhile. The SDK would still
+      // commit a session built after the response closed — closing the idle
+      // sessions this initialize planned to make room with — under an id
+      // nobody received, holding its slots until the idle sweep (Codex review).
+      const left = new AbortController();
+      const leave = () => left.abort();
+      res.once('close', leave);
+      let funded: boolean;
+      try {
+        funded =
+          offersFundedAgent({ ...cfg, modelKey }) &&
+          (await fundedAccount(key, cfg.baseUrl, { serviceSecret }, { signal: left.signal }));
+      } finally {
+        res.off('close', leave);
+      }
+      if (left.signal.aborted || res.destroyed) return;
       const t = new StreamableHTTPServerTransport({
         sessionIdGenerator: () => randomUUID(),
         ...(cfg.sseKeepAliveMs !== undefined ? { keepAliveMs: cfg.sseKeepAliveMs } : {}),
