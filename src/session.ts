@@ -10,11 +10,25 @@ export type SessionConfig = {
   /**
    * The caller's model-provider key, for the hosted agent routes.
    *
-   * Absent is the ordinary case and is not an error: `run_agent` and
-   * `run_agent_chat` are not registered, rather than offered and failing on use.
-   * A tool a model can see is a tool it will try.
+   * Absent is the ordinary case and is not an error: `run_agent_chat` is not
+   * registered, and `run_agent` is registered only when {@link funded} says the
+   * account's credits can pay — rather than offered and failing on use. A tool
+   * a model can see is a tool it will try.
    */
   modelKey?: string;
+  /**
+   * Whether this account's AI credits can pay for a run (OPL-5866): `GET
+   * /credits` answered, on this session's own key, an account that is not
+   * frozen with enough available for a run's first model call.
+   *
+   * Consulted only when there is no `modelKey`, and then `run_agent` is
+   * registered to run on credits; `run_agent_chat` never is. Decided before the
+   * session is built — once at startup over stdio, per session at initialize
+   * over HTTP — and never from anything but that read: an embedder calling
+   * createServer directly makes the same check (see `fundedAccount`) or leaves
+   * this unset.
+   */
+  funded?: boolean;
   /**
    * How the event stream opens a websocket. Defaults to undici's.
    *
@@ -63,6 +77,8 @@ export class Session {
    */
   readonly events: EventHub;
   readonly modelKey?: string;
+  /** See {@link SessionConfig.funded}. False whenever a model key is present. */
+  readonly funded: boolean;
   /** See {@link SessionConfig.defaultWorkspace}. */
   readonly defaultWorkspace?: { id: string; name: string } | null;
   /** See {@link SessionConfig.defaultWorkspaceUnreadable}. */
@@ -81,6 +97,9 @@ export class Session {
     this.api = new Api(cfg.apiKey, cfg.baseUrl ?? DEFAULT_BASE_URL, undefined, cfg.platform);
     this.events = new EventHub(this.api, cfg.webSocket);
     this.modelKey = cfg.modelKey;
+    // A model key always wins, as it does on the platform: a run that carries
+    // one is the caller's own, and credits are never spent on it.
+    this.funded = !cfg.modelKey && cfg.funded === true;
     this.defaultWorkspace = cfg.defaultWorkspace;
     this.defaultWorkspaceUnreadable = cfg.defaultWorkspaceUnreadable;
     this.#current = id(cfg.computerId);

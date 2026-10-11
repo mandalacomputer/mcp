@@ -9,7 +9,7 @@ import type { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdi
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { main } from '../src/cli.js';
 import { runStdio, type StdioConfig } from '../src/stdio.js';
-import { ACCOUNT_QUOTA, SECRET_LIST } from './harness.js';
+import { ACCOUNT_QUOTA, CREDITS, FUNDED_CREDITS, SECRET_LIST } from './harness.js';
 
 const COMPUTER = {
   id: 'fixture-computer',
@@ -68,6 +68,21 @@ type Reply = {
 };
 const text = (reply: Reply) =>
   reply.result?.content?.map((item) => item.text ?? '').join('\n') ?? '';
+/**
+ * The startup read of the account's AI credits (OPL-5866), which decides
+ * whether run_agent is offered without a model key. Answered by every backend
+ * here as an account its credits cannot pay for, and kept out of the call lists
+ * the tests pin: those pin what a TOOL sent, and this read is made before any
+ * tool exists. Recorded in `probes` instead, which its own tests pin.
+ */
+const isCreditsProbe = (url: string) => new URL(url, 'http://local').pathname.endsWith('/credits');
+let probes: { key: string | null; url: string }[] = [];
+let probeAnswer: () => Response = () => Response.json(CREDITS);
+function probed(input: unknown, init?: RequestInit): Response | undefined {
+  if (!isCreditsProbe(String(input))) return undefined;
+  probes.push({ key: new Headers(init?.headers).get('authorization'), url: String(input) });
+  return probeAnswer();
+}
 let home: string;
 let filename: string;
 const closes: (() => Promise<void>)[] = [];
@@ -145,6 +160,8 @@ async function local(cfg?: StdioConfig, argv?: string[]) {
 }
 
 beforeEach(() => {
+  probes = [];
+  probeAnswer = () => Response.json(CREDITS);
   home = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-startup-'));
   fs.mkdirSync(path.join(home, '.mandala'), { mode: 0o700 });
   filename = path.join(home, '.mandala', 'credentials.json');
@@ -173,6 +190,8 @@ afterEach(async () => {
 function backend(revoked = false) {
   const calls: { key: string | null; url: string; method: string }[] = [];
   vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+    const probe = probed(input, init);
+    if (probe) return probe;
     calls.push({
       key: new Headers(init?.headers).get('authorization'),
       url: String(input),
@@ -397,8 +416,12 @@ describe('native built and packed stdio', () => {
     it(`M01-local-stdio ${name}: initialize, read and stdin EOF`, async () => {
       const identities: string[] = [];
       const backend = createServer((req, res) => {
-        identities.push(req.headers.authorization ?? 'missing');
         res.setHeader('Content-Type', 'application/json');
+        if (isCreditsProbe(req.url ?? '/')) {
+          res.end(JSON.stringify(CREDITS));
+          return;
+        }
+        identities.push(req.headers.authorization ?? 'missing');
         res.end(JSON.stringify([{ ...COMPUTER, name: 'packed-fixture-identity' }]));
       });
       await new Promise<void>((resolve) => backend.listen(0, '127.0.0.1', resolve));
@@ -467,6 +490,8 @@ describe('a saved profile default workspace', () => {
   function secretsBackend() {
     const calls: { url: URL; method: string; body: unknown }[] = [];
     vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+      const probe = probed(input, init);
+      if (probe) return probe;
       const url = new URL(String(input));
       calls.push({
         url,
@@ -646,5 +671,63 @@ describe('a saved profile default workspace', () => {
     expect(r.result?.isError).not.toBe(true);
     const post = calls.find((c) => c.method === 'POST');
     expect(post).toMatchObject({ body: { workspace_id: WSP.id } });
+  });
+});
+
+describe('run_agent on AI credits at stdio startup (OPL-5866)', () => {
+  const toolNames = async (wire: Awaited<ReturnType<typeof local>>) =>
+    (
+      (await wire.request('tools/list')) as unknown as { result: { tools: { name: string }[] } }
+    ).result.tools.map((t) => t.name);
+
+  it('offers run_agent without a model key when the profile account can pay', async () => {
+    probeAnswer = () => Response.json(FUNDED_CREDITS);
+    const calls = backend();
+    const wire = await local();
+    const tools = await toolNames(wire);
+    expect(tools).toContain('run_agent');
+    expect(tools).not.toContain('run_agent_chat');
+    // Asked once, at startup, on the profile's own key and nothing else.
+    expect(probes).toEqual([
+      {
+        key: `Bearer ${baseDocument().profiles.default.api_key}`,
+        url: `${baseDocument().profiles.default.base_url}/credits?limit=1`,
+      },
+    ]);
+    expect(calls).toEqual([]);
+    expect(vi.mocked(console.error).mock.calls.flat().join('\n')).toContain(
+      "run_agent runs on this account's AI credits",
+    );
+  });
+
+  it.each([
+    ['an account its credits cannot pay for', () => Response.json(CREDITS)],
+    ['a read the platform refuses', () => Response.json({ error: 'no' }, { status: 403 })],
+    ['a read that fails', () => Response.json({ error: 'down' }, { status: 503 })],
+  ])('leaves run_agent out on %s', async (_label, answer) => {
+    probeAnswer = answer;
+    backend();
+    const wire = await local();
+    expect(await toolNames(wire)).not.toContain('run_agent');
+    expect(probes).toHaveLength(1);
+  });
+
+  it('asks nothing with a model key, or when the filters withhold run_agent', async () => {
+    probeAnswer = () => Response.json(FUNDED_CREDITS);
+    backend();
+    const keyed = await local({ modelKey: 'sk-ant-fixture' });
+    expect(await toolNames(keyed)).toEqual(expect.arrayContaining(['run_agent', 'run_agent_chat']));
+    const readOnly = await local({ readOnly: true });
+    expect(await toolNames(readOnly)).not.toContain('run_agent');
+    const tagged = await local({ tags: ['usage'] });
+    expect(await toolNames(tagged)).toEqual(['get_usage', 'get_credits']);
+    expect(probes).toEqual([]);
+  });
+
+  it('never takes funded from the configuration it was handed', async () => {
+    backend();
+    const wire = await local({ funded: true });
+    expect(await toolNames(wire)).not.toContain('run_agent');
+    expect(probes).toHaveLength(1);
   });
 });

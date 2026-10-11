@@ -39,6 +39,11 @@ export const MOVES = 'moves';
 
 /** What the account has used, over a window. Account-scoped, like {@link MOVES}. */
 export const USAGE = 'usage';
+/**
+ * The account's AI credits: balance, lots, this period's grant and a journal
+ * page (OPL-5866). Account-scoped, so a key confined to a workspace is refused.
+ */
+export const CREDITS = 'credits';
 /** Current account plan ceilings, consumption and advisory remaining quota. */
 export const ACCOUNT = 'account';
 /**
@@ -925,6 +930,8 @@ export function agentBody(args: {
   /** A computer-capable Anthropic or OpenAI model id; the platform picks one when it is left out. */
   model?: string;
   provider?: 'anthropic' | 'openai';
+  /** A funded run's admission budget in USD; the platform ignores it on a run with a model key. */
+  max_cost_usd?: number;
   stream: boolean;
 }): Json {
   return omitUndefined({ ...args } as Json);

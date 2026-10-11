@@ -31,6 +31,21 @@ are wording changes, and they are behaviour changes in the way that matters.
   explicit `provider`. `MANDALA_MODEL_KEY`, or `X-Model-Key` over HTTP, must be
   a key for that provider. Leaving both out keeps the Anthropic default.
 
+- **`run_agent` runs on the account's AI credits when no model key is
+  configured.** The server reads `GET /credits` on the session's own key —
+  once at startup over stdio, per session at initialize over HTTP, with that
+  caller's bearer — and registers `run_agent` only when the account is not
+  frozen and has at least $0.25 available. Any failure of that read leaves the
+  tool out. On credits the tool takes `max_cost_usd` (0.25 to 20) and not
+  `system` or `provider`, sends no `X-Model-Key`, and its answer reports
+  `cost_usd` and `credits_remaining_usd`. A model key still always wins, the
+  hosted server still never uses an operator's key or setting, and
+  `run_agent_chat` stays BYOK only.
+
+- **`get_credits`** reads the account's AI credits: available, balance, held,
+  debt, frozen, this period's plan grant, the unexpired lots and a page of the
+  journal (`before`, `limit`). In the `usage` tag.
+
 ### Changed
 
 - **Clicks are measured against the capture size, not the computer's
@@ -40,6 +55,12 @@ are wording changes, and they are behaviour changes in the way that matters.
 - **A `stale_capture` refusal is permanent.** The capture it names is gone,
   and sending the name again cannot bring it back. Take a new screenshot
   without `capture`, remeasure the region and use the new name.
+
+- **`run_agent` names AI credits running out.** A `402` carrying `top_up_url`,
+  before the stream or on it, is reported as the account's credits not covering
+  the run, with the billing page, instead of a plan limit or the model
+  provider's billing error. The stops `credits_exhausted` and `max_cost` read
+  as runs that did not finish.
 
 ## [0.11.0] — 2026-10-08
 

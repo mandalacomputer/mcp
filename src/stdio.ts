@@ -1,6 +1,7 @@
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { resolveCredentials, resolveWorkspaceDefault } from './credentials.js';
-import { createServer, type ServerConfig } from './server.js';
+import { fundedAccount } from './credits.js';
+import { createServer, offersFundedAgent, type ServerConfig } from './server.js';
 
 export type StdioConfig = Omit<ServerConfig, 'apiKey'> & { apiKey?: string; profile?: string };
 
@@ -24,6 +25,17 @@ export async function runStdio(cfg: StdioConfig = {}): Promise<void> {
     ...(defaults?.unreadable ? { defaultWorkspaceUnreadable: defaults.unreadable } : {}),
   };
   if (defaults?.note) console.error(`mandala-computer-mcp: ${defaults.note}`);
+  // Whether run_agent runs on the account's AI credits, asked once, here: one
+  // process is one key and one session, so startup IS the session's start. A
+  // read that fails, or a key the ledger refuses, leaves run_agent out until
+  // the next start — the same as an account with nothing to spend. Computed,
+  // never taken from the config, so nothing but that read can turn it on.
+  resolved.funded =
+    offersFundedAgent(resolved) && (await fundedAccount(credentials.apiKey, credentials.baseUrl));
+  if (resolved.funded)
+    console.error(
+      "mandala-computer-mcp: no MANDALA_MODEL_KEY, so run_agent runs on this account's AI credits",
+    );
   const server = createServer(resolved);
   const transport = new StdioServerTransport();
   await server.connect(transport);

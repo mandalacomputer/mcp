@@ -65,6 +65,12 @@ function platformWithRefusals() {
   const slowRefusals = new Map<string, number>();
   /** Headers of every request that reached the platform, lower-cased. */
   const seen: Array<Record<string, string>> = [];
+  /**
+   * The same, for each session's read of its AI credits at initialize
+   * (OPL-5866). Kept apart so `seen` still counts the bearer probes and tool
+   * calls these tests are about; answered like any other request below.
+   */
+  const credits: Array<Record<string, string>> = [];
   globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
     const url = new URL(typeof input === 'string' ? input : input.toString());
     if (url.host !== new URL(BASE).host) return fake(input as never, init);
@@ -72,7 +78,7 @@ function platformWithRefusals() {
     new Headers(init?.headers ?? {}).forEach((v, k) => {
       headers[k] = v;
     });
-    seen.push(headers);
+    (url.pathname.endsWith('/credits') ? credits : seen).push(headers);
     const token = (headers.authorization ?? '').replace(/^Bearer /, '');
     const named = url.pathname.endsWith('/whoami') ? state.accounts?.[token] : undefined;
     const record = named ? { ...WHOAMI, account: { ...named } } : undefined;
@@ -137,6 +143,7 @@ function platformWithRefusals() {
     state,
     slowRefusals,
     seen,
+    credits,
     restore: () => {
       globalThis.fetch = fake;
       platform.restore();
@@ -307,6 +314,8 @@ describe('not hosted: the metadata URL unset', () => {
     await res.text();
     expect(platform.seen.length).toBeGreaterThan(0);
     for (const h of platform.seen) expect(h['x-mandala-mcp-service']).toBeUndefined();
+    expect(platform.credits.at(-1)?.authorization).toBe('Bearer com_alice');
+    expect(platform.credits.at(-1)?.['x-mandala-mcp-service']).toBeUndefined();
   });
 });
 
@@ -345,6 +354,12 @@ describe('hosted: the platform and the bearer', () => {
       // Passed through unchanged.
       expect(h.authorization).toBe('Bearer mcpat_alice');
     }
+    // The session's read of its AI credits too (OPL-5866): the caller's own
+    // token, which the platform takes only beside the service secret.
+    expect(platform.credits.at(-1)).toMatchObject({
+      'x-mandala-mcp-service': SECRET,
+      authorization: 'Bearer mcpat_alice',
+    });
   });
 
   it('turns a platform 401 into an HTTP 401 with the challenge, not a tool error', async () => {

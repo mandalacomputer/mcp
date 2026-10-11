@@ -525,12 +525,20 @@ export function statusAdvice(status: number | undefined, reason?: string): strin
  * `undefined` for a status with nothing to add, so the caller keeps its own
  * wording. A 401 without `revoked` is left to {@link authenticationAdvice},
  * which already says it cannot tell the account key from the model key.
+ *
+ * The one 402 that is Mandala's own is a run on the account's AI credits that
+ * could not reserve its first model call (OPL-5866), and the platform says so
+ * by naming a top-up page. `topUp` is that page, resolved; given, the 402 is
+ * worded as credits run out rather than as the model provider's billing error,
+ * because the fix is on the Mandala billing page and not on a provider account.
  */
 export function agentRunAdvice(
   status: number | undefined,
   reason: string | undefined,
   tool: string,
+  topUp?: string,
 ): string | undefined {
+  if (status === 402 && topUp) return creditsExhaustedAdvice(topUp, tool);
   const noReplay = `Do not call ${tool} again with the same task: completed steps were already billed, so read what they did first`;
   if (status === 403 && reason === 'revoked') {
     return `this Mandala account no longer permits the run — a role that changed or an account suspended, not anything wrong with the computer. Nothing you can send changes that, and a new credential does not either: say what was refused and stop. ${noReplay}`;
@@ -548,6 +556,17 @@ export function agentRunAdvice(
           : undefined;
   if (!provider) return undefined;
   return `this is the model provider's own status for the configured model key (its ${provider}), not the Mandala plan and not the computer — check the model-provider account${status === 402 ? '' : ' and its status page, and try later'}. ${noReplay}`;
+}
+
+/**
+ * A run on the account's AI credits refused because they cannot cover it.
+ *
+ * Not the model provider, not the plan and not the computer, and waiting does
+ * not change it: the account's balance is what it is until a person tops it up
+ * or a model key is configured. Said so a model reports it rather than retrying.
+ */
+export function creditsExhaustedAdvice(topUp: string, tool: string): string {
+  return `this Mandala account's AI credits cannot cover the run — not the model provider, the plan or the computer. Waiting does not change it: a person can top up at ${topUp}, or configure their own model key. Say so and do not call ${tool} again until then`;
 }
 
 /**

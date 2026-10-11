@@ -10,10 +10,11 @@ import { Session, type SessionConfig } from './session.js';
 import { type ToolFilters, toolFilter } from './tool-filters.js';
 import { registerAccount } from './tools/account.js';
 import { registerActivities } from './tools/activities.js';
-import { registerAgent } from './tools/agent.js';
+import { RUN_AGENT_ANNOTATIONS, registerAgent } from './tools/agent.js';
 import { registerArtifacts } from './tools/artifacts.js';
 import { registerChat } from './tools/chat.js';
 import { registerComputers } from './tools/computers.js';
+import { registerCredits } from './tools/credits.js';
 import { registerDirectory } from './tools/directory.js';
 import { registerEvents } from './tools/events.js';
 import { registerExecutions } from './tools/executions.js';
@@ -75,6 +76,16 @@ This session exposes a filtered set of tools. Use only the tools in its tool lis
 Read each available tool's description before calling it. Read-only access follows the tool's readOnlyHint annotation: a read that can resume or bill a computer is not read-only. A running computer still costs money, and passive observation does not prevent idle suspension.
 
 Who you are is checked again while a call is in flight. A 401 or 403 means the credential or role stopped being accepted; a 402 means the current plan refuses the work. Do not resend these calls. Inspect any completed work attached before deciding what remains. A 409 may describe either a temporary condition or a decision that will not change on retry; read its message. A 400 never clears.`;
+
+/**
+ * Whether a session built from this config would offer run_agent on the
+ * account's AI credits, if `GET /credits` said they could pay (OPL-5866) — and
+ * so whether that read is worth making at all. Not with a model key, which
+ * always wins, and not when the filters withhold run_agent anyway.
+ */
+export function offersFundedAgent(cfg: ToolFilters & { modelKey?: string }): boolean {
+  return !cfg.modelKey && toolFilter(cfg).allows('run_agent', RUN_AGENT_ANNOTATIONS);
+}
 
 export type ServerConfig = SessionConfig &
   ToolFilters &
@@ -147,6 +158,7 @@ export function createServer(cfg: ServerConfig): McpServer {
   registerWebhooks(server, session, opts);
   registerSSH(server, session, opts);
   registerSecrets(server, session, opts);
+  registerCredits(server, session, opts);
   registerAgent(server, session, opts);
   registerDirectory(server, session, opts);
   registerActivities(server, session, opts);

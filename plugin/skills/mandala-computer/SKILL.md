@@ -58,9 +58,11 @@ port. A session keeps its chosen key/base until restarted.
   keys** at https://app.mandala.computer. Treat it as a password. It may cover the account
   or only one workspace, which is why a 404 below is not always what it looks like.
 - `MANDALA_MODEL_KEY` — optional Anthropic or OpenAI key, enabling `run_agent` and
-  `run_agent_chat` when filters permit them. Without it neither is registered.
-  The platform stores no copy and model work is billed to that key. It is
-  separate from the saved Mandala API credentials.
+  `run_agent_chat` when filters permit them. The platform stores no copy and
+  model work is billed to that key. It is separate from the saved Mandala API
+  credentials. Without it `run_agent_chat` is not registered, and `run_agent`
+  is registered only when the account's AI credits can pay for a run (checked
+  once at startup); then it runs on those credits.
 
 If startup fails, read the local error and ask the user to correct the named
 profile/protection setting, run the TypeScript `mandala login` command, or set
@@ -104,7 +106,8 @@ Optional configuration:
 Filters intersect: tags cannot restore a tool withheld by read-only,
 `MANDALA_NO_LIFECYCLE`, or a missing model key. A connected server may have
 an empty tool list (`agent` plus read-only does). `files` plus read-only exposes
-only `list_directory`. Both agent tools need the caller's model key, and
+only `list_directory`. `run_agent_chat` needs the caller's model key, and
+`run_agent` needs that key or AI credits that can pay, and
 lifecycle disabled alone does not withhold them. Check the actual
 tool list before following any workflow below; use only tools that are
 present. If the task requires a withheld tool, explain the limitation instead
@@ -141,7 +144,9 @@ HTTP never loads the local credential store and ignores `MANDALA_API_KEY`,
 and `MANDALA_COMPUTER_ID`, rather than lending the operator's model-provider key and the operator's machine to
 everyone who connects. A caller who wants `run_agent` there sends their own
 Anthropic or OpenAI key as an `X-Model-Key` header, and both agent tools are registered for
-that session only if they did and the filters permit it.
+that session only if they did and the filters permit it. Without that header,
+`run_agent` alone is registered when the caller's own account's AI credits can
+pay, checked when the session starts.
 
 ## The shape of a session
 
@@ -183,13 +188,15 @@ clicks and types inside itself, then answers with a sentence and the list of
 what it did. Ten clicks are not ten images in your context. Use it for
 anything that is more than two or three interactions: filling a form, logging
 in and navigating somewhere, reading a value off a page, driving an
-application. It needs a running computer, and it needs a model key to exist
-at all: `MANDALA_MODEL_KEY` in the server's environment over stdio, or the
+application. It needs a running computer, and something to pay for it: a
+model key (`MANDALA_MODEL_KEY` in the server's environment over stdio, or the
 caller's own `X-Model-Key` header over HTTP, where the server's variable is
-ignored. If every other `mandala` tool is present and `run_agent` is not, that
-may be due to a filter or the missing model key. Check the configured filters
-before explaining which key mechanism applies; an HTTP user needs their own
-header rather than the operator's environment variable.
+ignored), or else the account's Mandala AI credits. If every other `mandala`
+tool is present and `run_agent` is not, that may be due to a filter, or to no
+model key and no credits that could pay when the session started. Check the
+configured filters before explaining which mechanism applies; an HTTP user
+needs their own header rather than the operator's environment variable, and
+`get_credits` shows the account's credits.
 
 - `max_steps` (default 20, max 100) bounds actions, not time, model calls or
   spending. A client needs `progressToken` plus `resetTimeoutOnProgress` to
@@ -209,6 +216,12 @@ header rather than the operator's environment variable.
   status for the model key (its billing, timeout or overloaded error), not the
   Mandala plan: tell the user to check that model-provider account, not to
   upgrade their plan.
+- On AI credits (no model key) the tool takes `max_cost_usd`, the most a run may
+  start spending, and the answer says what the run cost and what is left. A run
+  that ends `RAN OUT OF AI CREDITS` or `REACHED max_cost_usd` is unfinished, like
+  `RAN OUT OF STEPS`. A refusal saying the account's AI credits cannot cover the
+  run means a person has to top up (the answer names the page) or configure a
+  model key: say so, and do not run it again.
 
 **`run_agent_chat` uses textual OpenAI-shaped messages and JSON-only results.**
 It drives the same BYOK Anthropic or OpenAI loop, not hosted inference or a chat UI.
@@ -260,7 +273,7 @@ retry, guest action or page-draining loop. Read-only filters grant no API role;
 member/owner and workspace authorization is checked again on each request.
 
 **Drive by hand** — `screenshot`, `click`, `type_text`, `press_key`, `scroll`,
-`drag` — when you need to see each frame yourself, when there is no model key,
+`drag` — when you need to see each frame yourself, when `run_agent` is absent,
 or for one or two actions. The rules there:
 
 - A screenshot is how you find out what the screen looks like, and the only
@@ -362,8 +375,9 @@ says what to do. The judgement it cannot make for you:
   for a 401; for a 403 say what was refused and stop. Do not report either as the
   computer being broken or gone, and do not read it as a transport failure worth
   retrying.
-- **A 402 is a plan limit** (except in the middle of an agent run, where it is
-  the model provider's billing error — see above). Waiting does not fix it and
+- **A 402 is a plan limit** (except from an agent run, where it is the model
+  provider's billing error, or the account's AI credits running out when it
+  names a top-up page — see above). Waiting does not fix it and
   neither do you — tell the user what was refused and leave it there. One that
   arrives after a long wait means the same thing rather than something going
   wrong on the machine: the plan, as it stands now, does not cover the work.

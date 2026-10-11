@@ -6,10 +6,17 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
 import express, { type Request, type Response } from 'express';
 import { Api, MODEL_KEY_HEADER } from './api.js';
+import { fundedAccount } from './credits.js';
 import { APIError } from './errors.js';
 import { MeteredBody } from './http-body.js';
 import { WHOAMI } from './paths.js';
-import { createServer, SERVER_NAME, SERVER_VERSION, type ServerConfig } from './server.js';
+import {
+  createServer,
+  offersFundedAgent,
+  SERVER_NAME,
+  SERVER_VERSION,
+  type ServerConfig,
+} from './server.js';
 import { toolFilter } from './tool-filters.js';
 
 export type HttpConfig = Omit<ServerConfig, 'apiKey' | 'activity'> & {
@@ -1637,6 +1644,20 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
     // `onsessioninitialized`): it has an id but no map slot.
     let dropped = false;
     try {
+      // Per-caller, and deliberately with no fallback to cfg.modelKey: an
+      // operator who set MANDALA_MODEL_KEY for their own stdio use would
+      // otherwise be billed for every stranger's run here.
+      const modelKey = req.header(MODEL_KEY_HEADER)?.trim() || undefined;
+      // Without one, run_agent is offered on the caller's AI credits when
+      // their account can pay (OPL-5866). Asked here, per session and on the
+      // caller's own bearer, because every session is a different account; a
+      // process-wide answer would hand one account's credits to the next
+      // caller. Inside the reservation, so a burst is bounded by the same caps
+      // as the sessions it would build. Never cfg.funded: nothing but this
+      // read turns it on, and any failure of it leaves run_agent out.
+      const funded =
+        offersFundedAgent({ ...cfg, modelKey }) &&
+        (await fundedAccount(key, cfg.baseUrl, { serviceSecret }));
       const t = new StreamableHTTPServerTransport({
         sessionIdGenerator: () => randomUUID(),
         ...(cfg.sseKeepAliveMs !== undefined ? { keepAliveMs: cfg.sseKeepAliveMs } : {}),
@@ -1725,11 +1746,10 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
             finishActivity();
           };
         },
-        // Per-caller, and deliberately with no fallback to cfg.modelKey: an
-        // operator who set MANDALA_MODEL_KEY for their own stdio use would
-        // otherwise be billed for every stranger's run here. Absent means
-        // run_agent is simply not offered to this session.
-        modelKey: req.header(MODEL_KEY_HEADER)?.trim() || undefined,
+        // See above. Absent, and unfunded, means run_agent is simply not
+        // offered to this session.
+        modelKey,
+        funded,
         // Dropped for the same reason, one field further on. MANDALA_COMPUTER_ID
         // is the operator's own machine, and spreading it into a stranger's
         // session pre-binds their key to a computer on somebody else's account:

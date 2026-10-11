@@ -1,3 +1,4 @@
+import type { ServerConfig } from '../src/server.js';
 import {
   ACTIVITY_ID,
   ARTIFACT_ID,
@@ -119,6 +120,8 @@ export const EXERCISE: Record<string, Record<string, unknown>[]> = {
   // Both bounds, because a call that names neither cannot show the parameter
   // sweep that this server can send either.
   get_usage: [{}, { from: '2026-08-01T00:00:00Z', to: '2026-08-22T00:00:00Z' }],
+  // The AI credit ledger (OPL-5866), and one older page of its journal.
+  get_credits: [{}, { before: 7, limit: 10 }],
   // No arguments to sweep: the window belongs to the account, so there is no id
   // and nothing to filter by.
   get_retention: [{}],
@@ -413,13 +416,25 @@ export function checkInventory(names: string[], exercise: typeof EXERCISE): void
     );
 }
 
+/**
+ * Variants for a session whose run_agent the account's AI credits pay for
+ * (OPL-5866): no model key, and the tool takes `max_cost_usd`, which the keyed
+ * one does not. Run on a session of their own, and counted under the same tool.
+ */
+export const FUNDED_EXERCISE: Record<string, Record<string, unknown>[]> = {
+  run_agent: [
+    { prompt: 'open firefox', model: 'claude-opus-5-5', max_steps: 3, max_cost_usd: 1.5 },
+  ],
+};
+
 /** Fresh in-process sessions prevent cached event reads from masking zero-request tools. */
 export async function collectExercises(
   exercise = EXERCISE,
   connectTools = connect,
+  funded = FUNDED_EXERCISE,
 ): Promise<ExerciseEvidence[]> {
   const platform = installFakePlatform();
-  const config = {
+  const config: Partial<ServerConfig> = {
     baseUrl: BASE,
     apiKey: 'com_fixture',
     modelKey: 'sk-ant-fixture',
@@ -429,6 +444,38 @@ export async function collectExercises(
     lifecycle: true,
   };
   const evidence: ExerciseEvidence[] = [];
+  /** Every variant must succeed and reach the platform; what each reached is kept. */
+  const run = async (
+    cfg: Partial<ServerConfig>,
+    name: string,
+    variants: Record<string, unknown>[],
+    label = '',
+  ): Promise<Recorded[]> => {
+    const connection = await connectTools(cfg);
+    const requests: Recorded[] = [];
+    try {
+      for (const [index, args] of variants.entries()) {
+        const before = platform.calls.length;
+        let result: Awaited<ReturnType<typeof connection.call>>;
+        try {
+          result = await connection.call(name, args);
+        } catch {
+          throw new Error(
+            `Tool ${name}${label} variant ${index + 1} failed at the MCP protocol boundary`,
+          );
+        }
+        if (result.isError)
+          throw new Error(`Tool ${name}${label} variant ${index + 1} returned an error`);
+        const observed = platform.calls.slice(before);
+        if (!observed.length)
+          throw new Error(`Zero request coverage for tool ${name}${label} variant ${index + 1}`);
+        requests.push(...observed);
+      }
+      return requests;
+    } finally {
+      await connection.close();
+    }
+  };
   try {
     const inventory = await connectTools(config);
     try {
@@ -440,31 +487,18 @@ export async function collectExercises(
       await inventory.close();
     }
     for (const [name, variants] of Object.entries(exercise)) {
-      const connection = await connectTools(config);
-      const requests: Recorded[] = [];
-      try {
-        for (const [index, args] of variants.entries()) {
-          const before = platform.calls.length;
-          let result: Awaited<ReturnType<typeof connection.call>>;
-          try {
-            result = await connection.call(name, args);
-          } catch {
-            throw new Error(
-              `Tool ${name} variant ${index + 1} failed at the MCP protocol boundary`,
-            );
-          }
-          if (result.isError)
-            throw new Error(`Tool ${name} variant ${index + 1} returned an error`);
-          const observed = platform.calls.slice(before);
-          if (!observed.length)
-            throw new Error(`Zero request coverage for tool ${name} variant ${index + 1}`);
-          requests.push(...observed);
-        }
-        if (!requests.length) throw new Error(`Zero request coverage for tool ${name}`);
-        evidence.push({ tool: name, requests });
-      } finally {
-        await connection.close();
-      }
+      const requests = await run(config, name, variants);
+      if (funded[name])
+        requests.push(
+          ...(await run(
+            { ...config, modelKey: undefined, funded: true },
+            name,
+            funded[name],
+            ' (funded)',
+          )),
+        );
+      if (!requests.length) throw new Error(`Zero request coverage for tool ${name}`);
+      evidence.push({ tool: name, requests });
     }
     return evidence;
   } finally {
