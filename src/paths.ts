@@ -936,6 +936,9 @@ export const webhook = (id: string) => `${WEBHOOKS}/${segment('webhook_id', id)}
 /** rotate | test | deliveries */
 export const webhookAction = (id: string, action: string) => `${webhook(id)}/${action}`;
 
+/** The longest a foreground exec may be told to wait, in seconds. */
+export const EXEC_MAX_TIMEOUT_S = LIMITS['exec.maxTimeoutSeconds'];
+
 /** The platform's own caps (`DESCRIPTION_MAX` and `COMPUTERS_MAX` on the platform side). */
 export const WEBHOOK_DESCRIPTION_MAX = LIMITS['webhook.descriptionMaxChars'];
 export const WEBHOOK_COMPUTERS_MAX = LIMITS['webhook.computersMax'];
@@ -1040,6 +1043,11 @@ export const activity = (id: string, activityId: string) => {
 export const activityResults = (id: string, activityId: string) =>
   `${activity(id, activityId)}/results`;
 export const signals = (id: string) => `${computer(id)}/signals`;
+/**
+ * The most actions one agent run may take, on both agent routes: a larger
+ * `max_steps` is a 400 there, so it is refused here before the call.
+ */
+export const AGENT_MAX_STEPS = LIMITS['agent.maxSteps'];
 export const CHAT_COMPLETIONS = 'chat/completions';
 export function chatBody(args: {
   computer_id: string;

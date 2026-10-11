@@ -612,7 +612,7 @@ export const registerComputers: Registrar = (server, session, opts) => {
     {
       title: 'Get a computer',
       description:
-        'Everything the platform knows about one computer: status, size, and the screen resolution every click and screenshot is measured in.',
+        "Everything the platform knows about one computer: status, size and its recorded screen resolution. Click coordinates are the capture size a screenshot returns, which can differ from the record's resolution.",
       inputSchema: { ...idArg },
       annotations: { readOnlyHint: true },
     },

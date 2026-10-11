@@ -10,7 +10,9 @@
  * the number is written once and the reason for it stays where it is used.
  */
 export const LIMITS = {
+  'agent.maxSteps': 100,
   'clipboard.writeMaxBytes': 64 * 1024,
+  'exec.maxTimeoutSeconds': 600,
   'webhook.descriptionMaxChars': 200,
   'webhook.computersMax': 64,
 } as const;

@@ -5,6 +5,7 @@ import {
   patternFor,
   UNIMPLEMENTED,
   UNIMPLEMENTED_PARAMETERS,
+  UNSENT_BODY_FORMS,
 } from './allowlist.js';
 import { connect, installFakePlatform, type Recorded } from './harness.js';
 import { collectExercises, EXERCISE } from './surface-exercise.js';
@@ -93,6 +94,18 @@ describe('the surface this server calls', () => {
       for (const p of sent) if (!known.has(p)) outside.push(`${route}  ${p}`);
     }
     expect(outside.sort()).toEqual([]);
+  });
+
+  it('never sends a body form recorded as a decision not to', async () => {
+    const calls = (await collectExercises()).flatMap((e) => e.requests);
+    for (const route of UNSENT_BODY_FORMS.keys()) expect(ALLOWED.has(route), route).toBe(true);
+    const sent = calls.filter((call) => {
+      const form = UNSENT_BODY_FORMS.get(`${call.method} ${patternFor(call.path)}`);
+      return form === 'array' && Array.isArray(call.body);
+    });
+    expect(sent).toEqual([]);
+    // The route is still exercised, so the check above has calls to look at.
+    expect(calls.some((call) => patternFor(call.path) === 'computers/:id/input')).toBe(true);
   });
 
   it('records an undocumented header instead of filtering it out', () => {

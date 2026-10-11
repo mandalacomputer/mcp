@@ -3630,6 +3630,9 @@ describe('the tools our own prose tells a model to call', () => {
     'accepted_at',
     'idempotency_outcome_unknown',
     'idempotency_in_progress',
+    // The refusal a pinned screenshot gets once its capture is gone (OPL-5856),
+    // named in the skill (OPL-5905).
+    'stale_capture',
   ]);
 
   it('names only tools that exist', async () => {

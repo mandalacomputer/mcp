@@ -52,10 +52,10 @@ export const registerAgent: Registrar = (server, session) => {
           .number()
           .int()
           .min(1)
-          .max(100)
+          .max(P.AGENT_MAX_STEPS)
           .default(20)
           .describe(
-            'How many ACTIONS the loop may take on the desktop. Not a count of model calls and not a proxy for what your key is billed: one model reply can ask for several actions and spends a step on each, a paused turn is resubmitted for tokens and no step, and a bash call or a cursor read takes no screenshot. So a run can make more model calls than steps AND more steps than screenshots — bound the work with this, and budget the bill on the key itself. Defaults to 20 and is capped at 100 here, so a larger value is refused before the call rather than after it.',
+            `How many ACTIONS the loop may take on the desktop. Not a count of model calls and not a proxy for what your key is billed: one model reply can ask for several actions and spends a step on each, a paused turn is resubmitted for tokens and no step, and a bash call or a cursor read takes no screenshot. So a run can make more model calls than steps AND more steps than screenshots — bound the work with this, and budget the bill on the key itself. Defaults to 20 and is capped at ${P.AGENT_MAX_STEPS} here, so a larger value is refused before the call rather than after it.`,
           ),
       },
       annotations: { openWorldHint: true },

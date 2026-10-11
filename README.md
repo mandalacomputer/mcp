@@ -1538,11 +1538,10 @@ there is no fixture fallback, credential requirement or skip branch.
 
 The committed OpenAPI fixture is synthetic, assembled from the public MCP route
 inventory, and is never presented as a downloaded publication. Offline green
-proves deterministic implementation coverage only. Anonymous CI at
-[commit 1b04314](https://github.com/mandalacomputer/mcp/commit/1b04314e84f5701e2e15c65cbb1c44a0c14a4948)
-returned HTTP 200 and matched all 56 operations in the fetched v1 contract using
-123 requests from 83 tools. That result applies to that commit and publication;
-every subsequent head must pass the gate independently. These counts are
+proves deterministic implementation coverage only. Each `published-openapi` run
+logs the publication's digest and how many operations it matched with how many
+requests from how many tools; a result applies to that commit and that
+publication, and every head must pass the gate independently. Those counts are
 observations, never fixed thresholds or exemptions. A blocked or red public gate
 must not be merged. Parameters and response modes remain separate contracts,
 with documented parameter exceptions and JSON-only chat support.
@@ -1598,6 +1597,7 @@ several names. Where a client has no way to do it, the cell says so with —.
 | The usage window | `usage.read({ from, to })` | `usage.read(since=…, until=…)`, or `from_=` and `to=` | `get_usage` with `from` and `to` | `usage --from … --to …` | — |
 | Change a computer (`PATCH`) | `update({ … })` | `rename()`, `resize()`, `set_idle_suspend()`, `set_browser_proxy()`, `set_egress_proxy()` | `update_computer` | `computers rename`, `resize`, `idle-suspend`, `browser-proxy set`/`clear`, `egress-proxy set`/`clear` | `browser-proxy set`/`clear`, `egress-proxy set`/`clear` |
 | Wait until the computer is ready | `waitForGuest()`, `waitForDesktop()` | `wait_for_guest()`, `wait_for_desktop()` | `wait_for_computer` with `until: "guest"`, which on Linux also waits for the desktop session | `computers wait --until guest` or `--until desktop` | — |
+| A screenshot, fresh or cached | `screenshot(width, { fresh, capture })`: cached unless `fresh: true` | `screenshot(fresh=…, capture=…)`: cached unless `fresh=True` | `screenshot`: **fresh by default** unless `capture` is given; `fresh: false` for the cache | `computers screenshot --fresh` | — |
 | The windows after an input action | `{ context: true }` on an input method, e.g. `click(x, y, [], { context: true })` | `context=True` on an input method, e.g. `click(x, y, context=True)` | `context: true` on an input tool | — | — |
 
 ## Security
