@@ -44,6 +44,17 @@ are wording changes, and they are behaviour changes in the way that matters.
   hosted server still never uses an operator's key or setting, and
   `run_agent_chat` stays BYOK only.
 
+  A `402` carrying `top_up_url`, before the stream or on it, is reported as the
+  account's credits not covering the run, with the billing page resolved
+  against the API's origin and the code `insufficient_credits`, and the stops
+  `credits_exhausted` and `max_cost` read as runs that did not finish. The
+  platform reports its AI service failing as `Mandala AI is unavailable` over
+  its provider's status; on a run on credits, that sentence at any status, and
+  any `402` without `top_up_url`, reads as the AI service failing, not as the
+  caller's credential (401), role (403), the computer (404), the request
+  (413), the plan or a model key's billing. The advice is to try later and,
+  when steps already ran, to send only what is left. Keyed runs are unchanged.
+
 - **`get_credits`** reads the account's AI credits: available, balance, held,
   debt, frozen, this period's plan grant, the unexpired lots and a page of the
   journal (`before`, `limit`). In the `usage` tag.
@@ -57,22 +68,6 @@ are wording changes, and they are behaviour changes in the way that matters.
 - **A `stale_capture` refusal is permanent.** The capture it names is gone,
   and sending the name again cannot bring it back. Take a new screenshot
   without `capture`, remeasure the region and use the new name.
-
-- **`run_agent` names AI credits running out.** A `402` carrying `top_up_url`,
-  before the stream or on it, is reported as the account's credits not covering
-  the run, with the billing page resolved against the API's origin and the code
-  `insufficient_credits`, instead of a plan limit or the model provider's
-  billing error. The stops `credits_exhausted` and `max_cost` read as runs that
-  did not finish.
-
-- **A run on credits that the platform's AI service fails says so.** The
-  platform reports such a failure as `Mandala AI is unavailable` over its
-  provider's status. On a run on credits, that sentence at any status, and any
-  `402` without `top_up_url`, now reads as the AI service failing. It is no
-  longer read as the caller's credential (401), role (403), the computer
-  (404), the request (413), the plan or a model key's billing. The advice is
-  to try later and, when steps already ran, to send only what is left. Keyed
-  runs are unchanged.
 
 - **`run_agent` reads every documented stop.** `pause_turn`, `incomplete` and
   `safety_check` each get their own first line as a run that did not finish,
