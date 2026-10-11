@@ -267,6 +267,12 @@ or for one or two actions. The rules there:
   way to know a click landed. Screenshot after anything you expect to change
   the screen. Coordinates are the pixels of the full-size frame; if you asked
   for a scaled `width` to save context, point on a full-size one.
+- Each screenshot names its `capture` and gives the capture size, which can
+  differ from the computer's recorded `resolution`; measure against the
+  capture size. To crop a frame you already measured, pass its `capture` with
+  `region` rather than taking a new one. A `stale_capture` refusal means that
+  frame is gone for good: take a new screenshot without `capture`, remeasure,
+  and use the new name. Never apply the old crop to a frame you have not seen.
 - A screenshot is **not** how you find out whether anything *happened*. The
   computer reports what it does — `wait_for_event` blocks for a window
   opening, a background command exiting, the desktop coming up; `poll_events`

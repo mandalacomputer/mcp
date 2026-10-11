@@ -227,7 +227,7 @@ export const registerChat: Registrar = (server, session) => {
           .string()
           .refine((v) => v.trim().length > 0, 'model must not be blank')
           .optional(),
-        max_steps: z.number().int().min(1).max(100).default(20),
+        max_steps: z.number().int().min(1).max(P.AGENT_MAX_STEPS).default(20),
       },
       annotations: { openWorldHint: true },
     },

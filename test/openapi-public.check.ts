@@ -14,21 +14,7 @@ it('covers every operation in the anonymously published OpenAPI contract', async
   const summary = compareCoverage(
     publication.contract,
     operationEvidence(await collectExercises()),
-    {
-      unsent: UNIMPLEMENTED,
-      // Explicit rollout gap, expires one week after this source update. The
-      // platform checks the new mirror before publishing this operation.
-      prepublication: [
-        {
-          operation: 'GET credits',
-          expiresAt: '2026-10-16T00:00:00.000Z',
-        },
-        {
-          operation: 'POST computers/:id/browser-connections/:connection/renew',
-          expiresAt: '2026-10-16T00:00:00.000Z',
-        },
-      ],
-    },
+    { unsent: UNIMPLEMENTED },
   );
   console.info(
     JSON.stringify({

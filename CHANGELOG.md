@@ -14,6 +14,33 @@ are wording changes, and they are behaviour changes in the way that matters.
 
 ## [Unreleased]
 
+### Added
+
+- **`screenshot` takes `capture`, to crop the frame you measured.** A live
+  screenshot now names its capture and gives the capture's own size, before
+  any cropping or scaling. Send that name back as `capture` with `region` and
+  the crop is cut from that same frame, not from whatever the screen shows by
+  then. With `capture`, `fresh` is no longer defaulted to true, and
+  `fresh: true` beside it is refused with nothing sent. This replaces the
+  0.11.0 note that `screenshot` did not offer `capture` yet. The skill and the
+  README describe it.
+
+- **`run_agent` and `run_agent_chat` take `provider`, and accept OpenAI
+  keys.** `provider: "openai"` runs `gpt-6.1-sol` by default, and a GPT or
+  o-series `model` selects OpenAI without it; a custom model name needs an
+  explicit `provider`. `MANDALA_MODEL_KEY`, or `X-Model-Key` over HTTP, must be
+  a key for that provider. Leaving both out keeps the Anthropic default.
+
+### Changed
+
+- **Clicks are measured against the capture size, not the computer's
+  `resolution`.** The server instructions and `get_computer` say so: the size
+  a screenshot returns can differ from the computer record's `resolution`.
+
+- **A `stale_capture` refusal is permanent.** The capture it names is gone,
+  and sending the name again cannot bring it back. Take a new screenshot
+  without `capture`, remeasure the region and use the new name.
+
 ## [0.11.0] — 2026-10-08
 
 ### Changed

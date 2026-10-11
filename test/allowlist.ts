@@ -526,6 +526,22 @@ export const UNIMPLEMENTED_PARAMETERS: ReadonlySet<string> = new Set([
   'POST computers/:id/input  body:scroll_amount',
 ]);
 
+/**
+ * Body forms a route accepts that this server deliberately never sends.
+ *
+ * Not parameters: a top-level JSON array has no field names, so neither table
+ * above can hold one, and a comment alone is not a thing that fails. The
+ * surface test holds every exercised call to this.
+ */
+export const UNSENT_BODY_FORMS: ReadonlyMap<string, 'array'> = new Map([
+  // DECISION (OPL-5905). The OpenAI batch: a top-level JSON array of OpenAI
+  // computer actions, run as one batch and answered once. The input tools
+  // speak the Anthropic action vocabulary, one action per call, so a model
+  // sees each answer before it chooses the next action; a batch would act on
+  // a screen nobody has looked at since its first action.
+  ['POST computers/:id/input', 'array'],
+]);
+
 export const key = (route: Route) => `${route.method} ${route.pattern}`;
 export const ALLOWED = new Set(V1_ROUTES.map(key));
 
@@ -536,11 +552,12 @@ export const ALLOWED = new Set(V1_ROUTES.map(key));
 export const UNIMPLEMENTED = new Set<string>([
   // OPL-5864: direct HTTP is available; this contract prerequisite adds no wrapper.
   'GET credits',
-  // GAP (OPL-5878): browser connection lifecycle currently uses direct HTTP.
-  // No MCP tool returns the raw browser capability to model context.
+  // DECISION (OPL-5878, OPL-5880). A browser connection answers a raw
+  // capability to drive the guest's browser, and a model's context is the
+  // wrong place for one: the SDKs' browser drivers create, renew and revoke it
+  // and keep it to themselves. No tool here reaches these three routes.
   'POST computers/:id/browser-connections',
   'DELETE computers/:id/browser-connections/:connection',
-  // OPL-5880: renewal belongs to the authenticated browser driver, not model context.
   'POST computers/:id/browser-connections/:connection/renew',
   // The account's secret store left this list in OPL-5026, reached by
   // list_secrets, get_secret, create_secret, replace_secret and delete_secret.

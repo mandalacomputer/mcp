@@ -4,6 +4,7 @@
  */
 
 import { afterEach, beforeEach, expect, it } from 'vitest';
+import { LIMITS } from '../src/limits.js';
 import { connect, installFakePlatform } from './harness.js';
 
 let platform: ReturnType<typeof installFakePlatform>;
@@ -58,3 +59,19 @@ it.each(['run_agent', 'run_agent_chat'])(
     }
   },
 );
+
+it('takes the max_steps and exec timeout ceilings from the platform limits it mirrors', async () => {
+  const { client, close } = await connect({ modelKey: 'sk-test' });
+  try {
+    const tools = (await client.listTools()).tools;
+    const prop = (tool: string, name: string) =>
+      tools.find((t) => t.name === tool)?.inputSchema.properties?.[name];
+    for (const tool of ['run_agent', 'run_agent_chat'])
+      expect(prop(tool, 'max_steps'), tool).toMatchObject({ maximum: LIMITS['agent.maxSteps'] });
+    expect(prop('exec', 'timeout_s')).toMatchObject({
+      maximum: LIMITS['exec.maxTimeoutSeconds'],
+    });
+  } finally {
+    await close();
+  }
+});
