@@ -342,6 +342,62 @@ export const USAGE = {
   reported_through: '2026-08-20',
 };
 
+/**
+ * An account whose AI credits cannot start a run (OPL-5866). The fake
+ * platform's default, so a session without a model key has no run_agent unless
+ * a test says the account is funded.
+ */
+export const CREDITS = {
+  balance_micros: 0,
+  available_micros: 0,
+  held_micros: 0,
+  debt_micros: 0,
+  frozen: false,
+  grant: null,
+  lots: [],
+  entries: [],
+  next_before: null,
+};
+
+/** An account whose credits pay for a run: $4.50 available, past the $0.25 a first call needs. */
+export const FUNDED_CREDITS = {
+  balance_micros: 4_750_000,
+  available_micros: 4_500_000,
+  held_micros: 250_000,
+  debt_micros: 0,
+  frozen: false,
+  grant: {
+    period_start: '2026-10-01T00:00:00.000Z',
+    period_end: '2026-11-01T00:00:00.000Z',
+    granted_micros: 5_000_000,
+    used_micros: 250_000,
+  },
+  lots: [
+    {
+      id: 'lot-plan-2026-10',
+      kind: 'plan_grant',
+      amount_micros: 5_000_000,
+      remaining_micros: 4_750_000,
+      expires_at: '2026-11-01T00:00:00.000Z',
+      created_at: '2026-10-01T00:00:05.000Z',
+    },
+  ],
+  entries: [
+    {
+      id: 8,
+      lot_id: null,
+      kind: 'debit',
+      amount_micros: 250_000,
+      debt_micros: 0,
+      model: 'claude-sonnet-5-5',
+      run_id: 'run-1',
+      step: 1,
+      created_at: '2026-10-09T12:00:00.000Z',
+    },
+  ],
+  next_before: 8,
+};
+
 export const ACTIVITY_ID = 'act_0123456789abcdef0123456789abcdef';
 export const ACTIVITY = {
   activity_id: ACTIVITY_ID,
@@ -447,10 +503,11 @@ export function installFakePlatform(): {
    * rather than a fixed value: the event socket re-reads this record on every
    * reconnect, which is how a suspend reaches a websocket client at all.
    */
-  state: { status: string };
+  state: { status: string; credits: unknown };
 } {
   const calls: Recorded[] = [];
-  const state = { status: 'running' };
+  // `credits` is what `GET /credits` answers, mutable for the same reason.
+  const state: { status: string; credits: unknown } = { status: 'running', credits: CREDITS };
   // Snapshots a DELETE has been accepted for, so that `GET /snapshots` stops
   // listing them. A deletion is a 202 now and the row going is the only thing
   // that means it finished (OPL-4572), so a fixture whose row never
@@ -483,7 +540,16 @@ export function installFakePlatform(): {
       headers[k.toLowerCase()] = v;
     });
     calls.push({ method, path, pathname: url.pathname, body, query: url.searchParams, headers });
-    return respond(method, path, headers, state.status, deleted, url.searchParams, body);
+    return respond(
+      method,
+      path,
+      headers,
+      state.status,
+      deleted,
+      url.searchParams,
+      body,
+      state.credits,
+    );
   }) as typeof fetch;
 
   return {
@@ -586,6 +652,7 @@ function respond(
   deleted: Set<string> = new Set(),
   query: URLSearchParams = new URLSearchParams(),
   body?: unknown,
+  credits: unknown = CREDITS,
 ): Response {
   const json = (v: unknown, status = 200) =>
     new Response(JSON.stringify(v), { status, headers: { 'Content-Type': 'application/json' } });
@@ -784,6 +851,7 @@ function respond(
   // adjacent so that stays visible.
   if (path === '/account' && method === 'GET') return json(ACCOUNT_QUOTA);
   if (path === '/usage') return json(USAGE);
+  if (path === '/credits' && method === 'GET') return json(credits);
   if (path === '/retention') return json(RETENTION);
   // The webhooks resource (OPL-4306). The two answers that carry the secret
   // are the create and the rotate, and only those; the test is a 202 with a

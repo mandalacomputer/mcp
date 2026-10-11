@@ -6,10 +6,17 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
 import express, { type Request, type Response } from 'express';
 import { Api, MODEL_KEY_HEADER } from './api.js';
+import { fundedAccount } from './credits.js';
 import { APIError } from './errors.js';
 import { MeteredBody } from './http-body.js';
 import { WHOAMI } from './paths.js';
-import { createServer, SERVER_NAME, SERVER_VERSION, type ServerConfig } from './server.js';
+import {
+  createServer,
+  offersFundedAgent,
+  SERVER_NAME,
+  SERVER_VERSION,
+  type ServerConfig,
+} from './server.js';
 import { toolFilter } from './tool-filters.js';
 
 export type HttpConfig = Omit<ServerConfig, 'apiKey' | 'activity'> & {
@@ -387,6 +394,13 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
   // kept here: it is read from `standing`, below, every time it is asked.
   type Acceptance = { until: number; account: string; workspace?: string };
   const accepted = new Map<string, Acceptance>();
+  // When the platform last refused each bearer at an initialize's credits read
+  // (OPL-5866), as a `probeSeq` mark, per digest. A whoami probe that started
+  // before the mark cannot re-cache the bearer's acceptance by finishing after
+  // it, and an initialize admitted before it cannot commit its session: either
+  // would restore what the refusal just took away. Bounded like the
+  // acceptance cache; an entry dropped for room only loses that guard.
+  const refusedSince = new Map<string, number>();
   let checksInFlight = 0;
 
   // ---- Account standing: one suspended account, one session (OPL-5452) ---
@@ -541,6 +555,8 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
         accepted.delete(accepted.keys().next().value as string);
       }
     }
+    // Refused since this probe started: its answer is the older word.
+    if ((refusedSince.get(id) ?? 0) > seq) return { verdict: 'refused' };
     const account = accountKey(id, confirmed);
     const workspace = workspaceKey(account, workspaceId);
     accepted.set(id, { until: now + checkTtl, account, workspace });
@@ -1481,6 +1497,9 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
     // read the same count.
     const keyDigest = digest(key);
     const keyId = keyDigest.toString('hex');
+    // The bearer's refusal mark as this initialize is admitted. A refusal
+    // recorded before its session lands drops the session (see `refusedSince`).
+    const refusalMark = refusedSince.get(keyId);
     // Hosted, the account the platform confirmed for this bearer (or the
     // bearer itself, when whoami named none); self-hosted, the bearer.
     const account = checkedAccount ?? accountKey(keyId, undefined);
@@ -1637,6 +1656,65 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
     // `onsessioninitialized`): it has an id but no map slot.
     let dropped = false;
     try {
+      // Per-caller, and deliberately with no fallback to cfg.modelKey: an
+      // operator who set MANDALA_MODEL_KEY for their own stdio use would
+      // otherwise be billed for every stranger's run here.
+      const modelKey = req.header(MODEL_KEY_HEADER)?.trim() || undefined;
+      // Without one, run_agent is offered on the caller's AI credits when
+      // their account can pay (OPL-5866). Asked here, per session and on the
+      // caller's own bearer, because every session is a different account; a
+      // process-wide answer would hand one account's credits to the next
+      // caller. Inside the reservation, so a burst is bounded by the same caps
+      // as the sessions it would build. Never cfg.funded: nothing but this
+      // read turns it on, and any failure of it leaves run_agent out.
+      //
+      // And abandoned when the caller goes away meanwhile. The SDK would still
+      // commit a session built after the response closed — closing the idle
+      // sessions this initialize planned to make room with — under an id
+      // nobody received, holding its slots until the idle sweep (Codex review).
+      //
+      // Hosted, a refusal of the bearer itself is not just "unfunded". It is
+      // recorded the moment it is seen, whatever then becomes of this request:
+      // the token's cached acceptance is dropped, the refused initialize
+      // counted against its address, and the token's existing sessions marked
+      // refused, so their idle ones make room for a refreshed token. Then this
+      // initialize is answered as any refused one is — the 401 an OAuth
+      // client refreshes on — rather than given a session (Codex review).
+      const left = new AbortController();
+      const leave = () => left.abort();
+      res.once('close', leave);
+      let funded: boolean;
+      let bearerRefused = false;
+      try {
+        funded =
+          offersFundedAgent({ ...cfg, modelKey }) &&
+          (await fundedAccount(
+            key,
+            cfg.baseUrl,
+            {
+              serviceSecret,
+              onBearerRefused: challenge
+                ? () => {
+                    if (bearerRefused) return;
+                    bearerRefused = true;
+                    refusedSince.delete(keyId);
+                    if (refusedSince.size >= MAX_ACCEPTED_BEARERS)
+                      refusedSince.delete(refusedSince.keys().next().value as string);
+                    refusedSince.set(keyId, ++probeSeq);
+                    accepted.delete(keyId);
+                    noteFailure(req);
+                    for (const live of sessions.values())
+                      if (sameKey(live.keyDigest, key)) live.refused = true;
+                  }
+                : undefined,
+            },
+            { signal: left.signal },
+          ));
+      } finally {
+        res.off('close', leave);
+      }
+      if (left.signal.aborted || res.destroyed) return;
+      if (bearerRefused) return challenged(res, refusedMessage(key), rpcId(req));
       const t = new StreamableHTTPServerTransport({
         sessionIdGenerator: () => randomUUID(),
         ...(cfg.sseKeepAliveMs !== undefined ? { keepAliveMs: cfg.sseKeepAliveMs } : {}),
@@ -1670,9 +1748,11 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
           // that fits; what keeps a burst under the ceiling is the pending
           // count at admission. Every landing leaves the map within both.
           // The account's standing is read again: a probe that answered in
-          // between is the newer word on whether it is suspended.
+          // between is the newer word on whether it is suspended. And a
+          // session whose bearer was refused since this initialize was
+          // admitted is dropped the same way (OPL-5866).
           const room = planRoom(keyDigest, account, workspace, accountSuspended(account), 0, 0, 0);
-          if ('full' in room) {
+          if ('full' in room || refusedSince.get(keyId) !== refusalMark) {
             dropped = true;
             release();
             void t.close().catch(() => {});
@@ -1725,11 +1805,10 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
             finishActivity();
           };
         },
-        // Per-caller, and deliberately with no fallback to cfg.modelKey: an
-        // operator who set MANDALA_MODEL_KEY for their own stdio use would
-        // otherwise be billed for every stranger's run here. Absent means
-        // run_agent is simply not offered to this session.
-        modelKey: req.header(MODEL_KEY_HEADER)?.trim() || undefined,
+        // See above. Absent, and unfunded, means run_agent is simply not
+        // offered to this session.
+        modelKey,
+        funded,
         // Dropped for the same reason, one field further on. MANDALA_COMPUTER_ID
         // is the operator's own machine, and spreading it into a stranger's
         // session pre-binds their key to a computer on somebody else's account:

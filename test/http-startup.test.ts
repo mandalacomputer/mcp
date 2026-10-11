@@ -7,7 +7,7 @@ import { expect, it, vi } from 'vitest';
 import { main } from '../src/cli.js';
 import * as hosted from '../src/http.js';
 import { runHttp } from '../src/http.js';
-import { ACCOUNT_QUOTA } from './harness.js';
+import { ACCOUNT_QUOTA, CREDITS } from './harness.js';
 
 it('rejects an occupied port without announcing successful startup', async () => {
   const occupied = createServer();
@@ -62,6 +62,9 @@ async function isolatedHosted(store: 'valid' | 'corrupt' | 'unsafe') {
   const run = hosted.runHttp;
   let server: Server | undefined;
   const seen: string[] = [];
+  // Each session's read of its account's AI credits at initialize (OPL-5866),
+  // kept apart from `seen`, which pins what the tools sent.
+  const probes: string[] = [];
   vi.stubEnv('MANDALA_API_KEY', 'fixture-operator');
   vi.stubEnv('MANDALA_PROFILE', '../operator-invalid-profile');
   vi.stubEnv('MANDALA_BASE_URL', undefined);
@@ -118,9 +121,11 @@ async function isolatedHosted(store: 'valid' | 'corrupt' | 'unsafe') {
   vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
     if (!String(input).startsWith('https://hosted-fixture.test/')) return realFetch(input, init);
     const key = new Headers(init?.headers).get('authorization') ?? '';
-    seen.push(key);
+    const credits = new URL(String(input)).pathname.endsWith('/credits');
+    (credits ? probes : seen).push(key);
     if (key !== 'Bearer fixture-callerA' && key !== 'Bearer fixture-callerB')
       return Response.json({ error: 'Credential revoked', reason: 'revoked' }, { status: 401 });
+    if (credits) return Response.json(CREDITS);
     return Response.json({
       ...ACCOUNT_QUOTA,
       plan: {
@@ -201,12 +206,15 @@ async function isolatedHosted(store: 'valid' | 'corrupt' | 'unsafe') {
     open,
     account,
     seen,
+    probes,
     close: async () => {
       try {
         expect(lookup).not.toHaveBeenCalled();
         expect(io).toEqual([]);
-        expect(seen).not.toContain('Bearer fixture-operator');
-        expect(seen).not.toContain(`Bearer ${fixture.base_document.profiles.default.api_key}`);
+        for (const asked of [seen, probes]) {
+          expect(asked).not.toContain('Bearer fixture-operator');
+          expect(asked).not.toContain(`Bearer ${fixture.base_document.profiles.default.api_key}`);
+        }
       } finally {
         server!.closeAllConnections();
         await new Promise<void>((resolve) => server!.close(() => resolve()));
@@ -228,6 +236,7 @@ it('M02-http-no-key', async () => {
         await response.text();
       }
       expect(http.seen).toEqual([]);
+      expect(http.probes).toEqual([]);
     } finally {
       await http.close();
     }
@@ -246,6 +255,7 @@ it('M03-http-wrong-key', async () => {
       expect(output).toContain('"status": 401');
       expect(output).toContain('"reason": "revoked"');
       expect(http.seen).toEqual([key]);
+      expect(http.probes).toEqual([key]);
     } finally {
       await http.close();
     }
@@ -266,6 +276,8 @@ it('M04-two-callers', async () => {
         );
       }
       expect(http.seen).toEqual(['Bearer fixture-callerA', 'Bearer fixture-callerB']);
+      // Asked per session, on that session's own bearer.
+      expect(http.probes).toEqual(['Bearer fixture-callerA', 'Bearer fixture-callerB']);
     } finally {
       await http.close();
     }

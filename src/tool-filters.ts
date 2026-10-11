@@ -106,7 +106,7 @@ export const TOOL_TAGS = {
     'delete_secret',
   ],
   ssh: ['list_ssh_keys', 'add_ssh_key', 'remove_ssh_key', 'get_computer_ssh', 'set_computer_ssh'],
-  usage: ['get_usage'],
+  usage: ['get_usage', 'get_credits'],
   webhooks: [
     'list_webhooks',
     'create_webhook',

@@ -3633,6 +3633,12 @@ describe('the tools our own prose tells a model to call', () => {
     // The refusal a pinned screenshot gets once its capture is gone (OPL-5856),
     // named in the skill (OPL-5905).
     'stale_capture',
+    // OPL-5866: the credit journal's paging field (get_credits), and a run on
+    // credits' cost cap and the stop reasons that report it.
+    'next_before',
+    'max_cost_usd',
+    'max_cost',
+    'credits_exhausted',
   ]);
 
   it('names only tools that exist', async () => {
@@ -3676,7 +3682,15 @@ describe('the tools our own prose tells a model to call', () => {
       where: 'plugin/skills/mandala-computer/SKILL.md',
       text: readFileSync(SKILL, 'utf8'),
     });
-    for (const t of (await client.listTools()).tools) {
+    // And run_agent as a session on AI credits has it (OPL-5866): another
+    // description, and another set of arguments, that the keyed scan cannot see.
+    const funded = await connect({ funded: true });
+    const fundedTools = (await funded.client.listTools()).tools.filter(
+      (t) => t.name === 'run_agent',
+    );
+    await funded.close();
+    expect(fundedTools, 'the funded server registers run_agent').toHaveLength(1);
+    for (const t of [...(await client.listTools()).tools, ...fundedTools]) {
       prose.push({ where: `${t.name} description`, text: t.description ?? '' });
       for (const [arg, schema] of Object.entries(t.inputSchema.properties ?? {})) {
         const d = (schema as { description?: string }).description;
@@ -5250,6 +5264,8 @@ describe('the event tools and what their annotations claim', () => {
           'get_activity',
           'get_activity_results',
           'get_artifact',
+          // Reads only (OPL-5866).
+          'get_credits',
           'get_desktop_url',
           'get_execution',
           // Reads only (OPL-5124).

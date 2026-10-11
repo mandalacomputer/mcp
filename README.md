@@ -96,7 +96,9 @@ right answer at all, that it costs money until it is suspended or stopped, that
 which refusals are worth a second try. It is a description of *when and how*,
 not a second client; once the server is installed it stays out of the way.
 `MANDALA_MODEL_KEY`, if exported alongside, is passed through and turns on
-`run_agent` when the configured filters permit it.
+`run_agent` when the configured filters permit it. Without it, `run_agent` runs
+on the account's AI credits when they can pay (see [Agents on AI
+credits](#agents-on-ai-credits)).
 
 To use an environment key instead of a saved profile:
 
@@ -228,7 +230,7 @@ which says nothing about the path; `isTransient` is false for both.
 `rename_workspace`, `delete_workspace`. Minting and revoking API keys are
 deliberately not tools — see [Who you are, and API keys](#who-you-are-and-api-keys).
 
-**Spending** — `get_usage`
+**Spending** — `get_usage`, `get_credits`
 
 **Being told somewhere else** — `list_webhooks`, `create_webhook`,
 `get_webhook`, `update_webhook`, `rotate_webhook_secret`, `test_webhook`,
@@ -300,9 +302,11 @@ before a request is sent — replaces the setting whole, and `null` removes it.
 says "its egress proxy is waiting for credentials; connections are closed until
 they arrive".
 
-**Delegating** — `run_agent`, `run_agent_chat`, registered only when a model key is present:
+**Delegating** — `run_agent`, `run_agent_chat`, registered when a model key is present:
 `MANDALA_MODEL_KEY` on stdio, or the caller's own `X-Model-Key` header over HTTP.
-Both must also survive the configured filters.
+Without a key, `run_agent` alone is registered when the account's AI credits can
+pay for a run (see [Agents on AI credits](#agents-on-ai-credits)). Both must also
+survive the configured filters.
 
 ### Tool filters
 
@@ -335,7 +339,7 @@ with an error listing all valid tags.
 | `snapshots` | All snapshot tools listed above, including `get_retention` |
 | `templates` | `list_templates`, all your-own-template tools and all build tools listed above |
 | `events` | `wait_for_event`, `poll_events`, `wait_for_file_change` |
-| `usage` | `get_usage` |
+| `usage` | `get_usage`, `get_credits` |
 | `webhooks` | All webhook tools listed above |
 | `ssh` | All SSH tools listed above |
 | `secrets` | `list_secrets`, `get_secret`, `create_secret`, `set_secret`, `replace_secret`, `delete_secret`, `get_computer_secrets`, `set_computer_secrets` |
@@ -346,7 +350,8 @@ with an error listing all valid tags.
 The selected tags form a union, then intersect with read-only and the existing
 lifecycle and model-key restrictions. `MANDALA_NO_LIFECYCLE=1` still withholds
 its five tools even when their tags are selected; selecting `agent` cannot
-enable either agent tool without a per-session model key. Both agent tools are
+enable `run_agent_chat` without a per-session model key, nor `run_agent` without
+one or credits that can pay. Both agent tools are
 withheld by read-only, but remain available with lifecycle disabled alone.
 `MANDALA_TAGS=files MANDALA_READ_ONLY=1` exposes only `list_directory`.
 An `agent` selection with read-only is a valid empty tool list.
@@ -571,8 +576,9 @@ time — `screenshot`, `click`, `screenshot` — puts an image in the calling
 model's context for every step. `run_agent` hands a task in plain language to
 the platform's own loop instead, which screenshots, decides and clicks inside
 the platform and answers with a sentence and the list of what it did. It is
-registered only when a model key is present (see [Configuration](#configuration))
-and bills that key for the run. `max_steps` bounds the WORK rather than the
+registered when a model key is present (see [Configuration](#configuration)),
+and bills that key for the run, or else when the account's AI credits can pay
+(see [Agents on AI credits](#agents-on-ai-credits)). `max_steps` bounds the WORK rather than the
 bill: a step is one action on the desktop, one model reply can ask for several
 and spends a step on each, a paused turn costs tokens and no step, and not every
 step takes a screenshot. It defaults to 20 and is capped at 100 here.
@@ -1381,7 +1387,7 @@ address.
 | `MANDALA_PROFILE` | Local saved profile; `--profile` overrides it. Otherwise the file default is selected. Ignored by HTTP. |
 | `MANDALA_BASE_URL` | With a saved profile, must match its stored base. Otherwise defaults to `https://app.mandala.computer/api/v1`. |
 | `MANDALA_COMPUTER_ID` | Bind a computer at startup, so `use_computer` is not needed. **stdio only** — under `--http` it is ignored rather than bound into every caller's session, since it names a machine on the operator's account. |
-| `MANDALA_MODEL_KEY` | An Anthropic or OpenAI key. Enables `run_agent` and `run_agent_chat` when filters permit them, which runs the platform's own loop on that key. **stdio only** — under `--http` each caller sends their own as `X-Model-Key`, and this variable is ignored. |
+| `MANDALA_MODEL_KEY` | An Anthropic or OpenAI key. Enables `run_agent` and `run_agent_chat` when filters permit them, which runs the platform's own loop on that key. Without it, `run_agent` runs on the account's AI credits when they can pay. **stdio only** — under `--http` each caller sends their own as `X-Model-Key`, and this variable is ignored. |
 | `MANDALA_NO_LIFECYCLE` | `1`, `true`, `yes` or `on` withholds `create_computer`, `clone_computer`, `clone_snapshot`, `delete_computer` and `delete_snapshot` — every tool that makes a computer or destroys one. `0`, `false`, `no`, `off` or unset leaves them registered. Any other value is **refused at startup** rather than read as off: a typo here would otherwise leave those tools in place on a server whose operator believes they are gone. The `--no-lifecycle` flag reads the same vocabulary and refuses the same way, except that it has no spelling for *unset*: `--no-lifecycle=` is refused rather than ignored, so a launcher template whose variable did not expand stops instead of quietly leaving the tools registered. |
 | `PORT`, `HOST` | For `--http`. Default `3000`, `127.0.0.1`. |
 | `MANDALA_READ_ONLY` | Keep only tools annotated `readOnlyHint: true`; strict boolean parsing as described under Tool filters. |
@@ -1417,6 +1423,42 @@ provider preserves the Anthropic default. OpenAI is BYOK only and stores
 Responses continuations at OpenAI; tasks, screenshots and tool results go to
 that provider. A native OpenAI action batch must fit the remaining step and
 API budget before it begins. Partial failures stop the run without replaying input.
+
+### Agents on AI credits
+
+Without a model key, `run_agent` can run on the account's Mandala AI credits.
+The server reads `GET /credits` on the session's own API key and registers
+`run_agent` only when the account is not frozen and has at least $0.25
+available, which is what a run's first model call reserves. On stdio that read
+happens once, at startup. Over HTTP it happens per session, at initialize, with
+that caller's bearer token; a caller who sends `X-Model-Key` is not asked, and no
+operator key or setting is ever used. Any failure of the read — a refusal (a
+workspace-scoped key cannot read the account-wide ledger), an error, a timeout or
+a record that does not parse — leaves `run_agent` out. A session started
+unfunded does not gain the tool when credits arrive later; reconnect, or restart
+a stdio server.
+
+On credits `run_agent` takes `max_cost_usd` (0.25 to 20; the platform defaults
+to 2), the most a run may start spending. The last model call can go past it,
+and a run that reaches it ends with `stop: "max_cost"`. It does not take
+`system` or `provider`: a run on credits uses the platform's own prompt and
+Anthropic, with `claude-sonnet-5-5` by default and `claude-opus-5-5` on request.
+The result reports `cost_usd`, the run's charge so far, and
+`credits_remaining_usd`, the balance the last step reported. A run whose credits
+run out partway ends with `stop: "credits_exhausted"`, and a run that cannot
+reserve its first call is refused `402` with a `top_up_url`; the tool reports
+that as the account's credits running out, with the billing page, rather than as
+a plan limit or the model provider's billing error. The platform reports its
+AI service failing a run on credits as `Mandala AI is unavailable` over the
+provider's status. On such a run that sentence, at any status, and any other
+`402`, are worded as the service failing, not as the caller's credential, the
+computer, the request or a model key. `run_agent_chat` is never registered
+without a model key: the platform runs that route only on the caller's own key.
+
+`get_credits` reads the ledger: available, balance, held, debt, whether the
+account is frozen, this period's plan grant, the unexpired lots and one page of
+the journal, newest first (`before` and `limit` page through it). Amounts are
+integer USD micros. It needs an account-wide key.
 
 ### Passive directories, activity history and signals
 
@@ -1500,7 +1542,9 @@ caller is a `401` or `403` carrying `reason: "revoked"`, and only that gets
 account advice. A `402`, `504` or `529` is the model provider's own status for
 the configured model key (its billing, timeout or overloaded error), so the
 advice is to check the model-provider account, not the Mandala plan; a `403`
-without `revoked` may be the provider's permission error for that key. The
+without `revoked` may be the provider's permission error for that key. The one
+`402` that is Mandala's own carries a `top_up_url`: a run on AI credits the
+account cannot cover, worded as such. The
 exception is a refusal `run_agent_chat` is given before any run started — a flat
 `{error: string}` body, from the role gate, a bad body, a suspension or the
 meter: nothing ran, and it keeps the usual role and plan advice every other tool

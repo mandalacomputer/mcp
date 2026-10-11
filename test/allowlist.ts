@@ -512,8 +512,6 @@ export const UNIMPLEMENTED_PARAMETERS: ReadonlySet<string> = new Set([
   'POST computers/:id/input  body:scroll_x',
   'POST computers/:id/input  body:scroll_y',
 
-  // OPL-5866 adds funded-agent options; this client currently sends its own model key.
-  'POST computers/:id/agent  body:max_cost_usd',
   // DECISION. `keys: ['ctrl', 'c']` is sent instead, as both SDKs send it. The
   // chord-as-one-string form cannot express a key whose own name contains the
   // separator.
@@ -550,8 +548,6 @@ export const ALLOWED = new Set(V1_ROUTES.map(key));
  * be exercised; parameter exceptions stay separate.
  */
 export const UNIMPLEMENTED = new Set<string>([
-  // OPL-5864: direct HTTP is available; this contract prerequisite adds no wrapper.
-  'GET credits',
   // DECISION (OPL-5878, OPL-5880). A browser connection answers a raw
   // capability to drive the guest's browser, and a model's context is the
   // wrong place for one: the SDKs' browser drivers create, renew and revoke it

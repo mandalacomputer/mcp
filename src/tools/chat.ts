@@ -175,24 +175,33 @@ function chatFailure(error: unknown): CallToolResult {
   return result;
 }
 
-/** Do not let a provider echo session secrets into output, even in a known text field. */
-export function safeResult(result: CallToolResult, modelKey: string): CallToolResult {
+/**
+ * Do not let a provider echo session secrets into output, even in a known text
+ * field. A run on credits has no model key to look for; splitting on an empty
+ * string would put the marker between every character, so it is skipped.
+ */
+export function safeResult(result: CallToolResult, modelKey: string | undefined): CallToolResult {
   return {
     ...result,
     content: result.content.map((item) =>
       item.type === 'text'
         ? {
             ...item,
-            text: item.text
-              .split(modelKey)
-              .join('[redacted]')
-              .replace(/\b(?:com_|sk-)[A-Za-z0-9_-]+/g, '[redacted]'),
+            text: (modelKey ? item.text.split(modelKey).join('[redacted]') : item.text).replace(
+              /\b(?:com_|sk-)[A-Za-z0-9_-]+/g,
+              '[redacted]',
+            ),
           }
         : item,
     ),
   };
 }
 
+/**
+ * BYOK only, and that is the platform's rule rather than this server's: the
+ * chat route refuses a run without a model key, so a session whose run_agent
+ * runs on AI credits still has no run_agent_chat.
+ */
 export const registerChat: Registrar = (server, session) => {
   if (!session.modelKey) return;
   const modelKey = session.modelKey;

@@ -24,7 +24,8 @@ Environment
                        stdio only — over HTTP it is ignored rather than bound
                        into every caller's session
   MANDALA_MODEL_KEY    Anthropic or OpenAI key; enables run_agent and run_agent_chat.
-                       stdio only
+                       Without one, run_agent runs on the account's AI credits
+                       when GET /credits says they can pay. stdio only
                        — over HTTP each caller sends their own X-Model-Key, and
                        this is ignored rather than spent on their runs
   MANDALA_NO_LIFECYCLE 1, true, yes or on to withhold create_computer,
