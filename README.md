@@ -1448,9 +1448,12 @@ The result reports `cost_usd`, the run's charge so far, and
 run out partway ends with `stop: "credits_exhausted"`, and a run that cannot
 reserve its first call is refused `402` with a `top_up_url`; the tool reports
 that as the account's credits running out, with the billing page, rather than as
-a plan limit or the model provider's billing error. `run_agent_chat` is never
-registered without a model key: the platform runs that route only on the
-caller's own key.
+a plan limit or the model provider's billing error. The platform reports its
+AI service failing a run on credits as `Mandala AI is unavailable` over the
+provider's status. On such a run that sentence, at any status, and any other
+`402`, are worded as the service failing, not as the caller's credential, the
+computer, the request or a model key. `run_agent_chat` is never registered
+without a model key: the platform runs that route only on the caller's own key.
 
 `get_credits` reads the ledger: available, balance, held, debt, whether the
 account is frozen, this period's plan grant, the unexpired lots and one page of

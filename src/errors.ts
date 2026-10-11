@@ -570,6 +570,26 @@ export function creditsExhaustedAdvice(topUp: string, tool: string): string {
 }
 
 /**
+ * The platform's own fixed words for its AI service failing a run on credits,
+ * over the model provider's status. The provider's text never leaves the
+ * platform on such a run, so this sentence is how the failure is recognised.
+ */
+export const FUNDED_UNAVAILABLE = 'Mandala AI is unavailable';
+
+/**
+ * A run on AI credits that the platform's AI service could not serve.
+ *
+ * Its status is the model provider's, answering Mandala's own key, so neither
+ * of the usual readings fits: a 401 or 403 is not the caller's credential or
+ * role, a 404 not the computer, a 413 not the request, a 402 not the plan, and
+ * there is no model key of the caller's to check. Steps already taken stand and
+ * were charged, so running the same prompt again would repeat them.
+ */
+export function fundedUnavailableAdvice(tool: string): string {
+  return `the platform's AI service could not serve this run on credits — its model provider answered this status, which is not the computer, your credential or the plan, and there is no key of yours to check. Waiting can clear it. If no step ran, ${tool} can be tried again later; if steps ran, they stand and were charged, so read what they did and send only what is left`;
+}
+
+/**
  * The platform's one-word classification off a refusal body, or `undefined`.
  *
  * Shape-checked in the manner of {@link moveOffer} and for its reason: this

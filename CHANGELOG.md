@@ -58,9 +58,24 @@ are wording changes, and they are behaviour changes in the way that matters.
 
 - **`run_agent` names AI credits running out.** A `402` carrying `top_up_url`,
   before the stream or on it, is reported as the account's credits not covering
-  the run, with the billing page, instead of a plan limit or the model
-  provider's billing error. The stops `credits_exhausted` and `max_cost` read
-  as runs that did not finish.
+  the run, with the billing page resolved against the API's origin and the code
+  `insufficient_credits`, instead of a plan limit or the model provider's
+  billing error. The stops `credits_exhausted` and `max_cost` read as runs that
+  did not finish.
+
+- **A run on credits that the platform's AI service fails says so.** The
+  platform reports such a failure as `Mandala AI is unavailable` over its
+  provider's status. On a run on credits, that sentence at any status, and any
+  `402` without `top_up_url`, now reads as the AI service failing. It is no
+  longer read as the caller's credential (401), role (403), the computer
+  (404), the request (413), the plan or a model key's billing. The advice is
+  to try later and, when steps already ran, to send only what is left. Keyed
+  runs are unchanged.
+
+- **`run_agent` reads every documented stop.** `pause_turn`, `incomplete` and
+  `safety_check` each get their own first line as a run that did not finish,
+  in place of a bare `ended: …`. A cost that is not a finite, non-negative
+  number is left out of the answer rather than repeated.
 
 ## [0.11.0] — 2026-10-08
 

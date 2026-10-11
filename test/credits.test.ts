@@ -319,6 +319,109 @@ describe('run_agent on credits', () => {
   });
 });
 
+describe('run_agent on credits: what a failure means (parity with the SDKs)', () => {
+  const failing = (frame: Record<string, unknown>, steps: [string, unknown][] = []) =>
+    agentAnswers(() => sse([...steps, ['error', { usage: {}, steps: [], ...frame }]]));
+
+  it.each([401, 403, 404, 413, 429, 503, 529])(
+    'reads a funded %i in the platform AI-service words as that service failing',
+    async (status) => {
+      failing({ status, error: 'Mandala AI is unavailable' }, [
+        [
+          'step',
+          { n: 1, tool: 'computer', action: 'left_click', detail: 'clicked', cost_usd: 0.03 },
+        ],
+      ]);
+      const { call } = await open({ funded: true });
+      const result = await call('run_agent', { prompt: 'go' });
+      expect(result.isError).toBe(true);
+      const said = textOf(result);
+      expect(said).toContain(`HTTP ${status}: the platform's AI service could not serve this run`);
+      expect(said).toContain('send only what is left');
+      // Not the readings the same status gets elsewhere.
+      expect(said).not.toContain('credential was refused');
+      expect(said).not.toContain('configured model key');
+      expect(said).not.toContain('Mandala account no longer permits');
+    },
+  );
+
+  it('reads a funded 402 without a top-up page as the AI service, not a provider billing error', async () => {
+    failing({ status: 402, error: 'payment required' });
+    const { call } = await open({ funded: true });
+    const said = textOf(await call('run_agent', { prompt: 'go' }));
+    expect(said).toContain("the platform's AI service could not serve this run");
+    expect(said).not.toContain('billing_error');
+  });
+
+  it('keeps the revoked reading of the platform credential check on a funded run', async () => {
+    failing({ status: 403, error: 'API key revoked', reason: 'revoked' });
+    const { call } = await open({ funded: true });
+    const said = textOf(await call('run_agent', { prompt: 'go' }));
+    expect(said).toContain('Mandala account no longer permits the run');
+    expect(said).not.toContain('AI service');
+  });
+
+  it('keeps the model-key readings on a keyed run, whatever the words', async () => {
+    failing({ status: 401, error: 'Mandala AI is unavailable' });
+    const { call } = await open({ modelKey: 'sk-test' });
+    const said = textOf(await call('run_agent', { prompt: 'go' }));
+    expect(said).not.toContain('AI service');
+    expect(said).toContain('credential was refused');
+  });
+
+  it('reads a funded refusal before the stream as the AI service, not a change that may have happened', async () => {
+    agentAnswers(() => json({ error: 'Mandala AI is unavailable' }, 503));
+    const { call } = await open({ funded: true });
+    const said = textOf(await call('run_agent', { prompt: 'go' }));
+    expect(said).toContain('Mandala AI is unavailable (HTTP 503)');
+    expect(said).toContain("the platform's AI service could not serve this run");
+    expect(said).not.toContain('MAY OR MAY NOT HAVE HAPPENED');
+  });
+
+  it('names the insufficient_credits code and the resolved top-up page on both 402 paths', async () => {
+    agentAnswers(() => json({ error: 'Insufficient AI credits', top_up_url: '/billing' }, 402));
+    const first = await open({ funded: true });
+    const before = textOf(await first.call('run_agent', { prompt: 'go' }));
+    expect(before).toContain('"code": "insufficient_credits"');
+    expect(before).toContain('"top_up_url": "https://api.test/billing"');
+    globalThis.fetch = originalFetch;
+    platform.restore();
+    platform = installFakePlatform();
+    failing({ status: 402, error: 'Insufficient AI credits', top_up_url: '/billing' });
+    const second = await open({ funded: true });
+    const streamed = textOf(await second.call('run_agent', { prompt: 'go' }));
+    expect(streamed).toContain('"code": "insufficient_credits"');
+    expect(streamed).toContain('"top_up_url": "https://api.test/billing"');
+  });
+
+  it.each([
+    ['pause_turn', 'kept pausing its turn'],
+    ['incomplete', 'response was incomplete'],
+    ['safety_check', 'STOPPED FOR A SAFETY CHECK'],
+  ])('reads stop %s as a run that did not finish', async (stop, verdict) => {
+    agentAnswers(() => sse([['done', { steps: 1, stop, text: '', usage: {} }]]));
+    const { call } = await open({ funded: true });
+    const result = await call('run_agent', { prompt: 'go' });
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toContain(verdict);
+  });
+
+  it('reports only a finite, non-negative cost, and a balance that may be negative', async () => {
+    agentAnswers(() =>
+      sse([
+        ['step', { n: 1, tool: 'computer', detail: 'clicked', credits_remaining_usd: -0.12 }],
+        ['done', { steps: 1, stop: 'end_turn', text: 'ok', usage: {}, cost_usd: -1 }],
+      ]),
+    );
+    const { call } = await open({ funded: true });
+    const said = textOf(await call('run_agent', { prompt: 'go' }));
+    expect(said).toContain('Cost: -$0.12 left on the account.');
+    expect(said).not.toContain('of AI credits spent');
+    expect(said).not.toContain('"cost_usd"');
+    expect(said).toContain('"credits_remaining_usd": -0.12');
+  });
+});
+
 describe('topUpUrl', () => {
   it('resolves the platform page against the API origin, and only for a 402', () => {
     expect(topUpUrl(402, { top_up_url: '/billing' }, 'https://app.mandala.computer/api/v1')).toBe(
@@ -597,6 +700,122 @@ describe('the hosted transport', () => {
       expect(next.status).toBe(200);
       await next.text();
       expect(whoamis()).toBe(asked + 1);
+    });
+
+    it('lets no probe that started before the refusal restore the bearer', async () => {
+      const url = await hosted();
+      // The first whoami for this bearer is held until released; later ones answer.
+      const fake = globalThis.fetch;
+      let whoamiSeen = 0;
+      let release = () => {};
+      const held = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      let started = () => {};
+      const first = new Promise<void>((resolve) => {
+        started = resolve;
+      });
+      let refuseCredits = true;
+      globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+        const path = new URL(String(input)).pathname;
+        if (path.endsWith('/whoami') && ++whoamiSeen === 1) {
+          started();
+          await held;
+        }
+        if (refuseCredits && path.endsWith('/credits'))
+          return new Response(JSON.stringify({ error: 'invalid or expired access token' }), {
+            status: 401,
+            headers: {
+              'Content-Type': 'application/json',
+              'WWW-Authenticate': 'Bearer error="invalid_token"',
+            },
+          });
+        return fake(input as never, init);
+      }) as typeof fetch;
+      // Its own model key, so it makes no credits read of its own.
+      const keyed = fetch(url, {
+        method: 'POST',
+        headers: {
+          Authorization: 'Bearer mcpat_stale',
+          'X-Model-Key': 'sk-caller',
+          'Content-Type': 'application/json',
+          Accept: 'application/json, text/event-stream',
+        },
+        body: JSON.stringify({
+          jsonrpc: '2.0',
+          id: 1,
+          method: 'initialize',
+          params: {
+            protocolVersion: '2025-06-18',
+            capabilities: {},
+            clientInfo: { name: 'keyed', version: '0' },
+          },
+        }),
+      });
+      await first;
+      // A second initialize is checked and then refused by its credits read.
+      const refused = await initialize(url, 'mcpat_stale');
+      expect(refused.status).toBe(401);
+      await refused.text();
+      // The first probe now answers: older than the refusal, it admits nothing.
+      release();
+      const late = await keyed;
+      expect(late.status).toBe(401);
+      expect(late.headers.get('mcp-session-id')).toBeNull();
+      await late.text();
+      // And the acceptance stays dropped: the next initialize asks whoami again.
+      refuseCredits = false;
+      const asked = whoamiSeen;
+      const next = await initialize(url, 'mcpat_stale');
+      expect(next.status).toBe(200);
+      await next.text();
+      expect(whoamiSeen).toBe(asked + 1);
+      globalThis.fetch = fake;
+    });
+
+    it('commits no session for an initialize admitted before the refusal', async () => {
+      const url = await hosted();
+      const fake = globalThis.fetch;
+      let creditsSeen = 0;
+      let release = () => {};
+      const held = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      let started = () => {};
+      const first = new Promise<void>((resolve) => {
+        started = resolve;
+      });
+      globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+        if (!new URL(String(input)).pathname.endsWith('/credits'))
+          return fake(input as never, init);
+        // The first read answers late, and well; the second refuses the bearer.
+        if (++creditsSeen === 1) {
+          started();
+          await held;
+          return json(FUNDED_CREDITS);
+        }
+        return new Response(JSON.stringify({ error: 'invalid or expired access token' }), {
+          status: 401,
+          headers: {
+            'Content-Type': 'application/json',
+            'WWW-Authenticate': 'Bearer error="invalid_token"',
+          },
+        });
+      }) as typeof fetch;
+      const early = initialize(url, 'mcpat_stale');
+      await first;
+      const refused = await initialize(url, 'mcpat_stale');
+      expect(refused.status).toBe(401);
+      await refused.text();
+      release();
+      const late = await early;
+      await late.text();
+      expect(late.status).not.toBe(200);
+      const health = (await (await fetch(url.toString().replace(/\/mcp$/, '/healthz'))).json()) as {
+        sessions: number;
+      };
+      expect(health.sessions).toBe(0);
+      globalThis.fetch = fake;
     });
 
     it("marks the bearer's open sessions refused", async () => {

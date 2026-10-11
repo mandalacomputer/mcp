@@ -6,6 +6,8 @@ import {
   agentRunAdvice,
   authenticationAdvice,
   creditsExhaustedAdvice,
+  FUNDED_UNAVAILABLE,
+  fundedUnavailableAdvice,
   platformSaid,
 } from '../errors.js';
 import { errorMetadata, failed, guarded, refused, said, withErrorMetadata } from '../format.js';
@@ -33,8 +35,7 @@ const computerId = z
   .describe('Which computer. Defaults to the one selected with use_computer.');
 const prompt = z.string().describe('The task, in plain language.');
 const nonblankModel = z.string().refine((v) => v.trim().length > 0, 'model must not be blank');
-const STEPS_CAP =
-  `Defaults to 20 and is capped at ${P.AGENT_MAX_STEPS} here, so a larger value is refused before the call rather than after it.`;
+const STEPS_CAP = `Defaults to 20 and is capped at ${P.AGENT_MAX_STEPS} here, so a larger value is refused before the call rather than after it.`;
 /** How many actions, told the way each payer needs it told. */
 const maxSteps = (bill: string, bound: string) =>
   z
@@ -261,14 +262,16 @@ function runAgent(
             frame,
           );
           const spent = spending(frame.cost_usd, remaining);
+          const topUp = topUpUrl(frame.status, frame, session.api.baseUrl);
           return withErrorMetadata(
             refused(
-              `The run failed after ${steps.length} step(s).${stopReason(ev.data, topUpUrl(frame.status, frame, session.api.baseUrl))}` +
+              `The run failed after ${steps.length} step(s).${stopReason(ev.data, topUp, session.funded)}` +
                 (spent.line ? `\n\n${spent.line}` : '') +
                 (steps.length ? `\n\nWhat it did, and is billed for:\n${steps.join('\n')}` : ''),
               {
                 error: platformSaid(frame),
                 status: errorMetadata({ status: frame.status }).fields.status,
+                ...(topUp ? { code: INSUFFICIENT_CREDITS, top_up_url: topUp } : {}),
                 ...spent.fields,
                 steps: frame.steps,
                 usage: frame.usage,
@@ -283,12 +286,22 @@ function runAgent(
         }
       }
     } catch (err) {
-      // Refused before the stream opened. The one refusal worded here is a run
-      // on credits the account cannot cover: a 402 naming a top-up page, which
-      // the shared advice would otherwise call a plan limit.
-      const topUp =
-        err instanceof APIError ? topUpUrl(err.status, err.body, session.api.baseUrl) : undefined;
-      if (topUp) return failed(err, true, creditsExhaustedAdvice(topUp, 'run_agent'));
+      // Refused before the stream opened. Two refusals are worded here rather
+      // than by the shared advice: a run on credits the account cannot cover
+      // (a 402 naming a top-up page, which that advice would call a plan
+      // limit), and a run on credits the platform's AI service cannot serve
+      // (which it would call a change that may or may not have happened).
+      if (!(err instanceof APIError)) throw err;
+      const topUp = topUpUrl(err.status, err.body, session.api.baseUrl);
+      if (topUp) {
+        const result = failed(err, true, creditsExhaustedAdvice(topUp, 'run_agent'));
+        result.content.push(
+          ...said('Refusal metadata:', { code: INSUFFICIENT_CREDITS, top_up_url: topUp }).content,
+        );
+        return result;
+      }
+      if (fundedOutage(session.funded, err.status, err.body))
+        return failed(err, true, fundedUnavailableAdvice('run_agent'));
       throw err;
     }
 
@@ -312,7 +325,13 @@ function runAgent(
               ? 'REACHED max_cost_usd: another model call would have gone past it — the task is probably unfinished'
               : stop === 'refusal'
                 ? 'the model declined the task'
-                : `ended: ${stop}`;
+                : stop === 'pause_turn'
+                  ? 'the model kept pausing its turn — the task is probably unfinished'
+                  : stop === 'incomplete'
+                    ? "the model's response was incomplete — the task is probably unfinished"
+                    : stop === 'safety_check'
+                      ? 'STOPPED FOR A SAFETY CHECK: the model asked for approval of an action, which this tool cannot give — the task is unfinished; say so rather than running it again'
+                      : `ended: ${stop}`;
     // Interpolated only when it IS a string, which is the same discipline
     // `stop` gets three lines up. `String()` over a shape this build does
     // not know — a content-block array is the plausible one — renders the
@@ -331,7 +350,10 @@ function runAgent(
       `${verdict}\n\n${text}` +
       (spent.line ? `\n\n${spent.line}` : '') +
       `\n\nWhat it did:\n${steps.join('\n')}`;
-    const record = { ...done, ...spent.fields };
+    // The cost fields as read above, not as sent: a value that is not a
+    // finite number (or a negative charge) is left out rather than repeated.
+    const { cost_usd: _cost, credits_remaining_usd: _left, ...rest } = done;
+    const record = { ...rest, ...spent.fields };
     return stop === 'end_turn' ? said(result, record) : refused(result, record);
   });
 }
@@ -350,7 +372,8 @@ function spending(
   remaining: number | undefined,
 ): { line?: string; fields: { cost_usd?: number; credits_remaining_usd?: number } } {
   const fields: { cost_usd?: number; credits_remaining_usd?: number } = {};
-  if (finite(cost)) fields.cost_usd = cost;
+  // A charge is never negative; a balance can be, after a call overran it.
+  if (finite(cost) && cost >= 0) fields.cost_usd = cost;
   if (remaining !== undefined) fields.credits_remaining_usd = remaining;
   if (fields.cost_usd === undefined && remaining === undefined) return { fields };
   const parts = [
@@ -369,6 +392,22 @@ const usd = (value: number): string => {
 const finite = (value: unknown): value is number =>
   typeof value === 'number' && Number.isFinite(value);
 
+/** The code the SDKs give a run on credits the account cannot cover. */
+const INSUFFICIENT_CREDITS = 'insufficient_credits';
+
+/**
+ * Whether a run on credits failed in the platform's AI service rather than in
+ * the way its status usually means: the platform's fixed sentence for that, at
+ * any status, or any other 402 — no plan limit refuses inside a run, and there
+ * is no key of the caller's for a provider to bill. Asked only after a 402
+ * naming a top-up page has been ruled out. Never on a run a model key paid
+ * for, whose statuses keep their own readings.
+ */
+function fundedOutage(funded: boolean, status: unknown, body: unknown): boolean {
+  if (!funded || !isRecord(body)) return false;
+  return body.error === FUNDED_UNAVAILABLE || status === 402;
+}
+
 /**
  * What an `error` frame says about whether calling this tool again can work.
  *
@@ -377,7 +416,10 @@ const finite = (value: unknown): value is number =>
  * platform's own authority re-check is a 401 or 403 carrying `reason:
  * 'revoked'`; the 401 gets the credential sentence, and the 403 says the account
  * no longer permits the run. A 402 naming a top-up page is the account's AI
- * credits run out (OPL-5866). Everything else with a status here is the model
+ * credits run out (OPL-5866). On a run credits paid for, the platform reports
+ * its provider's failures in its own fixed words over the provider's status,
+ * and those are the platform's AI service failing, whatever the status (see
+ * {@link fundedOutage}). Everything else with a status here is the model
  * provider's, relayed for the configured model key — a 402 without that page is
  * its billing error, not the Mandala plan (OPL-5437) — and {@link agentRunAdvice}
  * words those.
@@ -388,12 +430,17 @@ const finite = (value: unknown): value is number =>
  * direction: the leading space is part of the returned clause so that an
  * unclassified stop reads as one sentence rather than as a missing one.
  */
-function stopReason(data: unknown, topUp: string | undefined): string {
+function stopReason(data: unknown, topUp: string | undefined, funded: boolean): string {
   const frame = isRecord(data) ? data : undefined;
   const status = typeof frame?.status === 'number' ? frame.status : undefined;
   const said = platformSaid(frame);
   const why = said ? ` ${said}` : '';
   const reason = new APIError('', status ?? 0, frame).reason;
+  // Before either credential reading: on a run credits paid for, a 401 the
+  // platform reports in its own AI-service words is its provider refusing
+  // Mandala's key, not the caller's credential.
+  if (!topUp && fundedOutage(funded, status, frame))
+    return ` HTTP ${status}: ${fundedUnavailableAdvice('run_agent')}.${why}`;
   // 401 and 403 are split, because the recovery is not the same one. A shared
   // clause told a caller whose ROLE had been taken away to re-authenticate,
   // which restores nothing and sends it round the same refusal with another

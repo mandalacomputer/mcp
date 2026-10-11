@@ -221,7 +221,10 @@ needs their own header rather than the operator's environment variable, and
   that ends `RAN OUT OF AI CREDITS` or `REACHED max_cost_usd` is unfinished, like
   `RAN OUT OF STEPS`. A refusal saying the account's AI credits cannot cover the
   run means a person has to top up (the answer names the page) or configure a
-  model key: say so, and do not run it again.
+  model key: say so, and do not run it again. A failure saying the platform's AI
+  service could not serve the run is not your credential or the computer,
+  whatever its status: try later, and send only what the completed steps left
+  undone.
 
 **`run_agent_chat` uses textual OpenAI-shaped messages and JSON-only results.**
 It drives the same BYOK Anthropic or OpenAI loop, not hosted inference or a chat UI.

@@ -394,6 +394,13 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
   // kept here: it is read from `standing`, below, every time it is asked.
   type Acceptance = { until: number; account: string; workspace?: string };
   const accepted = new Map<string, Acceptance>();
+  // When the platform last refused each bearer at an initialize's credits read
+  // (OPL-5866), as a `probeSeq` mark, per digest. A whoami probe that started
+  // before the mark cannot re-cache the bearer's acceptance by finishing after
+  // it, and an initialize admitted before it cannot commit its session: either
+  // would restore what the refusal just took away. Bounded like the
+  // acceptance cache; an entry dropped for room only loses that guard.
+  const refusedSince = new Map<string, number>();
   let checksInFlight = 0;
 
   // ---- Account standing: one suspended account, one session (OPL-5452) ---
@@ -548,6 +555,8 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
         accepted.delete(accepted.keys().next().value as string);
       }
     }
+    // Refused since this probe started: its answer is the older word.
+    if ((refusedSince.get(id) ?? 0) > seq) return { verdict: 'refused' };
     const account = accountKey(id, confirmed);
     const workspace = workspaceKey(account, workspaceId);
     accepted.set(id, { until: now + checkTtl, account, workspace });
@@ -1488,6 +1497,9 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
     // read the same count.
     const keyDigest = digest(key);
     const keyId = keyDigest.toString('hex');
+    // The bearer's refusal mark as this initialize is admitted. A refusal
+    // recorded before its session lands drops the session (see `refusedSince`).
+    const refusalMark = refusedSince.get(keyId);
     // Hosted, the account the platform confirmed for this bearer (or the
     // bearer itself, when whoami named none); self-hosted, the bearer.
     const account = checkedAccount ?? accountKey(keyId, undefined);
@@ -1685,6 +1697,10 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
                 ? () => {
                     if (bearerRefused) return;
                     bearerRefused = true;
+                    refusedSince.delete(keyId);
+                    if (refusedSince.size >= MAX_ACCEPTED_BEARERS)
+                      refusedSince.delete(refusedSince.keys().next().value as string);
+                    refusedSince.set(keyId, ++probeSeq);
                     accepted.delete(keyId);
                     noteFailure(req);
                     for (const live of sessions.values())
@@ -1732,9 +1748,11 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
           // that fits; what keeps a burst under the ceiling is the pending
           // count at admission. Every landing leaves the map within both.
           // The account's standing is read again: a probe that answered in
-          // between is the newer word on whether it is suspended.
+          // between is the newer word on whether it is suspended. And a
+          // session whose bearer was refused since this initialize was
+          // admitted is dropped the same way (OPL-5866).
           const room = planRoom(keyDigest, account, workspace, accountSuspended(account), 0, 0, 0);
-          if ('full' in room) {
+          if ('full' in room || refusedSince.get(keyId) !== refusalMark) {
             dropped = true;
             release();
             void t.close().catch(() => {});
