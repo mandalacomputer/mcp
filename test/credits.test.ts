@@ -459,6 +459,64 @@ describe('the hosted transport', () => {
     expect(health.sessions).toBe(1);
   });
 
+  it('answers a hosted initialize 401 when the credits read refuses its bearer', async () => {
+    const url = await serve({
+      resourceMetadataUrl: 'https://app.mandala.computer/.well-known/oauth-protected-resource/mcp',
+      serviceSecret: 'svc-0123456789abcdef',
+    });
+    // whoami accepts the token; the credits read, a moment later, refuses it.
+    const fake = globalThis.fetch;
+    let refuse = true;
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) =>
+      refuse && new URL(String(input)).pathname.endsWith('/credits')
+        ? new Response(JSON.stringify({ error: 'invalid or expired access token' }), {
+            status: 401,
+            headers: {
+              'Content-Type': 'application/json',
+              'WWW-Authenticate': 'Bearer error="invalid_token"',
+            },
+          })
+        : fake(input as never, init)) as typeof fetch;
+    const initialize = () =>
+      fetch(url, {
+        method: 'POST',
+        headers: {
+          Authorization: 'Bearer mcpat_revoked',
+          'Content-Type': 'application/json',
+          Accept: 'application/json, text/event-stream',
+        },
+        body: JSON.stringify({
+          jsonrpc: '2.0',
+          id: 1,
+          method: 'initialize',
+          params: {
+            protocolVersion: '2025-06-18',
+            capabilities: {},
+            clientInfo: { name: 'revoked', version: '0' },
+          },
+        }),
+      });
+    const refused = await initialize();
+    expect(refused.status).toBe(401);
+    expect(refused.headers.get('www-authenticate')).toContain('resource_metadata=');
+    expect(refused.headers.get('mcp-session-id')).toBeNull();
+    await refused.text();
+    const health = async () =>
+      (
+        (await (await fetch(url.toString().replace(/\/mcp$/, '/healthz'))).json()) as {
+          sessions: number;
+        }
+      ).sessions;
+    expect(await health()).toBe(0);
+    // Its acceptance was dropped: the next initialize asks whoami again.
+    refuse = false;
+    const asked = platform.calls.filter((c) => c.path === '/whoami').length;
+    const admitted = await initialize();
+    expect(admitted.status).toBe(200);
+    await admitted.text();
+    expect(platform.calls.filter((c) => c.path === '/whoami')).toHaveLength(asked + 1);
+  });
+
   it('never takes funded from the operator configuration', async () => {
     const url = await serve({ funded: true });
     const caller = await session(url, { Authorization: 'Bearer com_unfunded' });
