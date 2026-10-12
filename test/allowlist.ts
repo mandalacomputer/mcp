@@ -39,6 +39,7 @@ export const V1_ROUTES: Route[] = [
   r('POST', 'computers'),
   r('GET', 'computers/:id'),
   r('PATCH', 'computers/:id'),
+  r('PUT', 'computers/:id/workspace'),
   r('DELETE', 'computers/:id'),
   r('POST', 'computers/:id/start'),
   r('POST', 'computers/:id/stop'),
@@ -252,6 +253,7 @@ export const PARAMETERS: ReadonlyMap<string, readonly string[]> = new Map([
     ],
   ],
   ['GET computers/:id', []],
+  ['PUT computers/:id/workspace', ['body:workspace_id']],
   [
     'PATCH computers/:id',
     [

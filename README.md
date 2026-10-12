@@ -172,8 +172,16 @@ Parameter and response-mode support remains a separate contract.
 
 **Lifecycle** — `create_computer`, `start_computer`, `stop_computer`,
 `suspend_computer`, `restart_computer`, `update_computer`, `clone_computer`,
-`delete_computer`, `move_computer`, `list_moves`, `get_operation`,
+`delete_computer`, `move_computer_to_workspace`, `move_computer`, `list_moves`, `get_operation`,
 `list_operations`, `wait_for_operation` — see [Lifecycle operations](#lifecycle-operations)
+
+`move_computer_to_workspace` changes workspace membership and who can access a computer.
+It requires an account-wide member or owner credential and explicit `computer_id` and
+`workspace_id` arguments (`null` means unassigned). The selected computer and default
+workspace are not used. The computer must be stopped, with no saved session, snapshots
+or snapshot history copies, secret bindings, or proxy credentials. Refusals leave
+those resources intact; the tool never removes them to force a move. This is separate
+from `move_computer`, which relocates a computer to different hardware.
 
 **Driving the desktop** — `screenshot`, `click`, `type_text`, `paste_text`,
 `press_key`, `scroll`, `drag`, `move_mouse`, `mouse_button`, `cursor_position`,
@@ -329,7 +337,7 @@ with an error listing all valid tags.
 | --- | --- |
 | `account` | `get_account`, `whoami`, `list_api_keys`, `list_workspaces`, `get_workspace`, `list_workspace_members`, `create_workspace`, `rename_workspace`, `delete_workspace` |
 | `computers` | `list_computers`, `get_computer`, `use_computer`, `wait_for_computer`, `get_desktop_url`, `list_sizes` |
-| `lifecycle` | `create_computer`, `start_computer`, `stop_computer`, `suspend_computer`, `restart_computer`, `update_computer`, `clone_computer`, `delete_computer`, `move_computer`, `list_moves`, `get_operation`, `list_operations`, `wait_for_operation` |
+| `lifecycle` | `create_computer`, `start_computer`, `stop_computer`, `suspend_computer`, `restart_computer`, `update_computer`, `clone_computer`, `delete_computer`, `move_computer_to_workspace`, `move_computer`, `list_moves`, `get_operation`, `list_operations`, `wait_for_operation` |
 | `input` | `screenshot`, `click`, `type_text`, `paste_text`, `press_key`, `scroll`, `drag`, `move_mouse`, `mouse_button`, `cursor_position`, `wait` |
 | `guest` | `exec`, `exec_poll`, `exec_kill`, `open_url`, `list_windows`, `window_action`, `read_clipboard`, `write_clipboard` |
 | `files` | `list_directory`, `read_file`, `write_file`, `wait_for_file_change` |
@@ -369,7 +377,7 @@ does not read the environment itself.
 ### Lifecycle operations
 
 Every accepted create, clone, start, stop, suspend, restart, snapshot restore,
-resize, move and delete records a lifecycle operation, and the tool that made the call
+resize, host move and delete records a lifecycle operation, and the tool that made the call
 says its `operation_id` — in its sentence, as `(operation op_…)`, and in the
 JSON. `move_computer` carries it onto the outcome it reports. It is absent where
 the platform could not record one; the call happened either way.

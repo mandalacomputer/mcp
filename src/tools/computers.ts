@@ -938,6 +938,62 @@ export const registerComputers: Registrar = (server, session, opts) => {
   );
 
   server.registerTool(
+    'move_computer_to_workspace',
+    {
+      title: 'Move a computer to a workspace',
+      description:
+        'Change which workspace a computer belongs to, within the same account. This changes who can access it. Requires an account-wide member or owner credential; workspace-scoped credentials are refused, even for a no-op. Supply computer_id explicitly and workspace_id as a wsp- ID, or null to make it unassigned. Neither the selected computer nor the default workspace is used. The computer must be stopped, with no saved session, snapshots or snapshot history copies, secret bindings, or proxy credentials. The platform checks these conditions; a fleet that cannot prove safety can refuse. Do not stop the computer, discard its session, delete snapshots, or remove bindings automatically to overcome a refusal. This changes workspace membership, not hardware or size. If the outcome cannot be confirmed, read get_computer before deciding whether to retry.',
+      inputSchema: {
+        computer_id: z.string().trim().min(1).describe('The explicit computer ID to move.'),
+        workspace_id: z
+          .string()
+          .length(16)
+          .regex(/^wsp-[0-9a-f]{12}$/)
+          .nullable()
+          .describe('Destination workspace ID, or explicit null for unassigned.'),
+      },
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true },
+    },
+    async ({ computer_id, workspace_id }, extra) =>
+      guarded(async () => {
+        const { status, value: body } = await session.api
+          .with(extra.signal)
+          .jsonWithStatus<unknown>('PUT', P.computerWorkspace(computer_id), {
+            body: { workspace_id },
+          });
+        const c =
+          body && typeof body === 'object' && !Array.isArray(body) && 'computer' in body
+            ? body.computer
+            : undefined;
+        if (
+          status !== 200 ||
+          !c ||
+          typeof c !== 'object' ||
+          Array.isArray(c) ||
+          !('id' in c) ||
+          c.id !== computer_id ||
+          !(
+            ('workspace_id' in c ? c.workspace_id : undefined) === workspace_id ||
+            (workspace_id === null &&
+              (!('workspace_id' in c) || c.workspace_id == null || c.workspace_id === ''))
+          )
+        ) {
+          return refused(
+            'The workspace change could not be confirmed from the response. Read get_computer for this computer before deciding whether to retry; the change may have happened.',
+          );
+        }
+        // Return only the confirmed membership. Computer records can carry
+        // connection credentials that this mutation does not need to expose.
+        return said(
+          workspace_id === null
+            ? `Computer ${computer_id} is now unassigned.`
+            : `Computer ${computer_id} is now in workspace ${workspace_id}.`,
+          { computer_id, workspace_id },
+        );
+      }),
+  );
+
+  server.registerTool(
     'move_computer',
     {
       title: 'Move a computer to a host that can run a bigger size',

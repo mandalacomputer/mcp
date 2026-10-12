@@ -176,6 +176,9 @@ function segment(kind: string, value: string): string {
 
 export const computer = (id: string) => `computers/${segment('computer_id', id)}`;
 
+/** Change workspace membership, independently of a host/size move. */
+export const computerWorkspace = (id: string) => `${computer(id)}/workspace`;
+
 /**
  * start | stop | suspend | restart | clone | screenshot | input | exec |
  * windows | files | snapshots | schedule | agent
