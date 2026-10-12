@@ -574,24 +574,13 @@ export const UNIMPLEMENTED = new Set<string>([
   // offered: neither ever carries a raw key.
   'POST api-keys',
   'DELETE api-keys/:id',
-  // Public URLs (platform OPL-3753), behind a flag on the platform until its
-  // edge exists. Tools for them come with the release that follows it there.
+  // Public URLs (platform OPL-3753), published and served, behind a staged
+  // flag on the platform until its dashboard ships. Tools for them follow.
   'GET computers/:id/public-urls',
   'POST computers/:id/public-urls',
   'PATCH computers/:id/public-urls/:urlId',
   'DELETE computers/:id/public-urls/:urlId',
 ]);
-
-// The mirror precedes deployment (platform OPL-3753): the public URL routes are
-// listed before the platform publishes them. Remove these markers once all four
-// appear in the published contract. An operation still absent after the deadline
-// fails, so a marker cannot exempt a future removal indefinitely.
-export const PREPUBLICATION = [
-  'GET computers/:id/public-urls',
-  'POST computers/:id/public-urls',
-  'PATCH computers/:id/public-urls/:urlId',
-  'DELETE computers/:id/public-urls/:urlId',
-].map((operation) => ({ operation, expiresAt: '2026-10-26T00:00:00.000Z' }));
 
 /**
  * Reduce a concrete path to its route pattern, exactly as `patternFor` in the
