@@ -515,7 +515,6 @@ export const PARAMETERS: ReadonlyMap<string, readonly string[]> = new Map([
  * would say nothing that route's own line does not.
  */
 export const UNIMPLEMENTED_PARAMETERS: ReadonlySet<string> = new Set([
-
   // DECISION (OPL-4396). Raw OpenAI dialect; typed helpers retain their action vocabulary.
   'POST computers/:id/input  body:type',
   'POST computers/:id/input  body:path',
