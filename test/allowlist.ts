@@ -40,6 +40,11 @@ export const V1_ROUTES: Route[] = [
   r('GET', 'computers/:id'),
   r('PATCH', 'computers/:id'),
   r('PUT', 'computers/:id/workspace'),
+  // Public URLs (platform OPL-3753).
+  r('GET', 'computers/:id/public-urls'),
+  r('POST', 'computers/:id/public-urls'),
+  r('PATCH', 'computers/:id/public-urls/:urlId'),
+  r('DELETE', 'computers/:id/public-urls/:urlId'),
   r('DELETE', 'computers/:id'),
   r('POST', 'computers/:id/start'),
   r('POST', 'computers/:id/stop'),
@@ -254,6 +259,8 @@ export const PARAMETERS: ReadonlyMap<string, readonly string[]> = new Map([
   ],
   ['GET computers/:id', []],
   ['PUT computers/:id/workspace', ['body:workspace_id']],
+  ['POST computers/:id/public-urls', ['body:port', 'body:label', 'body:access']],
+  ['PATCH computers/:id/public-urls/:urlId', ['body:port', 'body:access']],
   [
     'PATCH computers/:id',
     [
@@ -567,7 +574,24 @@ export const UNIMPLEMENTED = new Set<string>([
   // offered: neither ever carries a raw key.
   'POST api-keys',
   'DELETE api-keys/:id',
+  // Public URLs (platform OPL-3753), behind a flag on the platform until its
+  // edge exists. Tools for them come with the release that follows it there.
+  'GET computers/:id/public-urls',
+  'POST computers/:id/public-urls',
+  'PATCH computers/:id/public-urls/:urlId',
+  'DELETE computers/:id/public-urls/:urlId',
 ]);
+
+// The mirror precedes deployment (platform OPL-3753): the public URL routes are
+// listed before the platform publishes them. Remove these markers once all four
+// appear in the published contract. An operation still absent after the deadline
+// fails, so a marker cannot exempt a future removal indefinitely.
+export const PREPUBLICATION = [
+  'GET computers/:id/public-urls',
+  'POST computers/:id/public-urls',
+  'PATCH computers/:id/public-urls/:urlId',
+  'DELETE computers/:id/public-urls/:urlId',
+].map((operation) => ({ operation, expiresAt: '2026-10-26T00:00:00.000Z' }));
 
 /**
  * Reduce a concrete path to its route pattern, exactly as `patternFor` in the
@@ -609,6 +633,7 @@ export function patternFor(path: string): string {
       if (i === 3 && parts[0] === 'computers' && parts[2] === 'executions') return ':executionId';
       if (i === 3 && parts[0] === 'computers' && parts[2] === 'results') return ':resultId';
       if (i === 3 && parts[0] === 'computers' && parts[2] === 'artifacts') return ':artifactId';
+      if (i === 3 && parts[0] === 'computers' && parts[2] === 'public-urls') return ':urlId';
       // A template ref's two halves, pinned to a THREE-segment path under
       // `templates` — which is what keeps the two-segment literals,
       // `templates/schema` and `templates/validate`, reducing to themselves. The
