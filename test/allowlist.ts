@@ -40,6 +40,11 @@ export const V1_ROUTES: Route[] = [
   r('GET', 'computers/:id'),
   r('PATCH', 'computers/:id'),
   r('PUT', 'computers/:id/workspace'),
+  // Public URLs (platform OPL-3753).
+  r('GET', 'computers/:id/public-urls'),
+  r('POST', 'computers/:id/public-urls'),
+  r('PATCH', 'computers/:id/public-urls/:urlId'),
+  r('DELETE', 'computers/:id/public-urls/:urlId'),
   r('DELETE', 'computers/:id'),
   r('POST', 'computers/:id/start'),
   r('POST', 'computers/:id/stop'),
@@ -254,6 +259,8 @@ export const PARAMETERS: ReadonlyMap<string, readonly string[]> = new Map([
   ],
   ['GET computers/:id', []],
   ['PUT computers/:id/workspace', ['body:workspace_id']],
+  ['POST computers/:id/public-urls', ['body:port', 'body:label', 'body:access']],
+  ['PATCH computers/:id/public-urls/:urlId', ['body:port', 'body:access']],
   [
     'PATCH computers/:id',
     [
@@ -508,6 +515,7 @@ export const PARAMETERS: ReadonlyMap<string, readonly string[]> = new Map([
  * would say nothing that route's own line does not.
  */
 export const UNIMPLEMENTED_PARAMETERS: ReadonlySet<string> = new Set([
+
   // DECISION (OPL-4396). Raw OpenAI dialect; typed helpers retain their action vocabulary.
   'POST computers/:id/input  body:type',
   'POST computers/:id/input  body:path',
@@ -567,6 +575,12 @@ export const UNIMPLEMENTED = new Set<string>([
   // offered: neither ever carries a raw key.
   'POST api-keys',
   'DELETE api-keys/:id',
+  // Public URLs (platform OPL-3753), behind a flag on the platform until its
+  // edge exists. Tools for them come with the release that follows it there.
+  'GET computers/:id/public-urls',
+  'POST computers/:id/public-urls',
+  'PATCH computers/:id/public-urls/:urlId',
+  'DELETE computers/:id/public-urls/:urlId',
 ]);
 
 /**
@@ -609,6 +623,7 @@ export function patternFor(path: string): string {
       if (i === 3 && parts[0] === 'computers' && parts[2] === 'executions') return ':executionId';
       if (i === 3 && parts[0] === 'computers' && parts[2] === 'results') return ':resultId';
       if (i === 3 && parts[0] === 'computers' && parts[2] === 'artifacts') return ':artifactId';
+      if (i === 3 && parts[0] === 'computers' && parts[2] === 'public-urls') return ':urlId';
       // A template ref's two halves, pinned to a THREE-segment path under
       // `templates` — which is what keeps the two-segment literals,
       // `templates/schema` and `templates/validate`, reducing to themselves. The
