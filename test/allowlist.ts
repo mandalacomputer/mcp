@@ -583,6 +583,17 @@ export const UNIMPLEMENTED = new Set<string>([
   'DELETE computers/:id/public-urls/:urlId',
 ]);
 
+// The mirror precedes deployment (platform OPL-3753): the public URL routes are
+// listed before the platform publishes them. Remove these markers once all four
+// appear in the published contract. An operation still absent after the deadline
+// fails, so a marker cannot exempt a future removal indefinitely.
+export const PREPUBLICATION = [
+  'GET computers/:id/public-urls',
+  'POST computers/:id/public-urls',
+  'PATCH computers/:id/public-urls/:urlId',
+  'DELETE computers/:id/public-urls/:urlId',
+].map((operation) => ({ operation, expiresAt: '2026-10-26T00:00:00.000Z' }));
+
 /**
  * Reduce a concrete path to its route pattern, exactly as `patternFor` in the
  * platform's surface.ts does — by position and by parent, never by a regex over
