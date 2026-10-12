@@ -983,6 +983,15 @@ function respond(
   // computer with no name, id or status — was never seen here (OPL-3914).
   if (/\/computers\/[^/]+\/(start|stop|suspend|restart)$/.test(path)) return json({ ok: true });
   // Before the catch-all, which answers COMPUTER for every id there is.
+  if (method === 'PUT' && /^\/computers\/[^/]+\/workspace$/.test(path)) {
+    return json({
+      computer: {
+        ...COMPUTER,
+        id: computerID,
+        workspace_id: (body as { workspace_id: string | null }).workspace_id,
+      },
+    });
+  }
   if (path === '/computers/vm-bridged') return json(BRIDGED_COMPUTER);
   return json({ ...COMPUTER, status, running_ram_mb: runningRamFor(status) });
 }

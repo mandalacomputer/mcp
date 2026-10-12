@@ -60,6 +60,7 @@ export const TOOL_TAGS = {
     'update_computer',
     'clone_computer',
     'delete_computer',
+    'move_computer_to_workspace',
     'move_computer',
     'list_moves',
     'get_operation',

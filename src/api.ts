@@ -761,7 +761,7 @@ export class Api {
     return body;
   }
 
-  /** Existing exec decoding plus observed status, used only to confirm optional retention. */
+  /** JSON decoding plus observed status, for operations requiring a specific success status. */
   async jsonWithStatus<T>(
     method: string,
     path: string,
@@ -777,7 +777,11 @@ export class Api {
   ): Promise<{ status: number; value: T }> {
     const resp = await this.#fetch(method, path, opts);
     const value = await this.#decode<T>(resp, method, path, opts.signal ?? this.#signal);
-    if (value === undefined || value === null) throw new MandalaError('Expected an exec response');
+    if (value === undefined || value === null) {
+      throw new MandalaError(
+        `${method} ${path} answered ${resp.status} without the expected JSON response; the outcome could not be confirmed`,
+      );
+    }
     return { status: resp.status, value };
   }
 

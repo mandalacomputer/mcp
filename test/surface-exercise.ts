@@ -114,6 +114,10 @@ export const EXERCISE: Record<string, Record<string, unknown>[]> = {
   // All three sizing fields in one call, because the platform reads exactly
   // these three off a move and the parameter sweep below is what proves it. A
   // move is the sizing group and never a rename, so there is only one shape.
+  move_computer_to_workspace: [
+    { computer_id: 'vm-1', workspace_id: 'wsp-0123456789ab' },
+    { computer_id: 'vm-1', workspace_id: null },
+  ],
   move_computer: [{ ram_mb: 26000, cpu: 2, disk_gb: 40 }],
   list_moves: [{}],
   get_account: [{}],
