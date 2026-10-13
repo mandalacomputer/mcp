@@ -143,6 +143,11 @@ describe('public URL tools', () => {
     for (const body of [
       {},
       { ...PUBLIC_URL, url: 'http://cool-thing.mandala.dev' },
+      // Codex, round 2 on #212: a link that is https only by its prefix.
+      { ...PUBLIC_URL, url: 'https://' },
+      { ...PUBLIC_URL, url: 'https://other-thing.mandala.dev' },
+      { ...PUBLIC_URL, url: 'https://cool-thing.mandala.dev:8443' },
+      { ...PUBLIC_URL, url: 'https://user:pw@cool-thing.mandala.dev' },
       { ...PUBLIC_URL, access: 'everyone' },
       { ...PUBLIC_URL, disabled: undefined },
     ]) {
@@ -151,6 +156,28 @@ describe('public URL tools', () => {
       expect(textOf(res)).toContain('THE URL MAY HAVE BEEN CREATED');
       expect(textOf(res)).not.toContain('anyone with the link');
     }
+  });
+
+  it('reads a malformed link as no public URL on an update or in a listing too', async () => {
+    const update = await over({ ...PUBLIC_URL, url: 'https://' }, 200, 'update_public_url', {
+      url_id: PUBLIC_URL.id,
+      port: 8000,
+    });
+    expect(update.isError).toBe(true);
+    expect(textOf(update)).toContain('THE CHANGE MAY HAVE LANDED');
+    const list = await over(
+      {
+        enabled: true,
+        base_domain: 'mandala.dev',
+        limit: 2,
+        public_urls: [PUBLIC_URL, { ...PUBLIC_URL, id: 'pu-1111111111111111', url: 'https://' }],
+      },
+      200,
+      'list_public_urls',
+      {},
+    );
+    expect(textOf(list)).toContain('ignored 1 malformed public URL entry');
+    expect(textOf(list)).toContain('1 public URL on vm-1');
   });
 
   it('deletes, and reads a 404 as nothing deleted rather than as a deletion', async () => {

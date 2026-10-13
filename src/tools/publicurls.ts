@@ -75,8 +75,8 @@ function publicUrlOf(v: unknown): PublicUrl | undefined {
   if (!isRecord(v)) return undefined;
   const { id, url, label, port, access, disabled } = v;
   if (typeof id !== 'string' || !id) return undefined;
-  if (typeof url !== 'string' || !url.startsWith('https://')) return undefined;
   if (typeof label !== 'string' || !label) return undefined;
+  if (!linkFor(url, label)) return undefined;
   if (typeof port !== 'number' || !Number.isSafeInteger(port) || port < 1 || port > 65535)
     return undefined;
   if (access !== 'public' && access !== 'private') return undefined;
@@ -84,6 +84,30 @@ function publicUrlOf(v: unknown): PublicUrl | undefined {
   // whether it is turned off is not one to call answering.
   if (typeof disabled !== 'boolean') return undefined;
   return { id, url, label, port, access, disabled };
+}
+
+/**
+ * Whether `url` is the link the platform promises for `label`: https, on 443
+ * (no port), no credentials, and a host that is the label under a domain. A
+ * prefix check let `https://` through, and a create answering it was reported
+ * as a link anyone could open (Codex, round 2 on #212).
+ */
+function linkFor(url: unknown, label: string): url is string {
+  if (typeof url !== 'string') return false;
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return false;
+  }
+  return (
+    parsed.protocol === 'https:' &&
+    !parsed.username &&
+    !parsed.password &&
+    !parsed.port &&
+    parsed.hostname.startsWith(`${label}.`) &&
+    parsed.hostname.length > label.length + 1
+  );
 }
 
 /**
