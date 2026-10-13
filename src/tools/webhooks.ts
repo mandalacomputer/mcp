@@ -123,22 +123,39 @@ const shapeOf = (v: unknown): string =>
  * telling them apart. A body that is not an array at all — an error envelope, a
  * future paginated wrapper, a gateway answering 200 with nothing — coerced to
  * `[]` becomes an affirmative claim about the account made from a body this
- * server could not read; and a listing whose ROWS are not objects throws at the
- * first `w.id` before any `??` can help, so `guarded` turns the whole answer
- * into an opaque failure. Neither is an empty list, and only one of the two
- * answers invites an action.
+ * server could not read; and a listing with a ROW that is not one — not an
+ * object, or missing a field every row has — is a listing that cannot be
+ * read. These rows used to be dropped with a warning; now one fails the
+ * listing (OPL-5975), as the SDKs decode it: a dropped row is a subscription
+ * that may be delivering, left out of the answer a caller reads to find out.
  */
 const rowsOf = (
   body: unknown,
+  valid: (row: Record<string, unknown>) => boolean,
 ): { rows: Record<string, unknown>[]; malformed: number } | undefined =>
   Array.isArray(body)
-    ? { rows: body.filter(isRecord), malformed: body.filter((item) => !isRecord(item)).length }
+    ? {
+        rows: body.filter(isRecord),
+        malformed: body.filter((item) => !isRecord(item) || !valid(item)).length,
+      }
     : undefined;
 
-const malformedWarning = (noun: string, n: number): string =>
-  n
-    ? `WARNING: ignored ${n} malformed ${noun} entr${n === 1 ? 'y' : 'ies'} from the platform.\n\n`
-    : '';
+const nonblank = (v: unknown): boolean => typeof v === 'string' && v.trim() !== '';
+
+/** The fields every subscription row has, each of the type it must be. */
+const webhookRow = (w: Record<string, unknown>): boolean =>
+  nonblank(w.id) && typeof w.url === 'string' && typeof w.enabled === 'boolean';
+
+/** The fields every delivery row has, each of the type it must be. */
+const deliveryRow = (d: Record<string, unknown>): boolean =>
+  nonblank(d.id) &&
+  typeof d.state === 'string' &&
+  typeof d.attempts === 'number' &&
+  Number.isSafeInteger(d.attempts) &&
+  d.attempts >= 0;
+
+const malformedRows = (noun: string, n: number): string =>
+  `${n} ${noun} entr${n === 1 ? 'y is' : 'ies are'} malformed (not an object, or missing a field every entry has), so this listing cannot be read`;
 
 /**
  * The single record a one-subscription call answers with, or nothing.
@@ -264,30 +281,26 @@ export const registerWebhooks: Registrar = (server, session) => {
     (_args, extra) =>
       guarded(async () => {
         const body = await session.api.with(extra.signal).json<unknown>('GET', P.WEBHOOKS);
-        const checked = rowsOf(body);
+        const checked = rowsOf(body, webhookRow);
         if (!checked) {
           return refused(
             `GET /webhooks answered with ${shapeOf(body)}, not a list of subscriptions. This is not an empty account — do not create a webhook on the strength of it.`,
             body,
           );
         }
-        const list = checked.rows as Webhook[];
-        const warning = malformedWarning('webhook', checked.malformed);
-        if (!list.length) {
-          if (checked.malformed) {
-            return refused(
-              `${warning}No valid webhook subscriptions remained. This is not an empty account — do not create a webhook on the strength of a malformed listing.`,
-              body,
-            );
-          }
-          return said(
-            `${warning}No webhook subscriptions on this account. create_webhook makes one.`,
+        if (checked.malformed) {
+          return refused(
+            `GET /webhooks answered, but ${malformedRows('webhook', checked.malformed)}. It is not evidence about which subscriptions exist — do not create or delete one on the strength of it; try list_webhooks again.`,
             body,
           );
         }
-        const lines = list.map((w) => `${w.id ?? '?'} → ${w.url ?? '?'}: ${health(w)}`);
+        const list = checked.rows as Webhook[];
+        if (!list.length) {
+          return said('No webhook subscriptions on this account. create_webhook makes one.', body);
+        }
+        const lines = list.map((w) => `${w.id} → ${w.url}: ${health(w)}`);
         return said(
-          `${warning}${list.length} webhook subscription${list.length === 1 ? '' : 's'}, oldest first:\n${lines.join('\n')}`,
+          `${list.length} webhook subscription${list.length === 1 ? '' : 's'}, oldest first:\n${lines.join('\n')}`,
           body,
         );
       }),
@@ -457,22 +470,21 @@ export const registerWebhooks: Registrar = (server, session) => {
         const body = await session.api
           .with(extra.signal)
           .json<unknown>('GET', P.webhookAction(webhook_id, 'deliveries'));
-        const checked = rowsOf(body);
+        const checked = rowsOf(body, deliveryRow);
         if (!checked) {
           return refused(
             `GET the deliveries of ${webhook_id} answered with ${shapeOf(body)}, not a list of deliveries. This is not an empty history — do not conclude anything about what has been delivered from it.`,
             body,
           );
         }
-        const list = checked.rows as Delivery[];
-        const warning = malformedWarning('delivery', checked.malformed);
-        if (!list.length && checked.malformed) {
+        if (checked.malformed) {
           return refused(
-            `${warning}No valid deliveries remained for ${webhook_id}. This is not an empty history — do not conclude anything about what has been delivered from it.`,
+            `GET the deliveries of ${webhook_id} answered, but ${malformedRows('delivery', checked.malformed)}. Do not conclude anything about what has been delivered from it.`,
             body,
           );
         }
-        return said(`${warning}${deliveriesLine(webhook_id, list)}`, body);
+        const list = checked.rows as Delivery[];
+        return said(deliveriesLine(webhook_id, list), body);
       }),
   );
 

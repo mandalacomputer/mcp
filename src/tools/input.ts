@@ -430,6 +430,7 @@ export const registerInput: Registrar = (server, session) => {
             width: z.number().int().min(1),
             height: z.number().int().min(1),
           })
+          .strict()
           .optional()
           .describe(
             "Crop to this rectangle of the capture. x, y, width and height are full-size capture pixels, measured before any scaling; use the returned capture size, which can differ from the computer record's resolution. Give capture to pin the crop to the frame you measured. A region outside it is refused rather than clipped. The picture that comes back starts at (0, 0), so add x and y to a position in it before clicking there.",

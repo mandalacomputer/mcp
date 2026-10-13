@@ -73,6 +73,67 @@ it('list_workspace_members reads the members and projects only the public fields
   ]);
 });
 
+// OPL-5975: seat_suspended was stripped by the projection, so a member
+// waiting for a seat read like any other.
+it('keeps seat_suspended, says who is waiting for a seat, and refuses a malformed one', async () => {
+  respond([
+    WORKSPACE_MEMBER,
+    { ...WORKSPACE_MEMBER, user_id: 'usr-1111111111111111', seat_suspended: true },
+  ]);
+  const result = await (await open()).call('list_workspace_members', {
+    workspace_id: WORKSPACE.id,
+  });
+  expect(result.isError).not.toBe(true);
+  expect(data(result).map((m: { seat_suspended?: boolean }) => m.seat_suspended)).toEqual([
+    false,
+    true,
+  ]);
+  expect(text(result)).toContain('1 of them is waiting for a seat (seat_suspended)');
+
+  // A platform from before the field still lists its members.
+  const { seat_suspended: _, ...older } = WORKSPACE_MEMBER;
+  respond([older]);
+  const before = await (await open()).call('list_workspace_members', {
+    workspace_id: WORKSPACE.id,
+  });
+  expect(before.isError).not.toBe(true);
+  expect(text(before)).not.toContain('waiting for a seat');
+
+  // One that is not a boolean is not read as false.
+  respond([{ ...WORKSPACE_MEMBER, seat_suspended: 'yes' }]);
+  const malformed = await (await open()).call('list_workspace_members', {
+    workspace_id: WORKSPACE.id,
+  });
+  expect(malformed.isError).toBe(true);
+
+  const tool = (await (await open()).client.listTools()).tools.find(
+    (t) => t.name === 'list_workspace_members',
+  );
+  expect(tool?.description).toContain('seat_suspended');
+});
+
+// OPL-5975: the platform's 409 for a workspace still holding computers or
+// secrets carries `reason: "unsupported"`, whose advice named "this computer"
+// and called the answer the same forever — wrong subject, and false: moving or
+// deleting what is in it clears it.
+it('says what a workspace that is not empty needs, without blaming a computer', async () => {
+  respond(
+    {
+      error: 'This workspace still holds 2 computers. Move or delete them first.',
+      reason: 'unsupported',
+    },
+    409,
+  );
+  const result = await (await open()).call('delete_workspace', {
+    workspace_id: WORKSPACE.id,
+    confirm: true,
+  });
+  expect(result.isError).toBe(true);
+  expect(text(result)).toContain('This workspace still holds 2 computers');
+  expect(text(result)).toContain('needs another step first, which the message names');
+  expect(text(result)).not.toMatch(/this computer cannot do it|same forever/);
+});
+
 it('relays the 403 a workspace-scoped key gets for the members', async () => {
   const sentence = 'A key confined to a workspace cannot list members.';
   respond({ error: sentence }, 403);
@@ -141,8 +202,11 @@ it('describes the writes honestly and hides them from a read-only session', asyn
   // The platform refuses (409) a workspace that still holds computers, so the
   // description must not promise they survive the delete (OPL-5639).
   expect(byName('delete_workspace')?.description).toMatch(
-    /Only an empty workspace can be deleted: one that still holds computers is refused \(409\)/,
+    /Only an empty workspace can be deleted: one that still holds computers .* or active secrets is refused with 409/,
   );
+  // OPL-5975: the way out names a move as well as a delete, and the secrets.
+  expect(byName('delete_workspace')?.description).toContain('move_computer_to_workspace');
+  expect(byName('delete_workspace')?.description).toContain('delete_secret');
   expect(byName('delete_workspace')?.description).not.toMatch(/kept|NOT deleted|not touched/);
   expect(byName('delete_workspace')?.annotations).toMatchObject({
     readOnlyHint: false,

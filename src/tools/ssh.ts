@@ -160,10 +160,12 @@ export const registerSSH: Registrar = (server, session) => {
             body,
           );
         }
-        const rows = body.filter(isRecord);
+        // Strict (OPL-5975): a row that is not an object, or has no id, fails
+        // the listing, as the SDKs decode it — never a key line read as `?`.
+        const rows = body.filter((k): k is Record<string, unknown> => isRecord(k) && !!text(k.id));
         if (rows.length !== body.length) {
           return refused(
-            `GET /ssh-keys answered with ${body.length - rows.length} malformed entr${body.length - rows.length === 1 ? 'y' : 'ies'}; the list cannot be trusted.`,
+            `GET /ssh-keys answered with ${body.length - rows.length} malformed entr${body.length - rows.length === 1 ? 'y' : 'ies'} (not an object, or without an id); the list cannot be trusted.`,
             body,
           );
         }

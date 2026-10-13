@@ -717,6 +717,7 @@ export const registerSnapshots: Registrar = (server, session, opts) => {
             minute: z.number().int().min(0).max(59).default(0),
             tz: z.string().default('UTC').describe('An IANA zone, e.g. "America/New_York".'),
           })
+          .strict()
           .optional()
           .describe('Omit to read the current schedule. Include to replace it.'),
         clear: z.boolean().default(false).describe('Remove the schedule entirely.'),

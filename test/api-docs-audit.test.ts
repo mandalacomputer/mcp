@@ -104,10 +104,11 @@ describe('the boot window and after it', () => {
     expect(isTransient(starting)).toBe(true);
     expect(textOf(failed(starting))).toContain('two minutes');
     expect(textOf(failed(starting))).toContain('502');
-    // A word this version has never heard of is no classification at all.
+    // A word this version has never heard of is no classification at all —
+    // and an unclassified 409 is not transient (OPL-5975).
     const unknown = errorForStatus(409, 'x', { error: 'x', reason: 'some-new-word' });
     expect(unknown.reason).toBe('some-new-word');
-    expect(isTransient(unknown)).toBe(true);
+    expect(isTransient(unknown)).toBe(false);
   });
 });
 

@@ -109,11 +109,10 @@ const absolutePath = (what: string) =>
  * OPL-3584). The seventeenth is refused 409 with `this computer already has 16
  * background commands running`, and that refusal deliberately carries NO
  * `reason` (OPL-3898): the slots may be held by long-lived servers, so
- * the platform will not advise a retry it cannot promise. An absent word falls
- * back to the type answer, and for a 409 the type is {@link ConflictError},
- * which {@link isTransient} calls worth retrying. So this is the one conflict
- * where that fallback is optimistic in practice — correctly, on the platform's
- * side, and leaving the model a sentence with no next step in it.
+ * the platform will not advise a retry it cannot promise. An absent word is no
+ * classification, and since OPL-5975 {@link isTransient} says no to an
+ * unclassified 409 and the formatter says the platform did not say it clears —
+ * true, and still a sentence with no next step in it.
  *
  * Matched on PROSE, which is worth saying out loud, because matching on prose is
  * what OPL-3724 got this client out of. What that decision governs is the retry

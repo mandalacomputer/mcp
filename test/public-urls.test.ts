@@ -37,6 +37,12 @@ describe('public URL tools', () => {
     expect(text).toContain('PUBLIC: anyone with the link can open it');
     expect(text).toContain('0.0.0.0:3000, not 127.0.0.1');
     expect(text).toContain('mandala-skip-warning: 1');
+    // OPL-5975: the page goes to whatever looks like a browser, program or
+    // not, and the guest's browser gets past it by Continue.
+    expect(text).not.toContain('Requests from programs never see the page');
+    expect(text).toContain('a program that sends browser headers gets it too');
+    expect(text).toContain('open_url cannot send headers');
+    expect(text).toContain('click Continue');
     await close();
   });
 
@@ -136,7 +142,91 @@ describe('public URL tools', () => {
       {},
     );
     expect(malformed.isError).toBe(true);
-    expect(textOf(malformed)).toContain('ignored 1 malformed public URL entry');
+    expect(textOf(malformed)).toContain('1 entry that is not a public URL');
+    // A limit that is not a count is not a listing either.
+    for (const limit of [-1, 2.5, '2']) {
+      const res = await over(
+        { enabled: true, base_domain: 'mandala.dev', limit, public_urls: [] },
+        200,
+        'list_public_urls',
+        {},
+      );
+      expect(res.isError, String(limit)).toBe(true);
+    }
+  });
+
+  // OPL-5975: each refusal by its code, with its own advice and the code in
+  // the metadata, and none of them read as passing.
+  it.each([
+    [
+      409,
+      'LABEL_TAKEN',
+      'The label "my-demo" is taken; choose another.',
+      /does not clear by waiting.*never given to a second account/,
+    ],
+    [
+      409,
+      'PUBLIC_URL_LIMIT',
+      'This computer already has 2 of the 2 public URLs its plan allows; delete one first.',
+      /as many public URLs as its plan allows, and this does not clear by waiting/,
+    ],
+    [
+      403,
+      'PUBLIC_URLS_BLOCKED',
+      'Public URLs are turned off for this account. Contact support if you think this is a mistake.',
+      /turned public URLs off for this computer or this account\. It is not a role/,
+    ],
+    [
+      404,
+      'PUBLIC_URLS_DISABLED',
+      'Public URLs are not enabled here.',
+      /not enabled here at all\. This is not a missing computer/,
+    ],
+  ] as const)('gives a %i %s its own advice, and its code', async (status, code, error, advice) => {
+    const res = await over({ error, code }, status, 'create_public_url', {
+      port: 3000,
+      label: 'my-demo',
+    });
+    const text = textOf(res);
+    expect(res.isError).toBe(true);
+    expect(text).toContain(error);
+    expect(text).toMatch(advice);
+    expect(text).toContain(`"code": "${code}"`);
+    // Never the generic readings the status would otherwise get.
+    expect(text).not.toContain('a role that changed or an account suspended');
+    expect(text).not.toContain('worth sending again');
+    expect(text).not.toContain('the platform did not say whether this clears');
+  });
+
+  it('says a workspace move that is settling clears, and one that is stuck does not', async () => {
+    const settling = textOf(
+      await over(
+        {
+          error: 'This computer is being moved to another workspace.',
+          code: 'WORKSPACE_MOVING',
+          reason: 'contention',
+        },
+        409,
+        'update_public_url',
+        { url_id: PUBLIC_URL.id, port: 8000 },
+      ),
+    );
+    expect(settling).toContain('clears once the move has finished');
+    const stuck = textOf(
+      await over(
+        {
+          error: 'This computer’s workspace change is not settled.',
+          code: 'WORKSPACE_MOVING',
+          reason: 'unsupported',
+        },
+        409,
+        'update_public_url',
+        { url_id: PUBLIC_URL.id, port: 8000 },
+      ),
+    );
+    expect(stuck).toContain('waiting alone will not settle it');
+    expect(stuck).toContain('move_computer_to_workspace');
+    expect(stuck).not.toContain('this computer cannot do it at all');
   });
 
   it('says a create MAY have happened when the answer is not a public URL', async () => {
@@ -177,8 +267,59 @@ describe('public URL tools', () => {
       'list_public_urls',
       {},
     );
-    expect(textOf(list)).toContain('ignored 1 malformed public URL entry');
-    expect(textOf(list)).toContain('1 public URL on vm-1');
+    // OPL-5975: one bad row fails the listing rather than being dropped — a
+    // dropped row is a URL that may be answering, left out of the one answer
+    // read to find out what is exposed.
+    expect(list.isError).toBe(true);
+    expect(textOf(list)).toContain('1 entry that is not a public URL');
+    expect(textOf(list)).toContain('any of its URLs may be answering');
+    expect(textOf(list)).not.toMatch(/^\d+ public URLs? on vm-1/);
+  });
+
+  // OPL-5975: the oldest `limit` answer and the rest answer 404, so a listing
+  // past the limit says which, by place.
+  it('marks the URLs past the computer’s limit, oldest first', async () => {
+    const rows = ['a', 'b', 'c'].map((l, i) => ({
+      ...PUBLIC_URL,
+      id: `pu-000000000000000${i}`,
+      label: `label-${l}`,
+      url: `https://label-${l}.mandala.dev`,
+    }));
+    const res = await over(
+      { enabled: true, base_domain: 'mandala.dev', limit: 2, public_urls: rows },
+      200,
+      'list_public_urls',
+      {},
+    );
+    const text = textOf(res);
+    expect(res.isError).toBeFalsy();
+    expect(text).toContain('1 of them is past that limit and answers 404');
+    const lines = text.split('\n');
+    expect(lines.find((l) => l.includes('label-a.mandala.dev'))).not.toContain('PAST');
+    expect(lines.find((l) => l.includes('label-b.mandala.dev'))).not.toContain('PAST');
+    expect(lines.find((l) => l.includes('label-c.mandala.dev'))).toContain(
+      'PAST THIS COMPUTER’S LIMIT OF 2',
+    );
+    // Within the limit, nothing is marked; with URLs off, the off line says it.
+    const within = textOf(
+      await over(
+        { enabled: true, base_domain: 'mandala.dev', limit: 3, public_urls: rows },
+        200,
+        'list_public_urls',
+        {},
+      ),
+    );
+    expect(within).not.toContain('PAST');
+    const off = textOf(
+      await over(
+        { enabled: false, reason: 'off', base_domain: 'mandala.dev', limit: 0, public_urls: rows },
+        200,
+        'list_public_urls',
+        {},
+      ),
+    );
+    expect(off).toContain('PUBLIC URLS DO NOT ANSWER HERE');
+    expect(off).not.toContain('PAST');
   });
 
   it('deletes, and reads a 404 as nothing deleted rather than as a deletion', async () => {
@@ -188,6 +329,11 @@ describe('public URL tools', () => {
       `/computers/vm-1/public-urls/${PUBLIC_URL.id}`,
     );
     expect(textOf(res)).toContain(`Deleted ${PUBLIC_URL.id} from vm-1.`);
+    // P4 (OPL-5975): the label stays with the account; it is never free for
+    // anyone else.
+    expect(textOf(res)).toContain('Its label stays with this account');
+    expect(textOf(res)).toContain('no other account can take it');
+    expect(textOf(res)).not.toMatch(/\bfree\b|released/);
     await close();
 
     const gone = await over(
@@ -199,6 +345,8 @@ describe('public URL tools', () => {
     expect(gone.isError).toBeFalsy();
     expect(textOf(gone)).toContain('Nothing was deleted');
     expect(textOf(gone)).not.toMatch(/^Deleted/);
+    // The same 404 answers a computer this key cannot see (OPL-5975).
+    expect(textOf(gone)).toContain('is not a computer this key can see');
   });
 
   // Codex, round 1 on #212: an unknown key was stripped, so a misspelled
@@ -289,6 +437,11 @@ describe('public URL tools', () => {
     });
     const create = tools.find((t) => t.name === 'create_public_url');
     expect(create?.description).toContain('PUBLIC BY DEFAULT');
+    // P4 (OPL-5975): no word that a deleted URL's label is free for anyone.
+    const del = tools.find((t) => t.name === 'delete_public_url');
+    const words = `${del?.description} ${JSON.stringify(del?.inputSchema)}`;
+    expect(words).toContain('Its label stays with this account: no other account can ever take it');
+    expect(words).not.toMatch(/free for anyone|\bfree\b|released|may be gone|Irreversible/);
     await close();
   });
 });

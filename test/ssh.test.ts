@@ -144,10 +144,18 @@ describe('the SSH tools over answers they cannot trust', () => {
   };
 
   it('does not call an unreadable listing an empty one', async () => {
-    for (const body of [{ error: 'gateway' }, [SSH_KEY, null]]) {
+    // A row without an id fails the listing too (OPL-5975), rather than being
+    // shown as a key line that starts with `?`.
+    for (const body of [
+      { error: 'gateway' },
+      [SSH_KEY, null],
+      [SSH_KEY, { ...SSH_KEY, id: undefined }],
+      [SSH_KEY, { ...SSH_KEY, id: '' }],
+    ]) {
       const res = await over(body, 200, 'list_ssh_keys', {});
       expect(res.isError).toBe(true);
       expect(textOf(res)).not.toContain('No SSH keys are registered');
+      expect(textOf(res)).not.toMatch(/^\d+ SSH keys?, oldest first/);
     }
     const empty = await over([], 200, 'list_ssh_keys', {});
     expect(textOf(empty)).toContain('No SSH keys are registered to you');

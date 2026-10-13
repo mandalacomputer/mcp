@@ -51,6 +51,7 @@ import {
   RedirectError,
   reasonAdvice,
   reasonKind,
+  UNCLASSIFIED_CONFLICT_ADVICE,
   UnavailableError,
 } from '../src/errors.js';
 import { EventHub, MAX_BUFFERED } from '../src/events.js';
@@ -1788,8 +1789,20 @@ describe('a file too large to put in a conversation', () => {
 });
 
 describe('wait failures that are worth another poll', () => {
-  it.each([409, 429])('retries HTTP %s for anyone', (status) => {
-    expect(isTransient(errorForStatus(status, `HTTP ${status}`))).toBe(true);
+  it('retries HTTP 429 for anyone', () => {
+    expect(isTransient(errorForStatus(429, 'HTTP 429'))).toBe(true);
+  });
+
+  // OPL-5975: a 409 is published as transient only where the platform says it
+  // is passing. A bare one is unclassified — the poll predicate still rides it
+  // out, since it replays reads under a deadline.
+  it('retries HTTP 409 only where the platform says it clears, and polls through every one', () => {
+    const bare = errorForStatus(409, 'HTTP 409');
+    expect(isTransient(bare)).toBe(false);
+    expect(isTransientForPoll(bare)).toBe(true);
+    for (const reason of ['contention', 'starting']) {
+      expect(isTransient(errorForStatus(409, 'x', { error: 'x', reason })), reason).toBe(true);
+    }
   });
 
   it('retries HTTP 503 only for a request that is safe to repeat', () => {
@@ -2303,7 +2316,11 @@ describe('a selection concurrent with deletion', () => {
         );
       }
       if (method === 'DELETE' && url.pathname.endsWith('/computers/vm-2')) {
-        return new Response(null, { status: 204 });
+        // The platform's answer to a delete it carried out. An empty 2xx
+        // confirms nothing, and is no longer called a deletion (OPL-5975).
+        return new Response(JSON.stringify({ ok: true, snapshots_deleted: 0 }), {
+          headers: { 'Content-Type': 'application/json' },
+        });
       }
       if (url.pathname.endsWith('/screenshot')) {
         return new Response(new Uint8Array([1]), {
@@ -2726,10 +2743,11 @@ describe('an edge that never reached the platform is not reported as a bare stat
     }
     // What survives is answered by TYPE, with no status numbers at all — the
     // same four classes the TypeScript and Python SDKs now name, so one
-    // question has one answer in three clients.
-    for (const status of [409, 429]) {
-      expect(isTransient(errorForStatus(status, `HTTP ${status}`))).toBe(true);
-    }
+    // question has one answer in three clients. A 409 among them only where
+    // the platform says it clears (OPL-5975).
+    expect(isTransient(errorForStatus(429, 'HTTP 429'))).toBe(true);
+    expect(isTransient(errorForStatus(409, 'HTTP 409'))).toBe(false);
+    expect(isTransient(errorForStatus(409, 'x', { error: 'x', reason: 'contention' }))).toBe(true);
     // 503 is on the list only for a request that is safe to repeat (OPL-5026).
     expect(
       isTransient(errorForStatus(503, 'HTTP 503', undefined, undefined, { method: 'GET' })),
@@ -2772,7 +2790,15 @@ describe('the public error surface', () => {
     // number inside the predicate and had no class at all, so `retryAfterMs`
     // could not reach a caller and the platform's own "wait this long" was
     // thrown away by everyone but the poll loops.
-    expect(isTransient(new ConflictError('the guest agent is not answering yet', 409))).toBe(true);
+    // A ConflictError only where the platform says it clears (OPL-5975).
+    expect(
+      isTransient(
+        new ConflictError('the guest agent is not answering yet', 409, {
+          error: 'the guest agent is not answering yet',
+          reason: 'starting',
+        }),
+      ),
+    ).toBe(true);
     expect(isTransient(new RateLimitError('slow down', 429))).toBe(true);
     // A 503 is transient for a request that is safe to repeat; a change, or a
     // request whose method is unknown, may have happened (OPL-5026).
@@ -2800,10 +2826,15 @@ describe('the public error surface', () => {
   });
 
   it('does not repeat an empty HTTP error status', () => {
-    expect(said(failed(errorForStatus(409, 'HTTP 409')))).toBe('HTTP 409');
+    // A 409 the platform did not classify says so (OPL-5975); the status is
+    // still said once, not twice.
+    const unclassified =
+      ' — the platform did not say whether this clears, so treat it as one that does not: do not send it again unchanged unless the message itself says what to wait for. It usually says what to do instead';
+    expect(said(failed(errorForStatus(409, 'HTTP 409')))).toBe(`HTTP 409${unclassified}`);
     expect(said(failed(errorForStatus(409, 'guest still booting')))).toBe(
-      'guest still booting (HTTP 409)',
+      `guest still booting (HTTP 409)${unclassified}`,
     );
+    expect(said(failed(errorForStatus(400, 'HTTP 400')))).toBe('HTTP 400');
   });
 });
 
@@ -3634,6 +3665,9 @@ describe('the tools our own prose tells a model to call', () => {
     'minted_by_key_id',
     'user_id',
     'accepted_at',
+    // A member waiting for a seat (OPL-5919), named by list_workspace_members
+    // since OPL-5975. A response field.
+    'seat_suspended',
     'idempotency_outcome_unknown',
     'idempotency_in_progress',
     // The refusal a pinned screenshot gets once its capture is gone (OPL-5856),
@@ -3877,22 +3911,29 @@ describe('a refusal the platform put a word on', () => {
     // given" — which is what makes adding a word later safe. Both memberships
     // are tested rather than one being inferred from the other, so a word this
     // version has never heard of falls through to the type instead of reading
-    // as permanent and stopping a retry that would have worked.
+    // as permanent. Since OPL-5975 the type's answer for a 409 is no: the
+    // platform documents an absent word as no classification, and treating
+    // 409 as uniformly transient "loops forever on half of them". So a fifth
+    // word, a malformed one and none at all all answer as unclassified.
     const fifth = errorForStatus(409, 'something new', {
       error: 'something new',
       reason: 'wedged',
     });
     expect((fifth as APIError).reason).toBe('wedged');
-    expect(isTransient(fifth)).toBe(true);
+    expect(reasonKind((fifth as APIError).reason)).toBeUndefined();
+    expect(isTransient(fifth)).toBe(false);
     // Shape-checked like the move offer, and for its reason: this decides a
     // retry policy, so a `reason` that is not a string has to read as nothing
-    // said rather than as a refusal that never clears.
+    // said.
     const wrongType = errorForStatus(409, 'x', { error: 'x', reason: 5 });
     expect((wrongType as APIError).reason).toBeUndefined();
-    expect(isTransient(wrongType)).toBe(true);
+    expect(isTransient(wrongType)).toBe(false);
     const unclassified = errorForStatus(409, 'x', { error: 'x' });
     expect((unclassified as APIError).reason).toBeUndefined();
-    expect(isTransient(unclassified)).toBe(true);
+    expect(isTransient(unclassified)).toBe(false);
+    // A fifth word on a status that is not a 409 still falls through to that
+    // status's own answer: a 429 is a cadence whatever word it carries.
+    expect(isTransient(errorForStatus(429, 'x', { error: 'x', reason: 'wedged' }))).toBe(true);
   });
 
   it('is still polled through, because a poll is the one caller it may clear for', () => {
@@ -3942,10 +3983,12 @@ describe('a refusal the platform put a word on', () => {
     }
   });
 
-  it('says nothing extra about a refusal the platform did not classify', async () => {
-    // Appended rather than substituted, and only where there is a word: most
-    // refusals have none and always will, and those have to read exactly as
-    // they did before this existed.
+  it('says only that it is unclassified about a refusal the platform did not classify', async () => {
+    // Appended rather than substituted. A refusal with no word used to read
+    // exactly as it did before words existed, which left a model to its
+    // instinct, and its instinct is to retry. Since OPL-5975 it says the one
+    // thing that is true of it — the platform did not say it clears — after
+    // the platform's own sentence, unedited.
     const real = globalThis.fetch;
     globalThis.fetch = (async () =>
       new Response(JSON.stringify({ error: "the guest's desktop is not answering yet" }), {
@@ -3955,7 +3998,9 @@ describe('a refusal the platform put a word on', () => {
     try {
       const { call, close } = await connect();
       const res = await call('read_clipboard', { computer_id: 'vm-1' });
-      expect(said(res)).toBe("the guest's desktop is not answering yet (HTTP 409)");
+      expect(said(res)).toBe(
+        "the guest's desktop is not answering yet (HTTP 409) — the platform did not say whether this clears, so treat it as one that does not: do not send it again unchanged unless the message itself says what to wait for. It usually says what to do instead",
+      );
       await close();
     } finally {
       globalThis.fetch = real;
@@ -4107,7 +4152,10 @@ describe('a computer whose background slots are all held', () => {
     const { call, close } = await connect();
     const text = said(await call('exec', { command: 'true', background: true }));
     await close();
-    expect(text).toBe('the guest agent is busy with another call (HTTP 409)');
+    // Unclassified, so it says so (OPL-5975), and nothing about slots.
+    expect(text).toBe(
+      `the guest agent is busy with another call (HTTP 409) — ${UNCLASSIFIED_CONFLICT_ADVICE}`,
+    );
     expect(text).not.toContain('exec_kill');
   });
 
@@ -4165,15 +4213,17 @@ describe('a computer whose background slots are all held', () => {
   it('leaves the exported retry predicates answering by type and by word', () => {
     // The line this change does not cross. `isTransient` is a contract with
     // embedders, mirrored word for word by two other clients, and teaching it
-    // this sentence is the OPL-3724 mistake with a wider blast radius. It still
-    // says yes, honestly, and the next step lives in the tool that can print
-    // the platform's words beside it.
+    // this sentence is the OPL-3724 mistake with a wider blast radius. It
+    // answers by the word alone: none was sent, so the refusal is unclassified,
+    // and since OPL-5975 an unclassified 409 is not transient — the slots may
+    // be held by servers that never exit. The next step lives in the tool that
+    // can print the platform's words beside it.
     const full = errorForStatus(409, 'this computer already has 16 background commands running', {
       error: 'this computer already has 16 background commands running',
     });
     expect(full).toBeInstanceOf(ConflictError);
     expect((full as APIError).reason).toBeUndefined();
-    expect(isTransient(full)).toBe(true);
+    expect(isTransient(full)).toBe(false);
     expect(isTransientForPoll(full)).toBe(true);
   });
 });
@@ -4324,7 +4374,9 @@ describe('a window action whose outcome came back unknown', () => {
     const { call, close } = await connect();
     const text = said(await call('window_action', { window_id: '0x2600003', action: 'focus' }));
     await close();
-    expect(text).toBe('the guest agent is busy with another call (HTTP 409)');
+    expect(text).toBe(
+      `the guest agent is busy with another call (HTTP 409) — ${UNCLASSIFIED_CONFLICT_ADVICE}`,
+    );
     expect(text).not.toContain('list_windows');
   });
 

@@ -270,23 +270,34 @@ describe('the webhooks CRUD', () => {
     expect(text).not.toContain('the endpoint has not been called yet');
   });
 
-  it('drops malformed webhook rows and says how many, rather than failing the whole listing', async () => {
-    // `list.map((w) => w.id ?? '?')` dereferences before the `??`, so one null
-    // row threw a TypeError and `guarded` reported the listing as an opaque
-    // failure — the rows this server could read going with it.
-    const res = await over([WEBHOOK, null, 'bad projection'], 200, 'list_webhooks', {});
-    expect(res.isError, textOf(res)).toBeFalsy();
-    expect(textOf(res)).toMatch(/ignored 2 malformed webhook entries/);
-    expect(textOf(res)).toContain(WEBHOOK.id);
+  // OPL-5975: a malformed row fails the listing, as the SDKs decode it. It
+  // used to be dropped with a warning, which left a subscription that may be
+  // delivering out of the one answer a caller reads to find out.
+  it('fails a listing with a malformed webhook row rather than dropping it', async () => {
+    for (const rows of [
+      [WEBHOOK, null],
+      [WEBHOOK, 'bad projection'],
+      [WEBHOOK, { ...WEBHOOK, id: undefined }],
+      [WEBHOOK, { ...WEBHOOK, enabled: 'false' }],
+    ]) {
+      const res = await over(rows, 200, 'list_webhooks', {});
+      expect(res.isError, JSON.stringify(rows[1])).toBe(true);
+      expect(textOf(res)).toContain('1 webhook entry is malformed');
+      expect(textOf(res)).not.toMatch(/^\d+ webhook subscriptions?, oldest first/);
+    }
   });
 
-  it('drops malformed delivery rows the same way', async () => {
-    const res = await over([WEBHOOK_DELIVERY, null], 200, 'list_webhook_deliveries', {
-      webhook_id: WEBHOOK.id,
-    });
-    expect(res.isError, textOf(res)).toBeFalsy();
-    expect(textOf(res)).toMatch(/ignored 1 malformed delivery entry/);
-    expect(textOf(res)).toContain('1 delivery for');
+  it('fails a delivery listing with a malformed row the same way', async () => {
+    for (const rows of [
+      [WEBHOOK_DELIVERY, null],
+      [WEBHOOK_DELIVERY, { ...WEBHOOK_DELIVERY, attempts: '1' }],
+      [WEBHOOK_DELIVERY, { ...WEBHOOK_DELIVERY, id: '' }],
+    ]) {
+      const res = await over(rows, 200, 'list_webhook_deliveries', { webhook_id: WEBHOOK.id });
+      expect(res.isError, JSON.stringify(rows[1])).toBe(true);
+      expect(textOf(res)).toContain('1 delivery entry is malformed');
+      expect(textOf(res)).not.toContain('deliveries for');
+    }
   });
 
   it('will not say a secret is in an answer that has no secret in it', async () => {

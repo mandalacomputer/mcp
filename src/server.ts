@@ -6,6 +6,7 @@ import {
   McpError,
   type ToolAnnotations,
 } from '@modelcontextprotocol/sdk/types.js';
+import { z } from 'zod';
 import { Session, type SessionConfig } from './session.js';
 import { type ToolFilters, toolFilter } from './tool-filters.js';
 import { registerAccount } from './tools/account.js';
@@ -67,7 +68,7 @@ Things that are true here and are not obvious:
 - list_windows tells you what is on the screen as data. It is how you distinguish an application that failed to start from one that has not painted yet, which a screenshot alone cannot do.
 - A computer suspends itself when nobody uses it — 30 minutes by default. Input, exec and file transfers all count as use and resume it. Screenshots deliberately do not, so a loop that only watches can see its own machine go down.
 - Who you are is checked again while a call is in flight, not only when it starts, so a long call can be refused after part of its work is already done. A 401 or a 403 means the credential or the role behind it stopped being accepted: re-authenticate, or say what was refused. Do not resend it, and never resend one that creates, starts, moves, writes or deletes without first checking what took effect. A 402 is the plan as it stands now rather than a fault on the computer, and waiting does not change it. Any of the three can arrive with completed work attached — read that before deciding what is left to do.
-- A 409 is not one thing, and retrying blindly is how a turn gets burned. Most describe a passing state and clear on their own: a guest still booting, a guest agent busy with another call. Some describe a DECISION about what you asked for — a size the host cannot run, a computer that has to be stopped first — and those answer the same way forever; the message says which, and usually says what to do instead. A 400 never clears.
+- A 409 is not one thing, and retrying blindly is how a turn gets burned. Some describe a passing state and clear on their own — a guest still booting, a guest agent busy with another call — and the answer says so. The rest describe a DECISION about what you asked for — a size the host cannot run, a computer that has to be stopped first, a label already taken — and those answer the same way forever. A 409 that does not say it will clear is one of those: read the message, which usually says what to do instead, rather than sending it again. A 400 never clears.
 - Growing a computer past what its host can run is the refusal worth knowing by name: update_computer says a move is possible, and move_computer is how you take that up. It moves the machine to different hardware and copies its disk, so say what it costs before you call it.`;
 
 const filteredInstructions = `Mandala Computer gives you access to a Linux desktop in the cloud.
@@ -76,7 +77,7 @@ This session exposes a filtered set of tools. Use only the tools in its tool lis
 
 Read each available tool's description before calling it. Read-only access follows the tool's readOnlyHint annotation: a read that can resume or bill a computer is not read-only. A running computer still costs money, and passive observation does not prevent idle suspension.
 
-Who you are is checked again while a call is in flight. A 401 or 403 means the credential or role stopped being accepted; a 402 means the current plan refuses the work. Do not resend these calls. Inspect any completed work attached before deciding what remains. A 409 may describe either a temporary condition or a decision that will not change on retry; read its message. A 400 never clears.`;
+Who you are is checked again while a call is in flight. A 401 or 403 means the credential or role stopped being accepted; a 402 means the current plan refuses the work. Do not resend these calls. Inspect any completed work attached before deciding what remains. A 409 may describe either a temporary condition or a decision that will not change on retry; read its message, and treat one that does not say it will clear as one that will not. A 400 never clears.`;
 
 /**
  * Whether a session built from this config would offer run_agent on the
@@ -86,6 +87,47 @@ Who you are is checked again while a call is in flight. A 401 or 403 means the c
  */
 export function offersFundedAgent(cfg: ToolFilters & { modelKey?: string }): boolean {
   return !cfg.modelKey && toolFilter(cfg).allows('run_agent', RUN_AGENT_ANNOTATIONS);
+}
+
+/**
+ * A tool's input schema, made to refuse any key it does not declare.
+ *
+ * The SDK accepts either a field map or a Zod schema. A field map becomes an
+ * object that strips unknown keys, and so does a `z.object` without
+ * `.strict()`: the listed JSON Schema still says `additionalProperties: false`,
+ * but the call goes ahead with the unknown key silently dropped. That turned a
+ * misspelt `workspace_id` into a secret stored account-wide, a misspelt
+ * `resume_only` into a full start, and a misspelt flag on a delete into a
+ * delete. Every schema leaves here strict.
+ *
+ * Anything that cannot be made strict here is refused at registration, so a
+ * tool added later cannot reintroduce the stripping by its shape: a schema that
+ * is not an object, one that passes unknown keys through or has a catch-all,
+ * and an object wrapped in a refinement whose inner object is not strict
+ * already (a refinement's inner object cannot be replaced without losing it).
+ */
+export function strictInput(name: string, schema: unknown): z.ZodTypeAny {
+  if (schema === undefined) {
+    throw new Error(`Tool ${name} declares no input schema; give it one, even if empty.`);
+  }
+  if (!(schema instanceof z.ZodType)) {
+    return z.object(schema as z.ZodRawShape).strict();
+  }
+  if (schema instanceof z.ZodObject) {
+    if (!(schema._def.catchall instanceof z.ZodNever)) {
+      throw new Error(`Tool ${name}'s input schema has a catch-all; it must refuse unknown keys.`);
+    }
+    if (schema._def.unknownKeys === 'strict') return schema;
+    if (schema._def.unknownKeys === 'passthrough') {
+      throw new Error(`Tool ${name}'s input schema passes unknown keys through.`);
+    }
+    return schema.strict();
+  }
+  if (schema instanceof z.ZodEffects) {
+    const inner = schema.innerType();
+    if (inner instanceof z.ZodObject && inner._def.unknownKeys === 'strict') return schema;
+  }
+  throw new Error(`Tool ${name}'s input schema must be a strict object.`);
 }
 
 export type ServerConfig = SessionConfig &
@@ -122,8 +164,17 @@ export function createServer(cfg: ServerConfig): McpServer {
   const register = server.registerTool.bind(server) as (...args: unknown[]) => unknown;
   let registered = false;
   server.registerTool = ((...args: unknown[]) => {
-    const [name, config] = args as [string, { annotations?: ToolAnnotations }];
+    const [name, config] = args as [
+      string,
+      { annotations?: ToolAnnotations; inputSchema?: unknown },
+    ];
     if (!filter.allows(name, config.annotations)) return;
+    // Every tool refuses an argument it does not know (OPL-5975). Done here,
+    // once, rather than trusted to each registration, because the SDK turns a
+    // plain field map into an object that STRIPS unknown keys while the listed
+    // schema says `additionalProperties: false` — so a misspelt flag was
+    // dropped and the call went ahead without it.
+    args[1] = { ...config, inputSchema: strictInput(name, config.inputSchema) };
     if (cfg.activity) {
       const handlerIndex = args.length - 1;
       const handler = args[handlerIndex] as (...handlerArgs: unknown[]) => unknown;

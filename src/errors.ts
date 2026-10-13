@@ -4,10 +4,10 @@
  * The distinctions here are the ones an agent has to act on and cannot infer
  * from prose. A 400 never clears and retrying it burns a turn. A 402 is a plan
  * limit, which no amount of waiting fixes and which the user — not the model —
- * has to resolve. A 409 is the one that is not uniform: most of them are a
- * passing state and worth retrying, and some are a decision about the request
- * that no retry turns into a yes — see {@link ConflictError} and
- * {@link MoveRequiredError}.
+ * has to resolve. A 409 is the one that is not uniform: some of them are a
+ * passing state and worth retrying, which the platform says with a `reason`,
+ * and the rest are a decision about the request that no retry turns into a
+ * yes — see {@link ConflictError} and {@link MoveRequiredError}.
  *
  * Mirrors the mapping in mandala-computer-python's `_exceptions.py`, and
  * deliberately so: two clients disagreeing about what a 402 is means the same
@@ -53,6 +53,13 @@ export class APIError extends MandalaError {
    * the caller who arrived a moment earlier heard.
    */
   readonly reason?: string;
+  /**
+   * The platform's machine-readable `code` beside `error`, where it sent one:
+   * `LABEL_TAKEN`, `WORKSPACE_MOVING`, `idempotency_in_progress` and so on.
+   * Top-level only, and only a nonblank string; `undefined` otherwise. Like
+   * `reason`, it is the word to switch on, never the sentence.
+   */
+  readonly code?: string;
   /** Response header first, then the top-level body ID; never an idempotency key. */
   readonly requestId?: string;
   /** The received Allow header, when supplied. */
@@ -71,6 +78,7 @@ export class APIError extends MandalaError {
   ) {
     super(message);
     this.reason = refusalReason(body);
+    this.code = record(body) ? nonblank(body.code) : undefined;
     this.requestId =
       nonblank(metadata?.requestId) ?? (record(body) ? nonblank(body.request_id) : undefined);
     this.allow = nonblank(metadata?.allow);
@@ -210,7 +218,11 @@ export function reasonAdvice(reason: string | undefined): string | undefined {
       // reason code, not a computer — so it names the call that CAN.
       return 'the computer is not running; if nothing is starting it this will not clear on its own and start_computer is the fix, and if a start is already under way wait_for_computer says so without starting a second one';
     case 'unsupported':
-      return 'this computer cannot do it at all, so do not retry it — the answer is the same forever';
+      // Subject-neutral (OPL-5975). It said "this computer cannot do it at
+      // all … the same forever", and the platform sends this word for refusals
+      // that are about no computer and that a step clears: a workspace that
+      // still holds computers or secrets, a workspace change still unsettled.
+      return 'waiting will not change this answer: either it cannot be done at all, or it needs another step first, which the message names. Do not send it again unchanged; take that step, if there is one, and then send it';
     case 'exists':
       // Only THIS attempt is known to have written nothing: a create-only
       // write whose earlier attempt lost its answer may have written the file
@@ -236,6 +248,83 @@ export function reasonAdvice(reason: string | undefined): string | undefined {
       return undefined;
   }
 }
+
+/**
+ * The `code`s that mark a 409 as a passing state when its `reason` does not
+ * say otherwise (OPL-5975), taken from the platform's own words for each:
+ *
+ * - `idempotency_in_progress`: the call with this key is still being carried
+ *   out; send it again shortly for its answer. The platform sends it with
+ *   `reason: "contention"` as well, which already says so; the code is named
+ *   so that it is still read as passing if the word is ever missing.
+ * - `WORKSPACE_MOVING`: the computer's workspace change is unsettled; try
+ *   again once the move has finished. Sent with `reason: "contention"` while
+ *   the move is settling, and `reason: "unsupported"` when it is stuck and
+ *   needs checking — the word, read first, decides those two.
+ *
+ * Every other 409 without a reason the platform documents as passing is NOT
+ * a passing state: the platform says an absent `reason` is no
+ * classification, and a client that treats 409 as uniformly transient "loops
+ * forever on half of them". That includes the ones that carry a code and no
+ * word — `LABEL_TAKEN`, `PUBLIC_URL_LIMIT` — and the ones that carry neither:
+ * the webhook cap, a test of a disabled webhook, an SSH key already
+ * registered, the SSH key limit, the sixteen background-command slots.
+ */
+const CODE_CLEARS: ReadonlySet<string> = new Set(['idempotency_in_progress', 'WORKSPACE_MOVING']);
+
+/** Whether a 409 carries a code the platform documents as a passing state. */
+export function conflictCodeClears(err: APIError): boolean {
+  return err.code !== undefined && CODE_CLEARS.has(err.code);
+}
+
+/**
+ * What to tell a model about a refusal the platform named with a `code`, or
+ * `undefined` for a code with nothing to add. Ahead of {@link statusAdvice} in
+ * the formatter, because these codes are more specific than the status:
+ * `PUBLIC_URLS_BLOCKED` is a 403 that is neither a role nor a suspended
+ * account, and `PUBLIC_URLS_DISABLED` is a 404 that is not a missing computer.
+ */
+export function codeAdvice(err: APIError): string | undefined {
+  switch (err.code) {
+    case 'LABEL_TAKEN':
+      return 'that label is taken, and this does not clear by waiting. A label is never given to a second account, so one another account has ever held, or one the platform has blocked, reads as taken, as does one a URL of this account holds now (list_public_urls shows those). Choose another label, or leave label out to have one picked';
+    case 'PUBLIC_URL_LIMIT':
+      return 'this computer already has as many public URLs as its plan allows, and this does not clear by waiting. Delete one it no longer needs (list_public_urls), point an existing one at this port with update_public_url, or say the plan is the limit';
+    case 'PUBLIC_URLS_BLOCKED':
+      return 'the platform has turned public URLs off for this computer or this account. It is not a role, a credential or anything wrong with the computer, and neither retrying nor waiting changes it: say so to the user, who can contact support if they think it is a mistake';
+    case 'PUBLIC_URLS_DISABLED':
+      return 'public URLs are not enabled here at all. This is not a missing computer or URL, and waiting does not change it: say that public URLs are unavailable';
+    case 'WORKSPACE_MOVING':
+      return err.reason === 'unsupported'
+        ? 'this computer\u2019s workspace change is not settled, and waiting alone will not settle it. Repeating the same move_computer_to_workspace call reconciles it, or check the workspace change in the dashboard; then send this again'
+        : 'this computer is being moved to another workspace; this clears once the move has finished, so wait a moment and send it again';
+    default:
+      return undefined;
+  }
+}
+
+/**
+ * A 409 the platform did not classify: no `reason` this version knows, no code
+ * from {@link codeAdvice} or {@link CODE_CLEARS}, and none of the 409s that
+ * carry their own class and say what they are. Not a passing state
+ * (OPL-5975): the platform says absent means no classification.
+ */
+export function unclassifiedConflict(err: unknown): boolean {
+  return (
+    err instanceof ConflictError &&
+    !(err instanceof MoveRequiredError) &&
+    !(err instanceof FileExistsError) &&
+    !(err instanceof CreateOnlyConflictError) &&
+    reasonKind(err.reason) === undefined &&
+    !conflictCodeClears(err) &&
+    codeAdvice(err) === undefined &&
+    idempotencyCode(err) === undefined
+  );
+}
+
+/** What a model is told about an {@link unclassifiedConflict}. */
+export const UNCLASSIFIED_CONFLICT_ADVICE =
+  'the platform did not say whether this clears, so treat it as one that does not: do not send it again unchanged unless the message itself says what to wait for. It usually says what to do instead';
 
 /** The platform's `code` on a keyed call's own refusals (OPL-5127), or `undefined`. */
 export function idempotencyCode(err: APIError): string | undefined {
@@ -635,9 +724,10 @@ export class MethodNotAllowedError extends APIError {
 /**
  * 409 — the thing exists but is in the wrong state for this right now.
  *
- * The one status on this list that is usually temporary: a guest still booting,
- * a guest agent busy with another call, a desktop session that has not come up
- * yet. Worth retrying; the others on this list are not.
+ * The one status on this list that is SOMETIMES temporary: a guest still
+ * booting, a guest agent busy with another call, a desktop session that has not
+ * come up yet. Those are worth retrying, and the platform says so with a
+ * `reason`; one without a word is not (OPL-5975, see {@link isTransient}).
  *
  * USUALLY, and the exception is why {@link MoveRequiredError} exists. Whether a
  * 409 clears is a property of the BODY and not of the status: some describe a
@@ -654,9 +744,11 @@ export class MethodNotAllowedError extends APIError {
  * with it. The rest stay here and are told apart by {@link APIError.reason},
  * which is the word the platform added for that purpose (OPL-3898) and the one
  * its own reference now says to switch on — never the sentence, which is prose
- * written for a person and rewritten whenever a better one is. Where no word was
- * sent this class means what it always did, and that fallback is the contract
- * rather than a gap: not every refusal here has an answer yet.
+ * written for a person and rewritten whenever a better one is — or by
+ * {@link APIError.code} where the platform documents a code as passing. Where
+ * neither says so, the refusal is unclassified and {@link isTransient} says no
+ * (OPL-5975): not every refusal here has an answer yet, and an unanswered one
+ * is not a promise that waiting helps.
  */
 export class ConflictError extends APIError {
   override name = 'ConflictError';
@@ -1423,8 +1515,10 @@ export function errorForStatus(
  * because a number can be added to it without anyone having to say which of the
  * three answers changed. It now reads identically in all three:
  *
- * - {@link ConflictError} — something is in flight that this cannot run
- *   alongside, minus the one that is a decision
+ * - {@link ConflictError} — only where the platform says it is passing: a
+ *   `reason` of `contention` or `starting`, or a code it documents as
+ *   passing (`idempotency_in_progress`, `WORKSPACE_MOVING`). A 409 with
+ *   neither is unclassified and not transient (OPL-5975)
  * - {@link RateLimitError} — a cadence, and the response usually says how long
  * - {@link UnavailableError} — something briefly out of reach, for a GET or
  *   HEAD only. Any change answered 503 may have happened, so it is not
@@ -1452,7 +1546,7 @@ export function errorForStatus(
  * be answered after a change landed. So retry reads freely, and check before
  * repeating anything that creates something.
  *
- * Nor is a status enough on its own to answer it. 409 is the case: most of them
+ * Nor is a status enough on its own to answer it. 409 is the case: some of them
  * are a passing state, and the move offer is a decision that no retry changes,
  * which is why the check below leads with the type rather than the number. If a
  * second such refusal earns a class, it belongs on that line too.
@@ -1467,18 +1561,16 @@ export function errorForStatus(
  * absent word — or one this version does not know — leaves the type answer
  * standing unchanged (OPL-3898).
  *
- * One refusal is known to sit on the wrong side of that fallback, and it stays
- * there deliberately (OPL-3909). A computer runs at most sixteen background
- * commands, and the request for a seventeenth is refused 409 with no `reason` —
- * correctly, since the slots may be held by servers and the platform will not
- * advise a retry it cannot promise. The type answer therefore stands, and it
- * says yes to something that may never clear. The alternative is to read the
- * platform's sentence, which is the exported-contract version of the mistake
- * OPL-3724 removed from three clients: a predicate that changes its answer when
- * somebody rewords a message. So the next step is given where the sentence can
- * be read safely — in `exec`, which knows it asked for a slot and which prints
- * the platform's own words either way — and this predicate is left honest about
- * what it can and cannot tell apart.
+ * And the fallback for a 409 with no word is NO, not yes (OPL-5975). It used
+ * to be yes — "a 409 is usually passing" — and that said yes to every refusal
+ * the platform had not classified: a label that is taken, a computer at its
+ * public URL limit, the webhook cap, an SSH key already registered, the
+ * seventeenth background command (OPL-3909, whose slots may be held by servers
+ * and never free). The platform's reference is explicit that an absent
+ * `reason` is no classification and that treating 409 as uniformly transient
+ * loops forever. So a 409 is transient here only when its word clears or its
+ * code is one the platform documents as passing ({@link conflictCodeClears}),
+ * and the same classification holds in both SDKs.
  */
 export function isTransient(err: unknown): boolean {
   if (err instanceof APIError && [401, 402, 403, 404, 405].includes(err.status)) return false;
@@ -1536,11 +1628,13 @@ export function isTransient(err: unknown): boolean {
     if (kind === 'clears' && record(err.body) && typeof err.body.reason === 'string') return true;
     if (kind === 'permanent') return false;
   }
-  return (
-    err instanceof ConflictError ||
-    err instanceof RateLimitError ||
-    err instanceof ConnectivityError
-  );
+  // A 409 is a passing state only where the platform says so (OPL-5975): a
+  // word that clears, above, or a code it documents as passing. One with
+  // neither is unclassified, and the platform's own reference says a client
+  // treating 409 as uniformly transient loops forever on half of them — a
+  // label that is taken, a computer at its URL limit, a webhook cap.
+  if (err instanceof ConflictError) return conflictCodeClears(err);
+  return err instanceof RateLimitError || err instanceof ConnectivityError;
 }
 
 /**

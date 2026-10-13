@@ -194,6 +194,7 @@ export const WORKSPACE_MEMBER = {
   role: 'owner',
   accepted_at: '2026-08-01T00:00:00.000Z',
   suspended: false,
+  seat_suspended: false,
 };
 
 /** `GET whoami` for an account-wide key that manages keys. */
@@ -1037,6 +1038,31 @@ function respond(
     });
   }
   if (path === '/computers/vm-bridged') return json(BRIDGED_COMPUTER);
+  // A delete answers the platform's DeleteResult, not a computer record: a
+  // plain delete `{ok, snapshots_deleted}`, and a purge says `computer_deleted`
+  // and what the purge did. A tool that reads deletion off any 2xx would pass
+  // against a record; it must not against this (OPL-5975).
+  if (method === 'DELETE' && /^\/computers\/[^/]+$/.test(path)) {
+    return json(
+      query.get('snapshots') === 'delete'
+        ? {
+            ok: true,
+            computer_deleted: true,
+            snapshots_deleted: 2,
+            purge: {
+              selected: 2,
+              confirmed: 2,
+              queued: 0,
+              failed: 0,
+              unknown: 0,
+              remaining: 0,
+              unselected: 0,
+              complete: true,
+            },
+          }
+        : { ok: true, snapshots_deleted: 0 },
+    );
+  }
   return json({ ...COMPUTER, status, running_ram_mb: runningRamFor(status) });
 }
 

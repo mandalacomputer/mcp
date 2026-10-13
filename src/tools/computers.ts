@@ -395,7 +395,7 @@ const POWER_NEXT: Record<string, string> = {
 const POWER_DESCRIPTIONS: Record<string, string> = {
   start:
     "Boot a computer, or resume a suspended one — a resume restores the saved session, same processes and windows, in about a second. A resumed guest's clock is set to the current time within a few seconds, best effort through its guest agent (one whose agent does not answer keeps the old time until NTP corrects it), and the desktop panel's clock can show the old time for up to a minute after that.",
-  stop: 'Shut a computer down: the guest is asked, and given time to do it. On a suspended computer this discards the saved session, and the next start is a fresh boot. The disk is kept. `force` pulls the power instead, for a guest that will not come down on its own.',
+  stop: 'Shut a computer down: the guest is asked, and given up to 20 seconds to do it; a guest still up after that is forced off by the platform, so an ordinary stop always ends stopped and can take up to about a minute to answer. On a suspended computer this discards the saved session, and the next start is a fresh boot. The disk is kept. `force` skips the asking and the 20-second wait and pulls the power at once.',
   suspend:
     "Write the guest's RAM to disk and give the host its memory back. A pause, not a stop: start_computer resumes the same session. A computer that holds secrets suspends only on a host that seals saved sessions (its memory is encrypted on the way to disk); elsewhere, and while its secrets are still being delivered, it is refused with 409. After a change to its secret bindings that dropped a secret or moved one to another revision while it ran, it cannot be suspended until it restarts, since its memory may still hold the old value.",
   restart:
@@ -824,7 +824,7 @@ export const registerComputers: Registrar = (server, session, opts) => {
           .boolean()
           .optional()
           .describe(
-            'Pull the power instead of asking, the way holding the button in does. Anything the guest had not written to disk is lost, so this is the second attempt and not the first: stop it politely, and reach for `force` when what comes back is a computer still running — a hung X session, a modal "unsaved changes" dialog, or a service that ignores SIGTERM will refuse the polite stop identically every time it is asked.',
+            'Pull the power at once instead of asking, the way holding the button in does. Anything the guest had not written to disk is lost. It is rarely needed: an ordinary stop already forces the computer off if the guest has not shut down within 20 seconds, so `force` only saves those 20 seconds, and it takes from the guest the chance to write its data first. Leave it out unless the user wants the computer off immediately.',
           ),
         idempotency_key: idempotencyKeyArg,
       },
@@ -942,7 +942,7 @@ export const registerComputers: Registrar = (server, session, opts) => {
     {
       title: 'Move a computer to a workspace',
       description:
-        'Change which workspace a computer belongs to, within the same account. This changes who can access it. Requires an account-wide member or owner credential; workspace-scoped credentials are refused, even for a no-op. Supply computer_id explicitly and workspace_id as a wsp- ID, or null to make it unassigned. Neither the selected computer nor the default workspace is used. The computer must be stopped, with no saved session, snapshots or snapshot history copies, secret bindings, or proxy credentials. The platform checks these conditions; a fleet that cannot prove safety can refuse. Do not stop the computer, discard its session, delete snapshots, or remove bindings automatically to overcome a refusal. This changes workspace membership, not hardware or size. If the outcome cannot be confirmed, read get_computer before deciding whether to retry.',
+        'Change which workspace a computer belongs to, within the same account. This changes who can access it. Requires an account-wide member or owner credential; workspace-scoped credentials are refused, even for a no-op. Supply computer_id explicitly and workspace_id as a wsp- ID, or null to make it unassigned. Neither the selected computer nor the default workspace is used. The computer must be stopped, with no saved session, snapshots or snapshot history copies, secret bindings, or proxy credentials. The platform checks these conditions; a fleet that cannot prove safety can refuse. Do not stop the computer, discard its session, delete snapshots, or remove bindings automatically to overcome a refusal. This changes workspace membership, not hardware or size. Once moved, keys confined to the old workspace lose it, its events and webhooks follow it, and its desktop and share credentials are replaced, so a get_desktop_url link from before stops working. If the outcome cannot be confirmed, read get_computer before deciding whether to retry; repeating the same call reconciles a change whose outcome was uncertain.',
       inputSchema: {
         computer_id: z.string().trim().min(1).describe('The explicit computer ID to move.'),
         workspace_id: z
@@ -1213,7 +1213,7 @@ export const registerComputers: Registrar = (server, session, opts) => {
     {
       title: 'List moves in progress and their outcomes',
       description:
-        'Every move on this account: the ones running and the ones that finished in the last day. Read this after move_computer if the wait ran out, and read it when a move is refused because another computer on the account is already being moved — only one runs at a time, and this says which one and how far along. `live` is the flag to poll on.',
+        'Every move on this account that this key can see — a key confined to a workspace sees only the moves of computers in that workspace: the ones running and the ones that finished in the last day. Read this after move_computer if the wait ran out, and read it when a move is refused because another computer on the account is already being moved — only one runs at a time, and this says which one and how far along. `live` is the flag to poll on.',
       inputSchema: {},
       annotations: { readOnlyHint: true },
     },
@@ -1681,7 +1681,7 @@ export const registerComputers: Registrar = (server, session, opts) => {
     {
       title: 'Get a link to watch the desktop',
       description:
-        "A URL that opens this computer's live desktop in a browser. Watch-only by default. These are credentials in a link: anyone holding one has that desktop until the computer restarts.",
+        "A URL that opens this computer's live desktop in a browser. Watch-only by default. These are credentials in a link: anyone holding one has that desktop until the computer restarts or is moved to another workspace, either of which issues new desktop credentials.",
       inputSchema: {
         ...idArg,
         control: z
@@ -1803,16 +1803,17 @@ export const registerComputers: Registrar = (server, session, opts) => {
             'for this, the order is stop_computer, start_computer, wait_for_computer until the guest is ' +
             'up, then get_desktop_url again to read the new answer — and test with a sentinel string ' +
             'rather than with text you cannot afford to lose. This link keeps working across that: a ' +
-            'stop and a start do NOT reissue the credentials, and restart_computer is the only thing ' +
-            'that does, so use restart_computer on a stopped computer when you want the cold boot AND ' +
-            'a fresh credential. It is refused while a session is suspended, and a computer starting ' +
+            'stop and a start do NOT reissue the credentials. restart_computer does, and so does a move ' +
+            'to another workspace (move_computer_to_workspace), so use restart_computer on a stopped ' +
+            'computer when you want the cold boot AND a fresh credential. It is refused while a session is suspended, and a computer starting ' +
             'for the FIRST time may load the boot capture it was created from instead, which carries ' +
             'that capture topology.';
         return control
           ? said(
               'Full control — keyboard and pointer. Treat this link as a password for that ' +
-                'desktop. Of the tools here, restart_computer is the only one that ends it: a stop ' +
-                'and a start leave it working, so a restart is what revokes one that has leaked.\n\n' +
+                'desktop. Two things end it: restart_computer, and a move to another workspace ' +
+                '(move_computer_to_workspace), which replaces the desktop and share credentials. A ' +
+                'stop and a start leave it working, so a restart is what revokes one that has leaked.\n\n' +
                 'TO MOVE TEXT, use read_clipboard and write_clipboard. They need nothing of the ' +
                 "hardware, but they require a Linux desktop image with its desktop's clipboard tool " +
                 'installed: xclip on X11, wl-clipboard (wl-paste/wl-copy) on Wayland images such as ' +
@@ -2026,7 +2027,7 @@ export const registerComputers: Registrar = (server, session, opts) => {
         const chosen = byDefault(named);
         const where = chosen ? ` in workspace ${workspace_id}${chosen}` : '';
         const note = c.start_error
-          ? `Created ${describe(c)}${where}${operationClause(c)}, but it did not start: ${c.start_error}\nThe computer exists and is selected. start_computer often works on a second attempt.`
+          ? `Created ${describe(c)}${where}${operationClause(c)}, but it did not start: ${c.start_error}\nThe computer exists, is stopped, is selected and counts against the plan; do not create another. Read the reason above before calling start_computer: a start refused for lack of disk space or capacity on its host answers the same way until space there is freed, so wait rather than retrying it in a loop, and say so.`
           : `Created and selected ${describe(c)}${where}${operationClause(c)}.`;
         return said(
           args.template_transfer === undefined
@@ -2202,6 +2203,49 @@ export const registerComputers: Registrar = (server, session, opts) => {
               'account, in which case NO computer of yours has been touched and a real one may still be running ' +
               'under the id you meant. list_computers says which of the two this is. The session is no longer ' +
               'bound to that id either way.',
+          );
+        }
+        // A 2xx is not, by itself, a deletion (OPL-5975). The platform answers a
+        // purge whose computer delete was not confirmed with a 2xx carrying
+        // `{error, computer_deleted: false}` and no `ok`, and `computer_deleted:
+        // null` where whether it is gone is unknown. So the computer is called
+        // deleted only on the platform's word: `computer_deleted: true`, or —
+        // for a plain delete, which carries no `computer_deleted` — `ok: true`
+        // with no `error`. Anything else is reported as unconfirmed, and the
+        // session stays bound: the computer may well still be there.
+        const answer = isPlainRecord(res) ? res : undefined;
+        const confirmed =
+          answer !== undefined &&
+          (answer.computer_deleted === true ||
+            (answer.computer_deleted === undefined &&
+              answer.ok === true &&
+              answer.error === undefined));
+        if (!confirmed) {
+          const why =
+            typeof answer?.error === 'string' && answer.error.trim()
+              ? answer.error.trim()
+              : undefined;
+          const op = operationIdOf(res);
+          return refused(
+            `The platform answered the delete of ${computer_id}${operationClause(res)} without confirming that the computer is gone${why ? `: "${why}"` : ''}. ` +
+              `Do NOT report it as deleted. Read get_computer for ${computer_id} (list_computers if that is refused) to see whether it still exists before doing anything else` +
+              (delete_snapshots
+                ? `, and read snapshot_holdings for ${computer_id} before retrying any purge: unless the answer below says otherwise, its snapshot copies were kept.`
+                : '.') +
+              ' The session is still bound to it.',
+            {
+              computer_id,
+              ...(op ? { operation_id: op } : {}),
+              ...(answer && 'ok' in answer ? { ok: answer.ok } : {}),
+              ...(answer && 'computer_deleted' in answer
+                ? { computer_deleted: answer.computer_deleted }
+                : {}),
+              ...(answer?.snapshots_deleted === undefined
+                ? {}
+                : { snapshots_deleted: answer.snapshots_deleted }),
+              ...(answer?.purge !== undefined ? { purge: answer.purge } : {}),
+              ...(why ? { error: why } : {}),
+            },
           );
         }
         session.unbind(computer_id);

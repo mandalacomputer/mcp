@@ -122,6 +122,12 @@ const workspaceMember = z.object({
   role: label,
   accepted_at: z.string(),
   suspended: z.boolean(),
+  // Waiting for a seat on this account, and unable to act on it until one is
+  // restored (platform OPL-5919). Independent of `suspended`, which is a
+  // sign-in suspension. Optional, as the SDKs read it, so a platform that
+  // predates it still lists members; one sent as anything but a boolean fails
+  // the listing rather than reading as false.
+  seat_suspended: z.boolean().optional(),
 });
 
 // What a workspace delete answers: the ack, and how many keys went with it.
@@ -260,7 +266,7 @@ export const registerAccount: Registrar = (server, session) => {
     {
       title: "List a workspace's members",
       description:
-        "The people who reach a workspace, oldest member first: user_id, email, name (null when unset), role, accepted_at and suspended. Workspaces do not divide people — everybody on the account reaches every workspace at their account role — so this is the account's accepted members; invitations not yet accepted are left out. A key confined to a workspace is refused with 403, because the list is the whole account's: relay that rather than retrying, and use an account-wide key.",
+        "The people who reach a workspace, oldest member first: user_id, email, name (null when unset), role, accepted_at, suspended (a sign-in suspension: they cannot sign in anywhere) and seat_suspended (true while they wait for a seat on this account and cannot act on it; it returns to false when their seat is restored). Either flag, or both, can be true. Workspaces do not divide people — everybody on the account reaches every workspace at their account role — so this is the account's accepted members; invitations not yet accepted are left out. A key confined to a workspace is refused with 403, because the list is the whole account's: relay that rather than retrying, and use an account-wide key.",
       inputSchema: z.object({ workspace_id: workspaceIdArg }).strict(),
       annotations: readAnnotations,
     },
@@ -272,9 +278,10 @@ export const registerAccount: Registrar = (server, session) => {
             signal: extra.signal,
           }),
         );
+        const waiting = data.filter((m) => m.seat_suspended === true).length;
         return said(
           data.length
-            ? `${data.length} member${data.length === 1 ? '' : 's'} reach this workspace, oldest first.`
+            ? `${data.length} member${data.length === 1 ? '' : 's'} reach this workspace, oldest first.${waiting ? ` ${waiting} of them ${waiting === 1 ? 'is' : 'are'} waiting for a seat (seat_suspended) and cannot act on the account until one is restored.` : ''}`
             : 'No members reach this workspace.',
           data,
         );
@@ -347,7 +354,7 @@ export const registerAccount: Registrar = (server, session) => {
     'delete_workspace',
     {
       title: 'Delete a workspace',
-      description: `Permanently delete a workspace. It REVOKES every API key confined to it, whoever holds it, in the same step: anything using one of those keys — a person's CI, another agent — is refused from its next request, and this cannot be undone. The answer says how many were revoked. Only an empty workspace can be deleted: one that still holds computers is refused (409), saying how many, and nothing is deleted or revoked; delete those computers first. Needs confirm: true. ${OWNER_ACCOUNT_WIDE}`,
+      description: `Permanently delete a workspace. It REVOKES every API key confined to it, whoever holds it, in the same step: anything using one of those keys — a person's CI, another agent — is refused from its next request, and this cannot be undone. The answer says how many were revoked. Only an empty workspace can be deleted: one that still holds computers (counting one an unfinished workspace change is moving into it) or active secrets is refused with 409, saying how many, and nothing is deleted or revoked. To empty it, move its computers to another workspace with move_computer_to_workspace (or in the dashboard) or delete them, and delete its secrets with delete_secret, giving their workspace_id and current revision_id; then send this again. Say what is in it before moving or deleting anything to empty it. A 503 means the platform could not confirm it is empty: nothing was deleted, and it can be sent again shortly. Snapshots taken in it remain, and an account-wide key can still clone them. Needs confirm: true. ${OWNER_ACCOUNT_WIDE}`,
       inputSchema: z
         .object({
           workspace_id: workspaceIdArg,

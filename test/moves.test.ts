@@ -35,7 +35,7 @@ const offer = (possible: boolean, message = 'that is more RAM than this host can
     })) as typeof fetch;
 
 describe('the retry predicate', () => {
-  it('says no to a move offer and yes to every other conflict', () => {
+  it('says no to a move offer and yes to a conflict the platform calls passing', () => {
     // The bug, as one line. isTransient is exported and documented as a contract
     // with embedders, so a host application wrapping a resize in
     // `if (isTransient(err)) retry()` looped on a refusal that was a decision.
@@ -46,10 +46,19 @@ describe('the retry predicate', () => {
       true,
     );
     expect(isTransient(move)).toBe(false);
-    // And the ordinary 409 is untouched — a guest still booting is exactly what
+    // And a passing 409 is untouched — a guest still booting is exactly what
     // the predicate is for, and narrowing it to nothing would be the opposite
-    // mistake.
-    expect(isTransient(new ConflictError('the guest agent is not answering yet', 409))).toBe(true);
+    // mistake. Since OPL-5975 the platform has to say so, with its word: a 409
+    // with no word is unclassified and not transient.
+    expect(
+      isTransient(
+        new ConflictError('the guest agent is not answering yet', 409, {
+          error: 'the guest agent is not answering yet',
+          reason: 'starting',
+        }),
+      ),
+    ).toBe(true);
+    expect(isTransient(new ConflictError('the guest agent is not answering yet', 409))).toBe(false);
   });
 
   it('is a ConflictError still, so anything matching on the family keeps working', () => {
