@@ -210,6 +210,31 @@ describe('what a model is told', () => {
     expect(textOf(failed(cases[0]))).toContain('Retrying does not help');
   });
 
+  // Codex, round 3 on #213: a word that clears was said over a status the
+  // predicate calls final, and a code's advice masked the word beside it.
+  it('says a clearing word only where the predicate agrees', () => {
+    const fiveHundred = err(500, { error: 'x', reason: 'contention' });
+    expect(isTransient(fiveHundred)).toBe(false);
+    expect(textOf(failed(fiveHundred))).not.toContain('worth sending again');
+    const rateLimited = err(429, { error: 'x', reason: 'contention' });
+    expect(isTransient(rateLimited)).toBe(true);
+    expect(textOf(failed(rateLimited))).toContain('worth sending again');
+    expect(textOf(failed(err(409, { error: 'x', reason: 'contention' })))).toContain(
+      'worth sending again',
+    );
+  });
+
+  it('lets a word beside a code speak for itself', () => {
+    const taken = err(409, { error: 'x', code: 'LABEL_TAKEN', reason: 'contention' });
+    expect(isTransient(taken)).toBe(true);
+    expect(textOf(failed(taken))).toContain('worth sending again');
+    expect(textOf(failed(taken))).not.toContain('does not clear by waiting');
+    const limit = err(409, { error: 'x', code: 'PUBLIC_URL_LIMIT', reason: 'revoked' });
+    expect(isTransient(limit)).toBe(false);
+    expect(textOf(failed(limit))).not.toContain('update_public_url');
+    expect(textOf(failed(limit))).toContain(reasonAdvice('revoked') as string);
+  });
+
   it('gives a code’s advice only on the status it is documented with', () => {
     for (const [code, status] of [
       ['LABEL_TAKEN', 400],

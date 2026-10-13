@@ -221,6 +221,39 @@ describe('deleting a computer', () => {
     }
   });
 
+  // Codex, round 3 on #213: a purge always says `computer_deleted`, so an
+  // `ok: true` without it is not a confirmed deletion.
+  it('does not confirm a purge by ok alone', async () => {
+    const real = globalThis.fetch;
+    globalThis.fetch = (async (_input: unknown, init?: RequestInit) =>
+      new Response(
+        JSON.stringify(
+          (init?.method ?? 'GET') === 'DELETE'
+            ? { ok: true, snapshots_deleted: 0 }
+            : { id: 'vm-1', status: 'running' },
+        ),
+        { headers: { 'Content-Type': 'application/json' } },
+      )) as typeof fetch;
+    try {
+      const { call, close } = await connect();
+      const purged = await call('delete_computer', {
+        computer_id: 'vm-1',
+        confirm: true,
+        delete_snapshots: true,
+        expect: 'fp-abc123',
+      });
+      expect(purged.isError).toBe(true);
+      expect(textOf(purged)).toContain('without confirming that the computer is gone');
+      expect(textOf(await call('get_computer', {}))).not.toContain('No computer selected');
+      // The same answer to a plain delete is the platform's confirmation.
+      const plain = await call('delete_computer', { computer_id: 'vm-1', confirm: true });
+      expect(textOf(plain)).toMatch(/^Deleted vm-1\./);
+      await close();
+    } finally {
+      globalThis.fetch = real;
+    }
+  });
+
   it('calls a confirmed delete a deletion, plain or purged', async () => {
     const { call, close } = await connect();
     const plain = await call('delete_computer', { computer_id: 'vm-1', confirm: true });

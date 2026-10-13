@@ -2,12 +2,14 @@ import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import {
   APIError,
   codeAdvice,
+  isTransient,
   MandalaError,
   OriginTLSError,
   OriginUnreachableError,
   outcomeUnknownOn503,
   platformSaid,
   reasonAdvice,
+  reasonKind,
   statusAdvice,
   UNCLASSIFIED_CONFLICT_ADVICE,
   UnavailableError,
@@ -264,7 +266,12 @@ export function failed(
         codeAdvice(err) ??
         statusAdvice(err.status, err.reason) ??
         (reasonable
-          ? (reasonAdvice(err.reason) ??
+          ? // A word that clears is said only where the retry predicate agrees:
+            // on a 400 or a 409, at the top level. A 500 carrying `contention`
+            // is not told "worth sending again" (Codex, round 3 on #213).
+            ((reasonKind(err.reason) === 'clears' && !isTransient(err)
+              ? undefined
+              : reasonAdvice(err.reason)) ??
             (unclassifiedConflict(err) ? UNCLASSIFIED_CONFLICT_ADVICE : undefined))
           : undefined))
       : undefined;

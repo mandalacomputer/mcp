@@ -2211,13 +2211,16 @@ export const registerComputers: Registrar = (server, session, opts) => {
         // null` where whether it is gone is unknown. So the computer is called
         // deleted only on the platform's word: `computer_deleted: true`, or —
         // for a plain delete, which carries no `computer_deleted` — `ok: true`
-        // with no `error`. Anything else is reported as unconfirmed, and the
-        // session stays bound: the computer may well still be there.
+        // with no `error`. A purge always says `computer_deleted`, so one that
+        // does not is not confirmed by its `ok` (Codex, round 3 on #213).
+        // Anything else is reported as unconfirmed, and the session stays
+        // bound: the computer may well still be there.
         const answer = isPlainRecord(res) ? res : undefined;
         const confirmed =
           answer !== undefined &&
           (answer.computer_deleted === true ||
-            (answer.computer_deleted === undefined &&
+            (!delete_snapshots &&
+              answer.computer_deleted === undefined &&
               answer.ok === true &&
               answer.error === undefined));
         if (!confirmed) {

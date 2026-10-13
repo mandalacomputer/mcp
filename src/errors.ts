@@ -289,6 +289,10 @@ export function codeAdvice(err: APIError): string | undefined {
   // another status is not the refusal this advice describes, and the status's
   // own advice — a 401 to 405 is never a retry — is left to speak.
   if (CODE_STATUS[err.code ?? ''] !== err.status) return undefined;
+  // The word first, as in isTransient: a reason this version knows, beside any
+  // code but WORKSPACE_MOVING (whose advice reads the word itself), is the
+  // more specific answer, and its own advice is given instead.
+  if (err.code !== 'WORKSPACE_MOVING' && reasonKind(err.reason) !== undefined) return undefined;
   switch (err.code) {
     case 'LABEL_TAKEN':
       return 'that label is taken, and this does not clear by waiting. A label is never given to a second account, so one another account has ever held, or one the platform has blocked, reads as taken, as does one a URL of this account holds now (list_public_urls shows those). Choose another label, or leave label out to have one picked';
