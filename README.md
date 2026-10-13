@@ -238,6 +238,17 @@ which says nothing about the path; `isTransient` is false for both.
 `rename_workspace`, `delete_workspace`. Minting and revoking API keys are
 deliberately not tools — see [Who you are, and API keys](#who-you-are-and-api-keys).
 
+**Deliberately not tools** — five API operations, each because it would put a
+credential in a model's context: minting and revoking API keys (above), and the
+three browser-connection routes (create, renew and revoke). A browser
+connection is a raw capability to drive the guest's browser; the TypeScript
+and Python SDKs' browser drivers create, renew and revoke it and keep it to
+themselves. Every other API operation has a tool.
+
+**Every tool refuses an argument it does not declare.** A misspelt or unknown
+key is an input error naming the key, and nothing is sent — so a misspelt flag
+can never be dropped and the call go ahead without it.
+
 **Spending** — `get_usage`, `get_credits`
 
 **Being told somewhere else** — `list_webhooks`, `create_webhook`,
@@ -261,13 +272,22 @@ but not add or remove them.
 
 **Showing an app on the internet** — `list_public_urls`, `create_public_url`,
 `update_public_url`, `delete_public_url`. A port inside a computer served at
-`https://<label>.mandala.dev`, on 443 with no port in the address. **Public by
+`https://<label>.<base_domain>` (the domain is in the `list_public_urls`
+answer, e.g. `mandala.dev`), on 443 with no port in the address. **Public by
 default: anyone with the link can open it**; `access: "private"` requires an API
 key of this account as `Authorization: Bearer`, which never reaches the app. The
 app must listen on `0.0.0.0`, not `127.0.0.1`. Labels that read as the
-platform's or another company's address are refused. A browser may see a
-one-time notice page before a new account's URL; send `mandala-skip-warning: 1`
-when driving one yourself.
+platform's or another company's address are refused. A deleted URL's label stays
+with the account: no other account can ever take it, and the account may use it
+again unless the platform has blocked it. A computer over its plan's limit
+serves only its oldest URLs, and the listing marks the rest.
+
+A browser opening a new account's URL may first see a one-time notice page. It
+goes to any request that looks like a browser opening a page — a navigation by
+its fetch metadata, or, without fetch metadata, `Accept: text/html` from a
+`Mozilla/` user agent — so a program sending browser headers sees it too. A
+client that sets headers skips it with `mandala-skip-warning: 1`; in the
+computer's own browser, where `open_url` cannot send headers, click Continue.
 
 **Secrets** — `list_secrets`, `get_secret`, `create_secret`, `set_secret`,
 `replace_secret`, `delete_secret` for the account's secret store, and
@@ -501,8 +521,10 @@ one is refused (403), so none of them can touch the workspace this server's own
 key stands in. `delete_workspace` needs `confirm: true` and REVOKES every API
 key confined to the workspace, whoever holds it — a person's CI or another agent
 may be using one — and answers how many. Only an empty workspace can be
-deleted: one that still holds computers is refused (409), saying how many, and
-nothing is deleted or revoked.
+deleted: one that still holds computers or active secrets is refused (409),
+saying how many, and nothing is deleted or revoked. Move its computers out with
+`move_computer_to_workspace` (or delete them) and delete its secrets with
+`delete_secret`, then send it again.
 None of the three is offered to a read-only session (`MANDALA_READ_ONLY`).
 
 An account-wide key can work in one workspace without a key confined to it:
@@ -953,12 +975,14 @@ does not.
 **screenshots deliberately do not**, so a loop that only watches can see its own
 machine go down under it.
 
-**A stop is a request, and can be refused.** `stop_computer` asks the guest to
-shut down and gives it time to do it. A hung X session, a modal "unsaved
-changes" dialog or a service that ignores its own shutdown will refuse that
-identically every time it is asked. `force: true` pulls the power instead — the
-equivalent of holding the button in — and whatever the guest had not written to
-disk goes with it, so it is the second attempt rather than the first.
+**A stop asks first, then forces.** `stop_computer` asks the guest to shut
+down and gives it up to 20 seconds; a guest still up after that — a hung X
+session, a modal "unsaved changes" dialog, a service that ignores its own
+shutdown — is forced off by the platform, so an ordinary stop ends stopped and
+can take up to about a minute to answer. `force: true` skips the asking and the
+wait and pulls the power at once — the equivalent of holding the button in — and
+whatever the guest had not written to disk goes with it. It saves 20 seconds,
+not a failed stop, so leave it out unless the computer must be off immediately.
 
 **Purging snapshots is bound to the set you were shown.** Deleting a computer
 keeps its snapshots by default. To destroy them too, read `snapshot_holdings`
@@ -1018,8 +1042,13 @@ inside its boot window) clear, so the same call works in a moment;
 `unavailable`, `running`, `unsupported`, `exists` and `revoked` do not. A 409
 does not mean "wait": `exec`, input and the clipboard on a stopped computer
 answer 409 `unavailable`, and `start_computer` is what fixes that, while
-`running` needs the computer stopped first. The platform's own error messages
-come through unedited, because they are written to be acted on.
+`running` needs the computer stopped first. A 409 with no `reason` is
+unclassified, and is treated as one that does not clear — a label that is taken,
+a computer at its public URL limit, the webhook cap, an SSH key already
+registered — unless its `code` is one the platform documents as passing
+(`idempotency_in_progress`, or `WORKSPACE_MOVING` while the move settles). The
+platform's own error messages come through unedited, because they are written to
+be acted on.
 
 HTTP failures preserve their actual response status. An unsupported method on a
 known path is `MethodNotAllowedError` (405), with the received `Allow` value when
@@ -1034,7 +1063,10 @@ same way. So `isTransient` is false for it whatever `reason` it carries, the
 tool's answer says to read the current state first, and `error.method` records
 the method. A `reason` this version does not
 know, such as a new word, is treated as no classification. `reasonKind` returns
-`undefined` for it, and the status decides.
+`undefined` for it, and the status decides — which, for a 409, is no: a 409 is
+transient only when its `reason` clears or its `code` is
+`idempotency_in_progress` or `WORKSPACE_MOVING` (with no `reason` saying
+otherwise). `APIError.code` carries the platform's code.
 
 The secret store has typed calls on `api.secrets`: `list`, `create`, `get`,
 `replace` and `delete`. Each answer is decoded strictly to the documented
@@ -1075,9 +1107,11 @@ intermediaries and connection failures may supply none of them. Existing
 constructor arguments retain their meanings; an optional trailing
 `APIErrorMetadata` object adds these three fields, and `method`.
 
-MCP error results include supplied `reason`, `request_id`, `allow`,
-`www_authenticate` and `retry_after_ms` as labelled JSON metadata. Diagnostic
-strings are limited to 128, 256, 512 and 512 characters respectively; an
+MCP error results include supplied `code`, `reason`, `request_id`, `allow`,
+`www_authenticate` and `retry_after_ms` as labelled JSON metadata. `code` is the
+platform's machine-readable code (`LABEL_TAKEN`, `WORKSPACE_MOVING`, …), the
+word to switch on rather than the sentence. Diagnostic
+strings are limited to 128, 128, 256, 512 and 512 characters respectively; an
 oversized field is omitted with a notice, so a shortened Allow is never
 presented as complete. Tool-specific warnings about partial work, retained
 publication, execution reads and explicit template continuation still apply.
