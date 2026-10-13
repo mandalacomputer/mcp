@@ -1068,3 +1068,44 @@ export function chatBody(args: {
 }): Json {
   return omitUndefined({ ...args, stream: false });
 }
+
+/**
+ * A computer's public URLs (platform OPL-3753): `https://<label>.<base_domain>`
+ * serving a port inside it. The id is `pu-`-shaped.
+ */
+export const publicUrls = (id: string) => `${computer(id)}/public-urls`;
+export const publicUrl = (id: string, urlId: string) =>
+  `${publicUrls(id)}/${segment('url_id', urlId)}`;
+
+/** The port a public URL may not serve: the computer's own SSH. */
+export const PUBLIC_URL_RESERVED_PORT = 22;
+
+/**
+ * The body for a public URL create or update, with the platform's port refusal
+ * mirrored, because a port outside 1..65535 or the computer's own 22 is a call
+ * that can only fail. The label is NOT checked here: the platform's rules for
+ * it (reserved words, look-alike spellings, brand names) are its own to
+ * change, and its 400 says which rule a label broke. It is trimmed, the way the
+ * platform reads it. Undefined fields are dropped: on an update that is what
+ * "leave it as it is" means, and on a create it is what lets the platform pick
+ * a label and default the access to public.
+ */
+export function publicUrlBody(args: {
+  port?: number;
+  label?: string;
+  access?: 'public' | 'private';
+}): Json {
+  if (args.port !== undefined) {
+    if (!Number.isSafeInteger(args.port) || args.port < 1 || args.port > 65535) {
+      throw new Error(`port must be a whole number from 1 to 65535, not ${args.port}`);
+    }
+    if (args.port === PUBLIC_URL_RESERVED_PORT) {
+      throw new Error(
+        'port 22 is the computer’s own SSH and cannot be served on a public URL; use get_computer_ssh for SSH access',
+      );
+    }
+  }
+  const label = args.label === undefined ? undefined : args.label.trim();
+  if (label === '') throw new Error('label must not be empty; leave it out to have one picked');
+  return omitUndefined({ port: args.port, label, access: args.access });
+}

@@ -259,6 +259,16 @@ account) or bound to another account answers as if there were no such key, and
 the person removes it from the dashboard. A workspace-scoped key can read keys
 but not add or remove them.
 
+**Showing an app on the internet** — `list_public_urls`, `create_public_url`,
+`update_public_url`, `delete_public_url`. A port inside a computer served at
+`https://<label>.mandala.dev`, on 443 with no port in the address. **Public by
+default: anyone with the link can open it**; `access: "private"` requires an API
+key of this account as `Authorization: Bearer`, which never reaches the app. The
+app must listen on `0.0.0.0`, not `127.0.0.1`. Labels that read as the
+platform's or another company's address are refused. A browser may see a
+one-time notice page before a new account's URL; send `mandala-skip-warning: 1`
+when driving one yourself.
+
 **Secrets** — `list_secrets`, `get_secret`, `create_secret`, `set_secret`,
 `replace_secret`, `delete_secret` for the account's secret store, and
 `get_computer_secrets`, `set_computer_secrets` and `create_computer`'s `secrets`
@@ -350,6 +360,7 @@ with an error listing all valid tags.
 | `usage` | `get_usage`, `get_credits` |
 | `webhooks` | All webhook tools listed above |
 | `ssh` | All SSH tools listed above |
+| `public_urls` | `list_public_urls`, `create_public_url`, `update_public_url`, `delete_public_url` |
 | `secrets` | `list_secrets`, `get_secret`, `create_secret`, `set_secret`, `replace_secret`, `delete_secret`, `get_computer_secrets`, `set_computer_secrets` |
 | `agent` | `run_agent`, `run_agent_chat` |
 | `activities` | `list_activities`, `get_activity`, `get_activity_results` |

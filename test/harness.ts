@@ -293,6 +293,22 @@ export const WEBHOOK = {
   updated_at: '2026-09-01T11:00:00.000Z',
 };
 
+/**
+ * One public URL as the platform answers it (platform OPL-3753): public, on
+ * port 3000, not turned off.
+ */
+export const PUBLIC_URL = {
+  id: 'pu-0123456789abcdef',
+  url: 'https://cool-thing.mandala.dev',
+  hostname: 'cool-thing.mandala.dev',
+  label: 'cool-thing',
+  port: 3000,
+  access: 'public',
+  disabled: false,
+  created_at: '2026-10-12T12:00:00.000Z',
+  updated_at: '2026-10-12T12:00:00.000Z',
+};
+
 /** The same subscription as a create or a rotate answers it: with the secret. */
 export const WEBHOOK_CREATED = {
   ...WEBHOOK,
@@ -906,6 +922,34 @@ function respond(
       computer: decodeURIComponent(ssh[1]),
       enabled: method === 'PUT' ? sent : SSH_SETTING.enabled,
     });
+  }
+  // Public URLs (platform OPL-3753). A create or an update answers what it was
+  // sent, so a tool that dropped a field would be caught rather than echoed a
+  // fixture; a delete is the ack.
+  const publicUrls = /^\/computers\/[^/]+\/public-urls(?:\/([^/]+))?$/.exec(path);
+  if (publicUrls) {
+    const sent = (body ?? {}) as { port?: number; label?: string; access?: string };
+    if (!publicUrls[1] && method === 'GET')
+      return json({
+        enabled: true,
+        base_domain: 'mandala.dev',
+        limit: 2,
+        public_urls: [PUBLIC_URL],
+      });
+    if (method === 'DELETE') return json({ ok: true });
+    const label = sent.label ?? PUBLIC_URL.label;
+    return json(
+      {
+        ...PUBLIC_URL,
+        ...(publicUrls[1] ? { id: decodeURIComponent(publicUrls[1]) } : {}),
+        label,
+        hostname: `${label}.mandala.dev`,
+        url: `https://${label}.mandala.dev`,
+        port: sent.port ?? PUBLIC_URL.port,
+        access: sent.access ?? PUBLIC_URL.access,
+      },
+      method === 'POST' ? 201 : 200,
+    );
   }
   // The account's secret store. A create answers the name it was sent and a
   // replace a moved revision; neither ever carries the value it was sent, and a
