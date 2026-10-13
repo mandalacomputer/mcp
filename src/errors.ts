@@ -295,9 +295,14 @@ export function codeAdvice(err: APIError): string | undefined {
     case 'PUBLIC_URLS_DISABLED':
       return 'public URLs are not enabled here at all. This is not a missing computer or URL, and waiting does not change it: say that public URLs are unavailable';
     case 'WORKSPACE_MOVING':
-      return err.reason === 'unsupported'
-        ? 'this computer\u2019s workspace change is not settled, and waiting alone will not settle it. Repeating the same move_computer_to_workspace call reconciles it, or check the workspace change in the dashboard; then send this again'
-        : 'this computer is being moved to another workspace; this clears once the move has finished, so wait a moment and send it again';
+      // The word decides, as it does in isTransient: `unsupported` is the
+      // stuck change, and any other word that does not clear says what it
+      // says — so this stays silent and that word's own advice is given, never
+      // "send it again" over a refusal isTransient calls permanent.
+      if (err.reason === 'unsupported')
+        return 'this computer\u2019s workspace change is not settled, and waiting alone will not settle it. Repeating the same move_computer_to_workspace call reconciles it, or check the workspace change in the dashboard; then send this again';
+      if (reasonKind(err.reason) === 'permanent') return undefined;
+      return 'this computer is being moved to another workspace; this clears once the move has finished, so wait a moment and send it again';
     default:
       return undefined;
   }

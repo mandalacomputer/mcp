@@ -156,6 +156,29 @@ describe('what a model is told', () => {
     expect(advice).toContain('needs another step first, which the message names');
   });
 
+  // Codex, round 1 on #213: WORKSPACE_MOVING's "send it again" outranked a
+  // permanent word beside it, so a refusal isTransient calls permanent was
+  // answered as one to retry.
+  it.each(['unavailable', 'running', 'revoked', 'exists'])(
+    'defers WORKSPACE_MOVING to a permanent %s beside it',
+    (reason) => {
+      const e = err(409, { error: 'x', code: 'WORKSPACE_MOVING', reason });
+      expect(isTransient(e)).toBe(false);
+      const text = textOf(failed(e));
+      expect(text).not.toContain('wait a moment and send it again');
+      expect(text).not.toContain('clears once the move has finished');
+      expect(text).toContain(reasonAdvice(reason) as string);
+    },
+  );
+
+  it('keeps WORKSPACE_MOVING’s own advice where the word clears, is unknown, or is absent', () => {
+    for (const reason of ['contention', 'some-new-word', undefined]) {
+      const e = err(409, { error: 'x', code: 'WORKSPACE_MOVING', reason });
+      expect(isTransient(e), String(reason)).toBe(true);
+      expect(textOf(failed(e)), String(reason)).toContain('clears once the move has finished');
+    }
+  });
+
   it('has advice for each code it classifies, and none for one it does not', () => {
     for (const code of [
       'LABEL_TAKEN',
