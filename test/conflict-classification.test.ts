@@ -148,6 +148,13 @@ describe('what a model is told', () => {
     const text = textOf(failed(err(409, { error: 'The label is taken somewhere.' })));
     expect(text.startsWith('The label is taken somewhere. (HTTP 409) — ')).toBe(true);
     expect(text).toContain('the platform did not say whether this clears');
+    // No exception for a sentence that sounds like waiting (Codex, round 4 on
+    // #213): only a word or a code makes a 409 one to send again.
+    const waiting = textOf(
+      failed(err(409, { error: 'Wait until a running command exits before trying again.' })),
+    );
+    expect(waiting).toContain('do not send it again unchanged.');
+    expect(waiting).not.toMatch(/unless the message/);
     // Not on one the platform classified, either way, nor on a 400.
     expect(textOf(failed(err(409, { error: 'x', reason: 'contention' })))).not.toContain(
       'did not say whether this clears',
@@ -265,6 +272,50 @@ describe('what a model is told', () => {
       expect(codeAdvice(err(status, { error: 'x', code })), code).toBeDefined();
     }
     expect(codeAdvice(err(409, { error: 'x', code: 'SOMETHING_ELSE' }))).toBeUndefined();
+  });
+});
+
+describe('a keyed call refused as still running', () => {
+  let platform: ReturnType<typeof installFakePlatform>;
+  beforeEach(() => {
+    platform = installFakePlatform();
+  });
+  afterEach(() => platform.restore());
+
+  const answering = (status: number, body: Record<string, unknown>) => {
+    const real = globalThis.fetch;
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      if ((init?.method ?? 'GET') === 'POST')
+        return new Response(JSON.stringify(body), {
+          status,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      return real(input as never, init);
+    }) as typeof fetch;
+  };
+
+  it('is told to send it again with the same key, as the platform documents', async () => {
+    answering(409, { error: 'x', code: 'idempotency_in_progress', reason: 'contention' });
+    const { call, close } = await connect();
+    const text = textOf(await call('start_computer', { idempotency_key: 'k-1' }));
+    await close();
+    expect(text).toContain('call again with the same idempotency_key');
+  });
+
+  // Codex, round 4 on #213: the code's "send it again with this key" was given
+  // beside a permanent word and on another status, both final.
+  it.each([
+    [409, { error: 'x', code: 'idempotency_in_progress', reason: 'revoked' }],
+    [409, { error: 'x', code: 'idempotency_in_progress', reason: 'unsupported' }],
+    [403, { error: 'x', code: 'idempotency_in_progress' }],
+  ] as const)('is not told to resend a %i that is final: %j', async (status, body) => {
+    answering(status, body);
+    const { call, close } = await connect();
+    const text = textOf(await call('start_computer', { idempotency_key: 'k-1' }));
+    await close();
+    expect(text).not.toContain('call again with the same idempotency_key');
+    expect(text).not.toContain('with idempotency_key "k-1"');
+    expect(text).not.toContain('worth sending again');
   });
 });
 

@@ -346,7 +346,19 @@ export function unclassifiedConflict(err: unknown): boolean {
 
 /** What a model is told about an {@link unclassifiedConflict}. */
 export const UNCLASSIFIED_CONFLICT_ADVICE =
-  'the platform did not say whether this clears, so treat it as one that does not: do not send it again unchanged unless the message itself says what to wait for. It usually says what to do instead';
+  'the platform did not say whether this clears, so treat it as one that does not: do not send it again unchanged. The message usually says what to do instead';
+
+/**
+ * Whether this is the keyed call's "still running" refusal as the platform
+ * documents it: a 409 with code `idempotency_in_progress` that the retry
+ * predicate calls transient. A permanent word beside the code, or another
+ * status, is not that refusal, and earns no "send it again with this key".
+ */
+export function idempotencyInProgress(err: APIError): boolean {
+  return (
+    err.status === 409 && idempotencyCode(err) === 'idempotency_in_progress' && isTransient(err)
+  );
+}
 
 /** The platform's `code` on a keyed call's own refusals (OPL-5127), or `undefined`. */
 export function idempotencyCode(err: APIError): string | undefined {
@@ -374,6 +386,10 @@ export function idempotencyAdvice(err: unknown, tool?: string): string | undefin
       : undefined;
   switch (idempotencyCode(err)) {
     case 'idempotency_in_progress':
+      // Only the passing refusal the platform documents: a word beside the
+      // code that does not clear, or another status, is answered by its own
+      // advice instead (Codex, round 4 on #213).
+      if (!idempotencyInProgress(err)) return undefined;
       return `the same call with this idempotency_key is still running; wait and call again with the same idempotency_key for its answer${operation ? `, or read get_operation ${operation}` : ''}`;
     case 'idempotency_outcome_unknown':
       return `the platform did not hear how the call with this idempotency_key ended; do not send it again with this key, since the same key answers the same thing. ${resendAfterSpentKey(tool, operation, undefined, tool ? `call ${tool} again` : undefined)}`;
@@ -543,8 +559,7 @@ export function keyedOutcomeUnknown(err: unknown): boolean {
   return (
     err instanceof ConnectivityInterruptedError ||
     (err instanceof APIError &&
-      (idempotencyCode(err) === 'idempotency_in_progress' ||
-        (err.status >= 500 && !platformAnsweredFailure(err))))
+      (idempotencyInProgress(err) || (err.status >= 500 && !platformAnsweredFailure(err))))
   );
 }
 

@@ -2829,7 +2829,7 @@ describe('the public error surface', () => {
     // A 409 the platform did not classify says so (OPL-5975); the status is
     // still said once, not twice.
     const unclassified =
-      ' — the platform did not say whether this clears, so treat it as one that does not: do not send it again unchanged unless the message itself says what to wait for. It usually says what to do instead';
+      ' — the platform did not say whether this clears, so treat it as one that does not: do not send it again unchanged. The message usually says what to do instead';
     expect(said(failed(errorForStatus(409, 'HTTP 409')))).toBe(`HTTP 409${unclassified}`);
     expect(said(failed(errorForStatus(409, 'guest still booting')))).toBe(
       `guest still booting (HTTP 409)${unclassified}`,
@@ -3999,7 +3999,7 @@ describe('a refusal the platform put a word on', () => {
       const { call, close } = await connect();
       const res = await call('read_clipboard', { computer_id: 'vm-1' });
       expect(said(res)).toBe(
-        "the guest's desktop is not answering yet (HTTP 409) — the platform did not say whether this clears, so treat it as one that does not: do not send it again unchanged unless the message itself says what to wait for. It usually says what to do instead",
+        "the guest's desktop is not answering yet (HTTP 409) — the platform did not say whether this clears, so treat it as one that does not: do not send it again unchanged. The message usually says what to do instead",
       );
       await close();
     } finally {
