@@ -107,6 +107,24 @@ describe('which refusals are transient', () => {
     if (status === 409 || status === 429) expect(isTransientForPoll(e)).toBe(true);
   });
 
+  // The same edges as the TypeScript SDK: a nested word grants nothing, and a
+  // word that clears is about a 400 or a 409, not another status.
+  it('lets neither a nested word nor a word on another status grant a retry', () => {
+    const nested = errorForStatus(409, 'x', {
+      error: { message: 'x', reason: 'contention' },
+      code: 'WORKSPACE_MOVING',
+    });
+    expect(nested.reason).toBe('contention');
+    expect(isTransient(nested)).toBe(false);
+    expect(isTransient(err(500, { error: 'x', reason: 'contention' }))).toBe(false);
+    expect(isTransient(err(400, { error: 'x', reason: 'contention' }))).toBe(true);
+    // An unknown word is no word: the code decides.
+    expect(isTransient(err(409, { error: 'x', reason: 'new', code: 'WORKSPACE_MOVING' }))).toBe(
+      true,
+    );
+    expect(isTransient(err(409, { error: 'x', reason: 'new', code: 'LABEL_TAKEN' }))).toBe(false);
+  });
+
   it('reads the code off the body: top-level, a nonblank string, or nothing', () => {
     expect(err(409, { error: 'x', code: 'LABEL_TAKEN' }).code).toBe('LABEL_TAKEN');
     expect(err(409, { error: 'x', code: '  ' }).code).toBeUndefined();

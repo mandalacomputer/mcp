@@ -1629,8 +1629,14 @@ export function isTransient(err: unknown): boolean {
     // Through the exported classifier rather than the sets directly, so what an
     // embedder is told and what this server does are one answer and not two.
     const kind = reasonKind(err.reason);
-    // A nested run reason can arrive after billed work and grants no new replay permission.
-    if (kind === 'clears' && record(err.body) && typeof err.body.reason === 'string') return true;
+    if (kind === 'clears') {
+      // A nested run reason can arrive after billed work and grants no replay
+      // permission, whatever code sits beside it.
+      if (!(record(err.body) && typeof err.body.reason === 'string')) return false;
+      // The word describes a refusal: a 400 or a 409. On any other status the
+      // status's own answer stands, as in both SDKs.
+      if (err.status === 400 || err.status === 409) return true;
+    }
     if (kind === 'permanent') return false;
   }
   // A 409 is a passing state only where the platform says so (OPL-5975): a
