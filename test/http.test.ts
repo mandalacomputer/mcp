@@ -1365,7 +1365,11 @@ describe('concurrent large request bodies', () => {
         method: 'tools/call',
         params: {
           name: 'screenshot',
-          arguments: { computer_id: 'vm-1', pad: 'x'.repeat(400_000) },
+          arguments: { computer_id: 'vm-1' },
+          // The bulk rides in _meta, which the protocol carries beside the
+          // arguments: an unknown argument is refused before the handler runs
+          // (OPL-5975), and this test needs the handler to hold the body.
+          _meta: { pad: 'x'.repeat(400_000) },
         },
       });
       const first = fetch(`${url}/mcp`, {

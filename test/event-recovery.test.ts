@@ -281,7 +281,8 @@ describe('event recovery answers', () => {
 
         const controller = new AbortController();
         const cancelled = session.client.callTool(
-          { name: tool, arguments: { timeout_s: 5 } },
+          // poll_events takes no timeout, and an unknown key is refused (OPL-5975).
+          { name: tool, arguments: tool === 'wait_for_event' ? { timeout_s: 5 } : {} },
           undefined,
           { signal: controller.signal },
         );
