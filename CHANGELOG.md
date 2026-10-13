@@ -14,6 +14,8 @@ are wording changes, and they are behaviour changes in the way that matters.
 
 ## [Unreleased]
 
+## [0.13.0] — 2026-10-13
+
 ### Added
 
 - **Public URLs: `list_public_urls`, `create_public_url`,
@@ -23,7 +25,9 @@ are wording changes, and they are behaviour changes in the way that matters.
   create's answer says so in its first sentence; `access: "private"` requires
   an API key of the account. Port 22 and an empty update are refused before
   any request. An answer that is not a public URL is never described as one:
-  a create that answers something else says the URL may have been made. A
+  a create, update or delete whose answer cannot be read says the change may
+  have happened and to check `list_public_urls` first, and a URL answered as
+  turned off (`disabled: true`) is described as answering 404 to everyone. A
   delete of an id that is not there says nothing was deleted, and that the
   same 404 answers a computer the key cannot see. A deleted URL's label stays
   with the account: no other account can ever take it, and the account may
@@ -51,9 +55,11 @@ are wording changes, and they are behaviour changes in the way that matters.
 - **Activities keep `funded` and `cost_usd`** on a managed-agent run summary:
   whether the account's AI credits paid for the run, and the charge.
 
-- **Error results carry the platform's `code`** in their metadata, and
-  `APIError.code` carries it for embedders: the machine-readable word
-  (`LABEL_TAKEN`, `WORKSPACE_MOVING`, …) to switch on rather than the sentence.
+- **The platform's error `code` in error results.** An error result carries
+  it as `code` in its metadata, and `APIError.code` carries it for embedders,
+  so two refusals with one status, such as `LABEL_TAKEN` and
+  `PUBLIC_URL_LIMIT`, can be told apart without reading the sentence. The two
+  SDKs' CLIs carry the same word as `api_code`.
 
 ### Changed
 
@@ -64,20 +70,39 @@ are wording changes, and they are behaviour changes in the way that matters.
   `resume_only` on `start_computer` did a full start, and a misspelt flag on
   `delete_computer` still deleted. Now an unknown key is an input error that
   names it, and nothing is sent. Nested objects (a screenshot `region`, a
-  snapshot schedule's `set`) are strict too. A client that sent extra keys and
-  relied on them being ignored now gets an error.
+  snapshot schedule's `set`) are strict too, and so is a top-level
+  `__proto__`, which the MCP SDK's own parse used to drop before any schema
+  ran; it is refused over stdio and HTTP alike. A client that sent extra keys
+  and relied on them being ignored now gets an error.
 
-- **A 409 the platform did not classify is not transient.** `isTransient` used
-  to say yes to every 409 without a `reason`; the platform documents an absent
-  reason as no classification. A 409 is now transient only when its `reason`
-  is `contention` or `starting`, or its `code` is `idempotency_in_progress` or
-  `WORKSPACE_MOVING` with no reason saying otherwise. `LABEL_TAKEN`,
-  `PUBLIC_URL_LIMIT`, the webhook subscription cap, a test of a disabled
-  webhook, an SSH key already registered, the SSH key limit and the
-  sixteen-background-command cap are no longer transient. The same
-  classification holds in both SDKs. An unclassified 409 now says so in the
-  tool's answer — the platform did not say it clears, so do not send it again
+- **A 409 the platform did not classify is final: `isTransient()` answers
+  `false`.** The platform documents a 409 without a `reason` as unclassified,
+  and a client treating 409 as uniformly transient loops forever on the
+  refusals that are decisions: a public URL label that is taken
+  (`LABEL_TAKEN`), a computer at its public URL limit (`PUBLIC_URL_LIMIT`), a
+  webhook past the subscription cap, a test of a disabled webhook, an SSH key
+  already registered, the SSH key limit, the cap of sixteen background
+  commands. A 409 is now transient only with `reason` `contention` or
+  `starting`, or with `code` `idempotency_in_progress` or `WORKSPACE_MOVING`
+  and no word saying otherwise (`WORKSPACE_MOVING` with `reason:
+  "unsupported"` is final). A word this version does not know is no answer, so
+  on its own it leaves the 409 final. The TypeScript SDK, the Python SDK and
+  the MCP server classify every 409 the same way. A word that clears now
+  counts only at the top level of the body and only on a 400 or a 409, as both
+  SDKs read it: a nested word grants no retry, and a 5xx carrying `contention`
+  keeps its status's own answer. An unclassified 409 now says so in the tool's
+  answer — the platform did not say it clears, so do not send it again
   unchanged — and the server instructions no longer say most 409s pass.
+
+- **Retry advice is given only where `isTransient()` agrees.** A word that
+  clears is said to clear only on a 400 or a 409, so a 500 carrying
+  `contention` is not told to send again. "Call again with the same
+  `idempotency_key`" is given only for the passing `idempotency_in_progress`
+  409, not beside a word that does not clear or on another status. Each code's
+  advice is given only on the status the platform sends it with, so a 401 to
+  405 keeps its own never-retry sentence, and a word this version knows beside
+  a code speaks instead of the code's advice; `WORKSPACE_MOVING` says to send
+  it again only where `isTransient()` does.
 
 - **The advice for `reason: "unsupported"` names no subject.** It said "this
   computer cannot do it at all … the same forever", which was wrong for a
@@ -95,12 +120,14 @@ are wording changes, and they are behaviour changes in the way that matters.
   `computer_deleted: null`, an empty body — is reported as unconfirmed, and the
   session stays bound to the computer.
 
-- **Listings fail on a malformed row instead of dropping it**, as the SDKs
-  decode them: `list_webhooks` and `list_webhook_deliveries` (a row that is not
-  an object, or lacks `id`, `url` and `enabled`, or `id`, `state` and
-  `attempts`), `list_ssh_keys` (a row without an `id`) and
-  `list_public_urls`. A dropped row was a subscription or a URL that may be
-  live, left out of the answer read to find out.
+- **Webhook, webhook delivery and SSH key listings fail on a malformed row**,
+  which used to be dropped: `list_webhooks` (a row that is not an object, or
+  is missing its `id`, its `url` or a boolean `enabled`),
+  `list_webhook_deliveries` (one missing its `id`, `state` or `attempts`) and
+  `list_ssh_keys` (one without an `id`). The new `list_public_urls` reads its
+  rows the same way. A row left out was a subscription or a key that may be
+  live, missing from the answer read to find out. The TypeScript SDK and the
+  Python SDK fail on these rows too.
 
 - **`delete_workspace`** says a workspace holding active secrets is refused too,
   and that the way out is to move its computers with
@@ -1150,7 +1177,8 @@ No effect on the tool surface, listed because it is most of the window.
 - Several parser fixes landed before that scanner was retired, each ported to
   and from the TypeScript SDK's byte-identical copy.
 
-[Unreleased]: https://github.com/mandalacomputer/mcp/compare/v0.12.0...HEAD
+[Unreleased]: https://github.com/mandalacomputer/mcp/compare/v0.13.0...HEAD
+[0.13.0]: https://github.com/mandalacomputer/mcp/compare/v0.12.0...v0.13.0
 [0.12.0]: https://github.com/mandalacomputer/mcp/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/mandalacomputer/mcp/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/mandalacomputer/mcp/compare/v0.9.0...v0.10.0
