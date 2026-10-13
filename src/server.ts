@@ -1,7 +1,9 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
 import {
   CallToolRequestSchema,
   ErrorCode,
+  type JSONRPCMessage,
   ListToolsRequestSchema,
   McpError,
   type ToolAnnotations,
@@ -130,6 +132,44 @@ export function strictInput(name: string, schema: unknown): z.ZodTypeAny {
   throw new Error(`Tool ${name}'s input schema must be a strict object.`);
 }
 
+/**
+ * The refusal for a `tools/call` whose arguments carry an own `__proto__` key,
+ * or `undefined` for any other message.
+ *
+ * The one undeclared argument {@link strictInput} never sees: the SDK parses
+ * the request envelope before any tool schema runs, and that parse drops a
+ * top-level `__proto__` key without a word, so a call carrying one went ahead
+ * as though it had not (Codex, round 5 on #213). Refused here, before the SDK,
+ * in the words the SDK uses for every other unknown argument. Only for a tool
+ * this session registers: anything else gets the SDK's own answer.
+ */
+export function protoKeyRefusal(
+  message: JSONRPCMessage,
+  registered: ReadonlySet<string>,
+): JSONRPCMessage | undefined {
+  const m = message as { method?: unknown; id?: unknown; params?: unknown };
+  if (m.method !== 'tools/call' || (typeof m.id !== 'string' && typeof m.id !== 'number'))
+    return undefined;
+  const params = m.params as { name?: unknown; arguments?: unknown } | null | undefined;
+  if (!params || typeof params !== 'object') return undefined;
+  const { name, arguments: args } = params;
+  if (typeof name !== 'string' || !registered.has(name)) return undefined;
+  if (!args || typeof args !== 'object' || !Object.hasOwn(args, '__proto__')) return undefined;
+  return {
+    jsonrpc: '2.0',
+    id: m.id,
+    result: {
+      content: [
+        {
+          type: 'text',
+          text: `MCP error ${ErrorCode.InvalidParams}: Input validation error: Invalid arguments for tool ${name}: Unrecognized key(s) in object: '__proto__'`,
+        },
+      ],
+      isError: true,
+    },
+  };
+}
+
 export type ServerConfig = SessionConfig &
   ToolFilters &
   Partial<ToolOptions> & {
@@ -163,6 +203,7 @@ export function createServer(cfg: ServerConfig): McpServer {
   // Withheld tools never reach the SDK registry or acquire an activity lease.
   const register = server.registerTool.bind(server) as (...args: unknown[]) => unknown;
   let registered = false;
+  const names = new Set<string>();
   server.registerTool = ((...args: unknown[]) => {
     const [name, config] = args as [
       string,
@@ -193,6 +234,7 @@ export function createServer(cfg: ServerConfig): McpServer {
     }
     const tool = register(...args);
     registered = true;
+    names.add(name);
     return tool;
   }) as typeof server.registerTool;
 
@@ -226,6 +268,30 @@ export function createServer(cfg: ServerConfig): McpServer {
       throw new McpError(ErrorCode.InvalidParams, 'No tools are available in this session');
     });
   }
+
+  // A top-level `__proto__` argument is dropped by the SDK's own parse of the
+  // request, before any tool schema can refuse it, so it is refused on the way
+  // in (see protoKeyRefusal). Wrapped as the transport starts, which is after
+  // the server has installed its message handler and before any message.
+  const connect = server.connect.bind(server);
+  server.connect = (transport: Transport) => {
+    const start = transport.start.bind(transport);
+    transport.start = async () => {
+      const deliver = transport.onmessage;
+      if (deliver) {
+        transport.onmessage = (message, extra) => {
+          const refusal = protoKeyRefusal(message, names);
+          if (refusal) {
+            transport.send(refusal).catch(() => undefined);
+            return;
+          }
+          deliver(message, extra);
+        };
+      }
+      return start();
+    };
+    return connect(transport);
+  };
 
   // The event sockets outlive every tool call by design (OPL-3926), so nothing
   // in a tool can be the thing that closes them. This is the end of the

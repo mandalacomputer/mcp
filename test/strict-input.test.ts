@@ -108,6 +108,37 @@ describe('unknown arguments', () => {
     expect(checked).toBeGreaterThan(115);
   });
 
+  // Codex, round 5 on #213: the SDK's parse of the request envelope drops a
+  // top-level `__proto__` argument before any tool schema runs, so a delete
+  // carrying one went ahead. Own keys only arise from JSON, as here.
+  it('refuses a top-level __proto__ argument before anything is sent', async () => {
+    const { client, close } = await connect();
+    try {
+      const args = JSON.parse(
+        '{"computer_id":"vm-1","confirm":true,"__proto__":{"delete_snapshots":true}}',
+      ) as Record<string, unknown>;
+      expect(Object.hasOwn(args, '__proto__')).toBe(true);
+      const res = (await client.callTool({ name: 'delete_computer', arguments: args }).catch(
+        (err: unknown): CallToolResult => ({
+          isError: true,
+          content: [{ type: 'text', text: String(err) }],
+        }),
+      )) as CallToolResult;
+      expect(res.isError).toBe(true);
+      expect(textOf(res)).toContain("Unrecognized key(s) in object: '__proto__'");
+      expect(platform.calls).toEqual([]);
+      // The same call without it goes through, so the refusal was the key.
+      const ok = (await client.callTool({
+        name: 'delete_computer',
+        arguments: { computer_id: 'vm-1', confirm: true },
+      })) as CallToolResult;
+      expect(ok.isError).toBeFalsy();
+      expect(platform.calls.map((c) => c.method)).toEqual(['DELETE']);
+    } finally {
+      await close();
+    }
+  });
+
   it('lists every tool with additionalProperties: false, which is now what it does', async () => {
     const { client, close } = await connect({ modelKey: 'sk-ant-fixture' });
     const { tools } = await client.listTools();

@@ -2066,3 +2066,64 @@ describe('what /healthz says about capacity', () => {
     expect(health.largeBodyParses).toBeUndefined();
   });
 });
+
+// Codex, round 5 on #213 (OPL-5975): the SDK's parse of the request envelope
+// drops a top-level `__proto__` argument before any tool schema runs. Over the
+// wire, where JSON makes it an own key, the call is refused and nothing is
+// sent to the platform.
+describe('a tools/call carrying a __proto__ argument', () => {
+  let server: Server;
+  let url: string;
+  let platform: ReturnType<typeof installFakePlatform>;
+
+  beforeAll(async () => {
+    platform = installFakePlatform();
+    server = await runHttp({ port: 0, host: '127.0.0.1', baseUrl: BASE });
+    url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  });
+
+  afterAll(async () => {
+    platform.restore();
+    await new Promise<void>((r) => server.close(() => r()));
+  });
+
+  const post = (body: string, session?: string) =>
+    fetch(`${url}/mcp`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'application/json, text/event-stream',
+        Authorization: 'Bearer com_caller',
+        ...(session ? { 'mcp-session-id': session } : {}),
+      },
+      body,
+    });
+
+  /** The JSON-RPC answer, from a JSON body or the first SSE data line. */
+  const answer = (text: string) =>
+    JSON.parse(text.trim().startsWith('{') ? text : (/^data: (.*)$/m.exec(text)?.[1] ?? '{}'));
+
+  it('is refused before the platform is asked', async () => {
+    const opened = await post(JSON.stringify(INIT));
+    const session = opened.headers.get('mcp-session-id') as string;
+    await opened.text();
+    await (
+      await post(JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }), session)
+    ).text();
+    const before = platform.calls.length;
+    const res = await post(
+      '{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"delete_computer","arguments":{"computer_id":"vm-1","confirm":true,"__proto__":{"delete_snapshots":true}}}}',
+      session,
+    );
+    const reply = answer(await res.text()) as {
+      id: number;
+      result?: { isError?: boolean; content?: { text?: string }[] };
+    };
+    expect(reply.id).toBe(7);
+    expect(reply.result?.isError).toBe(true);
+    expect(reply.result?.content?.[0]?.text).toContain(
+      "Unrecognized key(s) in object: '__proto__'",
+    );
+    expect(platform.calls.slice(before).filter((c) => c.method === 'DELETE')).toEqual([]);
+  });
+});
