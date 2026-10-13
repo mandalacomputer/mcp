@@ -154,7 +154,8 @@ describe('public URL tools', () => {
       const res = await over(body, 201, 'create_public_url', { port: 3000 });
       expect(res.isError).toBe(true);
       expect(textOf(res)).toContain('THE URL MAY HAVE BEEN CREATED');
-      expect(textOf(res)).not.toContain('anyone with the link');
+      // A warning about what it would be, never a claim about what it is.
+      expect(textOf(res)).not.toContain('can open it');
     }
   });
 
@@ -244,6 +245,36 @@ describe('public URL tools', () => {
     }
   });
 
+  // Codex, round 3 on #212: a 2xx whose body cannot be read threw before the
+  // check, and the change was reported as a plain failure — inviting a blind
+  // retry of a create that may have made a URL open to anyone.
+  it('says a change may have happened when its answer cannot be read at all', async () => {
+    for (const raw of ['', 'null', '{not json']) {
+      const create = await overRaw(raw, 201, 'create_public_url', { port: 3000 });
+      expect(create.isError, `create ${JSON.stringify(raw)}`).toBe(true);
+      expect(textOf(create)).toContain('THE URL MAY HAVE BEEN CREATED');
+      expect(textOf(create)).toContain('open to anyone with the link');
+      expect(textOf(create)).toContain('list_public_urls');
+
+      const update = await overRaw(raw, 200, 'update_public_url', {
+        url_id: PUBLIC_URL.id,
+        access: 'private',
+      });
+      expect(update.isError, `update ${JSON.stringify(raw)}`).toBe(true);
+      expect(textOf(update)).toContain('THE CHANGE MAY HAVE LANDED');
+
+      const del = await overRaw(raw, 200, 'delete_public_url', {
+        url_id: PUBLIC_URL.id,
+        confirm: true,
+      });
+      expect(del.isError, `delete ${JSON.stringify(raw)}`).toBe(true);
+      expect(textOf(del)).toContain('MAY OR MAY NOT HAVE BEEN DELETED');
+    }
+    // A private create is said to be private if it was made.
+    const priv = await overRaw('', 201, 'create_public_url', { port: 3000, access: 'private' });
+    expect(textOf(priv)).toContain('it is private');
+  });
+
   it('marks the listing read-only, the update idempotent and the delete destructive', async () => {
     const { client, close } = await connect();
     const tools = (await client.listTools()).tools;
@@ -271,6 +302,21 @@ async function over(body: unknown, status: number, tool: string, args: Record<st
       status,
       headers: { 'Content-Type': 'application/json' },
     })) as typeof fetch;
+  try {
+    const { call, close } = await connect();
+    const res = await call(tool, args);
+    await close();
+    return res;
+  } finally {
+    globalThis.fetch = restore;
+  }
+}
+
+/** The same, with a raw body: an empty one, JSON null, or one that is not JSON. */
+async function overRaw(raw: string, status: number, tool: string, args: Record<string, unknown>) {
+  const restore = globalThis.fetch;
+  globalThis.fetch = (async () =>
+    new Response(raw, { status, headers: { 'Content-Type': 'application/json' } })) as typeof fetch;
   try {
     const { call, close } = await connect();
     const res = await call(tool, args);

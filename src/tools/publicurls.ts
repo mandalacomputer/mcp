@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { NotFoundError } from '../errors.js';
+import { APIError, NotFoundError } from '../errors.js';
 import { guarded, refused, said } from '../format.js';
 import * as P from '../paths.js';
 import type { Registrar } from './types.js';
@@ -135,6 +135,27 @@ const line = (u: PublicUrl): string =>
 const BROWSERS =
   'A browser opening a URL whose account is new may first see a one-time notice page from Mandala Computer; when you drive a browser at it yourself, send the header `mandala-skip-warning: 1` to go straight to the app. Requests from programs never see the page.';
 
+/**
+ * A change whose answer could not be read: a create, an update or a delete
+ * that failed for any reason other than an HTTP answer from the platform — an
+ * empty, `null` or non-JSON 2xx, a connection cut after the request went, a
+ * cancellation. The platform may have done it, so the caller is sent to the
+ * listing rather than told it failed: a create retried blind makes a second
+ * URL open to anyone, and the first goes on answering, untracked (Codex, round
+ * 3 on #212). An HTTP refusal is not this, and keeps its own advice.
+ */
+async function changed<T>(
+  attempt: () => Promise<T>,
+  unknownOutcome: (why: string) => ReturnType<typeof refused>,
+): Promise<{ value: T } | { refusal: ReturnType<typeof refused> }> {
+  try {
+    return { value: await attempt() };
+  } catch (err) {
+    if (err instanceof APIError) throw err;
+    return { refusal: unknownOutcome(err instanceof Error ? err.message : String(err)) };
+  }
+}
+
 export const registerPublicUrls: Registrar = (server, session) => {
   server.registerTool(
     'list_public_urls',
@@ -217,13 +238,20 @@ export const registerPublicUrls: Registrar = (server, session) => {
       guarded(async () => {
         const id = session.resolve(computer_id);
         const sent = P.publicUrlBody({ port, label, access });
-        const body = await session.api
-          .with(extra.signal)
-          .json<unknown>('POST', P.publicUrls(id), { body: sent });
+        const path = P.publicUrls(id);
+        const got = await changed(
+          () => session.api.with(extra.signal).send<unknown>('POST', path, { body: sent }),
+          (why) =>
+            refused(
+              `The create on ${id} could not be read back (${why}). THE URL MAY HAVE BEEN CREATED, and if it was, it is ${sent.access === 'private' ? 'private' : 'open to anyone with the link'} — call list_public_urls for ${id} before creating another.`,
+            ),
+        );
+        if ('refusal' in got) return got.refusal;
+        const body = got.value;
         const u = publicUrlOf(body);
         if (!u) {
           return refused(
-            `The create on ${id} answered with ${shapeOf(body)}, not a public URL. THE URL MAY HAVE BEEN CREATED — call list_public_urls for ${id} rather than creating a second one.`,
+            `The create on ${id} answered with ${shapeOf(body)}, not a public URL. THE URL MAY HAVE BEEN CREATED, and if it was, it is ${sent.access === 'private' ? 'private' : 'open to anyone with the link'} — call list_public_urls for ${id} rather than creating a second one.`,
             body,
           );
         }
@@ -259,9 +287,16 @@ export const registerPublicUrls: Registrar = (server, session) => {
           );
         }
         const id = session.resolve(computer_id);
-        const body = await session.api
-          .with(extra.signal)
-          .json<unknown>('PATCH', P.publicUrl(id, url_id), { body: sent });
+        const path = P.publicUrl(id, url_id);
+        const got = await changed(
+          () => session.api.with(extra.signal).send<unknown>('PATCH', path, { body: sent }),
+          (why) =>
+            refused(
+              `The update to ${url_id} could not be read back (${why}). THE CHANGE MAY HAVE LANDED — read it back with list_public_urls rather than assuming either way, since who can open the URL may have changed.`,
+            ),
+        );
+        if ('refusal' in got) return got.refusal;
+        const body = got.value;
         const u = publicUrlOf(body);
         if (!u) {
           return refused(
@@ -293,10 +328,17 @@ export const registerPublicUrls: Registrar = (server, session) => {
     ({ computer_id, url_id }, extra) =>
       guarded(async () => {
         const id = session.resolve(computer_id);
+        const path = P.publicUrl(id, url_id);
         let res: unknown;
         try {
-          res = await session.api.with(extra.signal).send('DELETE', P.publicUrl(id, url_id));
+          res = await session.api.with(extra.signal).send('DELETE', path);
         } catch (err) {
+          if (!(err instanceof APIError)) {
+            const why = err instanceof Error ? err.message : String(err);
+            return refused(
+              `The delete of ${url_id} could not be read back (${why}). IT MAY OR MAY NOT HAVE BEEN DELETED — call list_public_urls for ${id} to see whether it is still there before telling anyone it no longer answers.`,
+            );
+          }
           // A 404 is the state this call asked for, and the tool is annotated
           // idempotent, so the retry after a lost 2xx is one a client may make.
           // Said as a success but not as "Deleted": the same 404 answers an id
