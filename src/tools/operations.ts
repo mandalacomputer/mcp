@@ -185,7 +185,7 @@ export const registerOperations: Registrar = (server, session) => {
     'get_operation',
     {
       title: 'Read a lifecycle operation',
-      description: `One lifecycle operation: what an accepted create, clone, start, stop, suspend, restart, snapshot restore, resize, move or delete started, and where it got to. A call made with an idempotency_key is recorded pending before it is carried out, so it can be found even when its answer was lost; one the platform never heard end is failed with error.code lost. state is pending or running while live, and succeeded or failed once final; a failed one carries error.code (start_failed, build_failed, computer_gone, move_failed, resize_not_applied, lost, and more may be added) and a sentence. Most are already succeeded when the call that started them answered; a clone is running until its disk is copied, and a move until it lands. ${NOT_BOOTED} An id this key cannot see, or one that has expired, is not found.`,
+      description: `One lifecycle operation: what an accepted create, clone, start, stop, suspend, restart, snapshot restore, resize, move or delete started, and where it got to. A call made with an idempotency_key is recorded pending before it is carried out, so it can be found even when its answer was lost; one the platform never heard end is failed with error.code lost. state is pending or running while live, and succeeded or failed once final; a failed one carries error.code (start_failed, build_failed, computer_gone, move_failed, resize_not_applied, lost, and more may be added) and a sentence. Most are already succeeded when the call that started them answered; a clone is running until its disk is copied, and a move until it lands. ${NOT_BOOTED} An id this key cannot see — another account's, or for a key confined to a workspace, one about a computer outside it — or one that has expired, is not found.`,
       inputSchema: { operation_id: operationIdArg },
       annotations: readAnnotations,
     },
@@ -204,7 +204,7 @@ export const registerOperations: Registrar = (server, session) => {
     {
       title: 'List lifecycle operations',
       description:
-        "The lifecycle operations started on this account, from the API or the dashboard, newest first, a page at a time: kind, computer_id, state, error and timestamps. computer_id keeps one computer's (for a clone, the new computer's) — omitted, it is the whole account's, not the selected computer's. Pass next_cursor back as cursor for the next page; it is null on the last. Calls made from the dashboard are listed too, except a move.",
+        "The lifecycle operations started on this account, from the API or the dashboard, newest first, a page at a time: kind, computer_id, state, error and timestamps. A key confined to a workspace sees only the operations of computers in that workspace. computer_id keeps one computer's (for a clone, the new computer's) — omitted, it is every one this key can see, not the selected computer's. Pass next_cursor back as cursor for the next page; it is null on the last. Calls made from the dashboard are listed too, except a move.",
       inputSchema: {
         computer_id: z
           .string()

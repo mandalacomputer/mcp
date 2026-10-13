@@ -25,6 +25,8 @@ const output = {
 };
 const OTHER = 'exec_ffffffffffffffffffffffffffffffff';
 const zero = { execution_id: ID, stdout_offset: 0, stderr_offset: 0 };
+/** Each tool's own arguments: get_execution takes no offsets, and an unknown key is refused (OPL-5975). */
+const argsFor = (tool: string) => (tool === 'get_execution' ? { execution_id: ID } : zero);
 const textOf = (result: CallToolResult) =>
   result.content
     .filter((part) => part.type === 'text')
@@ -463,7 +465,7 @@ describe('authority and transport boundaries', () => {
         status,
       );
       for (const tool of ['get_execution', 'read_execution_output']) {
-        const result = await call(tool, zero);
+        const result = await call(tool, argsFor(tool));
         expect(result.isError).toBe(true);
         expect(textOf(result)).toContain(`HTTP ${status}`);
         expect(textOf(result)).not.toContain('PRIVATE-');
@@ -482,7 +484,7 @@ describe('authority and transport boundaries', () => {
     async (body) => {
       const { call } = await setup(body);
       for (const tool of ['get_execution', 'read_execution_output']) {
-        const result = await call(tool, zero);
+        const result = await call(tool, argsFor(tool));
         expect(result.isError).toBe(true);
         expect(textOf(result)).not.toContain('PRIVATE-');
       }
@@ -541,7 +543,7 @@ describe('authority and transport boundaries', () => {
         );
       });
       const controller = new AbortController();
-      const pending = client.callTool({ name: tool, arguments: zero }, undefined, {
+      const pending = client.callTool({ name: tool, arguments: argsFor(tool) }, undefined, {
         signal: controller.signal,
       });
       await entered;

@@ -6,7 +6,10 @@ description: Drive a Mandala Computer — a real Linux desktop in the cloud the 
 # Driving a Mandala Computer
 
 The `mandala` MCP server exposes desktop tools, each described well enough to
-call from its own text. It does not yet implement every API operation. This skill is the part the
+call from its own text. It covers every API operation but five, which are left
+out on purpose because each would put a credential in a model's context: minting
+and revoking API keys, and the three browser-connection routes, whose raw
+capability the SDKs' browser drivers keep to themselves. This skill is the part the
 tools cannot say for themselves: when a computer is the right answer, what it
 costs, and which of the tools to reach for so a task does not become a
 screenshot per step.
@@ -325,6 +328,32 @@ file binding at once, and new desktop shells get an env binding on images that
 support it. `delete_secret` stops a computer that is still bound to it from
 starting, so remove the binding first. Never repeat a value back to the user.
 
+## Showing an app: public URLs
+
+`create_public_url` serves a port inside the computer at
+`https://<label>.<base_domain>` — the domain comes from `list_public_urls`, so
+do not assume one. **It is public by default: anyone on the internet with the
+link can open it.** Pass `access: "private"` unless the user wants it open to
+everyone; a private URL answers only requests carrying an API key of the
+account. The app must listen on `0.0.0.0`, not `127.0.0.1`. A label is never
+given to a second account: after `delete_public_url` it stays with this account,
+which may use it again unless the platform has blocked it, and a label another
+account has ever held reads as taken. Delete URLs you no longer need; a computer
+over its plan's limit serves only its oldest ones. A browser may see a one-time
+notice page before a new account's URL: a client that sets headers can send
+`mandala-skip-warning: 1`, and in the computer's own browser (`open_url` cannot
+send headers) click Continue.
+
+## Moving a computer between workspaces
+
+`move_computer_to_workspace` changes which workspace a computer is in, and so
+who can reach it — not its hardware, which is `move_computer`. It needs an
+account-wide key, an explicit `computer_id`, and a stopped computer with no
+saved session, snapshots, secret bindings or proxy credentials. Do not stop,
+discard, unbind or delete anything to get past a refusal without the user
+saying so. A move replaces the computer's desktop and share credentials, so a
+`get_desktop_url` link from before stops working.
+
 ## Keeping the work: snapshots and clones
 
 A snapshot is a saved point on one computer; a clone is a second computer made
@@ -392,13 +421,15 @@ says what to do. The judgement it cannot make for you:
   report it as deleted. `list_computers` shows what the key can actually see;
   if the id the user named is not in that list, ask whether the key is the one
   for that workspace. The same holds for a snapshot id and `list_snapshots`.
-- **A 409 is not one thing.** Most describe a passing state — a guest still
+- **A 409 is not one thing.** Some describe a passing state — a guest still
   booting, an agent busy with another call, the clipboard claimed for an
-  instant — and the sentence will say "worth sending again". Some describe a
-  **decision**: the computer is not running (fix: `start_computer`, not a
-  retry), a size the host cannot run, a computer that has to be stopped first.
-  Those answer the same way forever. When the sentence says "does NOT clear by
-  waiting", believe it.
+  instant, a workspace move still settling — and the sentence will say "worth
+  sending again". The rest describe a **decision**: the computer is not running
+  (fix: `start_computer`, not a retry), a size the host cannot run, a computer
+  that has to be stopped first, a label already taken, a limit reached. Those
+  answer the same way forever. A 409 whose sentence does not say it will clear
+  is one of those — the platform sends no classification for it — so read what
+  it says to do instead rather than sending it again.
 - **A 409 `starting` is the boot window**: about two minutes after a start, a
   restart or a reboot inside the guest. It clears; send the call again in a
   moment. A guest agent still silent after that window answers 502 instead.
@@ -440,12 +471,15 @@ says what to do. The judgement it cannot make for you:
 - **A refused resize with an offer** ("another host could run it") does not
   clear by retrying. `move_computer` takes the offer up; it copies the disk,
   so say what that costs before calling it.
-- **A stop that is refused** is a guest that will not come down — a modal
-  dialog, a hung session. `force: true` on the second attempt, not the first;
-  whatever was unsaved goes with it.
+- **A stop does not need `force`.** An ordinary stop asks the guest, waits up
+  to 20 seconds, and then forces it off itself, so a modal dialog or a hung
+  session still ends stopped. `force: true` only skips that wait, and loses
+  whatever the guest had not written to disk; leave it out unless the user
+  wants the computer off at once.
 - **`create_computer` that came back "did not start"** is a computer that
-  exists and is selected. `start_computer` often works on a second attempt.
-  Do not create another.
+  exists and is selected. Read why it did not start before calling
+  `start_computer`: a start refused for low disk or capacity answers the same
+  way until that changes, so do not loop on it. Do not create another.
 
 ## A short list is an answer
 

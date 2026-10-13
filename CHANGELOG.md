@@ -18,13 +18,115 @@ are wording changes, and they are behaviour changes in the way that matters.
 
 - **Public URLs: `list_public_urls`, `create_public_url`,
   `update_public_url`, `delete_public_url`.** Serve a port inside a computer
-  at `https://<label>.mandala.dev`. A URL is public by default, and the
+  at `https://<label>.<base_domain>`, where `base_domain` is the one the
+  listing answers (e.g. `mandala.dev`). A URL is public by default, and the
   create's answer says so in its first sentence; `access: "private"` requires
   an API key of the account. Port 22 and an empty update are refused before
   any request. An answer that is not a public URL is never described as one:
   a create that answers something else says the URL may have been made. A
-  delete of an id that is not there says nothing was deleted. The new
-  `public_urls` tag selects the four tools.
+  delete of an id that is not there says nothing was deleted, and that the
+  same 404 answers a computer the key cannot see. A deleted URL's label stays
+  with the account: no other account can ever take it, and the account may
+  use it again unless the platform has blocked it. A listing marks the URLs
+  past the computer's limit, which answer 404. The create says who sees the
+  one-time notice page (any request that looks like a browser opening a page,
+  program or not), that `mandala-skip-warning: 1` skips it, and that in the
+  computer's own browser, where `open_url` cannot send headers, Continue is
+  the way past it. Each refusal code (`LABEL_TAKEN`, `PUBLIC_URL_LIMIT`,
+  `PUBLIC_URLS_BLOCKED`, `PUBLIC_URLS_DISABLED`, `WORKSPACE_MOVING`) gets its
+  own advice. The new `public_urls` tag selects the four tools.
+
+- **`move_computer_to_workspace`** (OPL-5932) changes which workspace a
+  computer belongs to, and so who can reach it. It needs an account-wide member
+  or owner key, an explicit `computer_id` and `workspace_id` (`null` for none),
+  and a stopped computer with no saved session, snapshots, secret bindings or
+  proxy credentials; it never removes any of those to force a move. It is in
+  the `lifecycle` tag. A move replaces the computer's desktop and share
+  credentials, which `get_desktop_url` now says.
+
+- **`list_workspace_members` reports `seat_suspended`** (OPL-5919): true while
+  a member waits for a seat on the account and cannot act on it. The answer
+  says how many are waiting. A value that is not a boolean fails the listing.
+
+- **Activities keep `funded` and `cost_usd`** on a managed-agent run summary:
+  whether the account's AI credits paid for the run, and the charge.
+
+- **Error results carry the platform's `code`** in their metadata, and
+  `APIError.code` carries it for embedders: the machine-readable word
+  (`LABEL_TAKEN`, `WORKSPACE_MOVING`, …) to switch on rather than the sentence.
+
+### Changed
+
+- **Every tool refuses an argument it does not declare.** The listed schemas
+  already said `additionalProperties: false`, but about a hundred tools
+  silently dropped an unknown key and went ahead without it: a misspelt
+  `workspace_id` on `create_secret` stored the secret account-wide, a misspelt
+  `resume_only` on `start_computer` did a full start, and a misspelt flag on
+  `delete_computer` still deleted. Now an unknown key is an input error that
+  names it, and nothing is sent. Nested objects (a screenshot `region`, a
+  snapshot schedule's `set`) are strict too. A client that sent extra keys and
+  relied on them being ignored now gets an error.
+
+- **A 409 the platform did not classify is not transient.** `isTransient` used
+  to say yes to every 409 without a `reason`; the platform documents an absent
+  reason as no classification. A 409 is now transient only when its `reason`
+  is `contention` or `starting`, or its `code` is `idempotency_in_progress` or
+  `WORKSPACE_MOVING` with no reason saying otherwise. `LABEL_TAKEN`,
+  `PUBLIC_URL_LIMIT`, the webhook subscription cap, a test of a disabled
+  webhook, an SSH key already registered, the SSH key limit and the
+  sixteen-background-command cap are no longer transient. The same
+  classification holds in both SDKs. An unclassified 409 now says so in the
+  tool's answer — the platform did not say it clears, so do not send it again
+  unchanged — and the server instructions no longer say most 409s pass.
+
+- **The advice for `reason: "unsupported"` names no subject.** It said "this
+  computer cannot do it at all … the same forever", which was wrong for a
+  workspace that still holds computers or secrets, or a workspace change that
+  has not settled: a step clears those. It now says waiting will not change the
+  answer and the message names the step, if there is one.
+
+- **A 403 `PUBLIC_URLS_BLOCKED` gets its own advice** rather than "a role that
+  changed or an account suspended": the platform turned public URLs off, and
+  neither retrying nor waiting changes it.
+
+- **`delete_computer` reports a deletion only on the platform's word**:
+  `computer_deleted: true`, or `ok: true` with no `error` on a plain delete. A
+  2xx that confirms nothing — `{error, computer_deleted: false}` with no `ok`,
+  `computer_deleted: null`, an empty body — is reported as unconfirmed, and the
+  session stays bound to the computer.
+
+- **Listings fail on a malformed row instead of dropping it**, as the SDKs
+  decode them: `list_webhooks` and `list_webhook_deliveries` (a row that is not
+  an object, or lacks `id`, `url` and `enabled`, or `id`, `state` and
+  `attempts`), `list_ssh_keys` (a row without an `id`) and
+  `list_public_urls`. A dropped row was a subscription or a URL that may be
+  live, left out of the answer read to find out.
+
+- **`delete_workspace`** says a workspace holding active secrets is refused too,
+  and that the way out is to move its computers with
+  `move_computer_to_workspace` (or delete them) and delete its secrets.
+
+- **`stop_computer`** says an ordinary stop waits up to 20 seconds and then
+  forces the computer off itself, so `force` only skips that wait. It was
+  described as the fix for a stop that fails, which sent agents to cut power
+  for nothing.
+
+- **`create_computer` that did not start** no longer says a second start
+  often works: a start refused for low disk answers the same until space is
+  freed, so the answer says to wait rather than loop.
+
+- **`list_moves`, `list_operations` and `get_operation`** say that a key
+  confined to a workspace sees only that workspace's computers.
+
+- **The server instructions** say workspace moves need `computer_id`
+  explicitly, where the rest of the computer tools can use the selected one.
+
+- **Docs.** The skill gains public-URL guidance (public by default; pass
+  `access: "private"` unless the user wants it open) and
+  `move_computer_to_workspace`, and says the five operations without a tool —
+  minting and revoking API keys, and the three browser-connection routes — are
+  left out on purpose. The README says the same, and that every tool refuses
+  an unknown argument.
 
 ## [0.12.0] — 2026-10-11
 
@@ -1048,6 +1150,7 @@ No effect on the tool surface, listed because it is most of the window.
 - Several parser fixes landed before that scanner was retired, each ported to
   and from the TypeScript SDK's byte-identical copy.
 
+[Unreleased]: https://github.com/mandalacomputer/mcp/compare/v0.12.0...HEAD
 [0.12.0]: https://github.com/mandalacomputer/mcp/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/mandalacomputer/mcp/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/mandalacomputer/mcp/compare/v0.9.0...v0.10.0

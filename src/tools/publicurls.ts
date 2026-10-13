@@ -123,17 +123,26 @@ const reach = (u: PublicUrl): string =>
       ? 'PUBLIC: anyone with the link can open it'
       : 'private: only requests with an API key of this account as `Authorization: Bearer` open it, and the key never reaches the app';
 
-/** One URL in a line, for a listing. */
-const line = (u: PublicUrl): string =>
-  `${u.url} → port ${u.port}, ${u.access}${u.disabled ? ' — TURNED OFF BY THE PLATFORM: it answers 404 until the platform turns it back on' : ''}  (${u.id})`;
+/**
+ * One URL in a line, for a listing. `past` is a URL beyond the computer's
+ * limit as the plan stands now: the oldest `limit` answer and the rest answer
+ * 404, counted over every URL of the computer in the listing's order, oldest
+ * first — so a row's place in the listing is what decides it.
+ */
+const line = (u: PublicUrl, past: number | undefined): string =>
+  `${u.url} → port ${u.port}, ${u.access}${u.disabled ? ' — TURNED OFF BY THE PLATFORM: it answers 404 until the platform turns it back on' : ''}${past === undefined ? '' : ` — PAST THIS COMPUTER\u2019S LIMIT OF ${past}: it answers 404 until the plan allows it again; only the oldest ${past} answer`}  (${u.id})`;
 
 /**
  * What a browser sees, said once in the create: the platform shows a one-time
- * notice page before a URL whose account is new, and a model driving a real
- * browser at its own URL can skip it.
+ * notice page before a URL whose account is new. Who gets it is decided by the
+ * request's headers, not by whether a program sent it: a page navigation by
+ * fetch metadata, or, without fetch metadata, `Accept: text/html` from a
+ * `Mozilla/` user agent. So a program sending a browser's headers sees it too,
+ * and the guest's own browser cannot add the skip header, so there the way
+ * past it is the page's own Continue.
  */
 const BROWSERS =
-  'A browser opening a URL whose account is new may first see a one-time notice page from Mandala Computer; when you drive a browser at it yourself, send the header `mandala-skip-warning: 1` to go straight to the app. Requests from programs never see the page.';
+  'A browser opening a URL whose account is new may first see a one-time notice page from Mandala Computer, once per URL per browser. It is shown to any request that looks like a browser opening a page — a navigation by its fetch metadata, or, without fetch metadata, `Accept: text/html` from a `Mozilla/` user agent — so a program that sends browser headers gets it too, and one that does not gets the app. A client that sets its own headers skips it by sending `mandala-skip-warning: 1`. open_url cannot send headers: in the computer\u2019s own browser, click Continue on the page to go on to the app.';
 
 /**
  * A change whose answer could not be read: a create, an update or a delete
@@ -175,36 +184,48 @@ export const registerPublicUrls: Registrar = (server, session) => {
           typeof body.enabled !== 'boolean' ||
           !Array.isArray(body.public_urls) ||
           typeof body.base_domain !== 'string' ||
-          typeof body.limit !== 'number'
+          typeof body.limit !== 'number' ||
+          !Number.isSafeInteger(body.limit) ||
+          body.limit < 0
         ) {
           return refused(
             `GET the public URLs of ${id} answered with ${shapeOf(body)}, not a listing. This is not a computer with no public URLs — do not create one on the strength of it.`,
             body,
           );
         }
+        const limit = body.limit;
+        // Strict, like every other decoder here (OPL-5975): one row that is
+        // not a public URL fails the listing rather than being dropped. A
+        // dropped row is a URL that may be answering, left out of the one
+        // answer a caller reads to find out what is exposed — and it would
+        // shift every later row's place, which is what decides which of them
+        // are past the limit.
         const rows = body.public_urls.map(publicUrlOf);
-        const list = rows.filter((u): u is PublicUrl => u !== undefined);
-        const malformed = rows.length - list.length;
-        const warning = malformed
-          ? `WARNING: ignored ${malformed} malformed public URL entr${malformed === 1 ? 'y' : 'ies'} from the platform.\n\n`
-          : '';
+        const malformed = rows.filter((u) => u === undefined).length;
+        if (malformed) {
+          return refused(
+            `GET the public URLs of ${id} answered with ${malformed} entr${malformed === 1 ? 'y' : 'ies'} that ${malformed === 1 ? 'is' : 'are'} not a public URL, so this listing cannot be read. It is not evidence about what ${id} exposes: any of its URLs may be answering. Do not create or delete one on the strength of it; try list_public_urls again.`,
+            body,
+          );
+        }
+        const list = rows as PublicUrl[];
         const off = body.enabled
           ? ''
           : `PUBLIC URLS DO NOT ANSWER HERE: ${typeof body.reason === 'string' && body.reason ? body.reason : 'no reason given'}. `;
         if (!list.length) {
-          if (malformed) {
-            return refused(
-              `${warning}No valid public URLs remained for ${id}. This is not a computer with none — do not create one on the strength of a malformed listing.`,
-              body,
-            );
-          }
           return said(
-            `${warning}${off}No public URLs on ${id}. ${body.enabled ? `create_public_url makes one; this computer may have ${body.limit}.` : ''}`.trimEnd(),
+            `${off}No public URLs on ${id}. ${body.enabled ? `create_public_url makes one; this computer may have ${limit}.` : ''}`.trimEnd(),
             body,
           );
         }
+        // Past the limit only matters while URLs can answer at all: with
+        // `enabled` false every one of them answers 404, and the line above
+        // already says so.
+        const past = body.enabled ? list.length - Math.min(list.length, limit) : 0;
         return said(
-          `${warning}${off}${list.length} public URL${list.length === 1 ? '' : 's'} on ${id} (this computer may have ${body.limit}), oldest first:\n${list.map(line).join('\n')}`,
+          `${off}${list.length} public URL${list.length === 1 ? '' : 's'} on ${id} (this computer may have ${limit}), oldest first:${past ? ` ${past} of them ${past === 1 ? 'is' : 'are'} past that limit and answer${past === 1 ? 's' : ''} 404 until the plan allows ${past === 1 ? 'it' : 'them'} again — delete URLs you no longer need, oldest you do not want first, to bring the rest within it.` : ''}\n${list
+            .map((u, i) => line(u, body.enabled && i >= limit ? limit : undefined))
+            .join('\n')}`,
           body,
         );
       }),
@@ -215,7 +236,7 @@ export const registerPublicUrls: Registrar = (server, session) => {
     {
       title: 'Serve a port on a public URL',
       description:
-        'Serve a port inside the computer at `https://<label>.<base_domain>` (e.g. `https://brave-otter-3f2a.mandala.dev`), on 443 with no port in the address. PUBLIC BY DEFAULT: anyone on the internet with the link can open it — pass access: "private" to require an API key of this account instead. The app must listen on 0.0.0.0:<port>, not 127.0.0.1. Without a label one is picked. A label is 3 to 40 letters, digits and hyphens, and the platform refuses names that read as its own or another company’s (www, login, brand names and their look-alikes) with a 400 that says why. Other refusals: 402 when the plan includes no public URLs, 409 when the label is taken or the computer has as many as its plan allows (Solo 2, Studio 5, Swarm 10), 429 after too many in a day. Responses are marked noindex, cookies the app sets stay on its own host name, and a Mandala API key sent to a public URL never reaches the app. Not idempotent: a retry after a lost answer makes a second URL — list_public_urls first.',
+        'Serve a port inside the computer at `https://<label>.<base_domain>` (e.g. `https://brave-otter-3f2a.mandala.dev`), on 443 with no port in the address. PUBLIC BY DEFAULT: anyone on the internet with the link can open it — pass access: "private" to require an API key of this account instead. The app must listen on 0.0.0.0:<port>, not 127.0.0.1. Without a label one is picked. A label is 3 to 40 letters, digits and hyphens, and the platform refuses names that read as its own or another company’s (www, login, brand names and their look-alikes) with a 400 that says why. Other refusals: 402 when the plan includes no public URLs; 403 PUBLIC_URLS_BLOCKED when the platform has turned public URLs off for this computer or account (not a role, and not something to retry — tell the user); 404 PUBLIC_URLS_DISABLED when public URLs are not enabled here at all (not a missing computer); 409 LABEL_TAKEN when the label is taken — a label is never given to a second account, so one another account has ever held, or one the platform has blocked, reads as taken — and 409 PUBLIC_URL_LIMIT when the computer has as many as its plan allows (Solo 2, Studio 5, Swarm 10); neither 409 clears by waiting. 429 after too many in a day, with Retry-After. Responses are marked noindex, cookies the app sets stay on its own host name, and a Mandala API key sent to a public URL never reaches the app. Not idempotent: a retry after a lost answer makes a second URL — list_public_urls first.',
       inputSchema: z
         .object({
           ...idArg,
@@ -313,14 +334,12 @@ export const registerPublicUrls: Registrar = (server, session) => {
     {
       title: 'Remove a public URL',
       description:
-        'The URL stops answering at once, and its label becomes free for anyone to take unless the platform has blocked it. The app inside the computer keeps running. Irreversible: a new URL is a new id, and the old label may be gone by then.',
+        'The URL stops answering at once. Its label stays with this account: no other account can ever take it, and this account may use it again (create_public_url with that label) unless the platform has blocked it. The app inside the computer keeps running. A URL made again is a new id.',
       inputSchema: z
         .object({
           ...idArg,
           ...urlIdArg,
-          confirm: z
-            .literal(true)
-            .describe('Must be true. The URL stops answering and its label is released.'),
+          confirm: z.literal(true).describe('Must be true. The URL stops answering at once.'),
         })
         .strict(),
       annotations: { destructiveHint: true, idempotentHint: true },
@@ -345,8 +364,11 @@ export const registerPublicUrls: Registrar = (server, session) => {
           // that was never on this computer, and "deleted" over a mistyped id
           // leaves a real URL answering. delete_webhook answers the same way.
           if (!(err instanceof NotFoundError)) throw err;
+          // Not "the id is wrong" alone: the platform answers the same 404 for
+          // a computer this key cannot see — another workspace's, or one that
+          // is gone — before it looks for the URL at all.
           return said(
-            `Nothing was deleted: ${id} has no public URL with the id ${url_id}. Either it was already removed — if this is a retry, the first call is the one that did it — or the id is wrong, in which case NO URL has been touched and the one you meant may still be answering. list_public_urls for ${id} says which.`,
+            `Nothing was deleted: the platform found no public URL ${url_id} on ${id} that this key can reach. Either it was already removed — if this is a retry, the first call is the one that did it — or the URL id is wrong, or ${id} is not a computer this key can see (another workspace's, or gone). In the last two cases NO URL has been touched and the one you meant may still be answering. list_public_urls for ${id} says which.`,
           );
         }
         // The platform's ack, checked before saying the exposure ended: a 2xx
@@ -359,7 +381,7 @@ export const registerPublicUrls: Registrar = (server, session) => {
           );
         }
         return said(
-          `Deleted ${url_id} from ${id}. It no longer answers, and its label is free.`,
+          `Deleted ${url_id} from ${id}. It no longer answers. Its label stays with this account: no other account can take it, and you may use it again unless the platform has blocked it.`,
           res,
         );
       }),

@@ -66,12 +66,13 @@ describe('asynchronous result identity and inventory integrity', () => {
     const platform = snapshots([[null, {}, { id: 7 }, { id: '' }, { id: '   ' }], terminal]);
     const { call, close } = await connect();
     try {
-      const result = await call(tool, {
-        computer_id: 'vm-1',
-        snapshot_id: 'snap-7',
-        confirm: true,
-        timeout_s: 5,
-      });
+      // Each tool's own arguments: an unknown key is refused (OPL-5975).
+      const result = await call(
+        tool,
+        tool === 'create_snapshot'
+          ? { computer_id: 'vm-1', timeout_s: 5 }
+          : { snapshot_id: 'snap-7', confirm: true, timeout_s: 5 },
+      );
       expect(platform.polls()).toBe(2);
       expect(result.isError).toBeFalsy();
       expect(textOf(result)).not.toContain('FAILED');

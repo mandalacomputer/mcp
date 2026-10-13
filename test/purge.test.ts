@@ -108,9 +108,11 @@ describe('deleting a computer', () => {
 
       // "and 0 of its snapshot(s)" is an affirmative claim that nothing was
       // destroyed, about the one call here that cannot be undone. Silence from
-      // the platform is not that claim.
+      // the platform is not that claim — and since OPL-5975 it is not a claim
+      // that the computer is gone either.
       expect(textOf(res)).not.toContain('0 of its snapshot');
-      expect(textOf(res)).toContain('its snapshots');
+      expect(textOf(res)).toContain('without confirming that the computer is gone');
+      expect(res.isError).toBe(true);
     } finally {
       globalThis.fetch = real;
     }
@@ -157,6 +159,113 @@ describe('deleting a computer', () => {
     } finally {
       globalThis.fetch = real;
     }
+  });
+
+  // OPL-5975: a 2xx is not a deletion. The platform answers a purge whose
+  // computer delete it could not confirm with a 2xx carrying
+  // `{error, computer_deleted: false}` and no `ok`, and `null` where whether it
+  // is gone is unknown. It was reported as "Deleted vm-1", and the session
+  // unbound from a computer that may still be running.
+  it.each([
+    [
+      'unconfirmed',
+      202,
+      {
+        error:
+          'Computer deletion was not confirmed. Check its state before retrying; snapshot copies were kept.',
+        computer_deleted: false,
+      },
+    ],
+    ['unknown', 200, { error: 'Computer absence could not be confirmed.', computer_deleted: null }],
+    ['present again', 200, { ok: false, computer_deleted: false, snapshots_deleted: 0, purge: {} }],
+    ['an error beside ok', 200, { ok: true, error: 'Something was not finished.' }],
+    ['no ok at all', 200, { snapshots_deleted: 0 }],
+  ])('does not call a 2xx that confirms nothing (%s) a deletion', async (_label, status, body) => {
+    const real = globalThis.fetch;
+    let deletes = 0;
+    globalThis.fetch = (async (_input: unknown, init?: RequestInit) => {
+      if ((init?.method ?? 'GET') === 'DELETE') {
+        deletes++;
+        return new Response(JSON.stringify(body), {
+          status,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      return new Response(JSON.stringify({ id: 'vm-1', status: 'running' }), {
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }) as typeof fetch;
+    try {
+      const { call, close } = await connect();
+      for (const purge of [false, true]) {
+        const res = await call('delete_computer', {
+          computer_id: 'vm-1',
+          confirm: true,
+          ...(purge ? { delete_snapshots: true, expect: 'fp-abc123' } : {}),
+        });
+        const text = textOf(res);
+        expect(res.isError, text).toBe(true);
+        expect(text).toContain('without confirming that the computer is gone');
+        expect(text).toContain('Do NOT report it as deleted');
+        expect(text).not.toMatch(/^Deleted/);
+        if (typeof (body as { error?: unknown }).error === 'string')
+          expect(text).toContain((body as { error: string }).error);
+        if (purge) expect(text).toContain('read snapshot_holdings');
+      }
+      // Still bound: the computer may well be there.
+      expect(textOf(await call('get_computer', {}))).not.toContain('No computer selected');
+      expect(deletes).toBe(2);
+      await close();
+    } finally {
+      globalThis.fetch = real;
+    }
+  });
+
+  // Codex, round 3 on #213: a purge always says `computer_deleted`, so an
+  // `ok: true` without it is not a confirmed deletion.
+  it('does not confirm a purge by ok alone', async () => {
+    const real = globalThis.fetch;
+    globalThis.fetch = (async (_input: unknown, init?: RequestInit) =>
+      new Response(
+        JSON.stringify(
+          (init?.method ?? 'GET') === 'DELETE'
+            ? { ok: true, snapshots_deleted: 0 }
+            : { id: 'vm-1', status: 'running' },
+        ),
+        { headers: { 'Content-Type': 'application/json' } },
+      )) as typeof fetch;
+    try {
+      const { call, close } = await connect();
+      const purged = await call('delete_computer', {
+        computer_id: 'vm-1',
+        confirm: true,
+        delete_snapshots: true,
+        expect: 'fp-abc123',
+      });
+      expect(purged.isError).toBe(true);
+      expect(textOf(purged)).toContain('without confirming that the computer is gone');
+      expect(textOf(await call('get_computer', {}))).not.toContain('No computer selected');
+      // The same answer to a plain delete is the platform's confirmation.
+      const plain = await call('delete_computer', { computer_id: 'vm-1', confirm: true });
+      expect(textOf(plain)).toMatch(/^Deleted vm-1\./);
+      await close();
+    } finally {
+      globalThis.fetch = real;
+    }
+  });
+
+  it('calls a confirmed delete a deletion, plain or purged', async () => {
+    const { call, close } = await connect();
+    const plain = await call('delete_computer', { computer_id: 'vm-1', confirm: true });
+    expect(textOf(plain)).toMatch(/^Deleted vm-1\./);
+    const purged = await call('delete_computer', {
+      computer_id: 'vm-1',
+      confirm: true,
+      delete_snapshots: true,
+      expect: 'fp-abc123',
+    });
+    expect(textOf(purged)).toMatch(/^Deleted vm-1 and 2 of its snapshot\(s\)\./);
+    await close();
   });
 
   it("passes on the platform's refusal when the set moved underneath it", async () => {

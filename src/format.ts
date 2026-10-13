@@ -1,14 +1,19 @@
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import {
   APIError,
+  codeAdvice,
+  isTransient,
   MandalaError,
   OriginTLSError,
   OriginUnreachableError,
   outcomeUnknownOn503,
   platformSaid,
   reasonAdvice,
+  reasonKind,
   statusAdvice,
+  UNCLASSIFIED_CONFLICT_ADVICE,
   UnavailableError,
+  unclassifiedConflict,
 } from './errors.js';
 
 /** A plain text result. */
@@ -98,6 +103,9 @@ export function errorMetadata(source: APIError | Record<string, unknown>): {
     source instanceof APIError
       ? {
           status: source.status,
+          // The platform's machine-readable code (OPL-5975), as every SDK
+          // surface shows it: the one word a caller can switch on.
+          code: source.code,
           reason: source.reason,
           request_id: source.requestId,
           allow: source.allow,
@@ -108,6 +116,7 @@ export function errorMetadata(source: APIError | Record<string, unknown>): {
   const fields: Record<string, string | number> = {};
   let omitted = false;
   for (const [name, limit] of Object.entries({
+    code: 128,
     reason: 128,
     request_id: 256,
     allow: 512,
@@ -233,18 +242,37 @@ export function failed(
   // platform's word: the change may or may not have happened, and a reason
   // saying "worth sending again" would invite the blind replay of a create or a
   // command that the platform's own docs warn against (OPL-5026).
+  //
+  // A code the platform documents comes ahead of the status (OPL-5975): it is
+  // the more specific answer, and the status's own sentence is wrong for some
+  // of them — a 403 PUBLIC_URLS_BLOCKED is no role and no suspended account,
+  // and a 404 PUBLIC_URLS_DISABLED is no missing computer.
+  //
+  // And a 409 nothing classifies says so, rather than saying nothing: the
+  // platform documents an absent reason as no classification, and silence
+  // left a model to its instinct, which is to retry.
+  const reasonable =
+    err instanceof APIError &&
+    includeReasonAdvice &&
+    ![404, 405].includes(err.status) &&
+    (!err.body ||
+      typeof err.body !== 'object' ||
+      !('error' in err.body) ||
+      typeof err.body.error !== 'object');
   const advice =
     err instanceof APIError
       ? (override ??
         unavailableAdvice(err) ??
+        codeAdvice(err) ??
         statusAdvice(err.status, err.reason) ??
-        (includeReasonAdvice &&
-        ![404, 405].includes(err.status) &&
-        (!err.body ||
-          typeof err.body !== 'object' ||
-          !('error' in err.body) ||
-          typeof err.body.error !== 'object')
-          ? reasonAdvice(err.reason)
+        (reasonable
+          ? // A word that clears is said only where the retry predicate agrees:
+            // on a 400 or a 409, at the top level. A 500 carrying `contention`
+            // is not told "worth sending again" (Codex, round 3 on #213).
+            ((reasonKind(err.reason) === 'clears' && !isTransient(err)
+              ? undefined
+              : reasonAdvice(err.reason)) ??
+            (unclassifiedConflict(err) ? UNCLASSIFIED_CONFLICT_ADVICE : undefined))
           : undefined))
       : undefined;
   const line = advice ? `${withStatus} — ${advice}` : withStatus;

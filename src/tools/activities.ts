@@ -20,6 +20,10 @@ const record = z.object({
   observed_at: label,
   revision: count.min(1).optional(),
   has_results: z.boolean().optional(),
+  // On a managed-agent run summary: whether the account's AI credits paid for
+  // it, and the total charge (zero for a run on the caller's own model key).
+  funded: z.boolean().optional(),
+  cost_usd: z.number().nonnegative().optional(),
   dispatched_at: label.optional(),
   elapsed_ms: count.optional(),
   reason: label.optional(),
