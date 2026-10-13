@@ -189,6 +189,38 @@ describe('what a model is told', () => {
     },
   );
 
+  // Codex, round 2 on #213: the code's "send it again" was given on a 403
+  // and beside a nested word, both of which isTransient calls final.
+  it('gives no retry advice for WORKSPACE_MOVING where isTransient says no', () => {
+    const cases = [
+      errorForStatus(403, 'x', { error: 'x', code: 'WORKSPACE_MOVING' }),
+      errorForStatus(401, 'x', { error: 'x', code: 'WORKSPACE_MOVING' }),
+      errorForStatus(409, 'x', {
+        error: { message: 'x', reason: 'contention' },
+        code: 'WORKSPACE_MOVING',
+      }),
+    ];
+    for (const e of cases) {
+      expect(isTransient(e), String(e.status)).toBe(false);
+      const text = textOf(failed(e));
+      expect(text, String(e.status)).not.toContain('wait a moment and send it again');
+      expect(text, String(e.status)).not.toContain('clears once the move has finished');
+    }
+    // A 403 keeps the status's own sentence.
+    expect(textOf(failed(cases[0]))).toContain('Retrying does not help');
+  });
+
+  it('gives a code’s advice only on the status it is documented with', () => {
+    for (const [code, status] of [
+      ['LABEL_TAKEN', 400],
+      ['PUBLIC_URL_LIMIT', 403],
+      ['PUBLIC_URLS_BLOCKED', 409],
+      ['PUBLIC_URLS_DISABLED', 409],
+    ] as const) {
+      expect(codeAdvice(errorForStatus(status, 'x', { error: 'x', code })), code).toBeUndefined();
+    }
+  });
+
   it('keeps WORKSPACE_MOVING’s own advice where the word clears, is unknown, or is absent', () => {
     for (const reason of ['contention', 'some-new-word', undefined]) {
       const e = err(409, { error: 'x', code: 'WORKSPACE_MOVING', reason });
@@ -198,14 +230,14 @@ describe('what a model is told', () => {
   });
 
   it('has advice for each code it classifies, and none for one it does not', () => {
-    for (const code of [
-      'LABEL_TAKEN',
-      'PUBLIC_URL_LIMIT',
-      'PUBLIC_URLS_BLOCKED',
-      'PUBLIC_URLS_DISABLED',
-      'WORKSPACE_MOVING',
-    ]) {
-      expect(codeAdvice(err(409, { error: 'x', code })), code).toBeDefined();
+    for (const [code, status] of [
+      ['LABEL_TAKEN', 409],
+      ['PUBLIC_URL_LIMIT', 409],
+      ['PUBLIC_URLS_BLOCKED', 403],
+      ['PUBLIC_URLS_DISABLED', 404],
+      ['WORKSPACE_MOVING', 409],
+    ] as const) {
+      expect(codeAdvice(err(status, { error: 'x', code })), code).toBeDefined();
     }
     expect(codeAdvice(err(409, { error: 'x', code: 'SOMETHING_ELSE' }))).toBeUndefined();
   });

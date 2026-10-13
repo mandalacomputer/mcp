@@ -285,6 +285,10 @@ export function conflictCodeClears(err: APIError): boolean {
  * account, and `PUBLIC_URLS_DISABLED` is a 404 that is not a missing computer.
  */
 export function codeAdvice(err: APIError): string | undefined {
+  // Each code on the one status the platform sends it with. The same code on
+  // another status is not the refusal this advice describes, and the status's
+  // own advice — a 401 to 405 is never a retry — is left to speak.
+  if (CODE_STATUS[err.code ?? ''] !== err.status) return undefined;
   switch (err.code) {
     case 'LABEL_TAKEN':
       return 'that label is taken, and this does not clear by waiting. A label is never given to a second account, so one another account has ever held, or one the platform has blocked, reads as taken, as does one a URL of this account holds now (list_public_urls shows those). Choose another label, or leave label out to have one picked';
@@ -296,17 +300,26 @@ export function codeAdvice(err: APIError): string | undefined {
       return 'public URLs are not enabled here at all. This is not a missing computer or URL, and waiting does not change it: say that public URLs are unavailable';
     case 'WORKSPACE_MOVING':
       // The word decides, as it does in isTransient: `unsupported` is the
-      // stuck change, and any other word that does not clear says what it
-      // says — so this stays silent and that word's own advice is given, never
-      // "send it again" over a refusal isTransient calls permanent.
+      // stuck change, which a step clears. Otherwise "send it again" is said
+      // only where isTransient agrees — never over a permanent word, a nested
+      // word (which grants no retry), or anything else it calls final.
       if (err.reason === 'unsupported')
         return 'this computer\u2019s workspace change is not settled, and waiting alone will not settle it. Repeating the same move_computer_to_workspace call reconciles it, or check the workspace change in the dashboard; then send this again';
-      if (reasonKind(err.reason) === 'permanent') return undefined;
+      if (!isTransient(err)) return undefined;
       return 'this computer is being moved to another workspace; this clears once the move has finished, so wait a moment and send it again';
     default:
       return undefined;
   }
 }
+
+/** The status each code in {@link codeAdvice} arrives with. */
+const CODE_STATUS: Readonly<Record<string, number>> = {
+  LABEL_TAKEN: 409,
+  PUBLIC_URL_LIMIT: 409,
+  PUBLIC_URLS_BLOCKED: 403,
+  PUBLIC_URLS_DISABLED: 404,
+  WORKSPACE_MOVING: 409,
+};
 
 /**
  * A 409 the platform did not classify: no `reason` this version knows, no code
