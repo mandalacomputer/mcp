@@ -57,6 +57,18 @@ function serverBases(servers) {
   });
 }
 
+/**
+ * HEAD where the same path item publishes a GET at the same URL is that GET
+ * answered without its body, and OPTIONS is the CORS preflight. Both are forms
+ * of the protocol rather than operations a tool sends, so they are reported
+ * and not required. They are still validated, still take part in the template
+ * ambiguity check, and still route requests, so a literal path published only
+ * for them keeps its precedence. A HEAD with no such GET is required like any
+ * other operation.
+ */
+const isProtocolForm = (method, full, gets) =>
+  method === 'options' || (method === 'head' && gets.has(full));
+
 /** Required subset: extra predeployment MCP operations belong to the separate mirror check. */
 export function parseOperations(document) {
   if (
@@ -68,6 +80,7 @@ export function parseOperations(document) {
     throw new Error('Expected a supported OpenAPI 3.x document with object paths');
   const rootBases = serverBases(document.servers);
   const operations = [];
+  const protocol = [];
   const excluded = [];
   const owners = new Map();
   for (const [path, item] of Object.entries(document.paths)) {
@@ -76,6 +89,7 @@ export function parseOperations(document) {
     if (!record(item) || item.$ref !== undefined)
       throw new Error('Unsupported OpenAPI path item or reference');
     const pathBases = item.servers === undefined ? rootBases : serverBases(item.servers);
+    const resolved = [];
     for (const [method, operation] of Object.entries(item)) {
       if (!METHODS.has(method)) continue;
       if (
@@ -87,27 +101,33 @@ export function parseOperations(document) {
       )
         throw new Error('Invalid OpenAPI operation');
       const bases = operation.servers === undefined ? pathBases : serverBases(operation.servers);
-      for (const base of bases) {
-        // OpenAPI appends the path to the effective server URL, including repeated segments.
-        const full = `${base}${path}`;
-        const segments = validPath(full);
-        const key = `${method.toUpperCase()} ${full}`;
-        if (!inScope(full)) {
-          excluded.push(key);
-          continue;
-        }
-        const canonical = `${method.toUpperCase()} ${full.replace(/\{[^}]+\}/g, '{}')}`;
-        const previous = owners.get(canonical);
-        if (previous !== undefined && previous !== path)
-          throw new Error('Ambiguous OpenAPI operation templates');
-        if (previous !== undefined) continue;
-        owners.set(canonical, path);
-        operations.push({ method: method.toUpperCase(), path: full, segments, key });
+      // OpenAPI appends the path to the effective server URL, including repeated segments.
+      for (const base of bases) resolved.push({ method, full: `${base}${path}` });
+    }
+    const gets = new Set(resolved.filter((r) => r.method === 'get').map((r) => r.full));
+    for (const { method, full } of resolved) {
+      const segments = validPath(full);
+      const key = `${method.toUpperCase()} ${full}`;
+      if (!inScope(full)) {
+        excluded.push(key);
+        continue;
       }
+      const canonical = `${method.toUpperCase()} ${full.replace(/\{[^}]+\}/g, '{}')}`;
+      const previous = owners.get(canonical);
+      if (previous !== undefined && previous !== path)
+        throw new Error('Ambiguous OpenAPI operation templates');
+      if (previous !== undefined) continue;
+      owners.set(canonical, path);
+      (isProtocolForm(method, full, gets) ? protocol : operations).push({
+        method: method.toUpperCase(),
+        path: full,
+        segments,
+        key,
+      });
     }
   }
   if (!operations.length) throw new Error('No in-scope /api/v1 OpenAPI operations');
-  return { operations, excluded: [...new Set(excluded)].sort() };
+  return { operations, protocol, excluded: [...new Set(excluded)].sort() };
 }
 
 /**
@@ -151,6 +171,7 @@ export function compareCoverage(contract, evidence, { unsent = [], prepublicatio
     }),
   );
   if (!Array.isArray(evidence) || !evidence.length) throw new Error('No tool request evidence');
+  const routable = [...contract.operations, ...contract.protocol];
   const seen = new Set();
   let requests = 0;
   const zero = [];
@@ -169,7 +190,9 @@ export function compareCoverage(contract, evidence, { unsent = [], prepublicatio
       )
         throw new Error('Invalid concrete HTTP request evidence');
       const segments = request.path.slice(1).split('/');
-      const paths = contract.operations.filter(
+      // Protocol forms route but are never required: a literal path published
+      // only for them still outranks a parameterized one.
+      const paths = routable.filter(
         (op) =>
           op.segments.length === segments.length &&
           op.segments.every((seg, i) =>
@@ -232,6 +255,7 @@ export function compareCoverage(contract, evidence, { unsent = [], prepublicatio
     requests,
     tools: evidence.length,
     excluded: contract.excluded,
+    protocol: contract.protocol.map((op) => op.key).sort(),
     unsent: notYetSent,
     awaitingPublication: awaitingPublication.sort((a, b) => a.operation.localeCompare(b.operation)),
   };

@@ -1,6 +1,6 @@
 export const PUBLIC_OPENAPI_URL: string;
 export type Operation = { method: string; path: string; segments: string[]; key: string };
-export type Contract = { operations: Operation[]; excluded: string[] };
+export type Contract = { operations: Operation[]; protocol: Operation[]; excluded: string[] };
 export type Evidence = { tool: string; requests: { method: string; path: string }[] }[];
 export function parseOperations(document: unknown): Contract;
 export function compareCoverage(
@@ -15,6 +15,7 @@ export function compareCoverage(
   requests: number;
   tools: number;
   excluded: string[];
+  protocol: string[];
   unsent: string[];
   awaitingPublication: { operation: string; expiresAt: string }[];
 };

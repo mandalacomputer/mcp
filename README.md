@@ -1626,8 +1626,13 @@ overall deadline and an 8 MiB body ceiling, then exercises the real MCP tools
 and requires request evidence for every published `/api/v1` operation. Every
 exercise variant must succeed and dispatch a request, including later variants
 of a tool that already dispatched successfully.
-Non-v1 operations are explicitly excluded and reported. The check uses OpenAPI
-server inheritance and literal-path precedence, not the local route allowlist.
+Non-v1 operations are explicitly excluded and reported. Protocol forms are
+reported but not required, since no tool sends them: `OPTIONS` (the CORS
+preflight) and a `HEAD` published beside a `GET` at the same URL (that `GET`
+without its body). A `HEAD` with no such `GET` is required like any other
+operation.
+The check uses OpenAPI server inheritance and literal-path precedence, not the
+local route allowlist.
 Each path is appended to its effective server base; repeated prefixes are not
 removed. Fully prefixed paths work with an absent or root server.
 It fails on a blocked fetch, redirect, invalid document or missing operation;
