@@ -58,6 +58,30 @@ it('covers the explicitly synthetic offline fixture with successful actual MCP t
   ).toThrow('Zero request coverage for tools: list_directory');
 });
 
+it('passes the fixture with HEAD on every GET path and OPTIONS on every path, and still fails a gap', async () => {
+  const observed = operationEvidence(await collectExercises());
+  const forms = structuredClone(fixture);
+  for (const item of Object.values(forms.paths) as Record<string, unknown>[]) {
+    if (item.get) item.head = operation();
+    item.options = { ...operation(), security: [] };
+  }
+  const contract = parseOperations(forms);
+  const summary = compareCoverage(contract, observed);
+  expect(summary.protocol.length).toBeGreaterThan(Object.keys(forms.paths).length);
+  expect(contract.operations).toEqual(parseOperations(fixture).operations);
+  const directory = observed.find((entry) => entry.tool === 'list_directory')!;
+  expect(() =>
+    compareCoverage(
+      contract,
+      observed.filter((entry) => entry !== directory),
+    ),
+  ).toThrow('Missing published operations:\nGET /api/v1/computers/{id}/files/list');
+  forms.paths['/future-public-operation'] = { post: operation(), options: operation() };
+  expect(() => compareCoverage(parseOperations(forms), observed)).toThrow(
+    'Missing published operations:\nPOST /api/v1/future-public-operation',
+  );
+});
+
 it('reports a published operation listed as not yet sent, and fails every other gap', async () => {
   const observed = operationEvidence(await collectExercises());
   const changed = structuredClone(fixture);
@@ -378,12 +402,107 @@ describe('independent OpenAPI parser and literal matcher', () => {
       'Missing published',
     );
   });
-  it.each(['head', 'options'])('requires actual evidence for published %s', (method) => {
+  it('reports HEAD beside a GET and every OPTIONS without requiring them', () => {
     const contract = parseOperations(
-      document({ '/one': { get: operation(), [method]: operation() } }),
+      document({
+        '/one': { get: operation(), head: operation(), post: operation(), options: operation() },
+        '/one/{id}': { delete: operation(), options: operation() },
+      }),
+    );
+    expect(contract.operations.map((op) => op.key)).toEqual([
+      'GET /api/v1/one',
+      'POST /api/v1/one',
+      'DELETE /api/v1/one/{id}',
+    ]);
+    const sent = (...requests: [string, string][]): Evidence => [
+      { tool: 'one', requests: requests.map(([method, path]) => ({ method, path })) },
+    ];
+    const summary = compareCoverage(
+      contract,
+      sent(['GET', '/api/v1/one'], ['POST', '/api/v1/one'], ['DELETE', '/api/v1/one/a']),
+    );
+    expect(summary.operations).toBe(3);
+    expect(summary.protocol).toEqual([
+      'HEAD /api/v1/one',
+      'OPTIONS /api/v1/one',
+      'OPTIONS /api/v1/one/{id}',
+    ]);
+    // Every other method is still required beside them.
+    expect(() =>
+      compareCoverage(contract, sent(['POST', '/api/v1/one'], ['DELETE', '/api/v1/one/a'])),
+    ).toThrow('Missing published operations:\nGET /api/v1/one');
+    expect(() =>
+      compareCoverage(contract, sent(['GET', '/api/v1/one'], ['DELETE', '/api/v1/one/a'])),
+    ).toThrow('Missing published operations:\nPOST /api/v1/one');
+    expect(() =>
+      compareCoverage(contract, sent(['GET', '/api/v1/one'], ['POST', '/api/v1/one'])),
+    ).toThrow('Missing published operations:\nDELETE /api/v1/one/{id}');
+  });
+  it.each(['put', 'patch', 'delete', 'trace'])('still requires a published %s', (method) => {
+    const contract = parseOperations(
+      document({ '/one': { get: operation(), head: operation(), [method]: operation() } }),
     );
     expect(() => compareCoverage(contract, evidence('GET', '/api/v1/one'))).toThrow(
-      `${method.toUpperCase()} /api/v1/one`,
+      `Missing published operations:\n${method.toUpperCase()} /api/v1/one`,
+    );
+  });
+  it('requires a HEAD that has no GET at the same URL', () => {
+    const lone = parseOperations(
+      document({ '/one': { get: operation() }, '/solo': { head: operation() } }),
+    );
+    expect(lone.protocol).toEqual([]);
+    expect(() => compareCoverage(lone, evidence('GET', '/api/v1/one'))).toThrow(
+      'Missing published operations:\nHEAD /api/v1/solo',
+    );
+    // A GET moved to another server is not the same URL.
+    const moved = parseOperations(
+      document({
+        '/one': { get: { ...operation(), servers: [{ url: '/api/v10' }] }, head: operation() },
+        '/two': { get: operation() },
+      }),
+    );
+    expect(moved.excluded).toEqual(['GET /api/v10/one']);
+    expect(() => compareCoverage(moved, evidence('GET', '/api/v1/two'))).toThrow(
+      'Missing published operations:\nHEAD /api/v1/one',
+    );
+  });
+  it('keeps protocol forms in literal precedence, template ambiguity and scope', () => {
+    // A literal path published only for OPTIONS still outranks a template, so
+    // a GET to it credits nothing rather than the parameterized operation.
+    const literal = parseOperations(
+      document({ '/one/literal': { options: operation() }, '/one/{id}': { get: operation() } }),
+    );
+    expect(() => compareCoverage(literal, evidence('GET', '/api/v1/one/literal'))).toThrow(
+      'Missing published operations:\nGET /api/v1/one/{id}',
+    );
+    expect(() =>
+      parseOperations(
+        document({
+          '/one/{a}': { get: operation(), options: operation() },
+          '/one/{b}': { post: operation(), options: operation() },
+        }),
+      ),
+    ).toThrow('Ambiguous OpenAPI operation templates');
+    const scoped = parseOperations(
+      document({ '/one': { get: operation(), head: operation(), options: operation() } }),
+    );
+    expect(scoped.excluded).toEqual([]);
+    const outside = parseOperations(
+      document({
+        '/one': { get: operation() },
+        '/other': { servers: [{ url: '/api/v10' }], get: operation(), options: operation() },
+      }),
+    );
+    expect(outside.excluded).toEqual(['GET /api/v10/other', 'OPTIONS /api/v10/other']);
+    expect(outside.protocol).toEqual([]);
+    expect(() =>
+      parseOperations(document({ '/one': { head: operation(), options: operation() } })),
+    ).not.toThrow();
+    expect(() => parseOperations(document({ '/one': { options: operation() } }))).toThrow(
+      'No in-scope',
+    );
+    expect(() => parseOperations(document({ '/one': { get: operation(), options: {} } }))).toThrow(
+      'Invalid OpenAPI operation',
     );
   });
   it.each([
