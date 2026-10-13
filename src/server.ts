@@ -21,6 +21,7 @@ import { registerExecutions } from './tools/executions.js';
 import { registerGuest } from './tools/guest.js';
 import { registerInput } from './tools/input.js';
 import { registerOperations } from './tools/operations.js';
+import { registerPublicUrls } from './tools/publicurls.js';
 import { registerResults } from './tools/results.js';
 import { registerSecrets } from './tools/secrets.js';
 import { registerSignals } from './tools/signals.js';
@@ -157,6 +158,7 @@ export function createServer(cfg: ServerConfig): McpServer {
   registerEvents(server, session, opts);
   registerWebhooks(server, session, opts);
   registerSSH(server, session, opts);
+  registerPublicUrls(server, session, opts);
   registerSecrets(server, session, opts);
   registerCredits(server, session, opts);
   registerAgent(server, session, opts);

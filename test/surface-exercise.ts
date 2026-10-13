@@ -184,6 +184,15 @@ export const EXERCISE: Record<string, Record<string, unknown>[]> = {
   remove_ssh_key: [{ key_id: 'sshk-3c9a51d07be2f846', confirm: true }],
   get_computer_ssh: [{}],
   set_computer_ssh: [{ enabled: true }, { enabled: false }],
+  // Public URLs (platform OPL-3753). Every body field on the create and the
+  // update is sent by one call or another, so the parameter half sees them.
+  list_public_urls: [{}],
+  create_public_url: [{ port: 3000 }, { port: 3000, label: 'cool-thing', access: 'private' }],
+  update_public_url: [
+    { url_id: 'pu-0123456789abcdef', port: 8000 },
+    { url_id: 'pu-0123456789abcdef', access: 'public' },
+  ],
+  delete_public_url: [{ url_id: 'pu-0123456789abcdef', confirm: true }],
   // Secret bindings. `version` is sent on one of the two sets, because the
   // parameter sweep is what proves it can be.
   get_computer_secrets: [{}],

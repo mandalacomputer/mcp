@@ -42,6 +42,7 @@ const GROUPS = {
   secrets:
     'get_computer_secrets set_computer_secrets list_secrets get_secret create_secret set_secret replace_secret delete_secret',
   ssh: 'list_ssh_keys add_ssh_key remove_ssh_key get_computer_ssh set_computer_ssh',
+  public_urls: 'list_public_urls create_public_url update_public_url delete_public_url',
   webhooks:
     'list_webhooks create_webhook get_webhook update_webhook rotate_webhook_secret test_webhook list_webhook_deliveries delete_webhook',
   agent: 'run_agent run_agent_chat',

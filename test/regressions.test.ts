@@ -3553,6 +3553,12 @@ describe('the tools our own prose tells a model to call', () => {
     'credentials_secret_id',
     // Chat agent.stop terminal value, not a callable tool.
     'end_turn',
+    // list_public_urls and create_public_url name it: the domain every public
+    // URL's label sits under, a field of the listing. Not a tool.
+    'base_domain',
+    // The MANDALA_TAGS tag for the four public URL tools, named in the skill's
+    // list of tags; the first tag with an underscore in it. Not a tool.
+    'public_urls',
     // whoami and list_api_keys name it: the field saying whether a key may
     // manage API keys (OPL-5053). A response field, not a tool.
     'manage_keys',

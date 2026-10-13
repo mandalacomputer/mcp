@@ -574,12 +574,6 @@ export const UNIMPLEMENTED = new Set<string>([
   // offered: neither ever carries a raw key.
   'POST api-keys',
   'DELETE api-keys/:id',
-  // Public URLs (platform OPL-3753), published and served, behind a staged
-  // flag on the platform until its dashboard ships. Tools for them follow.
-  'GET computers/:id/public-urls',
-  'POST computers/:id/public-urls',
-  'PATCH computers/:id/public-urls/:urlId',
-  'DELETE computers/:id/public-urls/:urlId',
 ]);
 
 /**

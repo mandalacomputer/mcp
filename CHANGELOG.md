@@ -14,6 +14,18 @@ are wording changes, and they are behaviour changes in the way that matters.
 
 ## [Unreleased]
 
+### Added
+
+- **Public URLs: `list_public_urls`, `create_public_url`,
+  `update_public_url`, `delete_public_url`.** Serve a port inside a computer
+  at `https://<label>.mandala.dev`. A URL is public by default, and the
+  create's answer says so in its first sentence; `access: "private"` requires
+  an API key of the account. Port 22 and an empty update are refused before
+  any request. An answer that is not a public URL is never described as one:
+  a create that answers something else says the URL may have been made. A
+  delete of an id that is not there says nothing was deleted. The new
+  `public_urls` tag selects the four tools.
+
 ## [0.12.0] — 2026-10-11
 
 ### Added

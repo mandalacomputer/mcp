@@ -1,0 +1,211 @@
+import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { publicUrlBody } from '../src/paths.js';
+import { connect, installFakePlatform, PUBLIC_URL } from './harness.js';
+
+// Public URLs (platform OPL-3753): a port inside a computer served on
+// `https://<label>.<base_domain>`. What is pinned is what a model acts on: the
+// first line of each answer — above all that a public URL is open to anyone
+// with the link, and that the app must listen on 0.0.0.0 — the refusals that
+// save a round trip which could only fail, and the bodies that are not public
+// URLs and must not be described as one.
+
+const textOf = (res: CallToolResult) =>
+  res.content
+    .filter((c): c is { type: 'text'; text: string } => c.type === 'text')
+    .map((c) => c.text)
+    .join('\n');
+
+describe('public URL tools', () => {
+  let platform: ReturnType<typeof installFakePlatform>;
+  beforeEach(() => {
+    platform = installFakePlatform();
+  });
+  afterEach(() => platform.restore());
+
+  it('creates on the selected computer, sending only what was given, and says who can open it', async () => {
+    const { call, close } = await connect();
+    const res = await call('create_public_url', { port: 3000 });
+    const sent = platform.calls.find(
+      (c) => c.method === 'POST' && c.path === '/computers/vm-1/public-urls',
+    );
+    expect(sent?.body).toEqual({ port: 3000 });
+    const text = textOf(res);
+    expect(text).toContain(
+      'Created https://cool-thing.mandala.dev, serving port 3000 inside vm-1.',
+    );
+    expect(text).toContain('PUBLIC: anyone with the link can open it');
+    expect(text).toContain('0.0.0.0:3000, not 127.0.0.1');
+    expect(text).toContain('mandala-skip-warning: 1');
+    await close();
+  });
+
+  it('says a private one opens only with this account’s key, which never reaches the app', async () => {
+    const { call, close } = await connect();
+    const res = await call('create_public_url', {
+      computer_id: 'vm-2',
+      port: 8080,
+      label: '  my-demo ',
+      access: 'private',
+    });
+    const sent = platform.calls.find((c) => c.method === 'POST');
+    expect(sent?.path).toBe('/computers/vm-2/public-urls');
+    expect(sent?.body).toEqual({ port: 8080, label: 'my-demo', access: 'private' });
+    const text = textOf(res);
+    expect(text).toContain('https://my-demo.mandala.dev');
+    expect(text).toContain('private: only requests with an API key of this account');
+    expect(text).not.toContain('anyone with the link');
+    await close();
+  });
+
+  it('refuses port 22, a port out of range and an empty label before any request', async () => {
+    expect(() => publicUrlBody({ port: 22 })).toThrow(/computer’s own SSH/);
+    expect(() => publicUrlBody({ port: 0 })).toThrow(/1 to 65535/);
+    expect(() => publicUrlBody({ port: 65536 })).toThrow(/1 to 65535/);
+    expect(() => publicUrlBody({ port: 3000, label: '   ' })).toThrow(/must not be empty/);
+    const { call, close } = await connect();
+    const res = await call('create_public_url', { port: 22 });
+    expect(res.isError).toBe(true);
+    expect(textOf(res)).toMatch(/computer’s own SSH/);
+    expect(platform.calls.filter((c) => c.method === 'POST')).toEqual([]);
+    await close();
+  });
+
+  it('refuses an empty update without a round trip, and sends only the named field', async () => {
+    const { call, close } = await connect();
+    const empty = await call('update_public_url', { url_id: PUBLIC_URL.id });
+    expect(empty.isError).toBe(true);
+    expect(textOf(empty)).toMatch(/name a port, an access, or both/);
+    expect(platform.calls.filter((c) => c.method === 'PATCH')).toEqual([]);
+
+    const res = await call('update_public_url', { url_id: PUBLIC_URL.id, access: 'private' });
+    const sent = platform.calls.find((c) => c.method === 'PATCH');
+    expect(sent?.path).toBe(`/computers/vm-1/public-urls/${PUBLIC_URL.id}`);
+    expect(sent?.body).toEqual({ access: 'private' });
+    expect(textOf(res)).toContain('Updated https://cool-thing.mandala.dev: port 3000. private:');
+    await close();
+  });
+
+  it('lists with the limit, and marks a URL the platform turned off', async () => {
+    const { call, close } = await connect();
+    const text = textOf(await call('list_public_urls', {}));
+    expect(text).toContain('1 public URL on vm-1 (this computer may have 2), oldest first:');
+    expect(text).toContain('https://cool-thing.mandala.dev → port 3000, public');
+    await close();
+
+    const off = await over(
+      {
+        enabled: false,
+        reason: 'Public URLs are not enabled here.',
+        base_domain: 'mandala.dev',
+        limit: 2,
+        public_urls: [{ ...PUBLIC_URL, disabled: true }],
+      },
+      200,
+      'list_public_urls',
+      {},
+    );
+    expect(textOf(off)).toContain(
+      'PUBLIC URLS DO NOT ANSWER HERE: Public URLs are not enabled here.',
+    );
+    expect(textOf(off)).toContain('TURNED OFF BY THE PLATFORM');
+  });
+
+  it('says an empty listing is empty, and how many the computer may have', async () => {
+    const res = await over(
+      { enabled: true, base_domain: 'mandala.dev', limit: 5, public_urls: [] },
+      200,
+      'list_public_urls',
+      {},
+    );
+    expect(textOf(res).split('\n')[0]).toBe(
+      'No public URLs on vm-1. create_public_url makes one; this computer may have 5.',
+    );
+  });
+
+  it('does not read a body that is not a listing as a computer with no URLs', async () => {
+    for (const body of [[], { public_urls: 'nope' }, { enabled: true, public_urls: [] }]) {
+      const res = await over(body, 200, 'list_public_urls', {});
+      expect(res.isError).toBe(true);
+      expect(textOf(res)).toContain('This is not a computer with no public URLs');
+    }
+    const malformed = await over(
+      { enabled: true, base_domain: 'mandala.dev', limit: 2, public_urls: [{ id: 'pu-x' }] },
+      200,
+      'list_public_urls',
+      {},
+    );
+    expect(malformed.isError).toBe(true);
+    expect(textOf(malformed)).toContain('ignored 1 malformed public URL entry');
+  });
+
+  it('says a create MAY have happened when the answer is not a public URL', async () => {
+    for (const body of [
+      {},
+      { ...PUBLIC_URL, url: 'http://cool-thing.mandala.dev' },
+      { ...PUBLIC_URL, access: 'everyone' },
+      { ...PUBLIC_URL, disabled: undefined },
+    ]) {
+      const res = await over(body, 201, 'create_public_url', { port: 3000 });
+      expect(res.isError).toBe(true);
+      expect(textOf(res)).toContain('THE URL MAY HAVE BEEN CREATED');
+      expect(textOf(res)).not.toContain('anyone with the link');
+    }
+  });
+
+  it('deletes, and reads a 404 as nothing deleted rather than as a deletion', async () => {
+    const { call, close } = await connect();
+    const res = await call('delete_public_url', { url_id: PUBLIC_URL.id, confirm: true });
+    expect(platform.calls.find((c) => c.method === 'DELETE')?.path).toBe(
+      `/computers/vm-1/public-urls/${PUBLIC_URL.id}`,
+    );
+    expect(textOf(res)).toContain(`Deleted ${PUBLIC_URL.id} from vm-1.`);
+    await close();
+
+    const gone = await over(
+      { error: 'public URL not found on this computer' },
+      404,
+      'delete_public_url',
+      { url_id: PUBLIC_URL.id, confirm: true },
+    );
+    expect(gone.isError).toBeFalsy();
+    expect(textOf(gone)).toContain('Nothing was deleted');
+    expect(textOf(gone)).not.toMatch(/^Deleted/);
+  });
+
+  it('marks the listing read-only, the update idempotent and the delete destructive', async () => {
+    const { client, close } = await connect();
+    const tools = (await client.listTools()).tools;
+    const hints = (name: string) => tools.find((t) => t.name === name)?.annotations ?? {};
+    expect(hints('list_public_urls').readOnlyHint).toBe(true);
+    expect(hints('create_public_url').readOnlyHint).toBeFalsy();
+    expect(hints('create_public_url').idempotentHint).toBeFalsy();
+    expect(hints('update_public_url').idempotentHint).toBe(true);
+    expect(hints('delete_public_url')).toMatchObject({
+      destructiveHint: true,
+      idempotentHint: true,
+    });
+    const create = tools.find((t) => t.name === 'create_public_url');
+    expect(create?.description).toContain('PUBLIC BY DEFAULT');
+    await close();
+  });
+});
+
+// A variant of the platform's answer, swapped in over the fake the way
+// webhooks.test.ts reads its own: these cases are about shapes it does not carry.
+async function over(body: unknown, status: number, tool: string, args: Record<string, unknown>) {
+  const restore = globalThis.fetch;
+  globalThis.fetch = (async () =>
+    new Response(JSON.stringify(body), {
+      status,
+      headers: { 'Content-Type': 'application/json' },
+    })) as typeof fetch;
+  try {
+    const { call, close } = await connect();
+    const res = await call(tool, args);
+    await close();
+    return res;
+  } finally {
+    globalThis.fetch = restore;
+  }
+}
