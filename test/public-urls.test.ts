@@ -173,6 +173,50 @@ describe('public URL tools', () => {
     expect(textOf(gone)).not.toMatch(/^Deleted/);
   });
 
+  // Codex, round 1 on #212: an unknown key was stripped, so a misspelled
+  // `access: "private"` created a URL anyone can open.
+  it('refuses an argument it does not know, sending nothing', async () => {
+    const { call, close } = await connect();
+    for (const [tool, args] of [
+      ['create_public_url', { port: 3000, acess: 'private' }],
+      ['list_public_urls', { computer: 'vm-2' }],
+      ['update_public_url', { url_id: PUBLIC_URL.id, port: 8000, acces: 'private' }],
+      ['delete_public_url', { url_id: PUBLIC_URL.id, confirm: true, computerid: 'vm-2' }],
+    ] as const) {
+      const res = await call(tool, args as Record<string, unknown>).catch((err: unknown) => ({
+        isError: true,
+        content: [{ type: 'text' as const, text: String(err) }],
+      }));
+      expect(res.isError, tool).toBe(true);
+    }
+    expect(platform.calls.filter((c) => c.path.includes('public-urls'))).toEqual([]);
+    await close();
+  });
+
+  it('says a URL the platform turned off opens for nobody, on a create or an update', async () => {
+    for (const [tool, args, status] of [
+      ['create_public_url', { port: 3000 }, 201],
+      ['update_public_url', { url_id: PUBLIC_URL.id, port: 8000 }, 200],
+    ] as const) {
+      const res = await over({ ...PUBLIC_URL, disabled: true }, status, tool, args);
+      const text = textOf(res);
+      expect(text).toContain('TURNED OFF BY THE PLATFORM');
+      expect(text).not.toContain('anyone with the link can open it');
+    }
+  });
+
+  it('does not say a URL stopped answering on a delete the platform did not acknowledge', async () => {
+    for (const body of [{ ok: false }, {}, 'OK']) {
+      const res = await over(body, 200, 'delete_public_url', {
+        url_id: PUBLIC_URL.id,
+        confirm: true,
+      });
+      expect(res.isError).toBe(true);
+      expect(textOf(res)).toContain('MAY OR MAY NOT HAVE BEEN DELETED');
+      expect(textOf(res)).not.toMatch(/^Deleted/);
+    }
+  });
+
   it('marks the listing read-only, the update idempotent and the delete destructive', async () => {
     const { client, close } = await connect();
     const tools = (await client.listTools()).tools;

@@ -86,11 +86,18 @@ function publicUrlOf(v: unknown): PublicUrl | undefined {
   return { id, url, label, port, access, disabled };
 }
 
-/** Who can open it, in the words a model acts on. */
+/**
+ * Who can open it, in the words a model acts on. A URL the platform has turned
+ * off opens for nobody, whatever its access says, so that comes first: a
+ * create or an update answering `disabled: true` is not a URL anyone can open
+ * (Codex, round 1 on #212).
+ */
 const reach = (u: PublicUrl): string =>
-  u.access === 'public'
-    ? 'PUBLIC: anyone with the link can open it'
-    : 'private: only requests with an API key of this account as `Authorization: Bearer` open it, and the key never reaches the app';
+  u.disabled
+    ? `TURNED OFF BY THE PLATFORM: it answers 404 to everyone until the platform turns it back on (its access is set to ${u.access})`
+    : u.access === 'public'
+      ? 'PUBLIC: anyone with the link can open it'
+      : 'private: only requests with an API key of this account as `Authorization: Bearer` open it, and the key never reaches the app';
 
 /** One URL in a line, for a listing. */
 const line = (u: PublicUrl): string =>
@@ -111,7 +118,7 @@ export const registerPublicUrls: Registrar = (server, session) => {
       title: 'List a computer’s public URLs',
       description:
         'The public URLs of one computer, oldest first: each is `https://<label>.<base_domain>` serving a port inside the computer, public (anyone with the link) or private (an API key of this account). Also says whether they can answer here at all — `enabled` is false, with a reason, where public URLs are off or the account’s plan includes none, and the URLs are listed either way so you can delete them — and how many this computer may have. If the plan drops below the number a computer has, the oldest within the limit keep answering and the rest answer 404.',
-      inputSchema: idArg,
+      inputSchema: z.object(idArg).strict(),
       annotations: { readOnlyHint: true },
     },
     ({ computer_id }, extra) =>
@@ -164,17 +171,23 @@ export const registerPublicUrls: Registrar = (server, session) => {
       title: 'Serve a port on a public URL',
       description:
         'Serve a port inside the computer at `https://<label>.<base_domain>` (e.g. `https://brave-otter-3f2a.mandala.dev`), on 443 with no port in the address. PUBLIC BY DEFAULT: anyone on the internet with the link can open it — pass access: "private" to require an API key of this account instead. The app must listen on 0.0.0.0:<port>, not 127.0.0.1. Without a label one is picked. A label is 3 to 40 letters, digits and hyphens, and the platform refuses names that read as its own or another company’s (www, login, brand names and their look-alikes) with a 400 that says why. Other refusals: 402 when the plan includes no public URLs, 409 when the label is taken or the computer has as many as its plan allows (Solo 2, Studio 5, Swarm 10), 429 after too many in a day. Responses are marked noindex, cookies the app sets stay on its own host name, and a Mandala API key sent to a public URL never reaches the app. Not idempotent: a retry after a lost answer makes a second URL — list_public_urls first.',
-      inputSchema: {
-        ...idArg,
-        port: portArg('create'),
-        label: z
-          .string()
-          .optional()
-          .describe(
-            'The name before the domain, lowercased. Leave it out to have one like `brave-otter-3f2a` picked.',
-          ),
-        access: accessArg('create').optional(),
-      },
+      inputSchema: z
+        .object({
+          ...idArg,
+          port: portArg('create'),
+          label: z
+            .string()
+            .optional()
+            .describe(
+              'The name before the domain, lowercased. Leave it out to have one like `brave-otter-3f2a` picked.',
+            ),
+          access: accessArg('create').optional(),
+        })
+        // Strict, above all here: a misspelled `access: "private"` stripped
+        // as an unknown key would create a URL anyone can open (Codex, round
+        // 1 on #212). Every tool in this file refuses an argument it does not
+        // know, rather than acting without it.
+        .strict(),
     },
     ({ computer_id, port, label, access }, extra) =>
       guarded(async () => {
@@ -203,12 +216,14 @@ export const registerPublicUrls: Registrar = (server, session) => {
       title: 'Change a public URL’s port or access',
       description:
         'Point a public URL at another port, switch it between public and private, or both. The label is the URL and does not change — delete it and create another for a new name. Fields you leave out are kept; name at least one.',
-      inputSchema: {
-        ...idArg,
-        ...urlIdArg,
-        port: portArg('update').optional(),
-        access: accessArg('update').optional(),
-      },
+      inputSchema: z
+        .object({
+          ...idArg,
+          ...urlIdArg,
+          port: portArg('update').optional(),
+          access: accessArg('update').optional(),
+        })
+        .strict(),
       annotations: { idempotentHint: true },
     },
     ({ computer_id, url_id, port, access }, extra) =>
@@ -240,13 +255,15 @@ export const registerPublicUrls: Registrar = (server, session) => {
       title: 'Remove a public URL',
       description:
         'The URL stops answering at once, and its label becomes free for anyone to take unless the platform has blocked it. The app inside the computer keeps running. Irreversible: a new URL is a new id, and the old label may be gone by then.',
-      inputSchema: {
-        ...idArg,
-        ...urlIdArg,
-        confirm: z
-          .literal(true)
-          .describe('Must be true. The URL stops answering and its label is released.'),
-      },
+      inputSchema: z
+        .object({
+          ...idArg,
+          ...urlIdArg,
+          confirm: z
+            .literal(true)
+            .describe('Must be true. The URL stops answering and its label is released.'),
+        })
+        .strict(),
       annotations: { destructiveHint: true, idempotentHint: true },
     },
     ({ computer_id, url_id }, extra) =>
@@ -264,6 +281,15 @@ export const registerPublicUrls: Registrar = (server, session) => {
           if (!(err instanceof NotFoundError)) throw err;
           return said(
             `Nothing was deleted: ${id} has no public URL with the id ${url_id}. Either it was already removed — if this is a retry, the first call is the one that did it — or the id is wrong, in which case NO URL has been touched and the one you meant may still be answering. list_public_urls for ${id} says which.`,
+          );
+        }
+        // The platform's ack, checked before saying the exposure ended: a 2xx
+        // that is not `{ ok: true }` is not evidence the URL stopped answering
+        // (Codex, round 1 on #212).
+        if (!isRecord(res) || res.ok !== true) {
+          return refused(
+            `The delete of ${url_id} answered with ${shapeOf(res)}, not the platform's acknowledgment. IT MAY OR MAY NOT HAVE BEEN DELETED — call list_public_urls for ${id} to see whether it is still there before telling anyone it no longer answers.`,
+            res,
           );
         }
         return said(
