@@ -9,7 +9,8 @@ name: Release
 # fails the run rather than publishing one version under another's name. Tests
 # run again here because CI runs on branches and this workflow runs on tags —
 # and one of them holds plugin/.claude-plugin/plugin.json to the same number,
-# so a release is four copies of the version agreeing, not three.
+# so a release is four copies of the version agreeing, not three. server.json
+# (the MCP Registry entry) names the version twice more and is checked here too.
 
 on:
   push:
@@ -32,8 +33,9 @@ jobs:
           tag="${GITHUB_REF_NAME#v}"
           declared=$(node -p "require('./package.json').version")
           server=$(grep -oE "SERVER_VERSION = '[^']+'" src/version.ts | sed -E "s/.*'([^']+)'/\\1/")
-          echo "tag=$tag package.json=$declared src/version.ts=$server"
-          [ "$tag" = "$declared" ] && [ "$tag" = "$server" ]
+          registry=$(node -p "const s=require('./server.json'); s.version === s.packages[0].version ? s.version : 'mismatch'")
+          echo "tag=$tag package.json=$declared src/version.ts=$server server.json=$registry"
+          [ "$tag" = "$declared" ] && [ "$tag" = "$server" ] && [ "$tag" = "$registry" ]
       - run: npm ci
       - run: npm run lint
       - run: npm run typecheck
@@ -67,3 +69,11 @@ jobs:
         run: |
           npm pack
           gh release create "$GITHUB_REF_NAME" ./*.tgz --verify-tag --generate-notes --title "$GITHUB_REF_NAME"
+      # The MCP Registry lists io.github.mandalacomputer/mcp from server.json.
+      # It checks the npm package's mcpName, so this runs after the publish;
+      # the same OIDC token proves the workflow belongs to the org.
+      - name: MCP Registry
+        run: |
+          curl -fsSL "https://github.com/modelcontextprotocol/registry/releases/download/v1.8.1/mcp-publisher_linux_amd64.tar.gz" | tar xz mcp-publisher
+          ./mcp-publisher login github-oidc
+          ./mcp-publisher publish
