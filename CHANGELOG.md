@@ -20,7 +20,9 @@ are wording changes, and they are behaviour changes in the way that matters.
   1.32.1 and `undici` 6.29.1 are now the minimums; the lockfile also takes
   `proxy-addr` 2.0.8 (IPv4-mapped IPv6 spoofing of the trusted-proxy check,
   which the hosted `--http` server uses for its per-address budgets), `qs`,
-  `ip-address`, `hono` and `fast-uri`. `npm audit --omit=dev` is clean.
+  `ip-address`, `hono` and `fast-uri`. Development moves to vitest 4.1.12,
+  which still runs on Node 20. `npm audit` is clean, and CI now runs it on
+  every pull request and daily.
 
 ## [0.13.1] — 2026-10-15
 

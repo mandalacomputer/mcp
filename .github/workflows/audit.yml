@@ -1,0 +1,34 @@
+name: Audit
+
+# npm audit over the whole lockfile, dev dependencies included. 0.13.1
+# shipped with eleven published advisories against its dependencies, seven
+# of them in production ones, and nothing here noticed: Glama's build log
+# was where they surfaced (OPL-6036). An advisory is published against code
+# that has not changed, so this also runs daily, not only when a pull
+# request happens to touch the lockfile.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "17 13 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      # Reads package-lock.json against the advisory database; no install, so
+      # no dependency's install script runs in this job.
+      - run: npm audit

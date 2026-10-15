@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, type Mock, vi } from 'vitest';
 import { HEARTBEAT_MS } from '../src/poll.js';
 import { CHAT_COMPLETION, connect, installFakePlatform } from './harness.js';
 
@@ -7,7 +7,7 @@ const ACCOUNT = 'com_chat_account_sentinel';
 const MODEL = 'sk-ant-chat-model-sentinel';
 let platform: ReturnType<typeof installFakePlatform>;
 let connection: Awaited<ReturnType<typeof connect>>;
-let release: ReturnType<typeof vi.fn>;
+let release: Mock<() => void>;
 function answer(value: unknown, status = 200, headers = {}) {
   const previous = globalThis.fetch;
   globalThis.fetch = async (...args) => {
@@ -21,7 +21,7 @@ function answer(value: unknown, status = 200, headers = {}) {
 const text = (value: unknown) => JSON.stringify(value);
 beforeEach(async () => {
   platform = installFakePlatform();
-  release = vi.fn();
+  release = vi.fn<() => void>();
   connection = await connect({ apiKey: ACCOUNT, modelKey: MODEL, activity: () => release });
 });
 afterEach(async () => {
