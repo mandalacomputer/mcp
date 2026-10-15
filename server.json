@@ -1,0 +1,44 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.mandalacomputer/mcp",
+  "title": "Mandala Computer",
+  "description": "Cloud desktops for AI agents: create a Linux computer, see its screen, click, type and run tasks.",
+  "websiteUrl": "https://mandala.computer",
+  "repository": {
+    "url": "https://github.com/mandalacomputer/mcp",
+    "source": "github"
+  },
+  "version": "0.13.1",
+  "packages": [
+    {
+      "registryType": "npm",
+      "identifier": "mandala-computer-mcp",
+      "version": "0.13.1",
+      "transport": {
+        "type": "stdio"
+      },
+      "environmentVariables": [
+        {
+          "name": "MANDALA_API_KEY",
+          "description": "API key from Settings → API keys. Optional after `mandala login`, which saves one.",
+          "isRequired": false,
+          "isSecret": true,
+          "format": "string"
+        },
+        {
+          "name": "MANDALA_MODEL_KEY",
+          "description": "Your model provider key. Optional; turns on run_agent.",
+          "isRequired": false,
+          "isSecret": true,
+          "format": "string"
+        }
+      ]
+    }
+  ],
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://app.mandala.computer/mcp"
+    }
+  ]
+}
