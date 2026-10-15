@@ -57,6 +57,45 @@ jobs:
       # is one nobody finds out about until they install it.
       - run: node dist/cli.js --help
 
+  # The matrix's '20' is the newest 20.x, while package.json promises 20.3.0,
+  # and the test stack itself cannot run there: vite and rolldown, under
+  # vitest, need 20.19. So the floor is checked as a user meets it instead:
+  # build on 22, install only the production dependencies on exactly 20.3.0,
+  # and ask the built server for its tools over stdio (OPL-6036).
+  node-floor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - run: rm -rf node_modules
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20.3.0'
+      - run: npm ci --omit=dev --ignore-scripts
+      # A placeholder key is enough to start and list tools; nothing here
+      # reaches the API.
+      - name: The built server lists its tools on Node 20.3.0
+        env:
+          MANDALA_API_KEY: com_placeholder
+        run: |
+          node --version
+          printf '%s\n' \
+            '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"ci","version":"1"}}}' \
+            '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
+            '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' \
+            | timeout 30 node dist/cli.js > out.jsonl
+          node -e 'const r=require("fs").readFileSync("out.jsonl","utf8").split("\n").filter(Boolean).map(l=>JSON.parse(l)).find(m=>m.id===2);const n=r?.result?.tools?.length??0;console.log("tools:",n);process.exit(n>0?0:1)'
+
   # There is no `surface:` job here any more. It checked the platform out and
   # ran scripts/check-surface.mjs, and for the whole of its life PLATFORM_REPO_TOKEN
   # was never set on this repository — so the checkout failed, continue-on-error
