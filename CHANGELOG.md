@@ -14,6 +14,14 @@ are wording changes, and they are behaviour changes in the way that matters.
 
 ## [Unreleased]
 
+### Security
+
+- **Dependencies with published advisories updated.** `@modelcontextprotocol/sdk`
+  1.32.1 and `undici` 6.29.1 are now the minimums; the lockfile also takes
+  `proxy-addr` 2.0.8 (IPv4-mapped IPv6 spoofing of the trusted-proxy check,
+  which the hosted `--http` server uses for its per-address budgets), `qs`,
+  `ip-address`, `hono` and `fast-uri`. `npm audit --omit=dev` is clean.
+
 ## [0.13.1] — 2026-10-15
 
 ### Added
