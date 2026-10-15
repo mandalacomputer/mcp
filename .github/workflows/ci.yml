@@ -83,7 +83,8 @@ jobs:
           node-version: '20.3.0'
       - run: npm ci --omit=dev --ignore-scripts
       # A placeholder key is enough to start and list tools; nothing here
-      # reaches the API.
+      # reaches the API. The check requires initialize itself to succeed:
+      # tools/list still answers after a failed initialize.
       - name: The built server lists its tools on Node 20.3.0
         env:
           MANDALA_API_KEY: com_placeholder
@@ -94,7 +95,7 @@ jobs:
             '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
             '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' \
             | timeout 30 node dist/cli.js > out.jsonl
-          node -e 'const r=require("fs").readFileSync("out.jsonl","utf8").split("\n").filter(Boolean).map(l=>JSON.parse(l)).find(m=>m.id===2);const n=r?.result?.tools?.length??0;console.log("tools:",n);process.exit(n>0?0:1)'
+          node scripts/check-stdio-smoke.mjs out.jsonl
 
   # There is no `surface:` job here any more. It checked the platform out and
   # ran scripts/check-surface.mjs, and for the whole of its life PLATFORM_REPO_TOKEN
