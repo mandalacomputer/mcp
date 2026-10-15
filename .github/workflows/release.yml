@@ -70,10 +70,19 @@ jobs:
           npm pack
           gh release create "$GITHUB_REF_NAME" ./*.tgz --verify-tag --generate-notes --title "$GITHUB_REF_NAME"
       # The MCP Registry lists io.github.mandalacomputer/mcp from server.json.
-      # It checks the npm package's mcpName, so this runs after the publish;
-      # the same OIDC token proves the workflow belongs to the org.
+      # It checks the npm package's mcpName, so this runs after the publish
+      # and first waits for the new version to be readable from the npm
+      # registry, which lags the publish by a few minutes (v0.13.1's attempt
+      # was refused with a 404 five seconds after it). The same OIDC token
+      # proves the workflow belongs to the org.
       - name: MCP Registry
         run: |
+          version="${GITHUB_REF_NAME#v}"
+          for i in $(seq 1 40); do
+            curl -fsS "https://registry.npmjs.org/mandala-computer-mcp/$version" >/dev/null && break
+            [ "$i" = 40 ] && { echo "mandala-computer-mcp@$version never appeared on npm"; exit 1; }
+            sleep 15
+          done
           curl -fsSL "https://github.com/modelcontextprotocol/registry/releases/download/v1.8.1/mcp-publisher_linux_amd64.tar.gz" | tar xz mcp-publisher
           ./mcp-publisher login github-oidc
           ./mcp-publisher publish
