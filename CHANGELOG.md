@@ -26,6 +26,15 @@ are wording changes, and they are behaviour changes in the way that matters.
   which still runs on Node 20. `npm audit` is clean, and CI now runs it on
   every pull request and daily.
 
+### Fixed
+
+- **A release now reaches the MCP Registry reliably.** 0.13.1's listing was
+  refused because the registry checked npm seconds after the publish, before
+  npm served the new version. The release workflow now publishes the listing
+  from a job of its own that waits for npm to serve the version with the right
+  `mcpName`, retries the publish, and can be re-run without publishing to npm
+  again.
+
 ## [0.13.1] — 2026-10-15
 
 ### Added
