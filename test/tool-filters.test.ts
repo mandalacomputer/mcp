@@ -26,7 +26,8 @@ const GROUPS = {
     'screenshot click type_text paste_text press_key scroll drag move_mouse mouse_button cursor_position wait',
   guest:
     'exec exec_poll exec_kill open_url list_windows window_action read_clipboard write_clipboard',
-  files: 'list_directory read_file write_file wait_for_file_change',
+  files:
+    'list_directory read_file write_file write_file_chunk get_file_upload cancel_file_upload wait_for_file_change',
   activities: 'list_activities get_activity get_activity_results',
   signals: 'read_signals',
   executions: 'get_execution read_execution_output',
@@ -279,7 +280,9 @@ describe('tool registration filters over MCP', () => {
   it('deduplicates tools shared by tags and exposes passive directory listing in read-only files', async () => {
     const union = await open({ tags: ['files', 'events'] });
     expect(names((await union.client.listTools()).tools)).toEqual(
-      words('list_directory read_file write_file wait_for_file_change wait_for_event poll_events'),
+      words(
+        'list_directory read_file write_file write_file_chunk get_file_upload cancel_file_upload wait_for_file_change wait_for_event poll_events',
+      ),
     );
     const empty = await open({ tags: ['files'], readOnly: true });
     expect(names((await empty.client.listTools()).tools)).toEqual(['list_directory']);

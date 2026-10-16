@@ -3563,6 +3563,7 @@ describe('the tools our own prose tells a model to call', () => {
   const IDENTIFIER = /\b[a-z][a-z0-9]*(?:_[a-z0-9]+)+\b/g;
   const SKILL = new URL('../plugin/skills/mandala-computer/SKILL.md', import.meta.url);
   const NOT_TOOLS = new Set([
+    'upload_id', // resumable upload identity parameter, not a tool
     // Parameters and response fields we name in prose, on purpose.
     'computer_id',
     'allow_partial',

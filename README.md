@@ -1710,3 +1710,9 @@ Please report anything security-sensitive privately — see
 ## Licence
 
 MIT.
+
+### Resumable file uploads
+
+`write_file_chunk`, `get_file_upload`, and `cancel_file_upload` expose Linux resumable uploads up to 2 GiB. Each tool write carries at most 256 KiB of decoded base64 to bound model-context transfers; prefer the SDK or CLI for large local datasets. Retain a fresh random 32-character lowercase hexadecimal `upload_id`, destination `path`, total `size`, and unchanged source. Send chunks at the confirmed `offset`. After any error, read status before retrying. The final chunk publishes atomically; `overwrite: false` refuses an occupied destination.
+
+Cancel removes only staging and the completion receipt, never the published destination. Staging consumes guest disk until cancelled and has no automatic expiry. These tools may resume a computer and incur running charges unless `no_wake` is set; they are included in the `files` tool group and excluded from read-only mode. They require Linux with Python 3 and an updated host. Existing `write_file` behavior is unchanged.

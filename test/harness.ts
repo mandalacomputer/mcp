@@ -683,6 +683,18 @@ function respond(
         computer_id: (body as { computer_id?: string })?.computer_id ?? 'vm-1',
       },
     });
+  if (path.endsWith('/files/uploads'))
+    return json(
+      method === 'DELETE'
+        ? { ok: true }
+        : {
+            path: query.get('path'),
+            upload_id: query.get('upload_id'),
+            offset: Number(query.get('size') ?? 3),
+            size: Number(query.get('size') ?? 3),
+            complete: true,
+          },
+    );
   if (path.endsWith('/files/list') && method === 'GET')
     return json({
       path: query.get('path'),

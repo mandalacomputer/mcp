@@ -640,6 +640,93 @@ export const registerGuest: Registrar = (server, session) => {
       }),
   );
 
+  const uploadArgs = {
+    ...idArg,
+    path: absolutePath('path').refine(
+      (path) =>
+        path.startsWith('/') &&
+        path !== '/' &&
+        !path
+          .split('/')
+          .slice(1)
+          .some((part) => part === '' || part === '.' || part === '..'),
+      'Use a normalized absolute Linux file path.',
+    ),
+    upload_id: z
+      .string()
+      .regex(/^[a-f0-9]{32}$/)
+      .describe(
+        'A fresh random 32-character lowercase hex ID; retain it to resume. Never reuse for different contents.',
+      ),
+    no_wake: noWakeArg,
+  };
+  server.registerTool(
+    'write_file_chunk',
+    {
+      title: 'Stage a resumable file chunk',
+      description:
+        'Linux with python3 only. Stage up to 256 KiB in one chunk of a file up to 2 GiB. Supply raw bytes as base64, in order, keeping path, upload_id, size, overwrite and source contents unchanged. The final chunk publishes atomically. After any error call get_file_upload and continue from its offset; never guess or restart blindly. An empty chunk at offset=size retries publication. Call cancel_file_upload after completion or to abandon staging. Staging consumes guest disk until cancelled, with no expiry. May resume a suspended computer and incur charges. For large local files prefer the SDK or CLI, avoiding model-context transfers.',
+      inputSchema: {
+        ...uploadArgs,
+        content_base64: z.string().max(349528),
+        offset: z.number().int().min(0).max(2147483648),
+        size: z.number().int().min(0).max(2147483648),
+        overwrite: z.boolean().default(true),
+      },
+    },
+    ({ computer_id, path, upload_id, no_wake, content_base64, offset, size, overwrite }, extra) =>
+      guarded(async () => {
+        if (!isBase64(content_base64)) return refused('Invalid base64; nothing was sent.');
+        const bytes = new Uint8Array(Buffer.from(content_base64, 'base64'));
+        if (
+          bytes.length > MAX_INLINE_BYTES ||
+          offset > size ||
+          bytes.length > size - offset ||
+          (bytes.length === 0 && offset !== size)
+        )
+          return refused('Invalid chunk range or chunk exceeds 256 KiB; nothing was sent.');
+        const value = await session.api
+          .with(extra.signal)
+          .json('PUT', P.computerAction(session.resolve(computer_id), 'files/uploads'), {
+            query: {
+              path,
+              upload_id,
+              offset,
+              size,
+              overwrite: String(overwrite),
+              ...(no_wake ? { no_wake: '1' } : {}),
+            },
+            raw: bytes,
+          });
+        return json(uploadProgress(value, path, upload_id));
+      }),
+  );
+  for (const [name, method] of [
+    ['get_file_upload', 'GET'],
+    ['cancel_file_upload', 'DELETE'],
+  ] as const) {
+    server.registerTool(
+      name,
+      {
+        title: method === 'GET' ? 'Read resumable upload status' : 'Remove upload staging',
+        description:
+          method === 'GET'
+            ? 'Read the confirmed offset and completion receipt before retrying an interrupted chunk. Missing uploads return 404. May resume the computer unless no_wake is set.'
+            : 'Remove an interrupted upload or completed upload receipt. Never deletes the published destination. Idempotent if staging is absent. May resume the computer unless no_wake is set.',
+        inputSchema: uploadArgs,
+      },
+      ({ computer_id, path, upload_id, no_wake }, extra) =>
+        guarded(async () => {
+          const value = await session.api
+            .with(extra.signal)
+            .json(method, P.computerAction(session.resolve(computer_id), 'files/uploads'), {
+              query: { path, upload_id, ...(no_wake ? { no_wake: '1' } : {}) },
+            });
+          return method === 'GET' ? json(uploadProgress(value, path, upload_id)) : json(value);
+        }),
+    );
+  }
+
   server.registerTool(
     'write_file',
     {
@@ -1408,4 +1495,29 @@ function execSummary(res: Record<string, unknown>): string {
   }
   if (res.killed) bits.push('killed');
   return bits.length ? bits.join('; ') : 'done';
+}
+
+function uploadProgress(value: unknown, path: string, uploadId: string) {
+  const p = value as {
+    path?: string;
+    upload_id?: string;
+    offset?: number;
+    size?: number;
+    complete?: boolean;
+  } | null;
+  if (
+    !p ||
+    p.path !== path ||
+    p.upload_id !== uploadId ||
+    !Number.isSafeInteger(p.offset) ||
+    !Number.isSafeInteger(p.size) ||
+    p.size! < 0 ||
+    p.size! > 2147483648 ||
+    p.offset! < 0 ||
+    p.offset! > p.size! ||
+    typeof p.complete !== 'boolean' ||
+    (p.complete && p.offset !== p.size)
+  )
+    throw new Error('Invalid upload status returned; completion is unconfirmed.');
+  return p;
 }
