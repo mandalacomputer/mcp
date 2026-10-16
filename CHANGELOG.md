@@ -14,6 +14,8 @@ are wording changes, and they are behaviour changes in the way that matters.
 
 ## [Unreleased]
 
+## [0.13.2] — 2026-10-16
+
 ### Security
 
 - **Dependencies with published advisories updated.** `@modelcontextprotocol/sdk`
@@ -23,6 +25,15 @@ are wording changes, and they are behaviour changes in the way that matters.
   `ip-address`, `hono` and `fast-uri`. Development moves to vitest 4.1.12,
   which still runs on Node 20. `npm audit` is clean, and CI now runs it on
   every pull request and daily.
+
+### Fixed
+
+- **A release now reaches the MCP Registry reliably.** 0.13.1's listing was
+  refused because the registry checked npm seconds after the publish, before
+  npm served the new version. The release workflow now publishes the listing
+  from a job of its own that waits for npm to serve the version with the right
+  `mcpName`, retries the publish, and can be re-run without publishing to npm
+  again.
 
 ## [0.13.1] — 2026-10-15
 
@@ -1197,7 +1208,8 @@ No effect on the tool surface, listed because it is most of the window.
 - Several parser fixes landed before that scanner was retired, each ported to
   and from the TypeScript SDK's byte-identical copy.
 
-[Unreleased]: https://github.com/mandalacomputer/mcp/compare/v0.13.1...HEAD
+[Unreleased]: https://github.com/mandalacomputer/mcp/compare/v0.13.2...HEAD
+[0.13.2]: https://github.com/mandalacomputer/mcp/compare/v0.13.1...v0.13.2
 [0.13.1]: https://github.com/mandalacomputer/mcp/compare/v0.13.0...v0.13.1
 [0.13.0]: https://github.com/mandalacomputer/mcp/compare/v0.12.0...v0.13.0
 [0.12.0]: https://github.com/mandalacomputer/mcp/compare/v0.11.0...v0.12.0
