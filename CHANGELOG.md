@@ -14,6 +14,8 @@ are wording changes, and they are behaviour changes in the way that matters.
 
 ## [Unreleased]
 
+## [0.13.2] — 2026-10-16
+
 ### Security
 
 - **Dependencies with published advisories updated.** `@modelcontextprotocol/sdk`
@@ -1197,7 +1199,8 @@ No effect on the tool surface, listed because it is most of the window.
 - Several parser fixes landed before that scanner was retired, each ported to
   and from the TypeScript SDK's byte-identical copy.
 
-[Unreleased]: https://github.com/mandalacomputer/mcp/compare/v0.13.1...HEAD
+[Unreleased]: https://github.com/mandalacomputer/mcp/compare/v0.13.2...HEAD
+[0.13.2]: https://github.com/mandalacomputer/mcp/compare/v0.13.1...v0.13.2
 [0.13.1]: https://github.com/mandalacomputer/mcp/compare/v0.13.0...v0.13.1
 [0.13.0]: https://github.com/mandalacomputer/mcp/compare/v0.12.0...v0.13.0
 [0.12.0]: https://github.com/mandalacomputer/mcp/compare/v0.11.0...v0.12.0
