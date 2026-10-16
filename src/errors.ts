@@ -922,7 +922,7 @@ export function isCreateOnlyUpload(
   query: Record<string, string | number | boolean | undefined> | undefined,
 ): boolean {
   if (method.toUpperCase() !== 'PUT') return false;
-  if (!/^\/?computers\/[^/]+\/files$/.test(path)) return false;
+  if (!/^\/?computers\/[^/]+\/files(?:\/uploads)?$/.test(path)) return false;
   const overwrite = query?.overwrite;
   return overwrite === false || overwrite === 'false';
 }

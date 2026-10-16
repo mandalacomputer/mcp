@@ -720,6 +720,29 @@
           }
         }
       }
+    },
+    "/computers/{id}/files/uploads": {
+      "put": {
+        "responses": {
+          "200": {
+            "description": "Synthetic resumable upload response"
+          }
+        }
+      },
+      "get": {
+        "responses": {
+          "200": {
+            "description": "Synthetic resumable upload response"
+          }
+        }
+      },
+      "delete": {
+        "responses": {
+          "200": {
+            "description": "Synthetic resumable upload response"
+          }
+        }
+      }
     }
   }
 }

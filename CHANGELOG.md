@@ -14,6 +14,8 @@ are wording changes, and they are behaviour changes in the way that matters.
 
 ## [Unreleased]
 
+- Add bounded Linux resumable upload tools, with explicit staging progress, recovery guidance and cleanup.
+
 ## [0.13.2] — 2026-10-16
 
 ### Security

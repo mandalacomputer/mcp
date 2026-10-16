@@ -27,7 +27,15 @@ export const TOOL_TAGS = {
   ],
   events: ['wait_for_event', 'poll_events', 'wait_for_file_change'],
   executions: ['get_execution', 'read_execution_output'],
-  files: ['list_directory', 'read_file', 'write_file', 'wait_for_file_change'],
+  files: [
+    'list_directory',
+    'read_file',
+    'write_file',
+    'write_file_chunk',
+    'get_file_upload',
+    'cancel_file_upload',
+    'wait_for_file_change',
+  ],
   guest: [
     'exec',
     'exec_poll',

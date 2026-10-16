@@ -98,6 +98,9 @@ export const V1_ROUTES: Route[] = [
   r('PUT', 'computers/:id/files'),
   r('GET', 'computers/:id/files'),
   r('GET', 'computers/:id/files/list'),
+  r('PUT', 'computers/:id/files/uploads'),
+  r('GET', 'computers/:id/files/uploads'),
+  r('DELETE', 'computers/:id/files/uploads'),
 
   // Snapshots.
   r('GET', 'snapshots'),
@@ -412,6 +415,19 @@ export const PARAMETERS: ReadonlyMap<string, readonly string[]> = new Map([
   // through a file larger than one request moves is this line.
   ['GET computers/:id/files', ['query:path', 'query:no_wake', 'header:Range']],
   ['GET computers/:id/files/list', ['query:path']],
+  [
+    'PUT computers/:id/files/uploads',
+    [
+      'query:no_wake',
+      'query:offset',
+      'query:overwrite',
+      'query:path',
+      'query:size',
+      'query:upload_id',
+    ],
+  ],
+  ['GET computers/:id/files/uploads', ['query:no_wake', 'query:path', 'query:upload_id']],
+  ['DELETE computers/:id/files/uploads', ['query:no_wake', 'query:path', 'query:upload_id']],
 
   ['GET snapshots', ['query:allow_partial', 'query:include']],
   ['GET computers/:id/snapshots', []],

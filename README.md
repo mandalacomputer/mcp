@@ -201,7 +201,7 @@ the platform's reason beside the windows.
 **Inside the guest** — `exec`, `exec_poll`, `exec_kill`, `get_execution`,
 `read_execution_output`, `open_url`,
 `list_windows`, `window_action`, `read_clipboard`, `write_clipboard`,
-`read_file`, `write_file`, `list_directory`
+`read_file`, `write_file`, `write_file_chunk`, `get_file_upload`, `cancel_file_upload`, `list_directory`
 
 `write_file` replaces a file already at the path. With `overwrite: false` it
 creates the file only if nothing is there, and a path that is taken is refused
@@ -370,7 +370,7 @@ with an error listing all valid tags.
 | `lifecycle` | `create_computer`, `start_computer`, `stop_computer`, `suspend_computer`, `restart_computer`, `update_computer`, `clone_computer`, `delete_computer`, `move_computer_to_workspace`, `move_computer`, `list_moves`, `get_operation`, `list_operations`, `wait_for_operation` |
 | `input` | `screenshot`, `click`, `type_text`, `paste_text`, `press_key`, `scroll`, `drag`, `move_mouse`, `mouse_button`, `cursor_position`, `wait` |
 | `guest` | `exec`, `exec_poll`, `exec_kill`, `open_url`, `list_windows`, `window_action`, `read_clipboard`, `write_clipboard` |
-| `files` | `list_directory`, `read_file`, `write_file`, `wait_for_file_change` |
+| `files` | `list_directory`, `read_file`, `write_file`, `write_file_chunk`, `get_file_upload`, `cancel_file_upload`, `wait_for_file_change` |
 | `executions` | `get_execution`, `read_execution_output` |
 | `results` | `get_activity_results`, `retain_execution_output`, `get_result`, `read_result_output`, `delete_result` |
 | `artifacts` | `publish_artifact`, `get_artifact`, `read_artifact`, `delete_artifact` |
@@ -1706,6 +1706,12 @@ several names. Where a client has no way to do it, the cell says so with —.
 
 Please report anything security-sensitive privately — see
 [SECURITY.md](SECURITY.md) rather than opening an issue.
+
+## Resumable file uploads
+
+`write_file_chunk`, `get_file_upload`, and `cancel_file_upload` expose Linux resumable uploads up to 2 GiB. Each tool write carries at most 256 KiB of decoded base64 to bound model-context transfers; prefer the SDK or CLI for large local datasets. Retain a fresh random 32-character lowercase hexadecimal `upload_id`, destination `path`, total `size`, and unchanged source. Send chunks at the confirmed `offset`. After any error, read status before retrying. The final chunk publishes atomically; `overwrite: false` refuses an occupied destination.
+
+Cancel removes only staging and the completion receipt, never the published destination. Staging consumes guest disk until cancelled and has no automatic expiry. These tools may resume a computer and incur running charges unless `no_wake` is set; they are included in the `files` tool group and excluded from read-only mode. They require Linux with Python 3 and an updated host. Existing `write_file` behavior is unchanged.
 
 ## Licence
 

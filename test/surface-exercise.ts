@@ -389,6 +389,19 @@ export const EXERCISE: Record<string, Record<string, unknown>[]> = {
   delete_snapshot: [{ snapshot_id: 'snap-1', confirm: true }],
 
   list_directory: [{ path: '/home/user/é files' }],
+  write_file_chunk: [
+    {
+      path: '/tmp/large',
+      upload_id: 'a'.repeat(32),
+      content_base64: 'YWJj',
+      offset: 0,
+      size: 3,
+      overwrite: false,
+      no_wake: true,
+    },
+  ],
+  get_file_upload: [{ path: '/tmp/large', upload_id: 'a'.repeat(32), no_wake: true }],
+  cancel_file_upload: [{ path: '/tmp/large', upload_id: 'a'.repeat(32), no_wake: true }],
   list_activities: [{}, { cursor: 'older:2 /+' }, { cursor: 'changes:3 /+', changes: true }],
   get_activity: [{ activity_id: ACTIVITY_ID }],
   get_activity_results: [{ activity_id: ACTIVITY_ID }],
