@@ -14,7 +14,21 @@ are wording changes, and they are behaviour changes in the way that matters.
 
 ## [Unreleased]
 
-- Add bounded Linux resumable upload tools, with explicit staging progress, recovery guidance and cleanup.
+## [0.14.0] — 2026-10-16
+
+### Added
+
+- **Resumable upload tools.** `write_file_chunk`, `get_file_upload` and
+  `cancel_file_upload` upload a file of up to 2 GiB to a Linux computer with
+  Python 3, in the `files` group (and not in read-only mode). Each call carries
+  at most 256 KiB of decoded base64, to keep transfers out of the model's
+  context — the SDK or CLI is the better tool for large local files. The model
+  keeps a fresh 32-character lowercase hex `upload_id`, sends chunks at the
+  confirmed `offset`, and reads status after any error before retrying; the
+  last chunk publishes atomically, and `overwrite: false` refuses an occupied
+  destination. Cancel removes staging and the completion receipt, never the
+  published file. Staging uses guest disk until cancelled and does not expire.
+  `write_file` is unchanged.
 
 ## [0.13.2] — 2026-10-16
 
