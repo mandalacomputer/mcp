@@ -668,7 +668,7 @@ export const registerGuest: Registrar = (server, session) => {
         'Linux with python3 only. Stage up to 256 KiB in one chunk of a file up to 2 GiB. Supply raw bytes as base64, in order, keeping path, upload_id, size, overwrite and source contents unchanged. The final chunk publishes atomically. After any error call get_file_upload and continue from its offset; never guess or restart blindly. An empty chunk at offset=size retries publication. Call cancel_file_upload after completion or to abandon staging. Staging consumes guest disk until cancelled, with no expiry. May resume a suspended computer and incur charges. For large local files prefer the SDK or CLI, avoiding model-context transfers.',
       inputSchema: {
         ...uploadArgs,
-        content_base64: z.string().max(349528),
+        content_base64: z.string().max(360 * 1024),
         offset: z.number().int().min(0).max(2147483648),
         size: z.number().int().min(0).max(2147483648),
         overwrite: z.boolean().default(true),
@@ -685,20 +685,52 @@ export const registerGuest: Registrar = (server, session) => {
           (bytes.length === 0 && offset !== size)
         )
           return refused('Invalid chunk range or chunk exceeds 256 KiB; nothing was sent.');
-        const value = await session.api
-          .with(extra.signal)
-          .json('PUT', P.computerAction(session.resolve(computer_id), 'files/uploads'), {
-            query: {
-              path,
-              upload_id,
-              offset,
-              size,
-              overwrite: String(overwrite),
-              ...(no_wake ? { no_wake: '1' } : {}),
-            },
-            raw: bytes,
-          });
-        return json(uploadProgress(value, path, upload_id));
+        const id = session.resolve(computer_id);
+        let value: unknown;
+        try {
+          value = await session.api
+            .with(extra.signal)
+            .json('PUT', P.computerAction(id, 'files/uploads'), {
+              query: {
+                path,
+                upload_id,
+                offset,
+                size,
+                overwrite: String(overwrite),
+                ...(no_wake ? { no_wake: '1' } : {}),
+              },
+              raw: bytes,
+            });
+        } catch (err) {
+          if (no_wake && err instanceof ConflictError && err.reason === 'unavailable') {
+            const asleep = noWakeRefusal(err, id, 'no upload chunk was staged');
+            if (asleep) return asleep;
+          }
+          if (err instanceof FileExistsError || err instanceof CreateOnlyConflictError) {
+            return withErrorMetadata(
+              refused(
+                `${err.message}\n\nRead get_file_upload for upload_id ${upload_id} and inspect ${path} before deciding what to do. Do not blindly resend, change the path, or overwrite. Staging may remain until cancel_file_upload; a previous attempt may already have published the destination.`,
+              ),
+              err,
+            );
+          }
+          throw err;
+        }
+        const progress = uploadProgress(value, path, upload_id);
+        if (
+          progress.size !== size ||
+          progress.offset !== offset + bytes.length ||
+          progress.complete !== (progress.offset === size)
+        )
+          return refused(
+            'The reply does not confirm this chunk. Read get_file_upload before retrying; publication is unconfirmed.',
+          );
+        return said(
+          progress.complete
+            ? `Upload published at ${path}. You may remove the receipt with cancel_file_upload.`
+            : `Bytes staged only; the destination has not been published. Continue from offset ${progress.offset} with the unchanged source.`,
+          progress,
+        );
       }),
   );
   for (const [name, method] of [
@@ -713,15 +745,26 @@ export const registerGuest: Registrar = (server, session) => {
           method === 'GET'
             ? 'Read the confirmed offset and completion receipt before retrying an interrupted chunk. Missing uploads return 404. May resume the computer unless no_wake is set.'
             : 'Remove an interrupted upload or completed upload receipt. Never deletes the published destination. Idempotent if staging is absent. May resume the computer unless no_wake is set.',
+        annotations: { destructiveHint: method === 'DELETE', idempotentHint: true },
         inputSchema: uploadArgs,
       },
       ({ computer_id, path, upload_id, no_wake }, extra) =>
         guarded(async () => {
-          const value = await session.api
-            .with(extra.signal)
-            .json(method, P.computerAction(session.resolve(computer_id), 'files/uploads'), {
-              query: { path, upload_id, ...(no_wake ? { no_wake: '1' } : {}) },
-            });
+          const id = session.resolve(computer_id);
+          let value: unknown;
+          try {
+            value = await session.api
+              .with(extra.signal)
+              .json(method, P.computerAction(id, 'files/uploads'), {
+                query: { path, upload_id, ...(no_wake ? { no_wake: '1' } : {}) },
+              });
+          } catch (err) {
+            if (no_wake && err instanceof ConflictError && err.reason === 'unavailable') {
+              const asleep = noWakeRefusal(err, id, 'upload staging was not accessed');
+              if (asleep) return asleep;
+            }
+            throw err;
+          }
           return method === 'GET' ? json(uploadProgress(value, path, upload_id)) : json(value);
         }),
     );

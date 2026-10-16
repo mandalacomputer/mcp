@@ -101,7 +101,7 @@ Optional configuration:
   Entries are comma-separated, trimmed and deduplicated; empty entries are
   ignored, and empty or unset means unfiltered. Unknown tags, including
   uppercase names, fail at startup and name the valid set. `files` means
-  `list_directory`, `read_file`, `write_file`, `wait_for_file_change`; the last also belongs to
+  `list_directory`, `read_file`, `write_file`, `write_file_chunk`, `get_file_upload`, `cancel_file_upload`, `wait_for_file_change`; the last also belongs to
   `events`. `guest` covers execution, windows, clipboard and URL tools;
   `input` includes screenshots and waits. `templates` includes listing and
   builds. See the README's Tool filters table for the full inventory.
