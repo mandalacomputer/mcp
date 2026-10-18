@@ -60,12 +60,13 @@ port. A session keeps its chosen key/base until restarted.
 - `MANDALA_API_KEY` — optional API key from **Settings → Credentials → API
   keys** at https://app.mandala.computer. Treat it as a password. It may cover the account
   or only one workspace, which is why a 404 below is not always what it looks like.
-- `MANDALA_MODEL_KEY` — optional Anthropic or OpenAI key, enabling `run_agent` and
-  `run_agent_chat` when filters permit them. The platform stores no copy and
-  model work is billed to that key. It is separate from the saved Mandala API
-  credentials. Without it `run_agent_chat` is not registered, and `run_agent`
-  is registered only when the account's AI credits can pay for a run (checked
-  once at startup); then it runs on those credits.
+- `MANDALA_MODEL_KEY` — optional Anthropic or OpenAI key, enabling `run_agent`,
+  `start_agent_run` and `run_agent_chat` when filters permit them. The platform
+  stores no copy and model work is billed to that key. It is separate from the
+  saved Mandala API credentials. Without it `run_agent_chat` is not registered,
+  and `run_agent` and `start_agent_run` are registered only when the account's
+  AI credits can pay for a run (checked once at startup); then they run on
+  those credits. The reads of runs and threads need neither.
 
 If startup fails, read the local error and ask the user to correct the named
 profile/protection setting, run the TypeScript `mandala login` command, or set
@@ -108,9 +109,10 @@ Optional configuration:
 
 Filters intersect: tags cannot restore a tool withheld by read-only,
 `MANDALA_NO_LIFECYCLE`, or a missing model key. A connected server may have
-an empty tool list (`agent` plus read-only does). `files` plus read-only exposes
+far fewer tools than this skill names (`agent` plus read-only keeps only the
+four reads of runs and threads). `files` plus read-only exposes
 only `list_directory`. `run_agent_chat` needs the caller's model key, and
-`run_agent` needs that key or AI credits that can pay, and
+`run_agent` and `start_agent_run` need that key or AI credits that can pay, and
 lifecycle disabled alone does not withhold them. Check the actual
 tool list before following any workflow below; use only tools that are
 present. If the task requires a withheld tool, explain the limitation instead
@@ -146,9 +148,9 @@ HTTP never loads the local credential store and ignores `MANDALA_API_KEY`,
 `MANDALA_PROFILE` and `--profile`. Over HTTP it also ignores `MANDALA_MODEL_KEY`
 and `MANDALA_COMPUTER_ID`, rather than lending the operator's model-provider key and the operator's machine to
 everyone who connects. A caller who wants `run_agent` there sends their own
-Anthropic or OpenAI key as an `X-Model-Key` header, and both agent tools are registered for
+Anthropic or OpenAI key as an `X-Model-Key` header, and the three tools that start a run are registered for
 that session only if they did and the filters permit it. Without that header,
-`run_agent` alone is registered when the caller's own account's AI credits can
+`run_agent` and `start_agent_run` are registered when the caller's own account's AI credits can
 pay, checked when the session starts.
 
 ## The shape of a session
@@ -229,10 +231,40 @@ needs their own header rather than the operator's environment variable, and
   whatever its status: try later, and send only what the completed steps left
   undone.
 
+**A task too long to wait for: `start_agent_run`, then `get_agent_run`.**
+`run_agent` holds the call open for the whole run. When the client will not hold
+a call open for minutes, or there is other work to do meanwhile, start the same
+run with `start_agent_run` (same arguments, same payer): it answers at once with
+a `run_id`, and the run goes on. Read it with `get_agent_run` every few seconds
+until its status is no longer `running`; `cancel_agent_run` stops it.
+
+- Only `status: completed` with `stop: end_turn` is a finished task. Any other
+  stop, `failed`, `cancelled` and `interrupted` did not finish, and their steps
+  stand: screenshot before deciding what is left.
+- `interrupted` (the platform restarted mid-run), and a thread turn that ended
+  `running`, `aborted` or `interrupted`, may have done more than it reported.
+  Look at the desktop before relying on it either way.
+- One run drives a computer at a time: a start on a busy computer is refused
+  `409` (`contention`). `list_agent_runs` with `status: running` finds the run to
+  wait for or cancel — and is the read to make if a start's answer was lost,
+  before starting another.
+
+**Continue a conversation with `thread_id`.** Every run that acts or answers is
+kept in a thread, and its answer names the `thread_id` (`agent.thread_id` on
+`run_agent_chat`). Send it with the next task on the same computer and the model
+is given the earlier turns, told they are done, and acts only on the new task —
+better than re-describing everything, and far better than re-running the whole
+task. `store: false` keeps nothing (not with `thread_id`). `list_agent_threads`
+and `get_agent_thread` read kept conversations. `delete_agent_thread` (with
+`confirm: true`) removes one for good — only one this conversation made or the
+user named, since every thread on the account is visible to the key.
+
 **`run_agent_chat` uses textual OpenAI-shaped messages and JSON-only results.**
 It drives the same BYOK Anthropic or OpenAI loop, not hosted inference or a chat UI.
 The last user message is the task; system messages supply standing instructions.
-Previous user/assistant conversation is not replayed. String text and text-part
+The user and assistant messages before it are given to the model as the
+conversation so far; with `thread_id`, the thread's own turns are the conversation
+and earlier messages are not read. String text and text-part
 arrays are supported. Optional `model` selects a computer-capable Anthropic or
 OpenAI model. Both agent tools infer the provider from recognized model names;
 custom names require `provider: "anthropic"` or `provider: "openai"`.

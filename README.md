@@ -340,11 +340,17 @@ before a request is sent — replaces the setting whole, and `null` removes it.
 says "its egress proxy is waiting for credentials; connections are closed until
 they arrive".
 
-**Delegating** — `run_agent`, `run_agent_chat`, registered when a model key is present:
-`MANDALA_MODEL_KEY` on stdio, or the caller's own `X-Model-Key` header over HTTP.
-Without a key, `run_agent` alone is registered when the account's AI credits can
-pay for a run (see [Agents on AI credits](#agents-on-ai-credits)). Both must also
-survive the configured filters.
+**Delegating** — `run_agent`, `start_agent_run`, `run_agent_chat`, registered when a
+model key is present: `MANDALA_MODEL_KEY` on stdio, or the caller's own `X-Model-Key`
+header over HTTP. Without a key, `run_agent` and `start_agent_run` are registered
+when the account's AI credits can pay for a run (see
+[Agents on AI credits](#agents-on-ai-credits)). All of them must also survive the
+configured filters.
+
+**Background runs and kept conversations** — `get_agent_run`, `list_agent_runs`,
+`cancel_agent_run`, `list_agent_threads`, `get_agent_thread`, `delete_agent_thread`,
+registered whether or not anything can pay for a run, since a run or a thread can
+come from any client — see [Background runs and threads](#background-runs-and-threads)
 
 ### Tool filters
 
@@ -382,18 +388,19 @@ with an error listing all valid tags.
 | `ssh` | All SSH tools listed above |
 | `public_urls` | `list_public_urls`, `create_public_url`, `update_public_url`, `delete_public_url` |
 | `secrets` | `list_secrets`, `get_secret`, `create_secret`, `set_secret`, `replace_secret`, `delete_secret`, `get_computer_secrets`, `set_computer_secrets` |
-| `agent` | `run_agent`, `run_agent_chat` |
+| `agent` | `run_agent`, `run_agent_chat`, `start_agent_run`, `get_agent_run`, `list_agent_runs`, `cancel_agent_run`, `list_agent_threads`, `get_agent_thread`, `delete_agent_thread` |
 | `activities` | `list_activities`, `get_activity`, `get_activity_results` |
 | `signals` | `read_signals` |
 
 The selected tags form a union, then intersect with read-only and the existing
 lifecycle and model-key restrictions. `MANDALA_NO_LIFECYCLE=1` still withholds
 its five tools even when their tags are selected; selecting `agent` cannot
-enable `run_agent_chat` without a per-session model key, nor `run_agent` without
-one or credits that can pay. Both agent tools are
-withheld by read-only, but remain available with lifecycle disabled alone.
+enable `run_agent_chat` without a per-session model key, nor `run_agent` or
+`start_agent_run` without one or credits that can pay. The tools that start a
+run, `cancel_agent_run` and `delete_agent_thread` are withheld by read-only, but
+remain available with lifecycle disabled alone; an `agent` selection with
+read-only keeps the four reads of runs and threads.
 `MANDALA_TAGS=files MANDALA_READ_ONLY=1` exposes only `list_directory`.
-An `agent` selection with read-only is a valid empty tool list.
 `activities,results` includes `get_activity_results` once; `signals` is separate
 from the active `events` socket. Filters never grant API privileges: the API
 checks current member/owner and workspace authorization on every request.
@@ -1440,7 +1447,7 @@ address.
 | `MANDALA_PROFILE` | Local saved profile; `--profile` overrides it. Otherwise the file default is selected. Ignored by HTTP. |
 | `MANDALA_BASE_URL` | With a saved profile, must match its stored base. Otherwise defaults to `https://app.mandala.computer/api/v1`. |
 | `MANDALA_COMPUTER_ID` | Bind a computer at startup, so `use_computer` is not needed. **stdio only** — under `--http` it is ignored rather than bound into every caller's session, since it names a machine on the operator's account. |
-| `MANDALA_MODEL_KEY` | An Anthropic or OpenAI key. Enables `run_agent` and `run_agent_chat` when filters permit them, which runs the platform's own loop on that key. Without it, `run_agent` runs on the account's AI credits when they can pay. **stdio only** — under `--http` each caller sends their own as `X-Model-Key`, and this variable is ignored. |
+| `MANDALA_MODEL_KEY` | An Anthropic or OpenAI key. Enables `run_agent`, `start_agent_run` and `run_agent_chat` when filters permit them, which runs the platform's own loop on that key. Without it, `run_agent` and `start_agent_run` run on the account's AI credits when they can pay. **stdio only** — under `--http` each caller sends their own as `X-Model-Key`, and this variable is ignored. |
 | `MANDALA_NO_LIFECYCLE` | `1`, `true`, `yes` or `on` withholds `create_computer`, `clone_computer`, `clone_snapshot`, `delete_computer` and `delete_snapshot` — every tool that makes a computer or destroys one. `0`, `false`, `no`, `off` or unset leaves them registered. Any other value is **refused at startup** rather than read as off: a typo here would otherwise leave those tools in place on a server whose operator believes they are gone. The `--no-lifecycle` flag reads the same vocabulary and refuses the same way, except that it has no spelling for *unset*: `--no-lifecycle=` is refused rather than ignored, so a launcher template whose variable did not expand stops instead of quietly leaving the tools registered. |
 | `PORT`, `HOST` | For `--http`. Default `3000`, `127.0.0.1`. |
 | `MANDALA_READ_ONLY` | Keep only tools annotated `readOnlyHint: true`; strict boolean parsing as described under Tool filters. |
@@ -1554,13 +1561,57 @@ or that a task succeeded. Unsupported (501) and unavailable (503) responses
 remain errors, never empty history or new checkpoints. There is no watcher,
 guest action, retry loop or automatic checkpoint cache in this tool.
 
+### Background runs and threads
+
+`run_agent` holds one tool call open for the whole run, which is minutes. A client
+that cannot keep a call open that long, or has other work to do meanwhile, starts
+the same run with `start_agent_run` instead: it takes the same arguments as
+`run_agent` on the same payer (less `store`), answers as soon as the run holds the
+computer with a `run_id`, and the run goes on without the call. `get_agent_run`
+reads it back — its status, every step so far, its cost on AI credits and, once
+it has ended, its closing text — and is meant to be polled every few seconds;
+`cancel_agent_run` stops it where it is, and `list_agent_runs` pages through the
+account's runs newest first (`computer_id`, `status`, `limit`, `before`). One run
+drives a computer at a time: a start on a computer another run is driving is
+refused `409` with `reason: "contention"`, and `list_agent_runs` with
+`status: "running"` finds the run to wait for or cancel. If a start's answer is
+lost, that is also the read to make before starting another.
+
+Only `status: "completed"` with `stop: "end_turn"` means the task was finished,
+and the tools say so in as many words. Any other stop on a completed run
+(`max_steps`, `max_cost`, `rate_limited`, …), `failed`, `cancelled` and
+`interrupted` are runs that did not finish, and the steps they took stand.
+`interrupted` is a run the platform was executing when it restarted, or whose
+ending was not recorded: it is not resumed, and it may have done more than it
+recorded, so look at the desktop before starting another.
+
+Every run that acts on the desktop or finishes with an answer is kept in a
+thread, and its `thread_id` comes back — in the text and the JSON of `run_agent`
+and `run_agent_chat` (as `agent.thread_id`), on a failed run that was kept, and on
+a background run once it has one. Send it as `thread_id` with the next task, on
+the same computer, to continue the conversation: the model is given the thread's
+earlier turns, told they are done, and acts only on the new task. A thread of
+another computer, and a full one (100 turns), are refused `409`. `store: false` on
+`run_agent` or `run_agent_chat` keeps nothing and cannot be combined with
+`thread_id`; a background run is always kept, since it is read back.
+`list_agent_threads` and `get_agent_thread` read the kept conversations; an
+assistant turn that ended `running`, `aborted` or `interrupted` may have done more
+than it reported. `delete_agent_thread` (with `confirm: true`) removes one for
+good: it stops no run and changes nothing on a desktop, and is meant for a thread
+the conversation made or the user named — every thread on the account is
+visible to the key. The native route's `messages` (a history the caller keeps
+itself) is not sent by these tools: a model's own context goes in the prompt, and
+a kept thread carries the runs' own turns.
+
 ### JSON chat with your own model key
 
 `run_agent_chat` drives the selected computer using the same BYOK Anthropic or OpenAI loop
 as `run_agent`. It accepts a nonempty array of textual OpenAI-shaped `messages`,
 including string content or arrays of `{type:"text",text:"..."}` parts. The
 **last user message** supplies the task; system messages supply standing
-instructions. Earlier user/assistant conversation is not replayed. Optional
+instructions; the user and assistant messages before it are given to the model as
+the conversation so far, told they are done. With `thread_id` the thread's own
+turns are the conversation instead, and earlier messages are not read. Optional
 `model` selects a computer-capable Anthropic or OpenAI model. `max_steps` is 1–100,
 default 20. This is computer control, not hosted general-purpose inference or a
 chat UI; it adds no key storage or model billing service.

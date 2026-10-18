@@ -172,7 +172,8 @@ describe('run_agent on credits', () => {
     const tool = (await client.listTools()).tools.find((t) => t.name === 'run_agent')!;
     const props = tool.inputSchema.properties as Record<string, Record<string, unknown>>;
     expect(Object.keys(props).sort()).toEqual(
-      ['computer_id', 'max_cost_usd', 'max_steps', 'model', 'prompt'].sort(),
+      // thread_id and store keep and continue a conversation (OPL-6085).
+      ['computer_id', 'max_cost_usd', 'max_steps', 'model', 'prompt', 'store', 'thread_id'].sort(),
     );
     expect(props.max_cost_usd).toMatchObject({ minimum: 0.25, maximum: 20 });
     expect(tool.description).toContain("account's Mandala AI credits");

@@ -8,7 +8,9 @@ import {
   installFakePlatform,
   RETAINED_ID,
   type Recorded,
+  RUN_ID,
   SSH_PUBLIC_KEY,
+  THREAD_ID,
 } from './harness.js';
 
 /**
@@ -417,6 +419,9 @@ export const EXERCISE: Record<string, Record<string, unknown>[]> = {
       model: 'claude-test',
       max_steps: 3,
     },
+    // Continuing a thread, and keeping nothing (OPL-6085).
+    { messages: [{ role: 'user', content: 'now close it' }], thread_id: THREAD_ID },
+    { messages: [{ role: 'user', content: 'open firefox' }], store: false },
   ],
   run_agent: [
     { prompt: 'open firefox' },
@@ -427,7 +432,30 @@ export const EXERCISE: Record<string, Record<string, unknown>[]> = {
       provider: 'anthropic',
       model: 'claude-test',
     },
+    // Continuing a thread, and keeping nothing (OPL-6085).
+    { prompt: 'now close it', thread_id: THREAD_ID },
+    { prompt: 'open firefox', store: false },
   ],
+  // Background runs (OPL-6085): every body field the keyed create can send on
+  // one variant, and every listing parameter on another.
+  start_agent_run: [
+    { prompt: 'download the invoices' },
+    {
+      prompt: 'download the invoices',
+      system: 'be brief',
+      max_steps: 3,
+      provider: 'anthropic',
+      model: 'claude-test',
+      thread_id: THREAD_ID,
+    },
+  ],
+  get_agent_run: [{ run_id: RUN_ID }],
+  list_agent_runs: [{}, { computer_id: 'vm-1', status: 'running', limit: 5, before: RUN_ID }],
+  cancel_agent_run: [{ run_id: RUN_ID }],
+  // Kept conversations (OPL-6085).
+  list_agent_threads: [{}, { computer_id: 'vm-1', limit: 5, before: THREAD_ID }],
+  get_agent_thread: [{ thread_id: THREAD_ID }],
+  delete_agent_thread: [{ thread_id: THREAD_ID, confirm: true }],
 };
 
 export type ExerciseEvidence = { tool: string; requests: Recorded[] };
@@ -450,6 +478,15 @@ export function checkInventory(names: string[], exercise: typeof EXERCISE): void
 export const FUNDED_EXERCISE: Record<string, Record<string, unknown>[]> = {
   run_agent: [
     { prompt: 'open firefox', model: 'claude-opus-5-5', max_steps: 3, max_cost_usd: 1.5 },
+  ],
+  start_agent_run: [
+    {
+      prompt: 'download the invoices',
+      model: 'claude-opus-5-5',
+      max_steps: 3,
+      max_cost_usd: 1.5,
+      thread_id: THREAD_ID,
+    },
   ],
 };
 
