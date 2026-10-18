@@ -520,25 +520,27 @@ export const registerComputers: Registrar = (server, session, opts) => {
             items,
           );
         }
-        const malformed = items.filter(
-          (item) => item === null || typeof item !== 'object' || Array.isArray(item),
-        ).length;
+        // Strict (OPL-6081), as the SDKs decode a listing: a row that is not
+        // an object, or has no id, fails the call rather than being dropped
+        // with a warning. A dropped row is a computer that exists and is
+        // running up a bill, left out of the answer a caller reads to find out.
         const list = items.filter(
           (item): item is Computer =>
-            item !== null && typeof item === 'object' && !Array.isArray(item),
+            item !== null &&
+            typeof item === 'object' &&
+            !Array.isArray(item) &&
+            typeof (item as { id?: unknown }).id === 'string' &&
+            (item as { id: string }).id.trim() !== '',
         );
-        const warning =
-          incompleteWarning('computers', incomplete) +
-          (malformed
-            ? `WARNING: ignored ${malformed} malformed computer entr${malformed === 1 ? 'y' : 'ies'} from the platform.\n\n`
-            : '');
+        const malformed = items.length - list.length;
+        if (malformed) {
+          return refused(
+            `GET /computers answered with ${malformed} malformed entr${malformed === 1 ? 'y' : 'ies'} (not an object, or without an id), so this listing cannot be read. This is not an empty account — do not create a computer on the strength of it.`,
+            items,
+          );
+        }
+        const warning = incompleteWarning('computers', incomplete);
         if (!list.length) {
-          if (malformed) {
-            return refused(
-              `${warning}No valid computers remained. This is not an empty account — do not create a computer on the strength of a malformed listing.`,
-              items,
-            );
-          }
           // Two different empty answers, and telling them apart is the whole
           // point of reading the header. A workspace-scoped key gets no
           // unreachable placeholder rows at all — the platform withholds them
@@ -1546,7 +1548,11 @@ export const registerComputers: Registrar = (server, session, opts) => {
                   await sleep(POLL_MS, signal);
                   continue;
                 }
-                if (!isTransientForPoll(err)) throw err;
+                // `starting` is the agent not up yet and polls; `unavailable` polls too,
+                // because the status read on the next turn names a stop itself. A 409 with
+                // no word is not this route's settling state (only a desktop exec has one),
+                // so it, and every other permanent word, ends the wait (OPL-6081).
+                if (!isTransientForPoll(err, { unavailable: true })) throw err;
                 // What actually refused, rather than one sentence for every
                 // failure. A 409 IS the guest not being up yet — that is the
                 // probe working, and it repeats the line beat in front of the
@@ -1609,9 +1615,10 @@ export const registerComputers: Registrar = (server, session, opts) => {
                   await sleep(POLL_MS, signal);
                   continue;
                 }
-                // A computer that stopped answers 409 `unavailable`, which polls
-                // through here: the status read on the next turn names it.
-                if (!isTransientForPoll(err)) throw err;
+                // A computer that stopped answers 409 `unavailable`, which polls through
+                // here: the status read on the next turn names it. A 409 with no word is
+                // the route's documented answer for a desktop session not up yet.
+                if (!isTransientForPoll(err, { unavailable: true, reasonless409: true })) throw err;
                 if (err instanceof ConflictError) {
                   heldOn = 'desktop';
                 } else {

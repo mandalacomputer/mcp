@@ -80,8 +80,14 @@ describe('check-internals', () => {
     '// lib/apidoc says otherwise',
     '// web/lib/projection.ts sets it',
     '// lib/hvproxy forwards the header',
+    "// the surface checker reads the platform's `web/lib`", // bare directory (OPL-6081)
+    '// the apidoc note on the files routes',
   ])('catches a platform module with or without its extension: %s', (line) => {
     expect(scanText(line, 'f.ts', new Set())).not.toHaveLength(0);
+  });
+
+  it('catches the daemon binary by name (OPL-6081)', () => {
+    expect(scanText('// Run `gorillad -build-template x`', 'f.ts', new Set())).toHaveLength(1);
   });
 
   it('reports an identifier by name even though the list only holds its hash', () => {

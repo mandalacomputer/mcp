@@ -684,10 +684,10 @@ describe('the version a user quotes in a bug report', () => {
   });
 
   it('is the one the Claude Code plugin declares', () => {
-    // A fourth copy (OPL-3914). The plugin manifest starts `npx -y
-    // mandala-computer-mcp`, so what it installs is always the latest publish
-    // and its own number is documentation of which server the skill was written
-    // against — which is only true if it moves with the rest.
+    // A fourth copy (OPL-3914), and a fifth beside it: the plugin manifest
+    // starts `npx -y mandala-computer-mcp@<version>`, pinned (OPL-6081) so a
+    // plugin installs the server its skill was written against rather than
+    // whatever npm's latest is. Both have to move with the rest.
     //
     // Under plugin/ and not at the root, because a marketplace entry's `source`
     // is the directory Claude Code copies into its plugin cache — and copying
@@ -705,7 +705,22 @@ describe('the version a user quotes in a bug report', () => {
     expect(plugin.version).toBe(pkg.version);
     // And it starts the package this repository publishes, not a path.
     expect(plugin.mcpServers.mandala.command).toBe('npx');
-    expect(plugin.mcpServers.mandala.args).toEqual(['-y', 'mandala-computer-mcp']);
+    expect(plugin.mcpServers.mandala.args).toEqual(['-y', `mandala-computer-mcp@${pkg.version}`]);
+  });
+
+  it('is the one the MCP Registry entry names, twice', () => {
+    // Checked by the release workflow at tag time too; here so a bump that
+    // misses server.json fails on the branch rather than on the tag (OPL-6081).
+    const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as {
+      version: string;
+    };
+    const entry = JSON.parse(readFileSync(new URL('../server.json', import.meta.url), 'utf8')) as {
+      version: string;
+      packages: { identifier: string; version: string }[];
+    };
+    expect(entry.version).toBe(pkg.version);
+    expect(entry.packages[0]?.identifier).toBe('mandala-computer-mcp');
+    expect(entry.packages[0]?.version).toBe(pkg.version);
   });
 });
 
@@ -1796,10 +1811,13 @@ describe('wait failures that are worth another poll', () => {
   // OPL-5975: a 409 is published as transient only where the platform says it
   // is passing. A bare one is unclassified — the poll predicate still rides it
   // out, since it replays reads under a deadline.
-  it('retries HTTP 409 only where the platform says it clears, and polls through every one', () => {
+  it('retries HTTP 409 only where the platform says it clears, and polls a bare one only where the route settles through it', () => {
     const bare = errorForStatus(409, 'HTTP 409');
     expect(isTransient(bare)).toBe(false);
-    expect(isTransientForPoll(bare)).toBe(true);
+    // OPL-6081: a 409 with no word ends a wait unless the polled route
+    // documents one as a settling state, as the desktop probe's does.
+    expect(isTransientForPoll(bare)).toBe(false);
+    expect(isTransientForPoll(bare, { reasonless409: true })).toBe(true);
     for (const reason of ['contention', 'starting']) {
       expect(isTransient(errorForStatus(409, 'x', { error: 'x', reason })), reason).toBe(true);
     }
@@ -2063,7 +2081,7 @@ describe('absolute guest paths', () => {
 });
 
 describe('malformed computer listings', () => {
-  it('skips null rows without failing the whole valid list', async () => {
+  it('fails on a null row rather than dropping it (OPL-6081)', async () => {
     const real = globalThis.fetch;
     globalThis.fetch = (async () =>
       new Response(JSON.stringify([null, { id: 'vm-1', name: 'desk', status: 'running' }]), {
@@ -2072,9 +2090,37 @@ describe('malformed computer listings', () => {
     try {
       const { call, close } = await connect();
       const res = await call('list_computers');
-      expect(res.isError).toBeFalsy();
-      expect(said(res)).toMatch(/ignored 1 malformed computer entry/);
-      expect(said(res)).toMatch(/vm-1/);
+      expect(res.isError).toBe(true);
+      expect(said(res)).toMatch(/1 malformed entry \(not an object, or without an id\)/);
+      expect(said(res)).toMatch(/not an empty account/);
+      await close();
+    } finally {
+      globalThis.fetch = real;
+    }
+  });
+});
+
+describe('computer and snapshot rows without an id', () => {
+  it.each([
+    ['list_computers', [{ id: 'vm-1', name: 'desk', status: 'running' }, { name: 'nameless' }]],
+    [
+      'list_snapshots',
+      [
+        { id: 'snap-1', computer_id: 'vm-1' },
+        { id: ' ', computer_id: 'vm-1' },
+      ],
+    ],
+  ] as const)('%s fails the listing (OPL-6081)', async (tool, rows) => {
+    const real = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify(rows), {
+        headers: { 'Content-Type': 'application/json' },
+      })) as typeof fetch;
+    try {
+      const { call, close } = await connect();
+      const res = await call(tool);
+      expect(res.isError).toBe(true);
+      expect(said(res)).toMatch(/1 malformed entry/);
       await close();
     } finally {
       globalThis.fetch = real;
@@ -2083,7 +2129,7 @@ describe('malformed computer listings', () => {
 });
 
 describe('malformed snapshot listings', () => {
-  it('skips null and non-object rows without failing the valid inventory', async () => {
+  it('fails on null and non-object rows rather than dropping them (OPL-6081)', async () => {
     const real = globalThis.fetch;
     globalThis.fetch = (async () =>
       new Response(
@@ -2093,9 +2139,8 @@ describe('malformed snapshot listings', () => {
     try {
       const { call, close } = await connect();
       const res = await call('list_snapshots');
-      expect(res.isError).toBeFalsy();
-      expect(said(res)).toMatch(/ignored 3 malformed snapshot entries/);
-      expect(said(res)).toMatch(/snap-1/);
+      expect(res.isError).toBe(true);
+      expect(said(res)).toMatch(/3 malformed entries/);
       await close();
     } finally {
       globalThis.fetch = real;
@@ -2112,7 +2157,7 @@ describe('malformed snapshot listings', () => {
       const { call, close } = await connect();
       const res = await call('list_snapshots');
       expect(res.isError).toBe(true);
-      expect(said(res)).toMatch(/no valid snapshots remained/i);
+      expect(said(res)).toMatch(/2 malformed entries/);
       expect(said(res)).not.toMatch(/^0 snapshot/m);
       await close();
     } finally {
@@ -3137,13 +3182,13 @@ describe('an environment for a command, rather than a shell prefix', () => {
     await close();
   });
 
-  it('leaves the platform to police how many and how long', () => {
-    // The ceilings (64 entries, 4096 bytes an entry) are the platform's policy
-    // and are not mirrored here, so a change to them is not a change that has
-    // to land in two repositories to take effect.
+  it('refuses past the published ceilings on how many and how long (OPL-6081)', () => {
+    // The ceilings (64 entries, 4096 bytes an entry) are the platform's policy,
+    // now published in its surface manifest and held to it by check-surface,
+    // so mirroring them no longer means a change has to land in two places.
     const many = Object.fromEntries(Array.from({ length: 200 }, (_, i) => [`V${i}`, 'x']));
-    expect(() => P.execEnv(many)).not.toThrow();
-    expect(() => P.execEnv({ BIG: 'x'.repeat(10_000) })).not.toThrow();
+    expect(() => P.execEnv(many)).toThrow(/at most 64/);
+    expect(() => P.execEnv({ BIG: 'x'.repeat(10_000) })).toThrow(/at most 4096/);
   });
 
   it('drops an empty environment at the body rather than at the tool', () => {
@@ -3937,18 +3982,19 @@ describe('a refusal the platform put a word on', () => {
     expect(isTransient(errorForStatus(429, 'x', { error: 'x', reason: 'wedged' }))).toBe(true);
   });
 
-  it('is still polled through, because a poll is the one caller it may clear for', () => {
+  it('is polled through only by a wait that reads the status next', () => {
     // The deliberate divergence between the two predicates. `unavailable` is a
     // permanent answer to whoever asked — and a computer coming up passes
-    // through it, so the wait loops, which only ever replay a read under a
-    // deadline the caller set, keep riding it out. They return a refusal of
-    // their own the moment the status they are watching says stopped.
+    // through it, so wait_for_computer's probes, which are followed by a
+    // status read that names a stop itself, keep riding it out. Every other
+    // wait ends on it (OPL-6081), like every other permanent word.
     const stopped = errorForStatus(409, 'this computer is not running', {
       error: 'this computer is not running',
       reason: 'unavailable',
     });
     expect(isTransient(stopped)).toBe(false);
-    expect(isTransientForPoll(stopped)).toBe(true);
+    expect(isTransientForPoll(stopped)).toBe(false);
+    expect(isTransientForPoll(stopped, { unavailable: true })).toBe(true);
   });
 
   it('reaches the model as the sentence it means', async () => {
@@ -4225,7 +4271,7 @@ describe('a computer whose background slots are all held', () => {
     expect(full).toBeInstanceOf(ConflictError);
     expect((full as APIError).reason).toBeUndefined();
     expect(isTransient(full)).toBe(false);
-    expect(isTransientForPoll(full)).toBe(true);
+    expect(isTransientForPoll(full)).toBe(false);
   });
 });
 
@@ -5380,7 +5426,7 @@ describe('tools that only read, but reach the computer to do it', () => {
       const { tools } = await client.listTools();
       // Every tool whose route the platform marks `spends: true`. Both reach
       // the guest agent, and reaching it resumes a suspended computer — the
-      // apidoc note on the files routes says such a read can even come back
+      // API reference's note on the files routes says such a read can even come back
       // 402. read_file was missed on the first pass, which is what an invariant
       // announced in one file and violated in the next looks like.
       for (const name of ['cursor_position', 'read_file']) {

@@ -102,9 +102,10 @@ describe('which refusals are transient', () => {
   ] as const)('%s', (_label, status, body, transient) => {
     const e = err(status, body);
     expect(isTransient(e)).toBe(transient);
-    // The wait tools replay reads under a deadline, and still ride out every
-    // 409 and 429; this is only the published answer.
-    if (status === 409 || status === 429) expect(isTransientForPoll(e)).toBe(true);
+    // The wait tools replay reads under a deadline and ride out every 429, but
+    // a 409 polls only where it would be worth sending again (OPL-6081): a
+    // permanent word, an always-final code or no word at all ends the wait.
+    if (status === 409 || status === 429) expect(isTransientForPoll(e)).toBe(transient);
   });
 
   // The same edges as the TypeScript SDK: a nested word grants nothing, and a

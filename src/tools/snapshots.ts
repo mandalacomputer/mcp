@@ -301,24 +301,25 @@ export const registerSnapshots: Registrar = (server, session, opts) => {
             items,
           );
         }
-        const malformed = items.filter(
-          (item) => item === null || typeof item !== 'object' || Array.isArray(item),
-        ).length;
+        // Strict (OPL-6081), as the SDKs decode a listing: a row that is not
+        // an object, or has no id, fails the call rather than being dropped
+        // with a warning — a dropped row is a snapshot that is still held.
         const all = items.filter(
           (item): item is Record<string, unknown> =>
-            item !== null && typeof item === 'object' && !Array.isArray(item),
+            item !== null &&
+            typeof item === 'object' &&
+            !Array.isArray(item) &&
+            typeof (item as { id?: unknown }).id === 'string' &&
+            (item as { id: string }).id.trim() !== '',
         );
-        const warning =
-          incompleteWarning('snapshots', incomplete) +
-          (malformed
-            ? `WARNING: ignored ${malformed} malformed snapshot entr${malformed === 1 ? 'y' : 'ies'} from the platform.\n\n`
-            : '');
-        if (!all.length && malformed) {
+        const malformed = items.length - all.length;
+        if (malformed) {
           return refused(
-            `${warning}No valid snapshots remained. This is not an empty snapshot inventory — do not draw conclusions from the malformed listing.`,
+            `GET /snapshots answered with ${malformed} malformed entr${malformed === 1 ? 'y' : 'ies'} (not an object, or without an id), so this inventory cannot be read. Do not draw conclusions from it about what exists.`,
             items,
           );
         }
+        const warning = incompleteWarning('snapshots', incomplete);
         // The filter keeps the unreachable placeholders, and that is not a
         // nicety. A partial listing does not merely omit rows — the platform
         // APPENDS one `{id, unreachable: true}` stub per snapshot it could not

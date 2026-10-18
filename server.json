@@ -8,28 +8,70 @@
     "url": "https://github.com/mandalacomputer/mcp",
     "source": "github"
   },
-  "version": "0.14.0",
+  "version": "0.15.0",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "mandala-computer-mcp",
-      "version": "0.14.0",
+      "version": "0.15.0",
       "transport": {
         "type": "stdio"
       },
       "environmentVariables": [
         {
           "name": "MANDALA_API_KEY",
-          "description": "API key from Settings → API keys. Optional after `mandala login`, which saves one.",
+          "description": "API key from Settings → Credentials → API keys. Optional after `mandala login`, which saves one.",
           "isRequired": false,
           "isSecret": true,
           "format": "string"
         },
         {
           "name": "MANDALA_MODEL_KEY",
-          "description": "Your model provider key. Optional; turns on run_agent.",
+          "description": "Optional Anthropic or OpenAI key. Enables run_agent_chat, and makes run_agent bill this key instead of the account's AI credits.",
           "isRequired": false,
           "isSecret": true,
+          "format": "string"
+        },
+        {
+          "name": "MANDALA_PROFILE",
+          "description": "Optional saved profile from `mandala login --profile`; used when MANDALA_API_KEY is not set.",
+          "isRequired": false,
+          "isSecret": false,
+          "format": "string"
+        },
+        {
+          "name": "MANDALA_BASE_URL",
+          "description": "Optional API base URL. Defaults to https://app.mandala.computer/api/v1.",
+          "isRequired": false,
+          "isSecret": false,
+          "format": "string"
+        },
+        {
+          "name": "MANDALA_COMPUTER_ID",
+          "description": "Optional computer id to bind at startup, so use_computer is not needed.",
+          "isRequired": false,
+          "isSecret": false,
+          "format": "string"
+        },
+        {
+          "name": "MANDALA_NO_LIFECYCLE",
+          "description": "Optional: 1, true, yes or on withholds the tools that create, clone or delete computers and snapshots.",
+          "isRequired": false,
+          "isSecret": false,
+          "format": "string"
+        },
+        {
+          "name": "MANDALA_READ_ONLY",
+          "description": "Optional: 1, true, yes or on keeps only read-only tools.",
+          "isRequired": false,
+          "isSecret": false,
+          "format": "string"
+        },
+        {
+          "name": "MANDALA_TAGS",
+          "description": "Optional comma-separated tool tags to expose (for example computers,input); empty means every tool.",
+          "isRequired": false,
+          "isSecret": false,
           "format": "string"
         }
       ]

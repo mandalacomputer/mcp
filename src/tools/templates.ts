@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { CancelledError, isTransientForPoll } from '../errors.js';
+import { CancelledError, errorForStatus, isTransientForPoll } from '../errors.js';
 import { guarded, incompleteWarning, json, refused, said } from '../format.js';
 import * as P from '../paths.js';
 import type { Registrar } from './types.js';
@@ -535,6 +535,29 @@ export const registerTemplates: Registrar = (server, session, opts) => {
           signal: extra.signal,
         })) {
           if (ev.event === 'error') {
+            // A frame with a status is the platform ending this caller's view
+            // because its authority went — a revoked key, a role taken away —
+            // with the sentence, status and word the refusal would have had as
+            // a response (OPL-6081). Thrown as that refusal, so the model gets
+            // its status, reason and request id and the advice that goes with
+            // them, and is not told to poll get_build with an authority that
+            // no longer holds.
+            const frame = isRecord(ev.data) ? ev.data : undefined;
+            const status = frame?.status;
+            if (
+              typeof status === 'number' &&
+              Number.isInteger(status) &&
+              status >= 400 &&
+              status < 600
+            ) {
+              const sentence =
+                typeof frame?.error === 'string' && frame.error.trim() ? frame.error : '';
+              throw errorForStatus(
+                status,
+                `The event stream for ${build_id} was ended by the platform${sentence ? `: ${sentence}` : ` with HTTP ${status}`}`,
+                frame,
+              );
+            }
             // The STREAM failed, not the build. Said as such, because a model
             // told "the build failed" would go and rewrite a document that is
             // fine — and the build is very likely still running.

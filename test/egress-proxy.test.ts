@@ -344,7 +344,7 @@ describe('wait_for_computer on a computer whose egress proxy waits for credentia
     const res = await platform(
       (seen) => {
         if (seen.path.endsWith('/exec'))
-          return [409, { error: 'guest agent not running', code: 'conflict' }];
+          return [409, { error: 'guest agent not running', reason: 'starting' }];
         gets++;
         return [
           200,

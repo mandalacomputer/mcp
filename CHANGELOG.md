@@ -14,6 +14,59 @@ are wording changes, and they are behaviour changes in the way that matters.
 
 ## [Unreleased]
 
+### Changed
+
+- **Wait tools end on a refusal that waiting cannot change.** `wait_for_computer`,
+  `wait_for_operation`, `move_computer`, `create_snapshot`, `delete_snapshot`,
+  `get_build` and the event stream's reconnect used to poll through every 409
+  until the deadline, up to 15 minutes, and then report a timeout. A 409 with a
+  permanent `reason` (`unsupported`, `running`, `exists`, `revoked`,
+  `name_taken`, `stale_revision`, `stale_capture`), or with the code
+  `idempotency_outcome_unknown` or `template_image_preparing`, now ends the wait
+  at once with that refusal. `contention` and `starting` (on a 400 too), and the
+  codes `idempotency_in_progress` and `WORKSPACE_MOVING`, still poll. A 409 with
+  no `reason` ends the wait too, except on `wait_for_computer`'s desktop probe,
+  where it is the documented answer for a desktop session that is not up yet.
+  `wait_for_computer`'s probes still poll through `unavailable`, because the
+  status read that follows names a stopped computer itself. The same rule as
+  both SDKs.
+- **Listings fail on a row they cannot read.** `list_computers` and
+  `list_snapshots` used to drop a row that was not an object with a warning, and
+  kept one with no `id`; either now fails the call, as `list_webhooks`,
+  `list_webhook_deliveries` and `list_ssh_keys` already did. A webhook row whose
+  `events` or `computers` is not a list of ids fails `list_webhooks` too: an
+  unreadable `computers` read as `[]` would mean every computer.
+- **`exec` refuses an `env` past the platform's caps before sending it:** at
+  most 64 entries, each at most 4096 bytes counted as `NAME=value` in UTF-8.
+  The platform checks these only after waking a suspended computer, so a local
+  refusal saves a resume. `create_webhook` and `update_webhook` refuse a `url`
+  over 2048 characters the same way. The caps are in the tool descriptions, and
+  `check:surface` now compares 9 of the platform's limits, not 5.
+- **The Claude Code plugin pins the server it starts** to its own version
+  (`npx -y mandala-computer-mcp@0.15.0`), so a plugin runs the server its skill
+  was written for rather than npm's latest. A test and the release workflow hold
+  the pin to the package version.
+
+### Fixed
+
+- **`watch_build` reports a stream the platform ended over the caller's
+  authority as that refusal.** An `error` frame carrying a `status` (a revoked
+  key, a role taken away) now reaches the model with its status, `reason` and
+  request id and the advice for it, rather than "call get_build", which the same
+  caller would be refused.
+- **MCP Registry entry:** `MANDALA_API_KEY` names the current page (Settings →
+  Credentials → API keys), `MANDALA_MODEL_KEY` says it enables `run_agent_chat`
+  and makes `run_agent` bill the key instead of AI credits, and the optional
+  `MANDALA_PROFILE`, `MANDALA_BASE_URL`, `MANDALA_COMPUTER_ID`,
+  `MANDALA_NO_LIFECYCLE`, `MANDALA_READ_ONLY` and `MANDALA_TAGS` are declared.
+- `delete_workspace` says that webhook subscriptions confined to the workspace
+  are deleted with it, with their delivery records, and account-wide ones are
+  not. `write_file_chunk` says a 404 from an older host means resumable upload
+  is unavailable there, and not to resend the chunk through `write_file`.
+- A `stale_capture` refusal met outside `screenshot` now carries advice.
+- The skill no longer says the Python distribution has a `mandala` command; it
+  is `mandala-py`, with no `login`.
+
 ## [0.14.0] — 2026-10-16
 
 ### Added
@@ -1224,7 +1277,8 @@ No effect on the tool surface, listed because it is most of the window.
 - Several parser fixes landed before that scanner was retired, each ported to
   and from the TypeScript SDK's byte-identical copy.
 
-[Unreleased]: https://github.com/mandalacomputer/mcp/compare/v0.13.2...HEAD
+[Unreleased]: https://github.com/mandalacomputer/mcp/compare/v0.14.0...HEAD
+[0.14.0]: https://github.com/mandalacomputer/mcp/compare/v0.13.2...v0.14.0
 [0.13.2]: https://github.com/mandalacomputer/mcp/compare/v0.13.1...v0.13.2
 [0.13.1]: https://github.com/mandalacomputer/mcp/compare/v0.13.0...v0.13.1
 [0.13.0]: https://github.com/mandalacomputer/mcp/compare/v0.12.0...v0.13.0

@@ -38,8 +38,8 @@ mandala login
 claude mcp add mandala -- npx -y mandala-computer-mcp
 ```
 
-The TypeScript CLI alone implements `mandala login`; the Python distribution
-also has a command named `mandala`. Browser approval is a user action. Do not
+The TypeScript CLI alone implements `mandala login`; the Python distribution's
+command is `mandala-py`, which has no `login`. Browser approval is a user action. Do not
 use model tools to approve devices, receive device secrets, or write the
 credential file.
 
