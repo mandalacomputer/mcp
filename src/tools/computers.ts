@@ -536,7 +536,8 @@ export const registerComputers: Registrar = (server, session, opts) => {
         if (malformed) {
           return refused(
             `GET /computers answered with ${malformed} malformed entr${malformed === 1 ? 'y' : 'ies'} (not an object, or without an id), so this listing cannot be read. This is not an empty account — do not create a computer on the strength of it.`,
-            items,
+            // Not the rows: a computer row can carry desktop credentials, and a
+            // refusal does not pass through the redaction the listing does.
           );
         }
         const warning = incompleteWarning('computers', incomplete);

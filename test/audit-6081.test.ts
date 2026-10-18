@@ -369,6 +369,25 @@ describe('the audit’s wording fixes', () => {
   });
 });
 
+describe('a malformed computer listing (Codex review)', () => {
+  it.each([
+    ['beside a null row', [null, { id: 'vm-1', vnc: { url: 'wss://x/?token=SECRET-TOKEN' } }]],
+    ['in a row without an id', [{ name: 'box', vnc: { url: 'wss://x/?token=SECRET-TOKEN' } }]],
+  ])('never shows desktop credentials %s', async (_label, rows) => {
+    const res = await platform(
+      () => [200, rows],
+      async () => {
+        const { call, close } = await connect();
+        const r = await call('list_computers');
+        await close();
+        return r;
+      },
+    );
+    expect(res.isError).toBe(true);
+    expect(textOf(res)).not.toContain('SECRET-TOKEN');
+  });
+});
+
 describe('webhook rows whose filter lists are not lists of ids (P13)', () => {
   it.each([
     ['a computer id that is not a string', { computers: [7] }],
