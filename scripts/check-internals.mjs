@@ -32,7 +32,9 @@
  *   - platform source paths, BY SHAPE rather than by prefix. This client has no
  *     Go, so any `<something>.go` in it names somebody else's file; the first
  *     cut required a `server/` prefix and let a bare one ship in `dist/`.
- *     Likewise `lib/<module>` and `web/lib/<module>`, extension or not.
+ *     Likewise `lib/<module>` and `web/lib/<module>`, extension or not, the
+ *     bare `web/lib` directory, and the reference module named on its own.
+ *   - the platform's daemon binary, by name.
  *   - identifiers declared in the platform and not in this library.
  *   - nothing else. Prose about what the platform DOES is the point of this
  *     client's comments and must stay.
@@ -83,6 +85,13 @@ const PATH_PATTERNS = [
   // Not preceded by a path separator: `@modelcontextprotocol/sdk/server/mcp`
   // is a package subpath, not the platform's tree.
   [/(?<![\w/@.-])server\/[A-Za-z][A-Za-z0-9_/]*\b/g, 'names a platform module'],
+  // The bare directory, which the rule above needs a module after: "reads the
+  // platform's `web/lib`" shipped in dist/ past it (OPL-6081).
+  [/\bweb\/lib\b/g, 'names a platform directory'],
+  // The platform's reference module, named without its directory.
+  [/\bapidoc\b/g, 'names a platform module'],
+  // The daemon binary on every host, and an operator's command line with it.
+  [/\bgorillad\b/g, 'names the platform daemon binary'],
 ];
 
 const IDENTIFIER = /\b[A-Za-z_][A-Za-z0-9_]*\b/g;

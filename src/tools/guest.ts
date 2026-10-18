@@ -277,7 +277,7 @@ export const registerGuest: Registrar = (server, session) => {
           .record(z.string(), z.string())
           .optional()
           .describe(
-            'Environment for this command, as {NAME: "value"}. Use it instead of writing FOO=bar in front of the command: a prefix assignment is shell syntax, so a value holding a space, a quote, a newline or a $ has to be quoted correctly by you and is silently truncated or re-parsed when it is not, while this reaches the process whole and unquoted. It also keeps a secret out of the command line, which is world-readable in the guest\'s ps and, for a background command, comes back to you inside every exec_poll answer. The variables are added on top of the guest\'s login profile rather than replacing it, so PATH and the rest are still there, and they apply to this command only — including with desktop: true. Names must not be empty or contain "=".',
+            `Environment for this command, as {NAME: "value"}. Use it instead of writing FOO=bar in front of the command: a prefix assignment is shell syntax, so a value holding a space, a quote, a newline or a $ has to be quoted correctly by you and is silently truncated or re-parsed when it is not, while this reaches the process whole and unquoted. It also keeps a secret out of the command line, which is world-readable in the guest's ps and, for a background command, comes back to you inside every exec_poll answer. The variables are added on top of the guest's login profile rather than replacing it, so PATH and the rest are still there, and they apply to this command only — including with desktop: true. Names must not be empty or contain "=". At most ${P.EXEC_MAX_ENV_ENTRIES} entries, each at most ${P.EXEC_MAX_ENV_ENTRY_BYTES} bytes counted as NAME=value in UTF-8; past either nothing runs.`,
           ),
       },
     },
@@ -665,7 +665,7 @@ export const registerGuest: Registrar = (server, session) => {
     {
       title: 'Stage a resumable file chunk',
       description:
-        'Linux with python3 only. Stage up to 256 KiB in one chunk of a file up to 2 GiB. Supply raw bytes as base64, in order, keeping path, upload_id, size, overwrite and source contents unchanged. The final chunk publishes atomically. After any error call get_file_upload and continue from its offset; never guess or restart blindly. An empty chunk at offset=size retries publication. Call cancel_file_upload after completion or to abandon staging. Staging consumes guest disk until cancelled, with no expiry. May resume a suspended computer and incur charges. For large local files prefer the SDK or CLI, avoiding model-context transfers.',
+        'Linux with python3 only. Stage up to 256 KiB in one chunk of a file up to 2 GiB. Supply raw bytes as base64, in order, keeping path, upload_id, size, overwrite and source contents unchanged. The final chunk publishes atomically. After any error call get_file_upload and continue from its offset; never guess or restart blindly. An empty chunk at offset=size retries publication. Call cancel_file_upload after completion or to abandon staging. Staging consumes guest disk until cancelled, with no expiry. May resume a suspended computer and incur charges. A 404 from an older host means resumable upload is not available on it: do not resend the chunk through write_file, which is neither atomic nor resumable. For large local files prefer the SDK or CLI, avoiding model-context transfers.',
       inputSchema: {
         ...uploadArgs,
         content_base64: z.string().max(360 * 1024),

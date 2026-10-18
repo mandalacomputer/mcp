@@ -144,7 +144,19 @@ const nonblank = (v: unknown): boolean => typeof v === 'string' && v.trim() !== 
 
 /** The fields every subscription row has, each of the type it must be. */
 const webhookRow = (w: Record<string, unknown>): boolean =>
-  nonblank(w.id) && typeof w.url === 'string' && typeof w.enabled === 'boolean';
+  nonblank(w.id) &&
+  typeof w.url === 'string' &&
+  typeof w.enabled === 'boolean' &&
+  idList(w.events) &&
+  idList(w.computers);
+
+/**
+ * A filter list, where one is sent: every element a nonblank string (OPL-6081).
+ * An element that is not one cannot be dropped quietly — `computers: []` means
+ * EVERY computer in scope, so a list whose only id was unreadable would read as
+ * a subscription far wider than the one that exists.
+ */
+const idList = (v: unknown): boolean => v === undefined || (Array.isArray(v) && v.every(nonblank));
 
 /** The fields every delivery row has, each of the type it must be. */
 const deliveryRow = (d: Record<string, unknown>): boolean =>
@@ -310,13 +322,12 @@ export const registerWebhooks: Registrar = (server, session) => {
     'create_webhook',
     {
       title: 'Subscribe an endpoint to this account’s events',
-      description:
-        'Subscribe an HTTPS endpoint to this account’s events. THE ANSWER CARRIES THE SIGNING SECRET ONCE — it is not readable again, so store it or hand it over before doing anything else. Each event is POSTed as the same JSON object wait_for_event hands you, byte for byte, signed with Standard Webhooks v1 headers (webhook-id, webhook-timestamp, webhook-signature); the receiver should verify the raw body, acknowledge with a 2xx before doing the work, and refuse a timestamp more than 300 seconds off. A failing delivery gets eight attempts (seven retries) over about fourteen hours; an endpoint that keeps failing for a day is disabled. The url must be https, must not carry a username or password, and must resolve to a public address — a private or loopback address is refused. Paid plans allow ten subscriptions; an account with no plan allows none.',
+      description: `Subscribe an HTTPS endpoint to this account’s events. THE ANSWER CARRIES THE SIGNING SECRET ONCE — it is not readable again, so store it or hand it over before doing anything else. Each event is POSTed as the same JSON object wait_for_event hands you, byte for byte, signed with Standard Webhooks v1 headers (webhook-id, webhook-timestamp, webhook-signature); the receiver should verify the raw body, acknowledge with a 2xx before doing the work, and refuse a timestamp more than ${P.WEBHOOK_REPLAY_WINDOW_S} seconds off. A failing delivery gets eight attempts (seven retries) over about fourteen hours; an endpoint that keeps failing for a day is disabled. The url must be https, at most ${P.WEBHOOK_URL_MAX} characters, must not carry a username or password, and must resolve to a public address — a private or loopback address is refused. Paid plans allow ten subscriptions; an account with no plan allows none.`,
       inputSchema: {
         url: z
           .string()
           .describe(
-            'Where to POST. https:// only, no username or password, resolving to a public address. A port other than 443 is fine.',
+            `Where to POST. https:// only, at most ${P.WEBHOOK_URL_MAX} characters, no username or password, resolving to a public address. A port other than 443 is fine.`,
           ),
         ...filterArgs('create'),
       },
@@ -375,7 +386,7 @@ export const registerWebhooks: Registrar = (server, session) => {
           .string()
           .optional()
           .describe(
-            'A new endpoint, checked exactly as on create: https, no credentials, public address.',
+            `A new endpoint, checked exactly as on create: https, at most ${P.WEBHOOK_URL_MAX} characters, no credentials, public address.`,
           ),
         ...filterArgs('update'),
       },

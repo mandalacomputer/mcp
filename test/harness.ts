@@ -1035,7 +1035,7 @@ function respond(
         : { ...COMPUTER, running_ram_mb: runningRamFor(COMPUTER.status) },
     );
   // The four power actions answer the platform's Ack and not a computer record
-  // (apidoc: `response: ref('Ack')` on each). The catch-all below answered a
+  // (the API reference documents an Ack response for each). The catch-all below answered a
   // record for them, so the server's formatting of the real answer — a
   // computer with no name, id or status — was never seen here (OPL-3914).
   if (/\/computers\/[^/]+\/(start|stop|suspend|restart)$/.test(path)) return json({ ok: true });

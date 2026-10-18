@@ -479,15 +479,16 @@ export function execBody(args: {
  * an absent one are already the same request, and the one that says so in fewer
  * fields is the one worth sending.
  *
- * The three rules below are checked in this process because the platform checks
- * them AFTER it has resumed the computer. `POST computers/:id/exec` runs its
- * `use` — which wakes a suspended guest and bills the resume — before `Exec`
- * ever looks at the environment, so a malformed name costs a machine coming up
- * to be told no. They are also the rules that will not drift: they are what an
- * entry IS in the list the guest agent takes, `NAME=value` strings separated by
- * NULs, rather than policy. The ceilings on how many entries and how long one
- * may be are policy, are the platform's to change, and are deliberately not
- * repeated here.
+ * The rules below are checked in this process so a request that can only fail
+ * is not made; the platform checks the same ones before it touches the
+ * computer, so the saving is a round trip, not a resume. The first three will
+ * not drift: they are what an entry IS in the list the guest agent takes,
+ * `NAME=value` strings separated by NULs, rather than policy. The ceilings on
+ * how many entries and how long one may be ARE policy, and are mirrored since
+ * the platform publishes them in its surface manifest (OPL-6081):
+ * `scripts/check-surface.mjs` holds {@link LIMITS} to it, so a ceiling that
+ * moves fails CI rather than turning this into a refusal of a call the
+ * platform would take.
  *
  * The `=` case is the one a model actually gets wrong. `{'FOO=bar': ''}` is the
  * assignment written into the name, which is the same mistake as writing the
@@ -507,6 +508,11 @@ export function execEnv(env?: Record<string, string>): Json | undefined {
   if (!env) return undefined;
   const entries = Object.entries(env);
   if (entries.length === 0) return undefined;
+  if (entries.length > EXEC_MAX_ENV_ENTRIES) {
+    throw new Error(
+      `env has ${entries.length} entries; the platform takes at most ${EXEC_MAX_ENV_ENTRIES}. Nothing was run.`,
+    );
+  }
   for (const [name, value] of entries) {
     if (!name) throw new Error('env has an entry with an empty name');
     if (name.includes('=')) {
@@ -522,9 +528,24 @@ export function execEnv(env?: Record<string, string>): Json | undefined {
     if (hasUnpairedSurrogate(name) || hasUnpairedSurrogate(value)) {
       throw new Error(`env entry ${name}: ${envSurrogateRefusal}`);
     }
+    // Counted as the guest receives it: `NAME=value` in UTF-8, the `=`
+    // included, so a long value leaves less room for a long name.
+    const bytes = utf8Length(name) + 1 + utf8Length(value);
+    if (bytes > EXEC_MAX_ENV_ENTRY_BYTES) {
+      throw new Error(
+        `env entry ${name} is ${bytes} bytes as NAME=value; the platform takes at most ${EXEC_MAX_ENV_ENTRY_BYTES} per entry. Nothing was run — put a value that large in a file and pass its path instead.`,
+      );
+    }
   }
   return Object.fromEntries(entries);
 }
+
+const utf8Length = (s: string): number => Buffer.byteLength(s, 'utf8');
+
+/** The most entries one exec's `env` may carry. */
+export const EXEC_MAX_ENV_ENTRIES = LIMITS['exec.maxEnvEntries'];
+/** The most UTF-8 bytes one `env` entry may carry, as `NAME=value`. */
+export const EXEC_MAX_ENV_ENTRY_BYTES = LIMITS['exec.maxEnvEntryBytes'];
 
 const envSurrogateRefusal =
   'that name or value has an unpaired surrogate in it — half of a character, usually from a ' +
@@ -766,9 +787,9 @@ export function windowBody(args: {
 /**
  * The most text `PUT /computers/{id}/clipboard` carries INTO a guest, in bytes.
  *
- * Mirrored so a request that can only fail is not made. NOT machine-checked —
- * `scripts/check-surface.mjs` reads the platform's `web/lib`, and this number
- * is not part of the table it reads. It is not arbitrary: the platform puts
+ * Mirrored so a request that can only fail is not made, and held to the
+ * platform's surface manifest by `scripts/check-surface.mjs` through
+ * {@link LIMITS}. It is not arbitrary: the platform puts
  * the text inside one argument of one command, Linux caps a single argv
  * string at 128 KiB, and two layers of base64 stand between the text and
  * that ceiling, so each byte costs about 1.8 of it. Past
@@ -952,14 +973,19 @@ export const EXEC_MAX_TIMEOUT_S = LIMITS['exec.maxTimeoutSeconds'];
 /** The platform's own caps (`DESCRIPTION_MAX` and `COMPUTERS_MAX` on the platform side). */
 export const WEBHOOK_DESCRIPTION_MAX = LIMITS['webhook.descriptionMaxChars'];
 export const WEBHOOK_COMPUTERS_MAX = LIMITS['webhook.computersMax'];
+/** The longest `url` a subscription may hold, counted as JavaScript counts `length`. */
+export const WEBHOOK_URL_MAX = LIMITS['webhook.urlMaxChars'];
+/** How far off a delivery's timestamp a receiver should refuse, in seconds. */
+export const WEBHOOK_REPLAY_WINDOW_S = LIMITS['webhook.replayWindowSeconds'];
 
 /**
  * The body for a webhook create or update — the fields, checked before they
  * cost a round trip.
  *
- * Three of the platform's refusals are mirrored here, because each is a call
- * that can only fail: a url that is not `https:` or carries a username or
- * password, a description over the cap, and a `computers` filter over its cap.
+ * The platform's syntax refusals are mirrored here, because each is a call
+ * that can only fail: a url that is not `https:`, carries a username or
+ * password, or is over its cap, a description over the cap, and a `computers`
+ * filter over its cap.
  * The one that is NOT mirrored is the address check — that the hostname resolves
  * to a public address — because it is a DNS answer the platform gets at create
  * time, and a guess made here would be wrong in both directions.
@@ -982,6 +1008,13 @@ export function webhookBody(args: {
   let url: string | undefined;
   if (args.url !== undefined) {
     url = args.url.trim();
+    // On the url as sent, which is the trimmed one: the platform counts the
+    // string it receives, before parsing it.
+    if (url.length > WEBHOOK_URL_MAX) {
+      throw new Error(
+        `url is ${url.length} characters; the platform keeps at most ${WEBHOOK_URL_MAX}. Nothing was sent.`,
+      );
+    }
     let parsed: URL;
     try {
       parsed = new URL(url);

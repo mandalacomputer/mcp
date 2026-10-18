@@ -237,6 +237,10 @@ export function reasonAdvice(reason: string | undefined): string | undefined {
       return 'a secret with this name already exists in this scope; this does not clear by waiting \u2014 pick another name or replace the existing one';
     case 'stale_revision':
       return 'the secret changed since you read it; read it again and retry with its current revision';
+    case 'stale_capture':
+      // Only the screenshot route sends it today, and that tool words it
+      // itself; this is the sentence for any other call that meets it.
+      return 'the capture this named is no longer held — a newer screenshot replaced it, or the computer restarted or moved. This does not clear by waiting: take a new screenshot and use the capture it names';
     case 'revoked':
       // Reached only on a status statusAdvice has no sentence for, because the
       // formatter asks that one first and the platform sends this word on 401 and
@@ -1764,18 +1768,33 @@ export function isTransient(err: unknown): boolean {
  *   `>= 500` bound rested on nothing. {@link RedirectError} is what a 3xx
  *   becomes now. Change one and this paragraph is wrong again.
  *
- * {@link APIError.reason} is deliberately NOT consulted here, and that is the
- * one place this predicate and {@link isTransient} part company (OPL-3898).
- * `unavailable` means the computer is not running, which is a permanent answer
- * to whoever asked — and a poll under a deadline is the one caller for whom it
- * may not be, since a computer coming up passes through it. The same generosity
- * as every unmapped 5xx below, for the same reason: this only ever replays a
- * read, and the loops above return a refusal of their own the moment the status
- * they are watching says stopped or suspended AND the platform says it is
- * holding nothing for the machine — the qualification OPL-4631 added, because
- * a start that has been admitted reads as stopped or suspended until its guest
- * process exists. mandala-computer-python's `_is_transient_for_poll` draws the
- * line in the same place.
+ * A 409 or a 400 is read by its WORD here as well, and that is where the
+ * second half of OPL-3724 meets the first (OPL-6081). It used to be that every
+ * 409 polled whatever it said, so a probe refused with `unsupported`,
+ * `running` or `exists` — answers that never change — rode out the caller's
+ * whole deadline, up to fifteen minutes, before reporting a timeout instead of
+ * the refusal. Now, the same rule in all three clients:
+ *
+ * - a word that clears (`contention`, `starting`), or a reasonless 409 whose
+ *   code the platform documents as passing ({@link conflictCodeClears}),
+ *   polls;
+ * - a permanent word ends the wait with that refusal, and so do
+ *   `idempotency_outcome_unknown` and `template_image_preparing`, which no
+ *   amount of waiting turns into another answer;
+ * - a 409 with no word polls only where the polled route documents one as a
+ *   settling state — the desktop probe, whose route answers a desktop session
+ *   that is not up yet with exactly that — and ends the wait everywhere else.
+ *   That is {@link PollSettles.reasonless409}.
+ *
+ * `unavailable` is the one permanent word a wait may opt out of, with
+ * {@link PollSettles.unavailable}. It means the computer is not running, which
+ * is a permanent answer to whoever asked — and a probe in wait_for_computer is
+ * the one caller for whom it may not be, since a computer coming up passes
+ * through it. Those loops read the computer's status on the next turn and
+ * return a refusal of their own the moment it says stopped or suspended AND
+ * the platform says it is holding nothing for the machine — the qualification
+ * OPL-4631 added, because a start that has been admitted reads as stopped or
+ * suspended until its guest process exists.
  *
  * Everything at 5xx polls through, 502 and 520-523 included: they mean the
  * outcome is unknown, and a read whose outcome is unknown can simply be read
@@ -1786,7 +1805,7 @@ export function isTransient(err: unknown): boolean {
  * origin can answer 700 — which `>= 500` alone called a passing moment and
  * polled until the caller's deadline (Codex adversarial review, OPL-3724).
  */
-export function isTransientForPoll(err: unknown): boolean {
+export function isTransientForPoll(err: unknown, settles: PollSettles = {}): boolean {
   if (!(err instanceof APIError) && !(err instanceof ConnectivityError)) return false;
   if (
     err instanceof MoveRequiredError ||
@@ -1797,8 +1816,35 @@ export function isTransientForPoll(err: unknown): boolean {
   if (err instanceof OriginTLSError) return false;
   if (err instanceof APIError) {
     if (err.status === 524) return false;
-    if (err.status === 408 || err.status === 409 || err.status === 429) return true;
+    if (err.status === 400 || err.status === 409) return refusalPolls(err, settles);
+    if (err.status === 408 || err.status === 429) return true;
     return err.status >= 500 && err.status < 600;
   }
   return true;
+}
+
+/**
+ * What a polled route has documented as a settling state, and so what one
+ * wait may poll through that {@link isTransientForPoll} otherwise ends on.
+ */
+export type PollSettles = {
+  /** The route answers a passing state with a 409 that carries no `reason`. */
+  reasonless409?: boolean;
+  /** The wait reads the computer's status next, which names a stop itself. */
+  unavailable?: boolean;
+};
+
+/** A 400 or a 409 inside a poll: its word, its code, then what the route says. */
+function refusalPolls(err: APIError, settles: PollSettles): boolean {
+  const code = record(err.body) ? err.body.code : undefined;
+  if (code === 'idempotency_outcome_unknown' || code === 'template_image_preparing') return false;
+  const kind = reasonKind(err.reason);
+  if (kind === 'clears') return true;
+  if (kind === 'permanent') {
+    return err.status === 409 && err.reason === 'unavailable' && settles.unavailable === true;
+  }
+  // A 400 describes the request unless its word says otherwise.
+  if (err.status === 400) return false;
+  if (conflictCodeClears(err)) return true;
+  return settles.reasonless409 === true;
 }

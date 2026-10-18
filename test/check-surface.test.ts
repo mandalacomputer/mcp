@@ -59,7 +59,7 @@ describe('check:surface', () => {
     version: 1,
     routes: [...ALLOWED].sort(),
     parameters: Object.fromEntries([...PARAMETERS].filter(([, names]) => names.length)),
-    limits: { 'webhook.urlMaxChars': 2048, ...LIMITS } as Record<string, number>,
+    limits: { 'browser.minimumLeaseSeconds': 60, ...LIMITS } as Record<string, number>,
   });
 
   const made: string[] = [];
