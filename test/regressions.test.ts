@@ -3730,6 +3730,8 @@ describe('the tools our own prose tells a model to call', () => {
     'thread_id',
     'run_id',
     'rate_limited',
+    // get_agent_thread's paging parameter.
+    'before_turn',
   ]);
 
   it('names only tools that exist', async () => {

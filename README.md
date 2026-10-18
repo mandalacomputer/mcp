@@ -1596,7 +1596,10 @@ another computer, and a full one (100 turns), are refused `409`. `store: false` 
 `thread_id`; a background run is always kept, since it is read back.
 `list_agent_threads` and `get_agent_thread` read the kept conversations; an
 assistant turn that ended `running`, `aborted` or `interrupted` may have done more
-than it reported. `delete_agent_thread` (with `confirm: true`) removes one for
+than it reported. A thread holds up to 100 turns of up to 32,000 characters, so
+`get_agent_thread` answers with the newest turns that fit in about 48,000
+characters, says which earlier turns it left out, and reads further back with
+`before_turn`. `delete_agent_thread` (with `confirm: true`) removes one for
 good: it stops no run and changes nothing on a desktop, and is meant for a thread
 the conversation made or the user named — every thread on the account is
 visible to the key. The native route's `messages` (a history the caller keeps

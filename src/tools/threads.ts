@@ -1,6 +1,6 @@
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
-import { APIError, NotFoundError } from '../errors.js';
+import { APIError, NotFoundError, neverSent } from '../errors.js';
 import { guarded, refused, said } from '../format.js';
 import * as P from '../paths.js';
 import { usd } from './agent.js';
@@ -66,6 +66,17 @@ const threadIdArg = z
   .regex(P.THREAD_ID, 'thread_id is thr_ followed by 24 lowercase hex characters')
   .describe('The thread: thr_ and 24 hex characters, from an agent run or list_agent_threads.');
 
+/**
+ * How much turn text one get_agent_thread answer carries, in characters.
+ *
+ * A thread holds up to 100 turns of up to 32,000 characters each, and one
+ * answer holding all of them is past what a client will put in a model's
+ * context — or is cut by the client, which drops the newest turns, the ones a
+ * continuation needs. So an answer holds the newest turns that fit, at least
+ * one whatever its size, and says which turn to read back from for the rest.
+ */
+const THREAD_CHARS = 48_000;
+
 /** The endings that leave a turn's run doing, or having done, more than it says. */
 const UNSETTLED = new Set(['running', 'aborted', 'interrupted']);
 
@@ -96,6 +107,10 @@ function turnLine(t: Turn, n: number): string {
   ];
   return `${n}. assistant, ${t.created_at} — ${facts.join('; ')}:\n${t.text}`;
 }
+
+/** `Turn 4 is` or `Turns 1 to 3 are`: a run of turn numbers, with its verb. */
+const span = (from: number, to: number, one: string, many: string): string =>
+  from === to ? `Turn ${from} ${one}` : `Turns ${from} to ${to} ${many}`;
 
 const summaryLine = (t: ThreadSummary): string =>
   `${t.id} on ${t.computer_id}: ${JSON.stringify(t.title)} — ${t.turns} turn(s), last used ${t.updated_at}`;
@@ -149,28 +164,59 @@ export const registerThreads: Registrar = (server, session) => {
     {
       title: 'Read a kept agent conversation',
       description:
-        'One kept conversation, every turn oldest first: each user turn is a prompt, and each assistant turn is how that run answered — its closing text, how it ended, its steps, and its cost on AI credits. Read it to see what earlier runs on a computer were asked and did before continuing it with thread_id. Only an assistant turn that ended end_turn finished its task. One that is running (its run is still going), aborted (stopped part way) or interrupted (the platform restarted mid-run) MAY HAVE DONE MORE THAN IT REPORTED: look at the desktop before relying on it. A thread this key cannot see is not found.',
-      inputSchema: { thread_id: threadIdArg },
+        'One kept conversation, oldest turn first: each user turn is a prompt, and each assistant turn is how that run answered — its closing text, how it ended, its steps, and its cost on AI credits. Read it to see what earlier runs on a computer were asked and did before continuing it with thread_id. An answer holds the newest turns that fit in about 48,000 characters; when earlier turns did not fit it says so, and before_turn reads the ones before. Only an assistant turn that ended end_turn finished its task. One that is running (its run is still going), aborted (stopped part way) or interrupted (the platform restarted mid-run) MAY HAVE DONE MORE THAN IT REPORTED: look at the desktop before relying on it. A thread this key cannot see is not found.',
+      inputSchema: {
+        thread_id: threadIdArg,
+        before_turn: z
+          .number()
+          .int()
+          .min(2)
+          .optional()
+          .describe(
+            'Only turns numbered below this one, for the turns an earlier answer said did not fit. Leave it out for the newest turns.',
+          ),
+      },
       annotations: readAnnotations,
     },
-    ({ thread_id }, extra) =>
+    ({ thread_id, before_turn }, extra) =>
       metadataCall(async () => {
         const data = metadata(
           thread,
           await session.api.json('GET', P.agentThread(thread_id), { signal: extra.signal }),
         );
         const { messages, ...meta } = data;
+        // Over every turn, not only the ones shown: a run that may have done
+        // more than it said is worth knowing about wherever it sits.
         const unsettled = messages.flatMap((t, i) =>
           t.role === 'assistant' && t.stop !== undefined && UNSETTLED.has(t.stop) ? [i + 1] : [],
         );
+        const last = Math.min(messages.length, (before_turn ?? messages.length + 1) - 1);
+        const shown: string[] = [];
+        let first = last + 1;
+        let used = 0;
+        for (let n = last; n >= 1; n--) {
+          const line = turnLine(messages[n - 1], n);
+          if (shown.length && used + line.length > THREAD_CHARS) break;
+          shown.unshift(line);
+          used += line.length;
+          first = n;
+        }
         const head =
           `${summaryLine(data)}. Continue it with thread_id ${data.id} on ${data.computer_id}.` +
           (unsettled.length
             ? `\n\nTurn ${unsettled.join(', ')} ended running, aborted or interrupted: ${unsettled.length === 1 ? 'that run' : 'those runs'} may have done more than reported. Take a screenshot before continuing, and do not assume what was or was not done.`
             : '');
+        const earlier =
+          first > 1
+            ? `\n\n${span(1, first - 1, 'is not', 'are not')} shown, to keep this answer bounded: call get_agent_thread again with before_turn ${first} for ${first > 2 ? 'them' : 'it'}.`
+            : '';
+        const later =
+          last < messages.length
+            ? `\n\n${span(last + 1, messages.length, 'comes', 'come')} after these: leave before_turn out for the newest.`
+            : '';
         return said(
-          `${head}\n\n${messages.length ? messages.map((t, i) => turnLine(t, i + 1)).join('\n\n') : 'No turns.'}`,
-          meta,
+          `${head}${earlier}${later}\n\n${shown.length ? shown.join('\n\n') : 'No turns.'}`,
+          { ...meta, ...(shown.length ? { shown_turns: { first, last } } : {}) },
         );
       }).then(out),
   );
@@ -199,6 +245,8 @@ export const registerThreads: Registrar = (server, session) => {
           res = await session.api.with(extra.signal).send('DELETE', path);
         } catch (err) {
           if (!(err instanceof APIError)) {
+            // A request that never left deleted nothing.
+            if (neverSent(err)) throw err;
             const why = err instanceof Error ? err.message : String(err);
             return refused(
               `The delete of ${thread_id} could not be read back (${why}). IT MAY OR MAY NOT HAVE BEEN DELETED — get_agent_thread says whether it is still there.`,

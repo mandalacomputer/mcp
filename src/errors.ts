@@ -1119,6 +1119,14 @@ export class ConnectivityInterruptedError extends ConnectivityError {
 }
 
 /**
+ * Whether a failure proves the request never left: a {@link ConnectivityError}
+ * that is not the interrupted kind. A write that failed this way did nothing,
+ * so it is reported as the failure it is, not as an outcome to go and check.
+ */
+export const neverSent = (err: unknown): boolean =>
+  err instanceof ConnectivityError && !(err instanceof ConnectivityInterruptedError);
+
+/**
  * 504, 524 — a proxy in front of the platform gave up before the platform answered.
  *
  * Not a refusal. The request arrived, is very likely still running, and nothing

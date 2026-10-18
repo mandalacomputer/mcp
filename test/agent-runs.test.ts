@@ -16,6 +16,8 @@ import {
 } from './harness.js';
 
 let platform: ReturnType<typeof installFakePlatform>;
+/** The fake platform's own fetch, which records every request; the helpers below wrap it. */
+let recording: typeof fetch;
 const connections: Awaited<ReturnType<typeof connect>>[] = [];
 async function open(cfg: Parameters<typeof connect>[0] = {}) {
   const connection = await connect(cfg);
@@ -24,6 +26,7 @@ async function open(cfg: Parameters<typeof connect>[0] = {}) {
 }
 beforeEach(() => {
   platform = installFakePlatform();
+  recording = globalThis.fetch;
 });
 afterEach(async () => {
   await Promise.all(connections.splice(0).map((c) => c.close()));
@@ -38,12 +41,27 @@ const textOf = (res: CallToolResult) =>
 
 /** Answer the next platform requests with this body, still recording them. */
 function answer(value: unknown, status = 200, contentType = 'application/json') {
-  const recording = globalThis.fetch;
   globalThis.fetch = (async (...args: Parameters<typeof fetch>) => {
     await recording(...args);
     return new Response(typeof value === 'string' ? value : JSON.stringify(value), {
       status,
       headers: { 'Content-Type': contentType },
+    });
+  }) as typeof fetch;
+}
+
+/** Fail the next platform requests the way a socket does: refused, or reset mid-answer. */
+function transport(kind: 'refused' | 'reset') {
+  globalThis.fetch = (async (...args: Parameters<typeof fetch>) => {
+    await recording(...args);
+    throw Object.assign(new TypeError('fetch failed'), {
+      cause:
+        kind === 'refused'
+          ? Object.assign(new Error('connect ECONNREFUSED'), {
+              code: 'ECONNREFUSED',
+              syscall: 'connect',
+            })
+          : Object.assign(new Error('other side closed'), { code: 'UND_ERR_SOCKET' }),
     });
   }) as typeof fetch;
 }
@@ -183,6 +201,41 @@ describe('run_agent_chat keeps and continues threads', () => {
     expect(textOf(res)).toContain(`Thread: ${THREAD_ID}.`);
   });
 
+  it('keeps the thread of a failure whose step record is too large to show', async () => {
+    const steps = Array.from({ length: 40 }, (_, i) => ({
+      n: i + 1,
+      tool: 'computer',
+      action: 'left_click',
+      detail: `clicked the thing number ${i} ${'x'.repeat(150)}`,
+    }));
+    answer(
+      {
+        error: {
+          message: 'Anthropic overloaded (529)',
+          code: 529,
+          agent: {
+            computer_id: 'vm-1',
+            usage: {
+              input_tokens: 1,
+              output_tokens: 1,
+              cache_read_tokens: 0,
+              cache_write_tokens: 0,
+            },
+            steps,
+            thread_id: THREAD_ID,
+          },
+        },
+        request_id: '00000000-0000-4000-8000-000000000000',
+      },
+      529,
+    );
+    const { call } = await open({ modelKey: 'sk-ant-test' });
+    const said = textOf(await call('run_agent_chat', task));
+    expect(said).toContain('oversized and omitted');
+    expect(said).toContain(`Thread: ${THREAD_ID}.`);
+    expect(said).toContain(`"thread_id": "${THREAD_ID}"`);
+  });
+
   it('says earlier messages are the conversation, not that they are ignored', async () => {
     const { client } = await open({ modelKey: 'sk-ant-test' });
     const tool = (await client.listTools()).tools.find((t) => t.name === 'run_agent_chat');
@@ -286,6 +339,25 @@ describe('start_agent_run', () => {
     expect(textOf(refused)).not.toContain('MAY HAVE STARTED');
   });
 
+  it('tells a request that never left from one whose answer was lost', async () => {
+    const { call } = await open({ modelKey: 'sk-ant-test' });
+    transport('refused');
+    const unsent = textOf(await call('start_agent_run', { computer_id: 'vm-3', prompt: 'go' }));
+    expect(unsent).toContain('could not reach');
+    expect(unsent).not.toContain('MAY HAVE STARTED');
+    transport('reset');
+    const lost = textOf(await call('start_agent_run', { computer_id: 'vm-3', prompt: 'go' }));
+    expect(lost).toContain('A RUN MAY HAVE STARTED on vm-3');
+  });
+
+  it('does not call a computer id it refused locally a run that may have started', async () => {
+    const { call } = await open({ modelKey: 'sk-ant-test' });
+    const res = await call('start_agent_run', { computer_id: 'a/b', prompt: 'go' });
+    expect(res.isError).toBe(true);
+    expect(textOf(res)).not.toContain('MAY HAVE STARTED');
+    expect(platform.calls).toEqual([]);
+  });
+
   it('says a run may be going when the acceptance cannot be read', async () => {
     answer({ id: 'not-a-run', status: 'running' }, 202);
     const { call } = await open({ modelKey: 'sk-ant-test' });
@@ -321,6 +393,18 @@ describe('get_agent_run', () => {
     expect(said).not.toContain('FINISHED');
     expect(said).toContain('WITHOUT FINISHING (stop max_steps)');
     expect(said).toContain('RAN OUT OF STEPS after 20');
+  });
+
+  it('reads a run that ran out of rate budget as unfinished, in words', async () => {
+    const said = textOf(
+      await read({ ...AGENT_RUN, result: { ...AGENT_RUN.result, stop: 'rate_limited' } }),
+    );
+    expect(said).toContain('WITHOUT FINISHING (stop rate_limited)');
+    expect(said).toContain('RAN OUT OF RATE BUDGET');
+    const other = textOf(
+      await read({ ...AGENT_RUN, result: { ...AGENT_RUN.result, stop: 'max_tokens' } }),
+    );
+    expect(other).toContain('ended: max_tokens — not finished (only end_turn is)');
   });
 
   it('reads a completed run with no result as unknown, not finished', async () => {
@@ -525,6 +609,40 @@ describe('agent threads', () => {
     expect(said).toContain('RAN OUT OF STEPS');
   });
 
+  it('bounds a long thread to its newest turns and pages back through the rest', async () => {
+    const big = Array.from({ length: 100 }, (_, i) => ({
+      role: i % 2 ? 'assistant' : 'user',
+      text: `turn ${i + 1} ${'y'.repeat(32_000)}`,
+      ...(i % 2 ? { stop: 'end_turn', steps: 1 } : {}),
+      created_at: '2026-10-18T09:00:00.000Z',
+    }));
+    answer({ ...AGENT_THREAD, turns: 100, messages: big });
+    const { call } = await open();
+    const newest = textOf(await call('get_agent_thread', { thread_id: THREAD_ID }));
+    expect(newest.length).toBeLessThan(60_000);
+    // One 32,000-character turn fits in an answer, and two do not.
+    expect(newest).toContain('turn 100 ');
+    expect(newest).not.toContain('turn 99 ');
+    expect(newest).toContain('Turns 1 to 99 are not shown');
+    expect(newest).toContain('before_turn 100');
+    const older = textOf(
+      await call('get_agent_thread', { thread_id: THREAD_ID, before_turn: 100 }),
+    );
+    expect(older).toContain('turn 99 ');
+    expect(older).not.toContain('turn 100 ');
+    expect(older).toContain('Turn 100 comes after these');
+    const first = textOf(await call('get_agent_thread', { thread_id: THREAD_ID, before_turn: 2 }));
+    expect(first).toContain('turn 1 ');
+    expect(first).not.toContain('not shown');
+    expect(first).toContain('Turns 2 to 100 come after these');
+    // Short turns: as many as fit, all of them here.
+    answer({ ...AGENT_THREAD, messages: big.map((t) => ({ ...t, text: t.text.slice(0, 20) })) });
+    const all = textOf(await call('get_agent_thread', { thread_id: THREAD_ID }));
+    expect(all).toContain('turn 1 ');
+    expect(all).toContain('turn 100');
+    expect(all).not.toContain('not shown');
+  });
+
   it('deletes a thread only with confirm, and says what stands', async () => {
     const { call, client } = await open();
     expect((await call('delete_agent_thread', { thread_id: THREAD_ID })).isError).toBe(true);
@@ -558,5 +676,14 @@ describe('agent threads', () => {
     const odd = await call('delete_agent_thread', { thread_id: THREAD_ID, confirm: true });
     expect(odd.isError).toBe(true);
     expect(textOf(odd)).toContain('MAY OR MAY NOT HAVE BEEN DELETED');
+    // A request that never left deleted nothing; one whose answer was lost may have.
+    transport('refused');
+    const unsent = await call('delete_agent_thread', { thread_id: THREAD_ID, confirm: true });
+    expect(unsent.isError).toBe(true);
+    expect(textOf(unsent)).toContain('could not reach');
+    expect(textOf(unsent)).not.toContain('MAY OR MAY NOT');
+    transport('reset');
+    const lost = await call('delete_agent_thread', { thread_id: THREAD_ID, confirm: true });
+    expect(textOf(lost)).toContain('MAY OR MAY NOT HAVE BEEN DELETED');
   });
 });

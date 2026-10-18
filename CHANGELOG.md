@@ -31,7 +31,9 @@ are wording changes, and they are behaviour changes in the way that matters.
   false`, to keep nothing; both refuse the two together before sending anything.
   Their answers name the thread a run was kept in, a failed run's included.
   `list_agent_threads` and `get_agent_thread` read kept conversations, warning
-  about turns that ended `running`, `aborted` or `interrupted`, and
+  about turns that ended `running`, `aborted` or `interrupted` (an answer holds
+  the newest turns that fit in about 48,000 characters, and `before_turn` reads
+  further back), and
   `delete_agent_thread` (with `confirm: true`) removes one. All seven new tools
   are in the `agent` tag; the four reads stay under `MANDALA_READ_ONLY`.
 

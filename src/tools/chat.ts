@@ -179,13 +179,17 @@ function chatFailure(error: unknown): CallToolResult {
     runAdvice(error),
   );
   const diagnostics = errorMetadata(error);
-  const thread = boundedNative ? keptThread(native.data.thread_id) : undefined;
+  // Read on its own rather than off the bounded native record: a failure with
+  // many steps is exactly the one whose record is omitted for size, and the
+  // thread is how the next run picks up from what those steps did.
+  const thread = keptThread(isRecord(nested?.agent) ? nested.agent.thread_id : undefined);
   if (thread) result.content.push({ type: 'text', text: threadLine(thread) });
   result.content.push(
     ...said(
       `${incompleteNative ? 'Native agent failure metadata was malformed or oversized and omitted. ' : ''}${diagnostics.omitted ? 'Oversized diagnostic metadata was omitted. ' : ''}Chat refusal metadata; recorded work may already be billed. Inspect what took effect before another run.`,
       {
         ...diagnostics.fields,
+        ...(thread ? { thread_id: thread } : {}),
         ...(boundedNative ? { agent: native.data } : {}),
         ...(incompleteNative ? { incomplete: true } : {}),
       },

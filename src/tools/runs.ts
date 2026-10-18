@@ -2,7 +2,7 @@ import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
 import { MODEL_KEY_HEADER } from '../api.js';
 import { topUpUrl } from '../credits.js';
-import { APIError, FUNDED_UNAVAILABLE } from '../errors.js';
+import { APIError, FUNDED_UNAVAILABLE, neverSent } from '../errors.js';
 import { failed, guarded, refused, said } from '../format.js';
 import * as P from '../paths.js';
 import type { Session } from '../session.js';
@@ -234,18 +234,22 @@ export const registerRuns: Registrar = (server, session) => {
   ) =>
     guarded(async () => {
       const id = session.resolve(computer_id);
+      // Built before the request, so a path refused here is not mistaken for
+      // a request whose answer was lost.
+      const path = P.agentRuns(id);
+      const body = P.agentBody({
+        prompt,
+        system,
+        provider,
+        model,
+        max_steps,
+        max_cost_usd,
+        thread_id,
+      });
       let raw: unknown;
       try {
-        raw = await session.api.json('POST', P.agentRuns(id), {
-          body: P.agentBody({
-            prompt,
-            system,
-            provider,
-            model,
-            max_steps,
-            max_cost_usd,
-            thread_id,
-          }),
+        raw = await session.api.json('POST', path, {
+          body,
           // No header at all on a run that credits pay for, as on run_agent:
           // its absence is what tells the platform to use them.
           ...(session.modelKey ? { headers: { [MODEL_KEY_HEADER]: session.modelKey } } : {}),
@@ -254,12 +258,13 @@ export const registerRuns: Registrar = (server, session) => {
       } catch (err) {
         const refusal = preRunRefusal(err, session, 'start_agent_run');
         if (refusal) return refusal;
-        // A 4xx is a refusal given before any run was recorded. Anything else
-        // — a 5xx, an answer that never arrived — leaves open whether a run
-        // started, and starting another once the first has ended would do the
-        // task twice. The lookup that settles it is named here, where it is
-        // needed, and not only in the description.
-        if (err instanceof APIError && err.status < 500) throw err;
+        // A 4xx is a refusal given before any run was recorded, and a request
+        // that never left started nothing. Anything else — a 5xx, an answer
+        // that never arrived — leaves open whether a run started, and starting
+        // another once the first has ended would do the task twice. The
+        // lookup that settles it is named here, where it is needed, and not
+        // only in the description.
+        if ((err instanceof APIError && err.status < 500) || neverSent(err)) throw err;
         const result = failed(err);
         result.content.push({
           type: 'text',
