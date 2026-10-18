@@ -93,6 +93,15 @@ export const V1_ROUTES: Route[] = [
   // OpenAI-shaped door.
   r('POST', 'computers/:id/agent'),
   r('POST', 'chat/completions'),
+  // Agent threads: the conversations agent runs keep, continued by id.
+  r('GET', 'agent/threads'),
+  r('GET', 'agent/threads/:thread'),
+  r('DELETE', 'agent/threads/:thread'),
+  // Background agent runs: started, then read back or cancelled by id.
+  r('POST', 'computers/:id/agent/runs'),
+  r('GET', 'agent/runs'),
+  r('GET', 'agent/runs/:run'),
+  r('POST', 'agent/runs/:run/cancel'),
 
   // Files in and out of the guest.
   r('PUT', 'computers/:id/files'),
@@ -393,6 +402,9 @@ export const PARAMETERS: ReadonlyMap<string, readonly string[]> = new Map([
       'body:model',
       'body:provider',
       'body:stream',
+      'body:thread_id',
+      'body:store',
+      'body:messages',
     ],
   ],
   [
@@ -405,8 +417,31 @@ export const PARAMETERS: ReadonlyMap<string, readonly string[]> = new Map([
       'body:provider',
       'body:max_steps',
       'body:stream',
+      'body:thread_id',
+      'body:store',
     ],
   ],
+  ['GET agent/threads', ['query:computer_id', 'query:limit', 'query:before']],
+  ['GET agent/threads/:thread', []],
+  ['DELETE agent/threads/:thread', []],
+  [
+    'POST computers/:id/agent/runs',
+    [
+      'header:X-Model-Key',
+      'body:prompt',
+      'body:system',
+      'body:max_cost_usd',
+      'body:max_steps',
+      'body:model',
+      'body:provider',
+      'body:thread_id',
+      'body:store',
+      'body:messages',
+    ],
+  ],
+  ['GET agent/runs', ['query:computer_id', 'query:status', 'query:limit', 'query:before']],
+  ['GET agent/runs/:run', []],
+  ['POST agent/runs/:run/cancel', []],
 
   // The upload's body is the file, raw — there are no named fields to mirror.
   ['PUT computers/:id/files', ['query:path', 'query:no_wake', 'query:overwrite']],
@@ -547,6 +582,14 @@ export const UNIMPLEMENTED_PARAMETERS: ReadonlySet<string> = new Set([
   'POST computers/:id/input  body:button',
   // DECISION. `amount` is sent instead. Same value, two names.
   'POST computers/:id/input  body:scroll_amount',
+
+  // GAP. Continuing a thread, opting out of keeping one, and a history the
+  // caller keeps itself: no tool sends them yet.
+  'POST computers/:id/agent  body:thread_id',
+  'POST computers/:id/agent  body:store',
+  'POST computers/:id/agent  body:messages',
+  'POST chat/completions  body:thread_id',
+  'POST chat/completions  body:store',
 ]);
 
 /**
@@ -590,6 +633,14 @@ export const UNIMPLEMENTED = new Set<string>([
   // offered: neither ever carries a raw key.
   'POST api-keys',
   'DELETE api-keys/:id',
+  // GAP. Agent threads and background runs: no tool reaches them yet.
+  'GET agent/threads',
+  'GET agent/threads/:thread',
+  'DELETE agent/threads/:thread',
+  'POST computers/:id/agent/runs',
+  'GET agent/runs',
+  'GET agent/runs/:run',
+  'POST agent/runs/:run/cancel',
 ]);
 
 /**
@@ -633,6 +684,10 @@ export function patternFor(path: string): string {
       if (i === 3 && parts[0] === 'computers' && parts[2] === 'results') return ':resultId';
       if (i === 3 && parts[0] === 'computers' && parts[2] === 'artifacts') return ':artifactId';
       if (i === 3 && parts[0] === 'computers' && parts[2] === 'public-urls') return ':urlId';
+      // An agent thread's and a background run's id, second segment under
+      // `agent` only, as the platform pins them.
+      if (i === 2 && parts[0] === 'agent' && parts[1] === 'threads') return ':thread';
+      if (i === 2 && parts[0] === 'agent' && parts[1] === 'runs') return ':run';
       // A template ref's two halves, pinned to a THREE-segment path under
       // `templates` — which is what keeps the two-segment literals,
       // `templates/schema` and `templates/validate`, reducing to themselves. The
