@@ -138,7 +138,9 @@ describe('run_agent keeps and continues threads', () => {
       'text/event-stream',
     );
     const { call } = await open({ modelKey: 'sk-ant-test' });
-    expect(textOf(await call('run_agent', { prompt: 'go' }))).not.toContain('Thread:');
+    const said = textOf(await call('run_agent', { prompt: 'go' }));
+    expect(said).not.toContain('Thread:');
+    expect(said).not.toContain('"thread_id"');
   });
 
   it('points a client that cannot hold a call open at start_agent_run', async () => {
@@ -234,6 +236,21 @@ describe('run_agent_chat keeps and continues threads', () => {
     expect(said).toContain('oversized and omitted');
     expect(said).toContain(`Thread: ${THREAD_ID}.`);
     expect(said).toContain(`"thread_id": "${THREAD_ID}"`);
+  });
+
+  it('names the thread of an answer it cannot otherwise read, and drops one that is not a thread', async () => {
+    const { choices: _c, ...broken } = CHAT_COMPLETION;
+    answer({ ...broken, agent: { ...CHAT_COMPLETION.agent, thread_id: THREAD_ID } });
+    const { call } = await open({ modelKey: 'sk-ant-test' });
+    const malformed = await call('run_agent_chat', task);
+    expect(malformed.isError).toBe(true);
+    expect(textOf(malformed)).toContain('Malformed or missing chat terminal metadata');
+    expect(textOf(malformed)).toContain(`Thread: ${THREAD_ID}.`);
+    answer({ ...CHAT_COMPLETION, agent: { ...CHAT_COMPLETION.agent, thread_id: 'thr_nope' } });
+    const odd = await call('run_agent_chat', task);
+    expect(odd.isError).toBeFalsy();
+    expect(textOf(odd)).not.toContain('Thread:');
+    expect(textOf(odd)).not.toContain('thr_nope');
   });
 
   it('says earlier messages are the conversation, not that they are ignored', async () => {
@@ -358,6 +375,31 @@ describe('start_agent_run', () => {
     expect(platform.calls).toEqual([]);
   });
 
+  it('follows an accepted run by its id even when the rest of the answer is unreadable', async () => {
+    answer({ id: RUN_ID, status: 'running' }, 202);
+    const { call } = await open({ modelKey: 'sk-ant-test' });
+    const res = await call('start_agent_run', { prompt: 'go' });
+    expect(res.isError).toBe(true);
+    expect(textOf(res)).toContain(`as ${RUN_ID}`);
+    expect(textOf(res)).toContain('A RUN IS GOING');
+    expect(textOf(res)).toContain(`get_agent_run (run_id ${RUN_ID})`);
+  });
+
+  it('never sends a lost start to a listing filtered on running, which hides a run that ended', async () => {
+    const { call, client } = await open({ modelKey: 'sk-ant-test' });
+    transport('reset');
+    const lost = textOf(await call('start_agent_run', { computer_id: 'vm-3', prompt: 'go' }));
+    expect(lost).toContain('no status filter');
+    expect(lost).toContain('newest on the list');
+    answer({ id: 'not-a-run' }, 202);
+    const unread = textOf(await call('start_agent_run', { computer_id: 'vm-3', prompt: 'go' }));
+    expect(unread).toContain('no status filter');
+    const description =
+      (await client.listTools()).tools.find((t) => t.name === 'start_agent_run')?.description ?? '';
+    expect(description).toContain('no status filter before starting another');
+    expect(description).not.toContain('with computer_id and status running before starting');
+  });
+
   it('says a run may be going when the acceptance cannot be read', async () => {
     answer({ id: 'not-a-run', status: 'running' }, 202);
     const { call } = await open({ modelKey: 'sk-ant-test' });
@@ -469,6 +511,13 @@ describe('get_agent_run', () => {
     expect(unknown).not.toContain('FINISHED');
   });
 
+  it('does not hand on a thread id that is not one', async () => {
+    const said = textOf(await read({ ...AGENT_RUN, thread_id: 'thread 7' }));
+    expect(said).not.toContain('Thread:');
+    expect(said).not.toContain('thread 7');
+    expect(said).toContain('"thread_id": null');
+  });
+
   it('refuses a malformed answer rather than guessing', async () => {
     const res = await read({ ...AGENT_RUN, status: undefined });
     expect(res.isError).toBe(true);
@@ -536,6 +585,16 @@ describe('cancel_agent_run', () => {
     expect(textOf(res)).toContain('CANCELLED');
     const tool = (await client.listTools()).tools.find((t) => t.name === 'cancel_agent_run');
     expect(tool?.annotations).toMatchObject({ destructiveHint: true, idempotentHint: true });
+  });
+
+  it('does not call a status it does not know an ended run', async () => {
+    answer({ ...AGENT_RUN, status: 'paused' });
+    const { call } = await open();
+    const said = textOf(await call('cancel_agent_run', { run_id: RUN_ID }));
+    expect(said).not.toContain('had already ended');
+    expect(said).toContain(
+      'status paused, which this server does not know, so whether it stopped is unknown',
+    );
   });
 
   it('says nothing was cancelled on a run that had already ended', async () => {

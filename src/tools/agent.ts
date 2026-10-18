@@ -375,8 +375,11 @@ function runAgent(
       `\n\nWhat it did:\n${steps.join('\n')}`;
     // The cost fields as read above, not as sent: a value that is not a
     // finite number (or a negative charge) is left out rather than repeated.
-    const { cost_usd: _cost, credits_remaining_usd: _left, ...rest } = done;
-    const record = { ...rest, ...spent.fields };
+    // And the thread as read above: a value that is not a thread id is left
+    // out of the record as it is left out of the sentence, rather than handed
+    // on to be sent back and refused.
+    const { cost_usd: _cost, credits_remaining_usd: _left, thread_id: _thread, ...rest } = done;
+    const record = { ...rest, ...(thread ? { thread_id: thread } : {}), ...spent.fields };
     return stop === 'end_turn' ? said(result, record) : refused(result, record);
   });
 }

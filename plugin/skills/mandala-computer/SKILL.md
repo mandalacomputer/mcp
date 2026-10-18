@@ -246,8 +246,9 @@ until its status is no longer `running`; `cancel_agent_run` stops it.
   Look at the desktop before relying on it either way.
 - One run drives a computer at a time: a start on a busy computer is refused
   `409` (`contention`). `list_agent_runs` with `status: running` finds the run to
-  wait for or cancel — and is the read to make if a start's answer was lost,
-  before starting another.
+  wait for or cancel. If a start's answer was lost, list the computer's runs
+  with no status filter before starting another: a short run may already have
+  ended, and is then the newest.
 
 **Continue a conversation with `thread_id`.** Every run that acts or answers is
 kept in a thread, and its answer names the `thread_id` (`agent.thread_id` on

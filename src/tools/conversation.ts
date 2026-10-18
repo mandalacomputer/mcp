@@ -72,6 +72,12 @@ export function keptThread(value: unknown): string | undefined {
   return typeof value === 'string' && P.THREAD_ID.test(value) ? value : undefined;
 }
 
+/**
+ * A `thread_id` field in an answer's schema: kept when it is a thread id, and
+ * dropped — not a failed parse, and not handed on — when it is anything else.
+ */
+export const keptThreadField = z.string().regex(P.THREAD_ID).optional().catch(undefined);
+
 /** The sentence that hands a model its thread. */
 export const threadLine = (thread: string): string =>
   `Thread: ${thread}. Send it as thread_id with the next task to continue this conversation.`;

@@ -90,6 +90,8 @@ const runError = z.object({
 const agentRun = z.object({
   id: z.string().regex(P.RUN_ID),
   computer_id: label,
+  // Null until the run is kept in a thread. Read through keptThread wherever
+  // it is shown, so anything but a thread id reads as not kept.
   thread_id: z.string().nullable().optional(),
   status: label,
   prompt: z.string(),
@@ -109,6 +111,19 @@ type AgentRun = z.infer<typeof agentRun>;
 const runPage = z.object({ runs: z.array(agentRun), has_more: z.boolean() });
 
 const STATUSES = ['running', 'completed', 'failed', 'cancelled', 'interrupted'] as const;
+/** The statuses a run ends in. */
+const ENDED = new Set<string>(['completed', 'failed', 'cancelled', 'interrupted']);
+
+/**
+ * What to read before starting another run, when one may have started: every
+ * run on the computer, newest first, NOT only the running ones — a short run
+ * can have ended before the lookup, and filtering on running would hide it.
+ */
+const RECOVER = (id: string): string =>
+  `Before starting another, call list_agent_runs with computer_id ${id} and no status filter: a run still going shows as running, and one that already ended is the newest on the list — a filter on running would hide that one.`;
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  value !== null && typeof value === 'object' && !Array.isArray(value);
 
 const runIdArg = z
   .string()
@@ -179,8 +194,15 @@ function describe(run: AgentRun, session: Session): string {
   return parts.join('\n\n');
 }
 
-/** The record beside the prose: everything but the steps, which the prose lists. */
-const record = ({ steps_taken: _steps, ...rest }: AgentRun) => rest;
+/**
+ * The record beside the prose: everything but the steps, which the prose
+ * lists, and the thread as the prose reads it — a value that is not a thread
+ * id is not handed on to be sent back and refused.
+ */
+const record = ({ steps_taken: _steps, thread_id, ...rest }: AgentRun) => ({
+  ...rest,
+  thread_id: keptThread(thread_id) ?? null,
+});
 
 /** A prompt's first line, short enough for a listing. */
 function title(prompt: string): string {
@@ -190,9 +212,10 @@ function title(prompt: string): string {
 
 /** One run in a listing: no steps and no closing text, and a shortened prompt. */
 function summary(run: AgentRun) {
-  const { steps_taken: _steps, result: done, prompt, ...rest } = run;
+  const { steps_taken: _steps, result: done, prompt, thread_id, ...rest } = run;
   return {
     ...rest,
+    thread_id: keptThread(thread_id) ?? null,
     prompt: title(prompt),
     ...(done ? { stop: done.stop } : {}),
     finished: finishedRun(run),
@@ -212,7 +235,7 @@ const WHEN =
   'Prefer it to run_agent when the task may take longer than your client holds one tool call open (a run is minutes), or when you have other work to do meanwhile; use run_agent when you can wait and want the answer in one call. Then read it with get_agent_run every few seconds — a step takes at least that long — until its status is no longer running; cancel_agent_run stops it.';
 
 const RULES =
-  "The computer must already be running, and one run drives a computer at a time: a computer another run is driving is refused with 409 (contention) — wait for that run or cancel it (list_agent_runs with status running finds it). thread_id continues an earlier run's conversation; the run's own thread_id, once it has one, continues this one. If this call's answer is lost, or it fails with a 5xx, a run may have started: list_agent_runs with computer_id and status running before starting another. Cancelling this call does not stop a run that has started; cancel_agent_run does.";
+  "The computer must already be running, and one run drives a computer at a time: a computer another run is driving is refused with 409 (contention) — wait for that run or cancel it (list_agent_runs with status running finds it). thread_id continues an earlier run's conversation; the run's own thread_id, once it has one, continues this one. If this call's answer is lost, or it fails with a 5xx, a run may have started: list_agent_runs with computer_id and no status filter before starting another, since a short run may already have ended. Cancelling this call does not stop a run that has started; cancel_agent_run does.";
 
 type StartArgs = {
   computer_id?: string;
@@ -268,7 +291,7 @@ export const registerRuns: Registrar = (server, session) => {
         const result = failed(err);
         result.content.push({
           type: 'text',
-          text: `A RUN MAY HAVE STARTED on ${id}. Before starting another, call list_agent_runs with computer_id ${id}: a run still going shows with status running, and one that already ended is the newest on the list.`,
+          text: `A RUN MAY HAVE STARTED on ${id}. ${RECOVER(id)}`,
         });
         return result;
       }
@@ -276,10 +299,17 @@ export const registerRuns: Registrar = (server, session) => {
       // read is still that, and the one thing a model must not do then is
       // start another run blind.
       const parsed = agentRun.safeParse(raw);
-      if (!parsed.success)
+      if (!parsed.success) {
+        // The id alone, when the answer carries a usable one, is enough to
+        // follow the run; the rest of the record is not needed for that.
+        const runId =
+          isRecord(raw) && typeof raw.id === 'string' && P.RUN_ID.test(raw.id) ? raw.id : undefined;
         return refused(
-          `The platform accepted the run on ${id}, but its answer could not be read, so the run id is unknown and A RUN MAY BE GOING. Call list_agent_runs with computer_id ${id} and status running to find it before starting another.`,
+          runId
+            ? `The platform accepted the run on ${id} as ${runId}, but the rest of its answer could not be read. A RUN IS GOING: read it with get_agent_run (run_id ${runId}) rather than starting another.`
+            : `The platform accepted the run on ${id}, but its answer could not be read, so the run id is unknown and A RUN MAY BE GOING. ${RECOVER(id)}`,
         );
+      }
       const run = parsed.data;
       return said(
         `Started ${run.id} in the background; it goes on without this call. Read it with get_agent_run (run_id ${run.id}) every few seconds until its status is no longer running.\n\n${describe(run, session)}`,
@@ -393,7 +423,9 @@ export const registerRuns: Registrar = (server, session) => {
             ? `Cancelled ${run.id}: it stopped where it was.`
             : run.status === 'running'
               ? `The cancel of ${run.id} was answered, but the run still reads running: read it again with get_agent_run before relying on it having stopped.`
-              : `${run.id} had already ended (${run.status}), so nothing was cancelled.`;
+              : ENDED.has(run.status)
+                ? `${run.id} had already ended (${run.status}), so nothing was cancelled.`
+                : `The cancel of ${run.id} was answered with status ${run.status}, which this server does not know, so whether it stopped is unknown: read it again with get_agent_run before relying on it.`;
         return said(`${head}\n\n${describe(run, session)}`, record(run));
       }).then(out),
   );

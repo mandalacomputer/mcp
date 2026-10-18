@@ -1575,7 +1575,9 @@ account's runs newest first (`computer_id`, `status`, `limit`, `before`). One ru
 drives a computer at a time: a start on a computer another run is driving is
 refused `409` with `reason: "contention"`, and `list_agent_runs` with
 `status: "running"` finds the run to wait for or cancel. If a start's answer is
-lost, that is also the read to make before starting another.
+lost, `list_agent_runs` with `computer_id` and no `status` is the read to make
+before starting another: a short run may already have ended, and is then the
+newest on the list.
 
 Only `status: "completed"` with `stop: "end_turn"` means the task was finished,
 and the tools say so in as many words. Any other stop on a completed run

@@ -7,6 +7,7 @@ import * as P from '../paths.js';
 import { heartbeat } from '../poll.js';
 import {
   keptThread,
+  keptThreadField,
   STORE_WITH_THREAD,
   storeArg,
   threadIdArg,
@@ -34,7 +35,7 @@ const agent = z.object({
   computer_id: label,
   steps: count,
   stop: label,
-  thread_id: z.string().optional(),
+  thread_id: keptThreadField,
 });
 const completion = z.object({
   id: label,
@@ -102,7 +103,7 @@ const failedAgent = z.object({
   }),
   steps,
   // A failed run is kept too, once it acted or when it continued a thread.
-  thread_id: z.string().optional(),
+  thread_id: keptThreadField,
 });
 /**
  * The advice for a failed chat run, in place of the status advice every other
@@ -291,14 +292,20 @@ export const registerChat: Registrar = (server, session) => {
         });
         extra.signal.throwIfAborted();
         const parsed = completion.safeParse(value);
-        if (!parsed.success)
+        if (!parsed.success) {
+          // The rest of the answer did not parse, but a thread it names is
+          // still where this run's exchange was kept.
+          const thread = keptThread(
+            isRecord(value) && isRecord(value.agent) ? value.agent.thread_id : undefined,
+          );
           return safeResult(
             refused(
-              'Malformed or missing chat terminal metadata; task completion is unconfirmed. Valid partial result:',
+              `Malformed or missing chat terminal metadata; task completion is unconfirmed.${thread ? ` ${threadLine(thread)}` : ''} Valid partial result:`,
               partial(value),
             ),
             modelKey,
           );
+        }
         const data = parsed.data;
         const finished =
           data.agent.stop === 'end_turn' &&
