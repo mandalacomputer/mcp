@@ -517,7 +517,8 @@ export const registerComputers: Registrar = (server, session, opts) => {
             items === undefined ? 'no body at all' : items === null ? 'null' : typeof items;
           return refused(
             `GET /computers answered with ${got}, not a list of computers. This is not an empty account — do not create a computer on the strength of it.`,
-            items,
+            // Not the body: a computer, or an envelope of them, can carry
+            // desktop credentials, which a refusal does not redact.
           );
         }
         // Strict (OPL-6081), as the SDKs decode a listing: a row that is not

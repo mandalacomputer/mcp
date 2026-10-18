@@ -373,7 +373,12 @@ describe('a malformed computer listing (Codex review)', () => {
   it.each([
     ['beside a null row', [null, { id: 'vm-1', vnc: { url: 'wss://x/?token=SECRET-TOKEN' } }]],
     ['in a row without an id', [{ name: 'box', vnc: { url: 'wss://x/?token=SECRET-TOKEN' } }]],
-  ])('never shows desktop credentials %s', async (_label, rows) => {
+    ['in a single computer object', { id: 'vm-1', vnc: { url: 'wss://x/?token=SECRET-TOKEN' } }],
+    [
+      'in an envelope of computers',
+      { computers: [{ id: 'vm-1', vnc: { url: 'wss://x/?token=SECRET-TOKEN' } }] },
+    ],
+  ] as const)('never shows desktop credentials %s', async (_label, rows) => {
     const res = await platform(
       () => [200, rows],
       async () => {
