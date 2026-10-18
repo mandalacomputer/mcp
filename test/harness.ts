@@ -499,6 +499,67 @@ export const CHAT_COMPLETION = {
   agent: { computer_id: 'vm-1', steps: 1, stop: 'end_turn' },
 };
 
+/** A background agent run (OPL-6085), as `GET agent/runs/:run` answers one that finished. */
+export const RUN_ID = 'run_89abcdef0123456789abcdef';
+export const THREAD_ID = 'thr_0123456789abcdef01234567';
+export const AGENT_RUN = {
+  id: RUN_ID,
+  computer_id: 'vm-1',
+  thread_id: THREAD_ID,
+  status: 'completed',
+  prompt: 'Download this month’s invoices into ~/invoices',
+  model: 'claude-sonnet-5-5',
+  max_steps: 20,
+  steps: 2,
+  result: {
+    steps: 2,
+    stop: 'end_turn',
+    text: 'The invoices are in ~/invoices.',
+    usage: { input_tokens: 10, output_tokens: 5, cache_read_tokens: 0, cache_write_tokens: 0 },
+  },
+  steps_taken: [
+    { n: 1, tool: 'computer', action: 'screenshot', detail: 'took a screenshot' },
+    { n: 2, tool: 'computer', action: 'left_click', detail: 'clicked (10, 20)' },
+  ],
+  created_at: '2026-10-18T09:00:00.000Z',
+  updated_at: '2026-10-18T09:04:00.000Z',
+  ended_at: '2026-10-18T09:04:00.000Z',
+};
+/** The same run as a create answers it: running, holding the computer, nothing done yet. */
+export const AGENT_RUN_STARTED = {
+  ...AGENT_RUN,
+  thread_id: null,
+  status: 'running',
+  steps: 0,
+  result: undefined,
+  steps_taken: [],
+  updated_at: '2026-10-18T09:00:00.000Z',
+  ended_at: null,
+};
+/** One kept conversation (OPL-6085): a prompt and how its run answered. */
+export const AGENT_THREAD = {
+  id: THREAD_ID,
+  computer_id: 'vm-1',
+  title: 'Open Firefox and search for the weather in Lisbon',
+  turns: 2,
+  created_at: '2026-10-18T09:00:00.000Z',
+  updated_at: '2026-10-18T09:04:00.000Z',
+  messages: [
+    {
+      role: 'user',
+      text: 'Open Firefox and search for the weather in Lisbon',
+      created_at: '2026-10-18T09:00:00.000Z',
+    },
+    {
+      role: 'assistant',
+      text: 'It is 21°C and sunny in Lisbon.',
+      stop: 'end_turn',
+      steps: 4,
+      created_at: '2026-10-18T09:04:00.000Z',
+    },
+  ],
+};
+
 const AGENT_STREAM =
   'event: step\ndata: {"n":1,"tool":"computer","action":"screenshot","detail":"took a screenshot"}\n\n' +
   'event: done\ndata: {"steps":1,"stop":"end_turn","text":"Done.","usage":{}}\n\n';
@@ -675,6 +736,35 @@ function respond(
     new Response(JSON.stringify(v), { status, headers: { 'Content-Type': 'application/json' } });
 
   const computerID = path.split('/')[2];
+  // Background agent runs and threads (OPL-6085). A create answers the run
+  // running on the computer in its path, and a cancel the run cancelled, so a
+  // tool that reads the wrong computer or the wrong status is caught.
+  const runs = /^\/computers\/([^/]+)\/agent\/runs$/.exec(path);
+  if (runs && method === 'POST')
+    return json({ ...AGENT_RUN_STARTED, computer_id: decodeURIComponent(runs[1]) }, 202);
+  if (path === '/agent/runs' && method === 'GET')
+    return json({ runs: [{ ...AGENT_RUN, steps_taken: [] }], has_more: false });
+  const run = /^\/agent\/runs\/([^/]+)(\/cancel)?$/.exec(path);
+  if (run && method === (run[2] ? 'POST' : 'GET'))
+    return json(
+      run[2]
+        ? {
+            ...AGENT_RUN,
+            id: run[1],
+            status: 'cancelled',
+            result: undefined,
+            steps: 1,
+            steps_taken: AGENT_RUN.steps_taken.slice(0, 1),
+          }
+        : { ...AGENT_RUN, id: run[1] },
+    );
+  if (path === '/agent/threads' && method === 'GET') {
+    const { messages: _turns, ...summary } = AGENT_THREAD;
+    return json({ threads: [summary], has_more: false });
+  }
+  const thread = /^\/agent\/threads\/([^/]+)$/.exec(path);
+  if (thread && method === 'DELETE') return json({ ok: true });
+  if (thread && method === 'GET') return json({ ...AGENT_THREAD, id: thread[1] });
   if (path === '/chat/completions' && method === 'POST')
     return json({
       ...CHAT_COMPLETION,

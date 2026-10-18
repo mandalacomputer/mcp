@@ -583,13 +583,18 @@ export const UNIMPLEMENTED_PARAMETERS: ReadonlySet<string> = new Set([
   // DECISION. `amount` is sent instead. Same value, two names.
   'POST computers/:id/input  body:scroll_amount',
 
-  // GAP. Continuing a thread, opting out of keeping one, and a history the
-  // caller keeps itself: no tool sends them yet.
-  'POST computers/:id/agent  body:thread_id',
-  'POST computers/:id/agent  body:store',
+  // DECISION (OPL-6085). A history the caller keeps itself. The model calling
+  // these tools holds its conversation in its own context, and the place to
+  // hand the loop what it needs from it is the prompt; a kept thread, named by
+  // `thread_id`, is how an earlier run's own turns are carried, and the
+  // platform refuses the two together. A second channel for the same context,
+  // with that rule to learn, buys a model nothing.
   'POST computers/:id/agent  body:messages',
-  'POST chat/completions  body:thread_id',
-  'POST chat/completions  body:store',
+  'POST computers/:id/agent/runs  body:messages',
+  // DECISION (OPL-6085). A background run is kept so it can be read back: the
+  // platform refuses `store: false` on it, and `true` is the default, so there
+  // is nothing worth sending.
+  'POST computers/:id/agent/runs  body:store',
 ]);
 
 /**
@@ -633,14 +638,9 @@ export const UNIMPLEMENTED = new Set<string>([
   // offered: neither ever carries a raw key.
   'POST api-keys',
   'DELETE api-keys/:id',
-  // GAP. Agent threads and background runs: no tool reaches them yet.
-  'GET agent/threads',
-  'GET agent/threads/:thread',
-  'DELETE agent/threads/:thread',
-  'POST computers/:id/agent/runs',
-  'GET agent/runs',
-  'GET agent/runs/:run',
-  'POST agent/runs/:run/cancel',
+  // Agent threads and background runs left this list in OPL-6085, reached by
+  // list_agent_threads, get_agent_thread, delete_agent_thread,
+  // start_agent_run, get_agent_run, list_agent_runs and cancel_agent_run.
 ]);
 
 /**

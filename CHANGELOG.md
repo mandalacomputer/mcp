@@ -14,6 +14,37 @@ are wording changes, and they are behaviour changes in the way that matters.
 
 ## [Unreleased]
 
+### Added
+
+- **Background agent runs.** `start_agent_run` starts the same run `run_agent`
+  does, on the same payer and with the same arguments, and answers at once with
+  a `run_id` instead of holding the call open for minutes. `get_agent_run` reads
+  it back — status, every step so far, cost on AI credits, and how it ended —
+  and is meant to be polled; `list_agent_runs` pages through the account's runs
+  (`computer_id`, `status`, `limit`, `before`), and `cancel_agent_run` stops one.
+  Every answer says in words that only `completed` with `stop: end_turn` is a
+  finished task, and that an `interrupted` run may have done more than it
+  recorded. `start_agent_run` is registered exactly when `run_agent` is; the
+  other three always are, since a run can be started from any client.
+- **Kept conversations.** `run_agent` and `run_agent_chat` take `thread_id`, to
+  continue an earlier run's conversation on the same computer, and `store:
+  false`, to keep nothing; both refuse the two together before sending anything.
+  Their answers name the thread a run was kept in, a failed run's included.
+  `list_agent_threads` and `get_agent_thread` read kept conversations, warning
+  about turns that ended `running`, `aborted` or `interrupted` (an answer holds
+  the newest turns that fit in about 48,000 characters, and `before_turn` reads
+  further back), and
+  `delete_agent_thread` (with `confirm: true`) removes one. All seven new tools
+  are in the `agent` tag; the four reads stay under `MANDALA_READ_ONLY`.
+
+### Changed
+
+- **`run_agent_chat` no longer says earlier messages are ignored.** The platform
+  now gives the model the user and assistant messages before the last user
+  message as the conversation so far, and the description says so.
+- **A run that ran out of rate budget says so.** `stop: rate_limited` reads as a
+  run that did not finish, rather than as an unrecognised ending.
+
 ## [0.15.0] — 2026-10-18
 
 ### Changed

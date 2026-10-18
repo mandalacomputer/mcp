@@ -46,8 +46,15 @@ const GROUPS = {
   public_urls: 'list_public_urls create_public_url update_public_url delete_public_url',
   webhooks:
     'list_webhooks create_webhook get_webhook update_webhook rotate_webhook_secret test_webhook list_webhook_deliveries delete_webhook',
-  agent: 'run_agent run_agent_chat',
+  agent:
+    'run_agent run_agent_chat start_agent_run get_agent_run list_agent_runs cancel_agent_run list_agent_threads get_agent_thread delete_agent_thread',
 };
+/** The agent tools offered whatever pays: reads of runs and threads, a cancel and a delete (OPL-6085). */
+const AGENT_ALWAYS =
+  'get_agent_run list_agent_runs cancel_agent_run list_agent_threads get_agent_thread delete_agent_thread';
+const AGENT_READS = 'get_agent_run list_agent_runs list_agent_threads get_agent_thread';
+/** The agent tools something has to pay for: a model key, or AI credits. */
+const AGENT_PAID = 'run_agent run_agent_chat start_agent_run';
 const names = (tools: { name: string }[]) => tools.map((tool) => tool.name).sort();
 const words = (text: string) => text.split(' ').sort();
 const allNames = [...new Set(Object.values(GROUPS).flatMap(words))].sort();
@@ -95,10 +102,13 @@ describe('filtered transport sessions', () => {
         sessions.push({ client, transport });
         await client.connect(transport);
         const visible = names((await client.listTools()).tools);
-        if (readOnly) expect(visible).toEqual(words('screenshot list_windows read_clipboard'));
+        if (readOnly)
+          expect(visible).toEqual(words(`screenshot list_windows read_clipboard ${AGENT_READS}`));
         else
           expect(visible).toEqual(
-            words(`${GROUPS.input} ${GROUPS.guest}${modelKey ? ' run_agent run_agent_chat' : ''}`),
+            words(
+              `${GROUPS.input} ${GROUPS.guest} ${AGENT_ALWAYS}${modelKey ? ` ${AGENT_PAID}` : ''}`,
+            ),
           );
         const chat = await client.callTool({
           name: 'run_agent_chat',
@@ -301,14 +311,18 @@ describe('tool registration filters over MCP', () => {
       'delete_snapshot',
     ]);
     expect(names((await limited.client.listTools()).tools)).toEqual(
-      words(`${GROUPS.lifecycle} ${GROUPS.snapshots}`).filter((name) => !withheld.has(name)),
+      words(`${GROUPS.lifecycle} ${GROUPS.snapshots} ${AGENT_ALWAYS}`).filter(
+        (name) => !withheld.has(name),
+      ),
     );
-    for (const name of [...withheld, 'run_agent', 'run_agent_chat'])
+    for (const name of [...withheld, ...words(AGENT_PAID)])
       expect((await limited.call(name)).isError).toBe(true);
     const keyed = await open({ tags: ['agent'], modelKey: 'sk-test', lifecycle: false });
-    expect(names((await keyed.client.listTools()).tools)).toEqual(['run_agent', 'run_agent_chat']);
+    expect(names((await keyed.client.listTools()).tools)).toEqual(words(GROUPS.agent));
+    // Read-only keeps the reads of runs and threads, and nothing that starts,
+    // stops or deletes anything.
     const readOnly = await open({ tags: ['agent'], modelKey: 'sk-test', readOnly: true });
-    expect((await readOnly.client.listTools()).tools).toEqual([]);
+    expect(names((await readOnly.client.listTools()).tools)).toEqual(words(AGENT_READS));
     expect(platform.calls).toEqual([]);
   });
 

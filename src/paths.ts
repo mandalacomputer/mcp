@@ -947,6 +947,10 @@ export function scheduleBody(args: {
   return { enabled, hour, minute, tz };
 }
 
+/**
+ * The body for an agent run: `POST computers/:id/agent`, and without `stream`
+ * the background run's `POST computers/:id/agent/runs`, which refuses one.
+ */
 export function agentBody(args: {
   prompt: string;
   max_steps?: number;
@@ -956,10 +960,46 @@ export function agentBody(args: {
   provider?: 'anthropic' | 'openai';
   /** A funded run's admission budget in USD; the platform ignores it on a run with a model key. */
   max_cost_usd?: number;
-  stream: boolean;
+  /** A thread to continue (OPL-6085). */
+  thread_id?: string;
+  /** `false` keeps nothing; the platform defaults it to `true`. */
+  store?: boolean;
+  stream?: boolean;
 }): Json {
   return omitUndefined({ ...args } as Json);
 }
+
+/**
+ * An agent thread's id: `thr_` and 24 lowercase hex characters, as the
+ * platform documents it. Checked before a call, because one that is not a
+ * thread id can only be refused, and an id is a path segment on two routes.
+ */
+export const THREAD_ID = /^thr_[0-9a-f]{24}$/;
+/** A background agent run's id: `run_` and 24 lowercase hex characters. */
+export const RUN_ID = /^run_[0-9a-f]{24}$/;
+
+/**
+ * The conversations agent runs keep (OPL-6085): listed, read and deleted here,
+ * and continued by sending a `thread_id` on a run. Account-scoped, or one
+ * workspace's for a key confined to it.
+ */
+export const AGENT_THREADS = 'agent/threads';
+export const agentThread = (id: string) => {
+  if (!THREAD_ID.test(id)) throw new Error('thread_id must be thr_ followed by 24 lowercase hex');
+  return `${AGENT_THREADS}/${id}`;
+};
+
+/**
+ * Background agent runs (OPL-6085): started on a computer, then read back or
+ * cancelled by id under one account-wide collection.
+ */
+export const AGENT_RUNS = 'agent/runs';
+export const agentRuns = (id: string) => `${computer(id)}/agent/runs`;
+export const agentRun = (id: string) => {
+  if (!RUN_ID.test(id)) throw new Error('run_id must be run_ followed by 24 lowercase hex');
+  return `${AGENT_RUNS}/${id}`;
+};
+export const agentRunCancel = (id: string) => `${agentRun(id)}/cancel`;
 
 /** One webhook subscription. The id is `whk-`-shaped. */
 export const webhook = (id: string) => `${WEBHOOKS}/${segment('webhook_id', id)}`;
@@ -1098,6 +1138,10 @@ export function chatBody(args: {
   model?: string;
   provider?: 'anthropic' | 'openai';
   max_steps: number;
+  /** A thread to continue (OPL-6085); its own turns are then the conversation. */
+  thread_id?: string;
+  /** `false` keeps nothing; the platform defaults it to `true`. */
+  store?: boolean;
 }): Json {
   return omitUndefined({ ...args, stream: false });
 }

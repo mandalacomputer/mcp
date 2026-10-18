@@ -27,7 +27,7 @@
         },
         {
           "name": "MANDALA_MODEL_KEY",
-          "description": "Optional Anthropic or OpenAI key. Enables run_agent_chat, and makes run_agent bill this key instead of the account's AI credits.",
+          "description": "Optional Anthropic or OpenAI key. Enables run_agent_chat, and makes run_agent and start_agent_run bill this key instead of the account's AI credits.",
           "isRequired": false,
           "isSecret": true,
           "format": "string"

@@ -1,3 +1,4 @@
+import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
 import { MODEL_KEY_HEADER } from '../api.js';
 import { topUpUrl } from '../credits.js';
@@ -15,6 +16,14 @@ import * as P from '../paths.js';
 import type { ProgressExtra } from '../poll.js';
 import type { Session } from '../session.js';
 import { safeResult } from './chat.js';
+import {
+  keptThread,
+  STORE_WITH_THREAD,
+  stopVerdict,
+  storeArg,
+  threadIdArg,
+  threadLine,
+} from './conversation.js';
 import type { Registrar } from './types.js';
 
 /** run_agent's annotations, shared with the check that decides whether to ask about credits. */
@@ -24,7 +33,7 @@ const TITLE = 'Have the platform drive the computer';
 
 /** What both descriptions say after their first sentence about who pays. */
 const HOW =
-  'Use it to delegate a long stretch of pixel work; drive with the individual tools when you want to see each frame yourself. The computer must already be running. A run is MINUTES, not seconds: it reports progress on every step so a client that sends a progressToken and sets resetTimeoutOnProgress can hold the request open, and a client that cannot should lower max_steps rather than watch its own default timeout cancel a run it is already paying for.';
+  'Use it to delegate a long stretch of pixel work; drive with the individual tools when you want to see each frame yourself. The computer must already be running. A run is MINUTES, not seconds: it reports progress on every step so a client that sends a progressToken and sets resetTimeoutOnProgress can hold the request open. A client that cannot hold one call open that long should use start_agent_run, which starts the same run in the background and answers at once, rather than watch its own timeout cancel a run it is already paying for. Unless it sent store: false, every run that acts or answers is kept in a thread, and the answer names its thread_id: send it back as thread_id to continue the conversation.';
 
 const TASK =
   'Give the computer a task in plain language and let the platform drive it — screenshot, decide, click, type, repeat — until it is done.';
@@ -36,6 +45,17 @@ const computerId = z
 const prompt = z.string().describe('The task, in plain language.');
 const nonblankModel = z.string().refine((v) => v.trim().length > 0, 'model must not be blank');
 const STEPS_CAP = `Defaults to 20 and is capped at ${P.AGENT_MAX_STEPS} here, so a larger value is refused before the call rather than after it.`;
+
+/** A run on credits' admission budget. */
+const maxCostArg = z
+  .number()
+  .min(0.25)
+  .max(20)
+  .optional()
+  .describe(
+    'The most this run may spend from credits, in USD, 0.25 to 20; the platform defaults to 2. No model call starts past it, but the last one can go over. A run that reaches it ends with stop max_cost.',
+  );
+
 /** How many actions, told the way each payer needs it told. */
 const maxSteps = (bill: string, bound: string) =>
   z
@@ -56,6 +76,8 @@ type RunArgs = {
   model?: string;
   max_steps: number;
   max_cost_usd?: number;
+  thread_id?: string;
+  store?: boolean;
 };
 type RunExtra = ProgressExtra & { signal: AbortSignal };
 
@@ -87,24 +109,8 @@ export const registerAgent: Registrar = (server, session) => {
       'run_agent',
       {
         title: TITLE,
-        description: `${TASK} Runs on the Anthropic or OpenAI key this server was configured with, and bills that key for every step. ${HOW}`,
-        inputSchema: {
-          computer_id: computerId,
-          prompt,
-          system: z.string().optional().describe('Standing instructions carried into the run.'),
-          provider: z
-            .enum(['anthropic', 'openai'])
-            .optional()
-            .describe(
-              'Inferred from model when omitted. Select openai to use gpt-6.1-sol by default. The configured MANDALA_MODEL_KEY must match the provider.',
-            ),
-          model: nonblankModel
-            .optional()
-            .describe(
-              'A computer-capable Anthropic or OpenAI model id to run with. Omit it for the one the platform picks. The configured key must be able to use it; a model it cannot use fails the run.',
-            ),
-          max_steps: maxSteps('what your key is billed', 'budget the bill on the key itself'),
-        },
+        description: `${TASK} ${BYOK_BILLING} ${HOW}`,
+        inputSchema: { ...BYOK_RUN_ARGS, thread_id: threadIdArg, store: storeArg },
         annotations: RUN_AGENT_ANNOTATIONS,
       },
       run,
@@ -117,39 +123,76 @@ export const registerAgent: Registrar = (server, session) => {
     'run_agent',
     {
       title: TITLE,
-      description: `${TASK} Runs on this account's Mandala AI credits, because no model key is configured: each model call reserves $0.25 and is charged for its usage, max_cost_usd caps what one run may start, and get_credits reads the balance. ${HOW}`,
-      inputSchema: {
-        computer_id: computerId,
-        prompt,
-        model: nonblankModel
-          .optional()
-          .describe(
-            'claude-sonnet-5-5, the default, or claude-opus-5-5; credits pay for these two. Another model needs a model key.',
-          ),
-        max_steps: maxSteps('what a run costs', 'the spend with max_cost_usd'),
-        max_cost_usd: z
-          .number()
-          .min(0.25)
-          .max(20)
-          .optional()
-          .describe(
-            'The most this run may spend from credits, in USD, 0.25 to 20; the platform defaults to 2. No model call starts past it, but the last one can go over. A run that reaches it ends with stop max_cost.',
-          ),
-      },
+      description: `${TASK} ${FUNDED_BILLING} ${HOW}`,
+      inputSchema: { ...FUNDED_RUN_ARGS, thread_id: threadIdArg, store: storeArg },
       annotations: RUN_AGENT_ANNOTATIONS,
     },
     run,
   );
 };
 
+/** Who pays for a run on a model key, said the same way by every tool that starts one. */
+export const BYOK_BILLING =
+  'Runs on the Anthropic or OpenAI key this server was configured with, and bills that key for every step.';
+/** Who pays for a run on AI credits. */
+export const FUNDED_BILLING =
+  "Runs on this account's Mandala AI credits, because no model key is configured: each model call reserves $0.25 and is charged for its usage, max_cost_usd caps what one run may start, and get_credits reads the balance.";
+
+/**
+ * What a run on a model key takes, shared by run_agent and start_agent_run: the
+ * two start the same loop with the same body, and a field described one way on
+ * one and another way on the other is two answers to one question.
+ */
+export const BYOK_RUN_ARGS = {
+  computer_id: computerId,
+  prompt,
+  system: z.string().optional().describe('Standing instructions carried into the run.'),
+  provider: z
+    .enum(['anthropic', 'openai'])
+    .optional()
+    .describe(
+      'Inferred from model when omitted. Select openai to use gpt-6.1-sol by default. The configured MANDALA_MODEL_KEY must match the provider.',
+    ),
+  model: nonblankModel
+    .optional()
+    .describe(
+      'A computer-capable Anthropic or OpenAI model id to run with. Omit it for the one the platform picks. The configured key must be able to use it; a model it cannot use fails the run.',
+    ),
+  max_steps: maxSteps('what your key is billed', 'budget the bill on the key itself'),
+};
+
+/** What a run on AI credits takes: no `system` or `provider`, which such a run is refused. */
+export const FUNDED_RUN_ARGS = {
+  computer_id: computerId,
+  prompt,
+  model: nonblankModel
+    .optional()
+    .describe(
+      'claude-sonnet-5-5, the default, or claude-opus-5-5; credits pay for these two. Another model needs a model key.',
+    ),
+  max_steps: maxSteps('what a run costs', 'the spend with max_cost_usd'),
+  max_cost_usd: maxCostArg,
+};
+
 /** One run, BYOK or funded: `session.modelKey` decides which. */
 function runAgent(
   log: { sendLoggingMessage: (p: { level: 'info'; data: string }) => Promise<void> },
   session: Session,
-  { computer_id, prompt, system, model, provider, max_steps, max_cost_usd }: RunArgs,
+  {
+    computer_id,
+    prompt,
+    system,
+    model,
+    provider,
+    max_steps,
+    max_cost_usd,
+    thread_id,
+    store,
+  }: RunArgs,
   extra: RunExtra,
 ) {
   return guarded(async () => {
+    if (store === false && thread_id !== undefined) return refused(STORE_WITH_THREAD);
     const id = session.resolve(computer_id);
     const steps: string[] = [];
     let done: Record<string, unknown> | undefined;
@@ -171,6 +214,8 @@ function runAgent(
           provider,
           max_steps,
           max_cost_usd,
+          thread_id,
+          store,
           stream: true,
         }),
         // No header at all on a run that credits pay for: its absence is what
@@ -263,16 +308,22 @@ function runAgent(
           );
           const spent = spending(frame.cost_usd, remaining);
           const topUp = topUpUrl(frame.status, frame, session.api.baseUrl);
+          // A failed run is kept too, once it acted or when it continued a
+          // thread the caller named, and the thread is how the next run picks
+          // up from what this one did (OPL-6085).
+          const thread = keptThread(frame.thread_id);
           return withErrorMetadata(
             refused(
-              `The run failed after ${steps.length} step(s).${stopReason(ev.data, topUp, session.funded)}` +
+              `The run failed after ${steps.length} step(s).${stopReason(ev.data, topUp, session.funded, 'run_agent')}` +
                 (spent.line ? `\n\n${spent.line}` : '') +
+                (thread ? `\n\n${threadLine(thread)}` : '') +
                 (steps.length ? `\n\nWhat it did, and is billed for:\n${steps.join('\n')}` : ''),
               {
                 error: platformSaid(frame),
                 status: errorMetadata({ status: frame.status }).fields.status,
                 ...(topUp ? { code: INSUFFICIENT_CREDITS, top_up_url: topUp } : {}),
                 ...spent.fields,
+                ...(thread ? { thread_id: thread } : {}),
                 steps: frame.steps,
                 usage: frame.usage,
               },
@@ -286,22 +337,9 @@ function runAgent(
         }
       }
     } catch (err) {
-      // Refused before the stream opened. Two refusals are worded here rather
-      // than by the shared advice: a run on credits the account cannot cover
-      // (a 402 naming a top-up page, which that advice would call a plan
-      // limit), and a run on credits the platform's AI service cannot serve
-      // (which it would call a change that may or may not have happened).
-      if (!(err instanceof APIError)) throw err;
-      const topUp = topUpUrl(err.status, err.body, session.api.baseUrl);
-      if (topUp) {
-        const result = failed(err, true, creditsExhaustedAdvice(topUp, 'run_agent'));
-        result.content.push(
-          ...said('Refusal metadata:', { code: INSUFFICIENT_CREDITS, top_up_url: topUp }).content,
-        );
-        return result;
-      }
-      if (fundedOutage(session.funded, err.status, err.body))
-        return failed(err, true, fundedUnavailableAdvice('run_agent'));
+      // Refused before the stream opened: see preRunRefusal for the two worded here.
+      const refusal = preRunRefusal(err, session, 'run_agent');
+      if (refusal) return refusal;
       throw err;
     }
 
@@ -314,24 +352,7 @@ function runAgent(
     // ignores: a run that hit max_steps ended without finishing, and
     // treating every ending as success reports a failure as a result.
     const stop = String(done.stop ?? 'unknown');
-    const verdict =
-      stop === 'end_turn'
-        ? 'finished'
-        : stop === 'max_steps'
-          ? `RAN OUT OF STEPS after ${done.steps ?? max_steps} — the task is probably unfinished`
-          : stop === 'credits_exhausted'
-            ? "RAN OUT OF AI CREDITS — the task is probably unfinished. A person can top up the account's credits on its billing page, or configure a model key"
-            : stop === 'max_cost'
-              ? 'REACHED max_cost_usd: another model call would have gone past it — the task is probably unfinished'
-              : stop === 'refusal'
-                ? 'the model declined the task'
-                : stop === 'pause_turn'
-                  ? 'the model kept pausing its turn — the task is probably unfinished'
-                  : stop === 'incomplete'
-                    ? "the model's response was incomplete — the task is probably unfinished"
-                    : stop === 'safety_check'
-                      ? 'STOPPED FOR A SAFETY CHECK: the model asked for approval of an action, which this tool cannot give — the task is unfinished; say so rather than running it again'
-                      : `ended: ${stop}`;
+    const verdict = stopVerdict(stop, done.steps ?? max_steps);
     // Interpolated only when it IS a string, which is the same discipline
     // `stop` gets three lines up. `String()` over a shape this build does
     // not know — a content-block array is the plausible one — renders the
@@ -346,16 +367,49 @@ function runAgent(
           ? ''
           : JSON.stringify(done.text);
     const spent = spending(done.cost_usd, remaining);
+    const thread = keptThread(done.thread_id);
     const result =
       `${verdict}\n\n${text}` +
       (spent.line ? `\n\n${spent.line}` : '') +
+      (thread ? `\n\n${threadLine(thread)}` : '') +
       `\n\nWhat it did:\n${steps.join('\n')}`;
     // The cost fields as read above, not as sent: a value that is not a
     // finite number (or a negative charge) is left out rather than repeated.
-    const { cost_usd: _cost, credits_remaining_usd: _left, ...rest } = done;
-    const record = { ...rest, ...spent.fields };
+    // And the thread as read above: a value that is not a thread id is left
+    // out of the record as it is left out of the sentence, rather than handed
+    // on to be sent back and refused.
+    const { cost_usd: _cost, credits_remaining_usd: _left, thread_id: _thread, ...rest } = done;
+    const record = { ...rest, ...(thread ? { thread_id: thread } : {}), ...spent.fields };
     return stop === 'end_turn' ? said(result, record) : refused(result, record);
   });
+}
+
+/**
+ * A refusal answered before any run started, worded here where the shared
+ * advice would word it wrong, or `undefined` to let the caller rethrow it.
+ *
+ * Two refusals: a run on credits the account cannot cover (a 402 naming a
+ * top-up page, which that advice would call a plan limit), and a run on
+ * credits the platform's AI service cannot serve (which it would call a change
+ * that may or may not have happened). Shared by every tool that starts a run.
+ */
+export function preRunRefusal(
+  err: unknown,
+  session: Session,
+  tool: string,
+): CallToolResult | undefined {
+  if (!(err instanceof APIError)) return undefined;
+  const topUp = topUpUrl(err.status, err.body, session.api.baseUrl);
+  if (topUp) {
+    const result = failed(err, true, creditsExhaustedAdvice(topUp, tool));
+    result.content.push(
+      ...said('Refusal metadata:', { code: INSUFFICIENT_CREDITS, top_up_url: topUp }).content,
+    );
+    return result;
+  }
+  if (fundedOutage(session.funded, err.status, err.body))
+    return failed(err, true, fundedUnavailableAdvice(tool));
+  return undefined;
 }
 
 /**
@@ -384,7 +438,7 @@ function spending(
 }
 
 /** Dollars to the cent, or to a hundredth of a cent when a cent would read as nothing. */
-const usd = (value: number): string => {
+export const usd = (value: number): string => {
   const digits = value !== 0 && Math.abs(value) < 0.01 ? 4 : 2;
   return `${value < 0 ? '-' : ''}$${Math.abs(value).toFixed(digits)}`;
 };
@@ -431,7 +485,12 @@ function fundedOutage(funded: boolean, status: unknown, body: unknown): boolean 
  * direction: the leading space is part of the returned clause so that an
  * unclassified stop reads as one sentence rather than as a missing one.
  */
-function stopReason(data: unknown, topUp: string | undefined, funded: boolean): string {
+export function stopReason(
+  data: unknown,
+  topUp: string | undefined,
+  funded: boolean,
+  tool: string,
+): string {
   const frame = isRecord(data) ? data : undefined;
   const status = typeof frame?.status === 'number' ? frame.status : undefined;
   const said = platformSaid(frame);
@@ -441,18 +500,18 @@ function stopReason(data: unknown, topUp: string | undefined, funded: boolean): 
   // platform reports in its own AI-service words is its provider refusing
   // Mandala's key, not the caller's credential.
   if (!topUp && fundedOutage(funded, status, frame))
-    return ` HTTP ${status}: ${fundedUnavailableAdvice('run_agent')}.${why}`;
+    return ` HTTP ${status}: ${fundedUnavailableAdvice(tool)}.${why}`;
   // 401 and 403 are split, because the recovery is not the same one. A shared
   // clause told a caller whose ROLE had been taken away to re-authenticate,
   // which restores nothing and sends it round the same refusal with another
   // prompt's worth of billed steps behind it (Codex review).
   if (status === 401) {
     return (
-      ` HTTP ${status}: ${authenticationAdvice(reason)}.${why} Do NOT call run_agent again with the same` +
+      ` HTTP ${status}: ${authenticationAdvice(reason)}.${why} Do NOT call ${tool} again with the same` +
       ` prompt. Read what the steps below already did before deciding what is left to do.`
     );
   }
-  const advice = agentRunAdvice(status, reason, 'run_agent', topUp);
+  const advice = agentRunAdvice(status, reason, tool, topUp);
   return advice ? ` HTTP ${status}: ${advice}.${why}` : why;
 }
 

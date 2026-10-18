@@ -5,6 +5,14 @@ import { APIError, agentRunAdvice, messageFromBody } from '../errors.js';
 import { apiErrorMessage, errorMetadata, failed, originWording, refused, said } from '../format.js';
 import * as P from '../paths.js';
 import { heartbeat } from '../poll.js';
+import {
+  keptThread,
+  keptThreadField,
+  STORE_WITH_THREAD,
+  storeArg,
+  threadIdArg,
+  threadLine,
+} from './conversation.js';
 import { count, label } from './directory.js';
 import { computerSchema } from './results.js';
 import type { Registrar } from './types.js';
@@ -20,7 +28,15 @@ const choice = z.object({
   message: z.object({ role: z.literal('assistant'), content: z.string() }),
   finish_reason: label,
 });
-const agent = z.object({ computer_id: label, steps: count, stop: label });
+// `thread_id` is the thread the exchange was kept in (OPL-6085), absent with
+// `store: false`; listed here because an object schema drops what it does not
+// name, and the id is what continues the conversation.
+const agent = z.object({
+  computer_id: label,
+  steps: count,
+  stop: label,
+  thread_id: keptThreadField,
+});
 const completion = z.object({
   id: label,
   object: z.literal('chat.completion'),
@@ -86,6 +102,8 @@ const failedAgent = z.object({
     cache_write_tokens: count,
   }),
   steps,
+  // A failed run is kept too, once it acted or when it continued a thread.
+  thread_id: keptThreadField,
 });
 /**
  * The advice for a failed chat run, in place of the status advice every other
@@ -162,11 +180,17 @@ function chatFailure(error: unknown): CallToolResult {
     runAdvice(error),
   );
   const diagnostics = errorMetadata(error);
+  // Read on its own rather than off the bounded native record: a failure with
+  // many steps is exactly the one whose record is omitted for size, and the
+  // thread is how the next run picks up from what those steps did.
+  const thread = keptThread(isRecord(nested?.agent) ? nested.agent.thread_id : undefined);
+  if (thread) result.content.push({ type: 'text', text: threadLine(thread) });
   result.content.push(
     ...said(
       `${incompleteNative ? 'Native agent failure metadata was malformed or oversized and omitted. ' : ''}${diagnostics.omitted ? 'Oversized diagnostic metadata was omitted. ' : ''}Chat refusal metadata; recorded work may already be billed. Inspect what took effect before another run.`,
       {
         ...diagnostics.fields,
+        ...(thread ? { thread_id: thread } : {}),
         ...(boundedNative ? { agent: native.data } : {}),
         ...(incompleteNative ? { incomplete: true } : {}),
       },
@@ -210,7 +234,7 @@ export const registerChat: Registrar = (server, session) => {
     {
       title: 'Drive the computer with BYOK textual chat',
       description:
-        "Run the same hosted computer agent using OpenAI-shaped textual messages and JSON-only results (stream:false). The last user message is the task; system messages provide standing instructions. Previous user/assistant conversation is not replayed. This is BYOK computer control, not hosted inference or a chat UI. The computer must already be running. Bills the caller's configured Anthropic or OpenAI key. A GPT or o-series model selects OpenAI; a Claude model selects Anthropic. SHORT TASKS ONLY: on the hosted API a request that does not stream is cut at the edge after about 120 seconds (HTTP 524), which stops the run and loses its result, usage and steps, and the default 20 steps can take longer than that. Use run_agent, which streams, for anything longer. Progress counts waiting heartbeats, not completed actions; progressToken plus resetTimeoutOnProgress keeps only the MCP client waiting, not the edge. Never automatically replay a failed run.",
+        "Run the same hosted computer agent using OpenAI-shaped textual messages and JSON-only results (stream:false). The last user message is the task; system messages provide standing instructions; the user and assistant messages before it are given to the model as the conversation so far, told they are done. With thread_id, the thread's own turns are the conversation instead and earlier messages are not read, so the last user message alone is enough. Unless it sent store: false, every run that acts or answers is kept in a thread, and agent.thread_id in the answer continues it. This is BYOK computer control, not hosted inference or a chat UI. The computer must already be running. Bills the caller's configured Anthropic or OpenAI key. A GPT or o-series model selects OpenAI; a Claude model selects Anthropic. SHORT TASKS ONLY: on the hosted API a request that does not stream is cut at the edge after about 120 seconds (HTTP 524), which stops the run and loses its result, usage and steps, and the default 20 steps can take longer than that. Use run_agent, which streams, for anything longer. Progress counts waiting heartbeats, not completed actions; progressToken plus resetTimeoutOnProgress keeps only the MCP client waiting, not the edge. Never automatically replay a failed run.",
       inputSchema: {
         computer_id: computerSchema,
         messages: z
@@ -237,15 +261,26 @@ export const registerChat: Registrar = (server, session) => {
           .refine((v) => v.trim().length > 0, 'model must not be blank')
           .optional(),
         max_steps: z.number().int().min(1).max(P.AGENT_MAX_STEPS).default(20),
+        thread_id: threadIdArg,
+        store: storeArg,
       },
       annotations: { openWorldHint: true },
     },
-    async ({ computer_id, messages, model, provider, max_steps }, extra) => {
+    async ({ computer_id, messages, model, provider, max_steps, thread_id, store }, extra) => {
+      if (store === false && thread_id !== undefined) return refused(STORE_WITH_THREAD);
       let beat: ReturnType<typeof heartbeat> | undefined;
       try {
         const id = session.resolve(computer_id);
         extra.signal.throwIfAborted();
-        const body = P.chatBody({ computer_id: id, messages, model, provider, max_steps });
+        const body = P.chatBody({
+          computer_id: id,
+          messages,
+          model,
+          provider,
+          max_steps,
+          thread_id,
+          store,
+        });
         beat = heartbeat(extra, server.server);
         await beat(
           'Waiting for the chat agent result; progress counts heartbeats, not completed actions.',
@@ -257,14 +292,20 @@ export const registerChat: Registrar = (server, session) => {
         });
         extra.signal.throwIfAborted();
         const parsed = completion.safeParse(value);
-        if (!parsed.success)
+        if (!parsed.success) {
+          // The rest of the answer did not parse, but a thread it names is
+          // still where this run's exchange was kept.
+          const thread = keptThread(
+            isRecord(value) && isRecord(value.agent) ? value.agent.thread_id : undefined,
+          );
           return safeResult(
             refused(
-              'Malformed or missing chat terminal metadata; task completion is unconfirmed. Valid partial result:',
+              `Malformed or missing chat terminal metadata; task completion is unconfirmed.${thread ? ` ${threadLine(thread)}` : ''} Valid partial result:`,
               partial(value),
             ),
             modelKey,
           );
+        }
         const data = parsed.data;
         const finished =
           data.agent.stop === 'end_turn' &&
@@ -273,11 +314,13 @@ export const registerChat: Registrar = (server, session) => {
           data.agent.computer_id === id &&
           data.agent.steps <= max_steps &&
           data.usage.total_tokens === data.usage.prompt_tokens + data.usage.completion_tokens;
+        const thread = keptThread(data.agent.thread_id);
+        const kept = thread ? ` ${threadLine(thread)}` : '';
         return safeResult(
           finished
-            ? said('The chat agent finished.', data)
+            ? said(`The chat agent finished.${kept}`, data)
             : refused(
-                'The chat agent did not establish successful task completion. Inspect stop, finish reason and partial work before deciding what remains; do not replay automatically.',
+                `The chat agent did not establish successful task completion. Inspect stop, finish reason and partial work before deciding what remains; do not replay automatically.${kept}`,
                 data,
               ),
           modelKey,

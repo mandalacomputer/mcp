@@ -3725,6 +3725,13 @@ describe('the tools our own prose tells a model to call', () => {
     'max_cost_usd',
     'max_cost',
     'credits_exhausted',
+    // OPL-6085: the thread a run is kept in and a background run's id, both
+    // parameters, and the stop a run that ran out of rate budget reports.
+    'thread_id',
+    'run_id',
+    'rate_limited',
+    // get_agent_thread's paging parameter.
+    'before_turn',
   ]);
 
   it('names only tools that exist', async () => {
@@ -3770,12 +3777,13 @@ describe('the tools our own prose tells a model to call', () => {
     });
     // And run_agent as a session on AI credits has it (OPL-5866): another
     // description, and another set of arguments, that the keyed scan cannot see.
+    // start_agent_run has its own funded variant (OPL-6085).
     const funded = await connect({ funded: true });
     const fundedTools = (await funded.client.listTools()).tools.filter(
-      (t) => t.name === 'run_agent',
+      (t) => t.name === 'run_agent' || t.name === 'start_agent_run',
     );
     await funded.close();
-    expect(fundedTools, 'the funded server registers run_agent').toHaveLength(1);
+    expect(fundedTools, 'the funded server registers both run starters').toHaveLength(2);
     for (const t of [...(await client.listTools()).tools, ...fundedTools]) {
       prose.push({ where: `${t.name} description`, text: t.description ?? '' });
       for (const [arg, schema] of Object.entries(t.inputSchema.properties ?? {})) {
@@ -5404,6 +5412,11 @@ describe('the event tools and what their annotations claim', () => {
           'list_workspaces',
           // Makes a new workspace; replaces nothing (a taken name is a 400).
           'create_workspace',
+          // Reads only (OPL-6085).
+          'get_agent_run',
+          'list_agent_runs',
+          'get_agent_thread',
+          'list_agent_threads',
         ].sort(),
       );
     } finally {
