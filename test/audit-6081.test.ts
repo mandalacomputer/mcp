@@ -166,6 +166,57 @@ describe('a 409 inside a wait (P7)', () => {
     expect(res.isError).toBeFalsy();
   }, 30_000);
 
+  it('keeps waiting through an unavailable guest probe during an admitted start', async () => {
+    // The probe says `unavailable`; the re-read says stopped but with memory
+    // held, which is a start the platform admitted. Not the end of the wait.
+    let gets = 0;
+    let probes = 0;
+    const ok = [200, { exit_code: 0, stdout: '', stderr: '' }] as [number, unknown];
+    const res = await platform(
+      (seen) => {
+        if (seen.path.endsWith('/exec')) {
+          probes++;
+          if ((seen.body as { session?: string }).session === 'desktop') return ok;
+          return probes === 1
+            ? [409, { error: 'this computer is not running', reason: 'unavailable' }]
+            : ok;
+        }
+        gets++;
+        return [200, gets === 2 ? { ...box, status: 'stopped', running_ram_mb: 2048 } : box];
+      },
+      async () => {
+        const { call, close } = await connect();
+        const r = await call('wait_for_computer', { until: 'guest', timeout_s: 30 });
+        await close();
+        return r;
+      },
+    );
+    expect(gets).toBeGreaterThanOrEqual(3);
+    expect(res.isError).toBeFalsy();
+    expect(textOf(res)).toContain('Guest is answering');
+  }, 30_000);
+
+  it('ends on an unavailable guest probe once the re-read says stopped and holding nothing', async () => {
+    let gets = 0;
+    const res = await platform(
+      (seen) => {
+        if (seen.path.endsWith('/exec'))
+          return [409, { error: 'this computer is not running', reason: 'unavailable' }];
+        gets++;
+        return [200, gets === 1 ? box : { ...box, status: 'stopped', running_ram_mb: 0 }];
+      },
+      async () => {
+        const { call, close } = await connect();
+        const r = await call('wait_for_computer', { until: 'guest', timeout_s: 30 });
+        await close();
+        return r;
+      },
+    );
+    expect(gets).toBe(2);
+    expect(res.isError).toBe(true);
+    expect(textOf(res)).toMatch(/is stopped\. start_computer boots it/);
+  }, 30_000);
+
   it('ends wait_for_operation at once on a permanent refusal', async () => {
     const res = await platform(
       () => [409, { error: 'that cannot be read here', reason: 'unsupported' }],

@@ -38,8 +38,7 @@ are wording changes, and they are behaviour changes in the way that matters.
   unreadable `computers` read as `[]` would mean every computer.
 - **`exec` refuses an `env` past the platform's caps before sending it:** at
   most 64 entries, each at most 4096 bytes counted as `NAME=value` in UTF-8.
-  The platform checks these only after waking a suspended computer, so a local
-  refusal saves a resume. `create_webhook` and `update_webhook` refuse a `url`
+  The platform refuses the same, so this saves only the round trip. `create_webhook` and `update_webhook` refuse a `url`
   over 2048 characters the same way. The caps are in the tool descriptions, and
   `check:surface` now compares 9 of the platform's limits, not 5.
 - **The Claude Code plugin pins the server it starts** to its own version

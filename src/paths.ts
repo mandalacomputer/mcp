@@ -479,18 +479,16 @@ export function execBody(args: {
  * an absent one are already the same request, and the one that says so in fewer
  * fields is the one worth sending.
  *
- * The three rules below are checked in this process because the platform checks
- * them AFTER it has resumed the computer. `POST computers/:id/exec` runs its
- * `use` — which wakes a suspended guest and bills the resume — before `Exec`
- * ever looks at the environment, so a malformed name costs a machine coming up
- * to be told no. They are also the rules that will not drift: they are what an
- * entry IS in the list the guest agent takes, `NAME=value` strings separated by
- * NULs, rather than policy. The ceilings on how many entries and how long one
- * may be ARE policy, and are checked here too since the platform publishes them
- * in its surface manifest (OPL-6081): `scripts/check-surface.mjs` holds
- * {@link LIMITS} to it, so a ceiling that moves fails CI rather than turning
- * this into a refusal of a call the platform would take — and the same resume
- * is saved for an environment that is only too big.
+ * The rules below are checked in this process so a request that can only fail
+ * is not made; the platform checks the same ones before it touches the
+ * computer, so the saving is a round trip, not a resume. The first three will
+ * not drift: they are what an entry IS in the list the guest agent takes,
+ * `NAME=value` strings separated by NULs, rather than policy. The ceilings on
+ * how many entries and how long one may be ARE policy, and are mirrored since
+ * the platform publishes them in its surface manifest (OPL-6081):
+ * `scripts/check-surface.mjs` holds {@link LIMITS} to it, so a ceiling that
+ * moves fails CI rather than turning this into a refusal of a call the
+ * platform would take.
  *
  * The `=` case is the one a model actually gets wrong. `{'FOO=bar': ''}` is the
  * assignment written into the name, which is the same mistake as writing the
