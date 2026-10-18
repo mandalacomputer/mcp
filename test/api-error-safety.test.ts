@@ -1,6 +1,12 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { Api, MODEL_KEY_HEADER, platformFetch } from '../src/api.js';
-import { ConnectivityError, ConnectivityInterruptedError, MandalaError } from '../src/errors.js';
+import {
+  ConnectivityError,
+  ConnectivityInterruptedError,
+  MandalaError,
+  neverSent,
+  RejectedLocallyError,
+} from '../src/errors.js';
 
 const BASE = 'https://api.example.invalid/api/v1';
 const realFetch = globalThis.fetch;
@@ -73,6 +79,9 @@ describe('request failure diagnostics', () => {
 
       const err = await testCase.request().catch((cause: unknown) => cause);
       expect(err).toBeInstanceOf(MandalaError);
+      // Its own class, so a write can say nothing was sent (OPL-6085).
+      expect(err).toBeInstanceOf(RejectedLocallyError);
+      expect(neverSent(err)).toBe(true);
       expect(err).not.toBeInstanceOf(ConnectivityError);
       expect(err).not.toBeInstanceOf(ConnectivityInterruptedError);
       expect((err as Error).message).toMatch(/rejected locally before it could be sent/i);

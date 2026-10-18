@@ -13,6 +13,7 @@ import {
   messageFromBody,
   RangeNotSatisfiableError,
   RedirectError,
+  RejectedLocallyError,
 } from './errors.js';
 import * as P from './paths.js';
 import {
@@ -535,7 +536,7 @@ export class Api {
         fetchRequest === (undiciFetch as unknown as typeof globalThis.fetch) &&
         undiciRejectsLocally(requested, headers)
       ) {
-        throw new MandalaError(
+        throw new RejectedLocallyError(
           `${method} /${path.replace(/^\/+/, '')} was rejected locally before it could be sent. ` +
             'Check the configured URL and request headers.',
         );

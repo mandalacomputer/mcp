@@ -147,6 +147,7 @@ describe('run_agent keeps and continues threads', () => {
     const { client } = await open({ modelKey: 'sk-ant-test' });
     const tool = (await client.listTools()).tools.find((t) => t.name === 'run_agent');
     expect(tool?.description).toContain('start_agent_run');
+    expect(tool?.description).toContain('Unless it sent store: false');
     expect(tool?.inputSchema.properties).toHaveProperty('thread_id');
     expect(tool?.inputSchema.properties).toHaveProperty('store');
     expect(tool?.inputSchema.properties).not.toHaveProperty('messages');
@@ -259,6 +260,7 @@ describe('run_agent_chat keeps and continues threads', () => {
     expect(tool?.description).not.toContain('not replayed');
     expect(tool?.description).toContain('conversation so far');
     expect(tool?.description).toContain('With thread_id');
+    expect(tool?.description).toContain('Unless it sent store: false');
   });
 });
 
@@ -365,6 +367,22 @@ describe('start_agent_run', () => {
     transport('reset');
     const lost = textOf(await call('start_agent_run', { computer_id: 'vm-3', prompt: 'go' }));
     expect(lost).toContain('A RUN MAY HAVE STARTED on vm-3');
+  });
+
+  it('does not call a request this client refused to send a run that may have started', async () => {
+    // The real HTTP stack, which refuses a header value with a line break in it
+    // before opening any connection.
+    platform.restore();
+    const { call } = await open({ modelKey: 'sk-ant-test\ncontinuation' });
+    const said = textOf(await call('start_agent_run', { computer_id: 'vm-3', prompt: 'go' }));
+    expect(said).toContain('rejected locally before it could be sent');
+    expect(said).not.toContain('MAY HAVE STARTED');
+    const { call: del } = await open({ apiKey: 'com_test\ncontinuation' });
+    const deleted = textOf(
+      await del('delete_agent_thread', { thread_id: THREAD_ID, confirm: true }),
+    );
+    expect(deleted).toContain('rejected locally before it could be sent');
+    expect(deleted).not.toContain('MAY OR MAY NOT');
   });
 
   it('does not call a computer id it refused locally a run that may have started', async () => {
@@ -594,6 +612,24 @@ describe('cancel_agent_run', () => {
     expect(said).not.toContain('had already ended');
     expect(said).toContain(
       'status paused, which this server does not know, so whether it stopped is unknown',
+    );
+  });
+
+  it('points an unreadable or failed cancel at get_agent_run', async () => {
+    const { call } = await open();
+    answer({});
+    const unread = await call('cancel_agent_run', { run_id: RUN_ID });
+    expect(unread.isError).toBe(true);
+    expect(textOf(unread)).toContain(
+      `Whether ${RUN_ID} stopped is unknown: get_agent_run reads it`,
+    );
+    answer({ error: 'the control plane could not be reached' }, 503);
+    expect(textOf(await call('cancel_agent_run', { run_id: RUN_ID }))).toContain(
+      'get_agent_run reads it, and cancel_agent_run can be sent again safely',
+    );
+    answer({ error: 'run not found' }, 404);
+    expect(textOf(await call('cancel_agent_run', { run_id: RUN_ID }))).not.toContain(
+      'stopped is unknown',
     );
   });
 

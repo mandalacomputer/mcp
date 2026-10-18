@@ -414,10 +414,26 @@ export const registerRuns: Registrar = (server, session) => {
     },
     ({ run_id }, extra) =>
       guarded(async () => {
-        const run = metadata(
-          agentRun,
-          await session.api.json('POST', P.agentRunCancel(run_id), { signal: extra.signal }),
-        );
+        const path = P.agentRunCancel(run_id);
+        // Whether a cancel that failed or answered unreadably took effect is
+        // what a model needs next, and get_agent_run is how it finds out; a
+        // cancel is safe to send again either way.
+        const settle = `Whether ${run_id} stopped is unknown: get_agent_run reads it, and cancel_agent_run can be sent again safely.`;
+        let raw: unknown;
+        try {
+          raw = await session.api.json('POST', path, { signal: extra.signal });
+        } catch (err) {
+          if ((err instanceof APIError && err.status < 500) || neverSent(err)) throw err;
+          const result = failed(err);
+          result.content.push({ type: 'text', text: settle });
+          return result;
+        }
+        const parsed = agentRun.safeParse(raw);
+        if (!parsed.success)
+          return refused(
+            `The cancel of ${run_id} was answered, but the answer could not be read. ${settle}`,
+          );
+        const run = parsed.data;
         const head =
           run.status === 'cancelled'
             ? `Cancelled ${run.id}: it stopped where it was.`

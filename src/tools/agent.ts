@@ -33,7 +33,7 @@ const TITLE = 'Have the platform drive the computer';
 
 /** What both descriptions say after their first sentence about who pays. */
 const HOW =
-  'Use it to delegate a long stretch of pixel work; drive with the individual tools when you want to see each frame yourself. The computer must already be running. A run is MINUTES, not seconds: it reports progress on every step so a client that sends a progressToken and sets resetTimeoutOnProgress can hold the request open. A client that cannot hold one call open that long should use start_agent_run, which starts the same run in the background and answers at once, rather than watch its own timeout cancel a run it is already paying for. Every run that acts or answers is kept in a thread, and the answer names its thread_id: send it back as thread_id to continue the conversation.';
+  'Use it to delegate a long stretch of pixel work; drive with the individual tools when you want to see each frame yourself. The computer must already be running. A run is MINUTES, not seconds: it reports progress on every step so a client that sends a progressToken and sets resetTimeoutOnProgress can hold the request open. A client that cannot hold one call open that long should use start_agent_run, which starts the same run in the background and answers at once, rather than watch its own timeout cancel a run it is already paying for. Unless it sent store: false, every run that acts or answers is kept in a thread, and the answer names its thread_id: send it back as thread_id to continue the conversation.';
 
 const TASK =
   'Give the computer a task in plain language and let the platform drive it — screenshot, decide, click, type, repeat — until it is done.';

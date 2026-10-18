@@ -1119,12 +1119,24 @@ export class ConnectivityInterruptedError extends ConnectivityError {
 }
 
 /**
+ * A request this client refused to send: the configured URL or a header value
+ * is one the HTTP stack rejects before opening a connection. Not a
+ * {@link ConnectivityError}, which a caller may retry: this one answers the
+ * same until the configuration changes. Nothing was sent.
+ */
+export class RejectedLocallyError extends MandalaError {
+  override name = 'RejectedLocallyError';
+}
+
+/**
  * Whether a failure proves the request never left: a {@link ConnectivityError}
- * that is not the interrupted kind. A write that failed this way did nothing,
- * so it is reported as the failure it is, not as an outcome to go and check.
+ * that is not the interrupted kind, or one this client refused to send. A
+ * write that failed this way did nothing, so it is reported as the failure it
+ * is, not as an outcome to go and check.
  */
 export const neverSent = (err: unknown): boolean =>
-  err instanceof ConnectivityError && !(err instanceof ConnectivityInterruptedError);
+  err instanceof RejectedLocallyError ||
+  (err instanceof ConnectivityError && !(err instanceof ConnectivityInterruptedError));
 
 /**
  * 504, 524 — a proxy in front of the platform gave up before the platform answered.
