@@ -215,6 +215,38 @@ describe('every other 5xx keeps its unknown outcome', () => {
     expect(said).not.toContain(NOTHING);
   });
 
+  it('every tool: the word beside a record of work keeps the uncertain answer', async () => {
+    const mixed = {
+      ...DRAINING,
+      error: {
+        message: 'the host could not be reached',
+        steps: [{ n: 1, detail: 'clicked once' }],
+      },
+      thread_id: 'thr_0123456789abcdef01234567',
+    };
+    const { call } = await open({ modelKey: 'sk-ant-test' });
+    startsAnswer(503, mixed, { 'Retry-After': '30' });
+    const agent = textOf(await call('run_agent', { prompt: 'go' }));
+    expect(agent).toContain('MAY OR MAY NOT HAVE HAPPENED');
+    expect(agent).not.toContain(NOTHING);
+    const start = textOf(await call('start_agent_run', { computer_id: 'vm-3', prompt: 'go' }));
+    expect(start).toContain('A RUN MAY HAVE STARTED on vm-3');
+    expect(start).not.toContain(NOTHING);
+    const chat = textOf(
+      await call('run_agent_chat', { messages: [{ role: 'user', content: 'go' }] }),
+    );
+    expect(chat).toContain('may already be billed');
+    expect(chat).toContain('clicked once');
+    expect(chat).not.toContain(NOTHING);
+    startsAnswer(503, { ...DRAINING, steps: [{ n: 1, detail: 'clicked twice' }] });
+    const flat = textOf(
+      await call('run_agent_chat', { messages: [{ role: 'user', content: 'go' }] }),
+    );
+    expect(flat).toContain('may already be billed');
+    expect(flat).toContain('clicked twice');
+    expect(flat).not.toContain(NOTHING);
+  });
+
   it('run_agent_chat: a flat 503 without the word keeps its billing warning', async () => {
     startsAnswer(503, { error: 'the host could not be reached' });
     const { call } = await open({ modelKey: 'sk-ant-test' });
@@ -229,6 +261,29 @@ describe('every other 5xx keeps its unknown outcome', () => {
 describe('the classification under the wording', () => {
   const post = (body: unknown, status = 503) =>
     errorForStatus(status, 'x', body, 30_000, { method: 'POST' });
+
+  it('does not read the word over a body that reports work', () => {
+    // An inconsistent body: the word beside a record of a run. The record is
+    // evidence that work was done, and outranks the word saying none was.
+    for (const extra of [
+      { steps: [{ n: 1, detail: 'clicked once' }] },
+      { steps_taken: [{ n: 1, detail: 'clicked once' }] },
+      { usage: { input_tokens: 10 } },
+      { cost_usd: 0.25 },
+      { thread_id: 'thr_0123456789abcdef01234567' },
+      { agent: { computer_id: 'vm-1', steps: [] } },
+    ]) {
+      const err = post({ ...DRAINING, ...extra });
+      expect(pausedForUpdate(err), JSON.stringify(extra)).toBe(false);
+      expect(isTransient(err), JSON.stringify(extra)).toBe(false);
+      expect(textOf(failed(err))).toContain('MAY OR MAY NOT HAVE HAPPENED');
+    }
+    // Nor beside a run's own failure envelope, or with no sentence at all.
+    expect(pausedForUpdate(post({ error: { message: 'x' }, reason: 'draining' }))).toBe(false);
+    expect(pausedForUpdate(post({ reason: 'draining' }))).toBe(false);
+    // Absent and null record nothing.
+    expect(pausedForUpdate(post({ ...DRAINING, thread_id: null }))).toBe(true);
+  });
 
   it('reads the word only at the top level of a 503', () => {
     expect(pausedForUpdate(post(DRAINING))).toBe(true);

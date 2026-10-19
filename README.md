@@ -1069,8 +1069,9 @@ happened, because the platform answers a failure after the request was sent the
 same way. So `isTransient` is false for it whatever `reason` it carries, the
 tool's answer says to read the current state first, and `error.method` records
 the method. The one exception is `reason: "draining"` at the top level of a
-`503`: a call that starts an agent run, refused before anything started while
-the platform updates. Nothing ran and nothing was billed, so `isTransient` is
+`503`, beside a flat `error` sentence and no record of a run (steps, usage, a
+cost or a thread): a call that starts an agent run, refused before anything
+started while the platform updates. Nothing ran and nothing was billed, so `isTransient` is
 true for it, and the same request can be sent again after `error.retryAfterMs`.
 That is a rule about the `503`, not a word that clears: `reasonKind` returns
 `undefined` for `draining`, as for any word it does not classify, and a `409`

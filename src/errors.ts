@@ -1067,15 +1067,26 @@ export function outcomeUnknownOn503(err: unknown): boolean {
  * Top level only, as {@link isTransient} reads a word that clears: a `reason`
  * nested inside an `error` object is a run's own failure, relayed after steps
  * may have run and been billed, and grants no replay.
+ *
+ * And only in the shape the platform documents for it: a flat `error`
+ * sentence beside the word, with no record of a run. A body that also reports
+ * steps, usage, a cost, a thread or a run's own failure envelope contradicts
+ * the word, and evidence of work outranks a word saying there was none — so
+ * such a body keeps the answer every other `503` to a change gets.
  */
 export function pausedForUpdate(err: unknown): boolean {
+  if (!(err instanceof UnavailableError) || err.status !== 503) return false;
+  const body = err.body;
   return (
-    err instanceof UnavailableError &&
-    err.status === 503 &&
-    record(err.body) &&
-    err.body.reason === 'draining'
+    record(body) &&
+    body.reason === 'draining' &&
+    typeof body.error === 'string' &&
+    !RUN_RECORD_FIELDS.some((field) => body[field] !== undefined && body[field] !== null)
   );
 }
+
+/** Fields that record a run's work: present on a refusal, they say one ran. */
+const RUN_RECORD_FIELDS = ['steps', 'steps_taken', 'usage', 'cost_usd', 'thread_id', 'agent'];
 
 /**
  * What to tell a model about a start refused during a platform update, with
