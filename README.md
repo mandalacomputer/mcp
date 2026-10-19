@@ -1075,7 +1075,8 @@ refused before anything started while the platform updates. Nothing ran and
 nothing was billed, so `isTransient` is true for it, and the same request can
 be sent again after `error.retryAfterMs`. The rule is read from the answer
 alone, not from the route: the platform sends `draining` only on the calls
-that start an agent run, and the rule relies on that.
+that start an agent run, and both `isTransient` and the tools' answers rely on
+that.
 That is a rule about the `503`, not a word that clears: `reasonKind` returns
 `undefined` for `draining`, as for any word it does not classify, and a `409`
 carrying it is not transient. A `reason` this version does not
