@@ -1676,7 +1676,10 @@ have happened, a run may have started, or work may already be billed). They
 say that nothing started and nothing was billed, and give the number of seconds
 to wait before sending the same call again. This server does not resend it
 itself: it retries no call that starts a run. Any other `5xx` on these tools
-keeps the uncertain answer.
+keeps the uncertain answer, and so does a `draining` body that also records
+work (steps, usage, a cost, a thread, or a run's own failure envelope): that
+answer shows the word but does not say nothing started, and the tool
+descriptions grant the resend only on that sentence.
 
 ## Development
 

@@ -34,9 +34,14 @@ export const storeArg = z
  * What a start refused during a platform update means, for the description of
  * every tool that starts a run (OPL-6094). The answer itself says it again,
  * with the wait the platform named.
+ *
+ * Keyed to the answer's own sentence, not to the status and the word: a 503
+ * whose body carries `draining` beside a record of work is not that refusal,
+ * the answer says so, and a description that granted a resend on the word
+ * alone would contradict it.
  */
 export const PAUSED_FOR_UPDATE =
-  'A 503 with reason draining means the platform is updating and started nothing: no run began and nothing was billed. Send the same call again after the Retry-After seconds the answer names.';
+  'While the platform updates it refuses new runs before they start (a 503 with reason draining): only when the answer says NOTHING STARTED AND NOTHING WAS BILLED, send the same call again after the seconds it names. Any other 5xx keeps its own advice, even if it shows reason draining.';
 
 /** The refusal for `store: false` beside a `thread_id`, which the platform answers 400. */
 export const STORE_WITH_THREAD =

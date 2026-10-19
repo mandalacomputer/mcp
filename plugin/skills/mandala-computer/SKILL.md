@@ -501,11 +501,14 @@ says what to do. The judgement it cannot make for you:
   repeating it blind can do it twice. The exception is a lifecycle tool's 503
   that names no `operation_id`: resend it with the same key, as above, which
   cannot do it twice.
-- **A 503 `draining` on a tool that starts an agent run started nothing.** While
-  the platform updates, `run_agent`, `start_agent_run` and `run_agent_chat` are
-  refused before anything starts: nothing ran and nothing was billed. The
-  answer says how many seconds to wait (the `Retry-After`); send the same call
-  again after that. There is no run to look for with `list_agent_runs`.
+- **A start refused while the platform updates started nothing.** While the
+  platform updates, `run_agent`, `start_agent_run` and `run_agent_chat` are
+  refused before anything starts (a 503 with `reason: draining`), and the
+  answer says NOTHING STARTED AND NOTHING WAS BILLED and how many seconds to
+  wait. Send the same call again after that; there is no run to look for with
+  `list_agent_runs`. Only that sentence means it: an answer that shows
+  `draining` but does not say it (because the response also recorded work)
+  keeps its own advice, like any other 5xx.
 - **A refused resize with an offer** ("another host could run it") does not
   clear by retrying. `move_computer` takes the offer up; it copies the disk,
   so say what that costs before calling it.

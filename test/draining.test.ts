@@ -215,7 +215,7 @@ describe('every other 5xx keeps its unknown outcome', () => {
     expect(said).not.toContain(NOTHING);
   });
 
-  it('every tool: the word beside a record of work keeps the uncertain answer', async () => {
+  it('every tool: the word beside a record of work never says nothing started', async () => {
     const mixed = {
       ...DRAINING,
       error: {
@@ -339,8 +339,12 @@ describe('the descriptions', () => {
     const { tools } = await client.listTools();
     for (const name of ['run_agent', 'start_agent_run', 'run_agent_chat']) {
       const description = tools.find((t) => t.name === name)?.description ?? '';
-      expect(description, name).toContain('A 503 with reason draining');
-      expect(description, name).toContain('Retry-After');
+      expect(description, name).toContain('a 503 with reason draining');
+      // The resend is granted on the answer's own sentence, which a body
+      // recording work never gets, and not on the status and the word.
+      expect(description, name).toContain(`only when the answer says ${NOTHING}`);
+      expect(description, name).toContain('even if it shows reason draining');
+      expect(description, name).not.toMatch(/reason draining means/);
     }
     const start = tools.find((t) => t.name === 'start_agent_run')?.description ?? '';
     expect(start).toContain('any other 5xx, a run may have started');
@@ -351,7 +355,7 @@ describe('the descriptions', () => {
     const { tools } = await client.listTools();
     for (const name of ['run_agent', 'start_agent_run']) {
       expect(tools.find((t) => t.name === name)?.description, name).toContain(
-        'A 503 with reason draining',
+        `only when the answer says ${NOTHING}`,
       );
     }
   });
