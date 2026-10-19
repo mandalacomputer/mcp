@@ -1066,10 +1066,10 @@ Neither response causes an automatic retry or method switch.
 `isTransient(err)` answers "is this worth sending again unchanged". A `503` is
 transient only for a GET or HEAD. Any change answered `503` may or may not have
 happened, because the platform answers a failure after the request was sent the
-same way. So `isTransient` is false for it whatever `reason` it carries, the
-tool's answer says to read the current state first, and `error.method` records
-the method. The one exception is `reason: "draining"` at the top level of a
-`503`, beside a flat `error` sentence and no record of a run (steps, usage, a
+same way. So `isTransient` is false for it whatever `reason` it carries, but
+for the one exception below, the tool's answer says to read the current state
+first, and `error.method` records the method. The exception is
+`reason: "draining"` at the top level of a `503`, beside a flat `error` sentence and no record of a run (steps, usage, a
 cost or a thread): a call that starts an agent run, refused before anything
 started while the platform updates. Nothing ran and nothing was billed, so `isTransient` is
 true for it, and the same request can be sent again after `error.retryAfterMs`.

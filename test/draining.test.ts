@@ -347,6 +347,8 @@ describe('the descriptions', () => {
       // recording work never gets, and not on the status and the word.
       expect(description, name).toContain(`only when the answer says ${NOTHING}`);
       expect(description, name).toContain('even if it shows reason draining');
+      // A refusal with no Retry-After names no seconds; the description must not promise them.
+      expect(description, name).toContain('or after a short wait if it names none');
       expect(description, name).not.toMatch(/reason draining means/);
     }
     const start = tools.find((t) => t.name === 'start_agent_run')?.description ?? '';

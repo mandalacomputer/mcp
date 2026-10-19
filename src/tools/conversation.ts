@@ -41,7 +41,7 @@ export const storeArg = z
  * alone would contradict it.
  */
 export const PAUSED_FOR_UPDATE =
-  'While the platform updates it refuses new runs before they start (a 503 with reason draining): only when the answer says NOTHING STARTED AND NOTHING WAS BILLED, send the same call again after the seconds it names. Any other 5xx keeps its own advice, even if it shows reason draining.';
+  'While the platform updates it refuses new runs before they start (a 503 with reason draining): only when the answer says NOTHING STARTED AND NOTHING WAS BILLED, send the same call again after the wait it names, or after a short wait if it names none. Any other 5xx keeps its own advice, even if it shows reason draining.';
 
 /** The refusal for `store: false` beside a `thread_id`, which the platform answers 400. */
 export const STORE_WITH_THREAD =
