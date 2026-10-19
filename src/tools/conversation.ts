@@ -30,6 +30,14 @@ export const storeArg = z
     'false keeps no record of this run: no thread_id comes back and it cannot be continued. It cannot be combined with thread_id. Leave it out to keep the run, which is the default.',
   );
 
+/**
+ * What a start refused during a platform update means, for the description of
+ * every tool that starts a run (OPL-6094). The answer itself says it again,
+ * with the wait the platform named.
+ */
+export const PAUSED_FOR_UPDATE =
+  'A 503 with reason draining means the platform is updating and started nothing: no run began and nothing was billed. Send the same call again after the Retry-After seconds the answer names.';
+
 /** The refusal for `store: false` beside a `thread_id`, which the platform answers 400. */
 export const STORE_WITH_THREAD =
   'store: false keeps nothing, so it cannot continue a thread: send thread_id or store: false, not both. Nothing was sent.';

@@ -17,7 +17,13 @@ import {
   usd,
 } from './agent.js';
 import { safeResult } from './chat.js';
-import { keptThread, stopVerdict, threadIdArg, threadLine } from './conversation.js';
+import {
+  keptThread,
+  PAUSED_FOR_UPDATE,
+  stopVerdict,
+  threadIdArg,
+  threadLine,
+} from './conversation.js';
 import { count, label, metadata, metadataCall } from './directory.js';
 import { readAnnotations } from './results.js';
 import type { Registrar } from './types.js';
@@ -234,8 +240,7 @@ const START =
 const WHEN =
   'Prefer it to run_agent when the task may take longer than your client holds one tool call open (a run is minutes), or when you have other work to do meanwhile; use run_agent when you can wait and want the answer in one call. Then read it with get_agent_run every few seconds — a step takes at least that long — until its status is no longer running; cancel_agent_run stops it.';
 
-const RULES =
-  "The computer must already be running, and one run drives a computer at a time: a computer another run is driving is refused with 409 (contention) — wait for that run or cancel it (list_agent_runs with status running finds it). thread_id continues an earlier run's conversation; the run's own thread_id, once it has one, continues this one. If this call's answer is lost, or it fails with a 5xx, a run may have started: list_agent_runs with computer_id and no status filter before starting another, since a short run may already have ended. Cancelling this call does not stop a run that has started; cancel_agent_run does.";
+const RULES = `The computer must already be running, and one run drives a computer at a time: a computer another run is driving is refused with 409 (contention) — wait for that run or cancel it (list_agent_runs with status running finds it). thread_id continues an earlier run's conversation; the run's own thread_id, once it has one, continues this one. ${PAUSED_FOR_UPDATE} If this call's answer is lost, or it fails with any other 5xx, a run may have started: list_agent_runs with computer_id and no status filter before starting another, since a short run may already have ended. Cancelling this call does not stop a run that has started; cancel_agent_run does.`;
 
 type StartArgs = {
   computer_id?: string;
@@ -279,6 +284,8 @@ export const registerRuns: Registrar = (server, session) => {
           signal: extra.signal,
         });
       } catch (err) {
+        // A start refused while the platform updates is answered here too:
+        // a 503 that started nothing, and says when to send it again.
         const refusal = preRunRefusal(err, session, 'start_agent_run');
         if (refusal) return refusal;
         // A 4xx is a refusal given before any run was recorded, and a request

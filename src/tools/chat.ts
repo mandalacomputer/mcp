@@ -1,13 +1,20 @@
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
 import { MODEL_KEY_HEADER } from '../api.js';
-import { APIError, agentRunAdvice, messageFromBody } from '../errors.js';
+import {
+  APIError,
+  agentRunAdvice,
+  messageFromBody,
+  pausedForUpdate,
+  pausedForUpdateAdvice,
+} from '../errors.js';
 import { apiErrorMessage, errorMetadata, failed, originWording, refused, said } from '../format.js';
 import * as P from '../paths.js';
 import { heartbeat } from '../poll.js';
 import {
   keptThread,
   keptThreadField,
+  PAUSED_FOR_UPDATE,
   STORE_WITH_THREAD,
   storeArg,
   threadIdArg,
@@ -150,6 +157,19 @@ const edgeCut = (error: APIError): boolean => error.status === 524 && !isRecord(
 
 function chatFailure(error: unknown): CallToolResult {
   if (!(error instanceof APIError)) return failed(error);
+  // A start refused while the platform updates (OPL-6094): a flat body the
+  // platform answers before any run, so nothing ran and nothing was billed,
+  // and none of the run-failure reading below applies — least of all the line
+  // saying recorded work may already be billed.
+  if (pausedForUpdate(error))
+    return failed(
+      error,
+      true,
+      pausedForUpdateAdvice(
+        error.retryAfterMs,
+        'call run_agent_chat again with the same arguments',
+      ),
+    );
   const nested = isRecord(error.body) && isRecord(error.body.error) ? error.body.error : undefined;
   const source = nested ?? (isRecord(error.body) ? error.body : {});
   const projected: Record<string, unknown> = {};
@@ -233,8 +253,7 @@ export const registerChat: Registrar = (server, session) => {
     'run_agent_chat',
     {
       title: 'Drive the computer with BYOK textual chat',
-      description:
-        "Run the same hosted computer agent using OpenAI-shaped textual messages and JSON-only results (stream:false). The last user message is the task; system messages provide standing instructions; the user and assistant messages before it are given to the model as the conversation so far, told they are done. With thread_id, the thread's own turns are the conversation instead and earlier messages are not read, so the last user message alone is enough. Unless it sent store: false, every run that acts or answers is kept in a thread, and agent.thread_id in the answer continues it. This is BYOK computer control, not hosted inference or a chat UI. The computer must already be running. Bills the caller's configured Anthropic or OpenAI key. A GPT or o-series model selects OpenAI; a Claude model selects Anthropic. SHORT TASKS ONLY: on the hosted API a request that does not stream is cut at the edge after about 120 seconds (HTTP 524), which stops the run and loses its result, usage and steps, and the default 20 steps can take longer than that. Use run_agent, which streams, for anything longer. Progress counts waiting heartbeats, not completed actions; progressToken plus resetTimeoutOnProgress keeps only the MCP client waiting, not the edge. Never automatically replay a failed run.",
+      description: `Run the same hosted computer agent using OpenAI-shaped textual messages and JSON-only results (stream:false). The last user message is the task; system messages provide standing instructions; the user and assistant messages before it are given to the model as the conversation so far, told they are done. With thread_id, the thread's own turns are the conversation instead and earlier messages are not read, so the last user message alone is enough. Unless it sent store: false, every run that acts or answers is kept in a thread, and agent.thread_id in the answer continues it. This is BYOK computer control, not hosted inference or a chat UI. The computer must already be running. Bills the caller's configured Anthropic or OpenAI key. A GPT or o-series model selects OpenAI; a Claude model selects Anthropic. SHORT TASKS ONLY: on the hosted API a request that does not stream is cut at the edge after about 120 seconds (HTTP 524), which stops the run and loses its result, usage and steps, and the default 20 steps can take longer than that. Use run_agent, which streams, for anything longer. Progress counts waiting heartbeats, not completed actions; progressToken plus resetTimeoutOnProgress keeps only the MCP client waiting, not the edge. Never automatically replay a failed run. ${PAUSED_FOR_UPDATE}`,
       inputSchema: {
         computer_id: computerSchema,
         messages: z

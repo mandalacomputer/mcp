@@ -1068,7 +1068,11 @@ transient only for a GET or HEAD. Any change answered `503` may or may not have
 happened, because the platform answers a failure after the request was sent the
 same way. So `isTransient` is false for it whatever `reason` it carries, the
 tool's answer says to read the current state first, and `error.method` records
-the method. A `reason` this version does not
+the method. The one exception is `reason: "draining"` at the top level of a
+`503`: a call that starts an agent run, refused before anything started while
+the platform updates. Nothing ran and nothing was billed, so `isTransient` is
+true for it, `reasonKind` calls the word `clears`, and the same request can be
+sent again after `error.retryAfterMs`. A `reason` this version does not
 know, such as a new word, is treated as no classification. `reasonKind` returns
 `undefined` for it, and the status decides — which, for a 409, is no: a 409 is
 transient only when its `reason` clears or its `code` is
@@ -1575,9 +1579,10 @@ account's runs newest first (`computer_id`, `status`, `limit`, `before`). One ru
 drives a computer at a time: a start on a computer another run is driving is
 refused `409` with `reason: "contention"`, and `list_agent_runs` with
 `status: "running"` finds the run to wait for or cancel. If a start's answer is
-lost, `list_agent_runs` with `computer_id` and no `status` is the read to make
-before starting another: a short run may already have ended, and is then the
-newest on the list.
+lost, or it fails with a `5xx`, `list_agent_runs` with `computer_id` and no
+`status` is the read to make before starting another: a short run may already
+have ended, and is then the newest on the list. The exception is a `503` with
+`reason: "draining"`, below, which started nothing.
 
 Only `status: "completed"` with `stop: "end_turn"` means the task was finished,
 and the tools say so in as many words. Any other stop on a completed run
@@ -1658,6 +1663,17 @@ exception is a refusal `run_agent_chat` is given before any run started — a fl
 `{error: string}` body, from the role gate, a bad body, a suspension or the
 meter: nothing ran, and it keeps the usual role and plan advice every other tool
 gets.
+
+While the platform updates, it stops starting agent runs for a few minutes.
+`run_agent`, `start_agent_run` and `run_agent_chat` are then refused with a `503`
+carrying `reason: "draining"` and a `Retry-After`. The
+refusal comes before anything starts, and runs already going are not affected.
+So these tools do not give the usual `5xx` answer here (that the change may
+have happened, a run may have started, or work may already be billed). They
+say that nothing started and nothing was billed, and give the number of seconds
+to wait before sending the same call again. This server does not resend it
+itself: it retries no call that starts a run. Any other `5xx` on these tools
+keeps the uncertain answer.
 
 ## Development
 
