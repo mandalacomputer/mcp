@@ -14,6 +14,24 @@ are wording changes, and they are behaviour changes in the way that matters.
 
 ## [Unreleased]
 
+### Changed
+
+- **A start refused while the platform updates says nothing started.** While
+  the platform updates, it refuses new agent runs for a few minutes with a `503`
+  carrying `reason: "draining"` and a `Retry-After`, before anything starts.
+  `run_agent` used to answer it as a change that may or may not have happened,
+  `start_agent_run` as a run that may have started, and `run_agent_chat` as work
+  that may already be billed. All three now say that nothing started and nothing
+  was billed, and give the seconds to wait before sending the same call again.
+  Their descriptions say so too. Every other `5xx` keeps the uncertain answer,
+  and this server still resends nothing itself.
+- **`isTransient` is true for that refusal.** It is the one change answered
+  `503` that the exported `isTransient` calls worth sending again unchanged, and
+  only with `reason: "draining"` at the top level of a flat body that records
+  no run: a body that also reports steps, usage, a cost or a thread keeps the
+  uncertain answer. The rule covers only the `503`: `reasonKind` does not
+  classify `draining`.
+
 ## [0.16.0] — 2026-10-18
 
 ### Added

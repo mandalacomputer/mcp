@@ -42,7 +42,8 @@ export class APIError extends MandalaError {
    * The platform's own word for what KIND of refusal this is, where it sent
    * one: `contention`, `starting`, `unavailable` or `unsupported` (OPL-3898),
    * `revoked` (OPL-4801) — the one word about the caller rather than the
-   * computer — `exists` (OPL-4994), or `running` (OPL-5050). `undefined` for
+   * computer — `exists` (OPL-4994), `running` (OPL-5050), or `draining`
+   * (OPL-6094), a start refused while the platform updates. `undefined` for
    * most errors, and always will be — the platform is explicit that an absent
    * value means unclassified rather than "none of these".
    *
@@ -98,6 +99,12 @@ export class APIError extends MandalaError {
  * from the other, which is what makes an unknown word fall through to the type
  * answer instead of reading as permanent. Mirrors `_REASON_CLEARS` and
  * `_REASON_PERMANENT` in mandala-computer-python's `_exceptions.py`.
+ *
+ * NOT `draining`, a start refused while the platform updates (OPL-6094), and
+ * on purpose, as in both SDKs. These two clear a 400 or a 409; that one is
+ * read on a `503` alone, where every other answer to a change is an outcome
+ * nobody knows, so it is a rule of its own — {@link pausedForUpdate} — rather
+ * than a third word here, which would also make a 409 carrying it transient.
  */
 const REASON_CLEARS: ReadonlySet<string> = new Set(['contention', 'starting']);
 /**
@@ -1013,7 +1020,9 @@ export class RateLimitError extends APIError {
  * sent the same way, with or without a warning in the message. So
  * {@link isTransient} calls a 503 worth repeating only for a request that is
  * safe to repeat — a GET or HEAD, see {@link REPEATABLE_METHODS} — and any
- * change has its current state read before it is sent again.
+ * change has its current state read before it is sent again. The exception is
+ * a start the platform refused while it updates ({@link pausedForUpdate}):
+ * nothing started, and the same request is sent again after `retryAfterMs`.
  */
 export class UnavailableError extends APIError {
   override name = 'UnavailableError';
@@ -1032,9 +1041,81 @@ const REPEATABLE_METHODS: ReadonlySet<string> = new Set(['GET', 'HEAD']);
 /**
  * Whether a `503` leaves the request's outcome unknown: it was a change, or its
  * method was not recorded.
+ *
+ * Not a start refused during a platform update ({@link pausedForUpdate}): the
+ * platform answers that one before anything starts, so its outcome is known —
+ * nothing happened.
  */
 export function outcomeUnknownOn503(err: unknown): boolean {
-  return err instanceof UnavailableError && !(err.method && REPEATABLE_METHODS.has(err.method));
+  return (
+    err instanceof UnavailableError &&
+    !pausedForUpdate(err) &&
+    !(err.method && REPEATABLE_METHODS.has(err.method))
+  );
+}
+
+/**
+ * Whether this is the platform refusing to start an agent run while it updates
+ * (OPL-6094): a `503` whose body carries `reason: "draining"` at the top level.
+ *
+ * The one `503` answered to a change whose outcome is known. The platform
+ * decides it before the run starts, so nothing ran, nothing was held and
+ * nothing was billed, and it documents the same request as safe to send again
+ * after the `Retry-After` it names. Runs already going are not affected.
+ *
+ * Top level only, as {@link isTransient} reads a word that clears: a `reason`
+ * nested inside an `error` object is a run's own failure, relayed after steps
+ * may have run and been billed, and grants no replay.
+ *
+ * And only in the shape the platform documents for it: a flat `error`
+ * sentence beside the word, with no record of a run. A body that also reports
+ * steps, usage, a cost, a thread or a run's own failure envelope contradicts
+ * the word, and evidence of work outranks a word saying there was none — so
+ * such a body keeps the answer every other `503` to a change gets.
+ *
+ * Read from the answer alone, not from the route or the method: an error does
+ * not carry the path it answered. That is safe because the platform sends
+ * `draining` only on the calls that start an agent run, and this rule relies on
+ * it — the same trust {@link isTransient} already gives `contention` and
+ * `starting`, which are read from the answer too.
+ */
+export function pausedForUpdate(err: unknown): boolean {
+  if (!(err instanceof UnavailableError) || err.status !== 503) return false;
+  const body = err.body;
+  return (
+    record(body) &&
+    body.reason === 'draining' &&
+    typeof body.error === 'string' &&
+    !RUN_RECORD_FIELDS.some((field) => body[field] !== undefined && body[field] !== null)
+  );
+}
+
+/** Fields that record a run's work: present on a refusal, they say one ran. */
+const RUN_RECORD_FIELDS = ['steps', 'steps_taken', 'usage', 'cost_usd', 'thread_id', 'agent'];
+
+/**
+ * What to tell a model about a start refused during a platform update, with
+ * the wait the platform named. `resend` is the call to make once it is over.
+ *
+ * Said in as many words because the default reading of a `503` on a change is
+ * the opposite one — "it may have happened, look before you resend" — and a
+ * model told that goes looking for a run that was never started.
+ */
+export function pausedForUpdateAdvice(
+  retryAfterMs: number | undefined,
+  resend = 'send the same call again',
+): string {
+  // Anything that is not a usable wait — absent, NaN, infinite or negative — is
+  // said as no wait named, never as "NaN seconds".
+  const seconds =
+    retryAfterMs === undefined || !Number.isFinite(retryAfterMs) || retryAfterMs < 0
+      ? undefined
+      : Math.max(1, Math.ceil(retryAfterMs / 1000));
+  const wait =
+    seconds === undefined
+      ? 'after a short wait (the answer did not say how long)'
+      : `after ${seconds} second${seconds === 1 ? '' : 's'}, the Retry-After the platform named`;
+  return `the platform is updating and is not starting new agent runs for a few minutes. This was refused before anything started: NOTHING STARTED AND NOTHING WAS BILLED, so there is nothing to look for or clean up. ${resend.charAt(0).toUpperCase()}${resend.slice(1)} ${wait}`;
 }
 
 /**
@@ -1583,7 +1664,10 @@ export function errorForStatus(
  * - {@link RateLimitError} — a cadence, and the response usually says how long
  * - {@link UnavailableError} — something briefly out of reach, for a GET or
  *   HEAD only. Any change answered 503 may have happened, so it is not
- *   transient, whatever `reason` it carries
+ *   transient, whatever `reason` it carries — except `draining` at the top
+ *   level, a start the platform refused before it began while it updates
+ *   ({@link pausedForUpdate}, OPL-6094), which it documents as safe to send
+ *   again after its `Retry-After`
  * - {@link ConnectivityError} — the request never left
  *
  * That last line is now literally true, and it was not always. The class used
@@ -1675,6 +1759,8 @@ export function isTransient(err: unknown): boolean {
   // cannot say whether this request's change landed — a `contention` on a
   // create's 503 must not make the create look safe to replay. Anything but a
   // GET or HEAD, or a request whose method was not recorded, is not replayed.
+  // A start refused during a platform update is the one change whose outcome
+  // is known — nothing started — and outcomeUnknownOn503 says so (OPL-6094).
   if (err instanceof UnavailableError) return !outcomeUnknownOn503(err);
   // The platform's own word, ahead of the types below, because it is the more
   // specific answer and it is the one that tells the 409 that never clears from

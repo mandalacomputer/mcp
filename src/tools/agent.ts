@@ -9,6 +9,8 @@ import {
   creditsExhaustedAdvice,
   FUNDED_UNAVAILABLE,
   fundedUnavailableAdvice,
+  pausedForUpdate,
+  pausedForUpdateAdvice,
   platformSaid,
 } from '../errors.js';
 import { errorMetadata, failed, guarded, refused, said, withErrorMetadata } from '../format.js';
@@ -18,6 +20,7 @@ import type { Session } from '../session.js';
 import { safeResult } from './chat.js';
 import {
   keptThread,
+  PAUSED_FOR_UPDATE,
   STORE_WITH_THREAD,
   stopVerdict,
   storeArg,
@@ -32,8 +35,7 @@ export const RUN_AGENT_ANNOTATIONS = { openWorldHint: true } as const;
 const TITLE = 'Have the platform drive the computer';
 
 /** What both descriptions say after their first sentence about who pays. */
-const HOW =
-  'Use it to delegate a long stretch of pixel work; drive with the individual tools when you want to see each frame yourself. The computer must already be running. A run is MINUTES, not seconds: it reports progress on every step so a client that sends a progressToken and sets resetTimeoutOnProgress can hold the request open. A client that cannot hold one call open that long should use start_agent_run, which starts the same run in the background and answers at once, rather than watch its own timeout cancel a run it is already paying for. Unless it sent store: false, every run that acts or answers is kept in a thread, and the answer names its thread_id: send it back as thread_id to continue the conversation.';
+const HOW = `Use it to delegate a long stretch of pixel work; drive with the individual tools when you want to see each frame yourself. The computer must already be running. A run is MINUTES, not seconds: it reports progress on every step so a client that sends a progressToken and sets resetTimeoutOnProgress can hold the request open. A client that cannot hold one call open that long should use start_agent_run, which starts the same run in the background and answers at once, rather than watch its own timeout cancel a run it is already paying for. Unless it sent store: false, every run that acts or answers is kept in a thread, and the answer names its thread_id: send it back as thread_id to continue the conversation. ${PAUSED_FOR_UPDATE}`;
 
 const TASK =
   'Give the computer a task in plain language and let the platform drive it — screenshot, decide, click, type, repeat — until it is done.';
@@ -337,7 +339,7 @@ function runAgent(
         }
       }
     } catch (err) {
-      // Refused before the stream opened: see preRunRefusal for the two worded here.
+      // Refused before the stream opened: see preRunRefusal for the three worded here.
       const refusal = preRunRefusal(err, session, 'run_agent');
       if (refusal) return refusal;
       throw err;
@@ -388,10 +390,12 @@ function runAgent(
  * A refusal answered before any run started, worded here where the shared
  * advice would word it wrong, or `undefined` to let the caller rethrow it.
  *
- * Two refusals: a run on credits the account cannot cover (a 402 naming a
- * top-up page, which that advice would call a plan limit), and a run on
- * credits the platform's AI service cannot serve (which it would call a change
- * that may or may not have happened). Shared by every tool that starts a run.
+ * Three refusals: a start refused while the platform updates (a 503 that
+ * started nothing, which a tool would otherwise call a run that may have
+ * started), a run on credits the account cannot cover (a 402 naming a top-up
+ * page, which that advice would call a plan limit), and a run on credits the
+ * platform's AI service cannot serve (which it would call a change that may or
+ * may not have happened). Shared by every tool that starts a run.
  */
 export function preRunRefusal(
   err: unknown,
@@ -399,6 +403,14 @@ export function preRunRefusal(
   tool: string,
 ): CallToolResult | undefined {
   if (!(err instanceof APIError)) return undefined;
+  // First: its body is the platform's own and names no top-up page, but on a
+  // run credits pay for it must not read as their AI service failing either.
+  if (pausedForUpdate(err))
+    return failed(
+      err,
+      true,
+      pausedForUpdateAdvice(err.retryAfterMs, `call ${tool} again with the same arguments`),
+    );
   const topUp = topUpUrl(err.status, err.body, session.api.baseUrl);
   if (topUp) {
     const result = failed(err, true, creditsExhaustedAdvice(topUp, tool));

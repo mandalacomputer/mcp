@@ -7,6 +7,8 @@ import {
   OriginTLSError,
   OriginUnreachableError,
   outcomeUnknownOn503,
+  pausedForUpdate,
+  pausedForUpdateAdvice,
   platformSaid,
   reasonAdvice,
   reasonKind,
@@ -188,9 +190,13 @@ export function apiErrorMessage(error: APIError): string {
  * Two answers, told apart by the request's method, and the same split
  * isTransient makes: a GET or HEAD can be sent again shortly; any change may
  * already have happened, so the current state is read first.
+ *
+ * And a third, ahead of both: a start refused while the platform updates,
+ * which started nothing and names its wait (OPL-6094).
  */
 export function unavailableAdvice(err: APIError): string | undefined {
   if (!(err instanceof UnavailableError)) return undefined;
+  if (pausedForUpdate(err)) return pausedForUpdateAdvice(err.retryAfterMs);
   return outcomeUnknownOn503(err)
     ? 'something this depends on could not answer right now, and THIS CHANGE MAY OR MAY NOT HAVE HAPPENED: a failure after the request was sent is answered the same way. Read the current state before sending it again — repeating a create, a command, a clone or a snapshot blind can do it twice'
     : 'something this depends on could not answer right now; the same request can be sent again shortly';
@@ -241,7 +247,9 @@ export function failed(
   // A 503 answered to a change is the one status whose advice outranks the
   // platform's word: the change may or may not have happened, and a reason
   // saying "worth sending again" would invite the blind replay of a create or a
-  // command that the platform's own docs warn against (OPL-5026).
+  // command that the platform's own docs warn against (OPL-5026). The one 503
+  // whose word does decide it is `draining`, a start refused before it began
+  // while the platform updates, and unavailableAdvice reads it first (OPL-6094).
   //
   // A code the platform documents comes ahead of the status (OPL-5975): it is
   // the more specific answer, and the status's own sentence is wrong for some
