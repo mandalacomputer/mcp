@@ -53,16 +53,19 @@ const DRAINING = {
 
 /**
  * Answer every request that starts a run with this status, body and headers,
- * recording it; anything else goes to the fake platform as usual.
+ * recording it; anything else goes to the fake platform as usual, the
+ * `list_agent_runs` GET on the same path included.
  */
 function startsAnswer(status: number, body: unknown, headers: Record<string, string> = {}) {
   let starts = 0;
   globalThis.fetch = (async (...args: Parameters<typeof fetch>) => {
     const url = new URL(String(args[0] instanceof Request ? args[0].url : args[0]));
+    const method = (args[0] instanceof Request ? args[0].method : args[1]?.method) ?? 'GET';
     const starting =
-      url.pathname.endsWith('/agent') ||
-      url.pathname.endsWith('/agent/runs') ||
-      url.pathname.endsWith('/chat/completions');
+      method.toUpperCase() === 'POST' &&
+      (url.pathname.endsWith('/agent') ||
+        url.pathname.endsWith('/agent/runs') ||
+        url.pathname.endsWith('/chat/completions'));
     if (!starting) return recording(...args);
     starts += 1;
     await recording(...args);

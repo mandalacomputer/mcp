@@ -339,7 +339,7 @@ function runAgent(
         }
       }
     } catch (err) {
-      // Refused before the stream opened: see preRunRefusal for the two worded here.
+      // Refused before the stream opened: see preRunRefusal for the three worded here.
       const refusal = preRunRefusal(err, session, 'run_agent');
       if (refusal) return refusal;
       throw err;

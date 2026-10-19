@@ -99,8 +99,7 @@ export class APIError extends MandalaError {
  * from the other, which is what makes an unknown word fall through to the type
  * answer instead of reading as permanent. Mirrors `_REASON_CLEARS` and
  * `_REASON_PERMANENT` in mandala-computer-python's `_exceptions.py`.
- */
-/**
+ *
  * NOT `draining`, a start refused while the platform updates (OPL-6094), and
  * on purpose, as in both SDKs. These two clear a 400 or a 409; that one is
  * read on a `503` alone, where every other answer to a change is an outcome
