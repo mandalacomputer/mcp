@@ -101,12 +101,13 @@ export class APIError extends MandalaError {
  * `_REASON_PERMANENT` in mandala-computer-python's `_exceptions.py`.
  */
 /**
- * `draining` is a start refused while the platform updates (OPL-6094), on a
- * `503`: waiting is what clears it. Its own status answers {@link isTransient}
- * through {@link pausedForUpdate}; listed here so the word reads as one that
- * clears, the way the platform documents it.
+ * NOT `draining`, a start refused while the platform updates (OPL-6094), and
+ * on purpose, as in both SDKs. These two clear a 400 or a 409; that one is
+ * read on a `503` alone, where every other answer to a change is an outcome
+ * nobody knows, so it is a rule of its own — {@link pausedForUpdate} — rather
+ * than a third word here, which would also make a 409 carrying it transient.
  */
-const REASON_CLEARS: ReadonlySet<string> = new Set(['contention', 'starting', 'draining']);
+const REASON_CLEARS: ReadonlySet<string> = new Set(['contention', 'starting']);
 /**
  * `revoked` is the first of these about the CALLER rather than about a computer:
  * the authority the request arrived with no longer holds — suspended, demoted,

@@ -27,8 +27,8 @@ are wording changes, and they are behaviour changes in the way that matters.
   and this server still resends nothing itself.
 - **`isTransient` is true for that refusal.** It is the one change answered
   `503` that the exported `isTransient` calls worth sending again unchanged, and
-  only with `reason: "draining"` at the top level of the body. `reasonKind`
-  calls `draining` a word that `clears`.
+  only with `reason: "draining"` at the top level of the body. The rule covers
+  only the `503`: `reasonKind` does not classify `draining`.
 
 ## [0.16.0] — 2026-10-18
 

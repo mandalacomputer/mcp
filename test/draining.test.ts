@@ -248,7 +248,18 @@ describe('the classification under the wording', () => {
     expect(isTransient(post({ error: { message: 'x', reason: 'draining' } }))).toBe(false);
     expect(isTransient(post(DRAINING, 500))).toBe(false);
     expect(isTransientForPoll(post(DRAINING))).toBe(true);
-    expect(reasonKind('draining')).toBe('clears');
+  });
+
+  it('is a rule about a 503, not a word that clears a 409', () => {
+    // As in both SDKs: the word is read on its status, and a 409 carrying it
+    // is as unclassified as it was.
+    expect(reasonKind('draining')).toBeUndefined();
+    for (const status of [400, 409]) {
+      const refusal = errorForStatus(status, 'x', DRAINING, undefined, { method: 'POST' });
+      expect(isTransient(refusal), String(status)).toBe(false);
+      expect(isTransientForPoll(refusal), String(status)).toBe(false);
+      expect(pausedForUpdate(refusal), String(status)).toBe(false);
+    }
   });
 
   it('says so through the shared refusal, for any tool that meets it', () => {
