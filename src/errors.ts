@@ -1072,6 +1072,12 @@ export function outcomeUnknownOn503(err: unknown): boolean {
  * steps, usage, a cost, a thread or a run's own failure envelope contradicts
  * the word, and evidence of work outranks a word saying there was none — so
  * such a body keeps the answer every other `503` to a change gets.
+ *
+ * Read from the answer alone, not from the route or the method: an error does
+ * not carry the path it answered. That is safe because the platform sends
+ * `draining` only on the calls that start an agent run, and this rule relies on
+ * it — the same trust {@link isTransient} already gives `contention` and
+ * `starting`, which are read from the answer too.
  */
 export function pausedForUpdate(err: unknown): boolean {
   if (!(err instanceof UnavailableError) || err.status !== 503) return false;
@@ -1099,8 +1105,12 @@ export function pausedForUpdateAdvice(
   retryAfterMs: number | undefined,
   resend = 'send the same call again',
 ): string {
+  // Anything that is not a usable wait — absent, NaN, infinite or negative — is
+  // said as no wait named, never as "NaN seconds".
   const seconds =
-    retryAfterMs === undefined ? undefined : Math.max(1, Math.ceil(retryAfterMs / 1000));
+    retryAfterMs === undefined || !Number.isFinite(retryAfterMs) || retryAfterMs < 0
+      ? undefined
+      : Math.max(1, Math.ceil(retryAfterMs / 1000));
   const wait =
     seconds === undefined
       ? 'after a short wait (the answer did not say how long)'

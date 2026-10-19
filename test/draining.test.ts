@@ -333,6 +333,10 @@ describe('the classification under the wording', () => {
     expect(pausedForUpdateAdvice(1_500)).toContain('after 2 seconds');
     expect(pausedForUpdateAdvice(0)).toContain('after 1 second,');
     expect(pausedForUpdateAdvice(undefined)).toContain('after a short wait');
+    for (const unusable of [Number.NaN, Number.POSITIVE_INFINITY, -1]) {
+      expect(pausedForUpdateAdvice(unusable)).toContain('after a short wait');
+      expect(pausedForUpdateAdvice(unusable)).not.toContain('NaN');
+    }
   });
 });
 
