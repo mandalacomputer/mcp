@@ -13,6 +13,8 @@ import {
   reasonAdvice,
   reasonKind,
   statusAdvice,
+  trialUnavailable,
+  trialUnavailableAdvice,
   UNCLASSIFIED_CONFLICT_ADVICE,
   UnavailableError,
   unclassifiedConflict,
@@ -192,11 +194,14 @@ export function apiErrorMessage(error: APIError): string {
  * already have happened, so the current state is read first.
  *
  * And a third, ahead of both: a start refused while the platform updates,
- * which started nothing and names its wait (OPL-6094).
+ * which started nothing and names its wait (OPL-6094); and a free trial's
+ * create, start or resume refused before it was sent (`TRIAL_FULL`,
+ * `TRIAL_UNAVAILABLE`), which did nothing either.
  */
 export function unavailableAdvice(err: APIError): string | undefined {
   if (!(err instanceof UnavailableError)) return undefined;
   if (pausedForUpdate(err)) return pausedForUpdateAdvice(err.retryAfterMs);
+  if (trialUnavailable(err)) return trialUnavailableAdvice(err);
   return outcomeUnknownOn503(err)
     ? 'something this depends on could not answer right now, and THIS CHANGE MAY OR MAY NOT HAVE HAPPENED: a failure after the request was sent is answered the same way. Read the current state before sending it again — repeating a create, a command, a clone or a snapshot blind can do it twice'
     : 'something this depends on could not answer right now; the same request can be sent again shortly';
