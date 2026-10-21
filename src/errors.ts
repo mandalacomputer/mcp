@@ -322,8 +322,10 @@ export function codeAdvice(err: APIError): string | undefined {
     case 'TRIAL_CREATE_PENDING':
       // The earlier create can be absent from list_computers while it is under
       // way (the platform refuses on it before it is listed), so the recovery
-      // is to poll for it, not to wait on a computer nobody has an id for.
-      return 'this trial\u2019s earlier create is still under way, and a trial makes one computer at a time. This call created nothing. Do not create another. The computer being made may not be listed yet: call list_computers every few seconds until it appears, then wait_for_computer with its computer_id. If it has not appeared after a minute, create_computer can be sent again — while that earlier create is still under way it is refused the same way, so it cannot make a second computer';
+      // is to poll for it, not to wait on a computer nobody has an id for. And
+      // never a timed resend (Codex round 2): the earlier create can finish
+      // in between, and a fresh create would then be a second computer.
+      return 'this trial\u2019s earlier create is still under way, and a trial makes one computer at a time. This call created nothing. Do not create another. The computer being made may not be listed yet: call list_computers every few seconds until it appears, then wait_for_computer with its computer_id. Never create again on a timer: the earlier create can finish just before a resend, which would then make a second computer and spend another launch. If the computer does not appear, look for the earlier create in list_operations, and if neither shows it, tell the user its outcome is not known yet';
     case 'WORKSPACE_MOVING':
       // The word decides, as it does in isTransient: `unsupported` is the
       // stuck change, which a step clears. Otherwise "send it again" is said

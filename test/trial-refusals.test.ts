@@ -153,7 +153,9 @@ describe('what a trial is not allowed', () => {
     expect(said).toContain('may not be listed yet');
     expect(said).toContain('list_computers every few seconds until it appears');
     expect(said).toContain('wait_for_computer with its computer_id');
-    expect(said).toContain('cannot make a second computer');
+    expect(said).toContain('Never create again on a timer');
+    expect(said).toContain('list_operations');
+    expect(said).not.toMatch(/create_computer can be sent again/);
   });
 
   it('a code on another status keeps that status’s own advice', () => {

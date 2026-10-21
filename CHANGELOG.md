@@ -28,7 +28,7 @@ are wording changes, and they are behaviour changes in the way that matters.
   `TRIAL_CREATE_PENDING`, each get their own sentence instead of the general
   plan or unclassified-conflict one. `TRIAL_CREATE_PENDING` says to poll
   `list_computers` for the computer being made, which may not be listed yet,
-  rather than to create another.
+  rather than to create another, and never to resend the create on a timer.
 
 ## [0.17.0] — 2026-10-19
 
