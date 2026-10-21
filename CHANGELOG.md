@@ -26,7 +26,9 @@ are wording changes, and they are behaviour changes in the way that matters.
   `isTransient` is unchanged for both. The `402`s `TRIAL_LIMIT`,
   `TRIAL_CREATES_USED` and `PLAN_REQUIRED`, and the `409`
   `TRIAL_CREATE_PENDING`, each get their own sentence instead of the general
-  plan or unclassified-conflict one.
+  plan or unclassified-conflict one. `TRIAL_CREATE_PENDING` says to poll
+  `list_computers` for the computer being made, which may not be listed yet,
+  rather than to create another.
 
 ## [0.17.0] — 2026-10-19
 

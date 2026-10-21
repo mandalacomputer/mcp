@@ -148,6 +148,14 @@ describe('what a trial is not allowed', () => {
     expect(unclassifiedConflict(err)).toBe(false);
   });
 
+  it('TRIAL_CREATE_PENDING says to poll for a computer that may not be listed yet', () => {
+    const said = textOf(failed(post(409, { error: 'x', code: 'TRIAL_CREATE_PENDING' })));
+    expect(said).toContain('may not be listed yet');
+    expect(said).toContain('list_computers every few seconds until it appears');
+    expect(said).toContain('wait_for_computer with its computer_id');
+    expect(said).toContain('cannot make a second computer');
+  });
+
   it('a code on another status keeps that status’s own advice', () => {
     const said = textOf(failed(post(403, { error: 'x', code: 'TRIAL_LIMIT' })));
     expect(said).not.toContain('the trial does not include this');
