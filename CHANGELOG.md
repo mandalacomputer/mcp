@@ -14,6 +14,22 @@ are wording changes, and they are behaviour changes in the way that matters.
 
 ## [Unreleased]
 
+### Changed
+
+- **A free trial's refusals say what happened and what to do.** On a trial
+  account the platform answers a create, start or resume with a `503` carrying
+  `code: "TRIAL_FULL"` (every trial slot in use, with a `Retry-After`) or
+  `"TRIAL_UNAVAILABLE"` (trials paused), decided before anything is sent. These
+  were answered as a change that may or may not have happened; they now say
+  nothing happened and nothing was used up, give the wait for `TRIAL_FULL`, and
+  on a keyed tool say the same `idempotency_key` is safe to send again.
+  `isTransient` is unchanged for both. The `402`s `TRIAL_LIMIT`,
+  `TRIAL_CREATES_USED` and `PLAN_REQUIRED`, and the `409`
+  `TRIAL_CREATE_PENDING`, each get their own sentence instead of the general
+  plan or unclassified-conflict one. `TRIAL_CREATE_PENDING` says to poll
+  `list_computers` for the computer being made, which may not be listed yet,
+  rather than to create another, and never to resend the create on a timer.
+
 ## [0.17.0] — 2026-10-19
 
 ### Changed

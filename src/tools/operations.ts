@@ -10,6 +10,7 @@ import {
   platformAnsweredFailure,
   resendAfterSpentKey,
   resendUnseenByRead,
+  trialUnavailable,
 } from '../errors.js';
 import { failed, guarded, operationIdOf, refused, said, unavailableAdvice } from '../format.js';
 import * as P from '../paths.js';
@@ -134,8 +135,11 @@ export function keyedFailure(
   // one answer, and the read-first one names no key, which is the resend that
   // could do it twice (OPL-5437). Only that sentence is replaced; any other
   // 5xx keeps the platform's own word.
+  // A free trial's refusal says itself that nothing happened and when to send
+  // it again, so it keeps its own sentence (OPL-6134).
+  const trial = trialUnavailable(err);
   const result =
-    unsentRefusal && unavailableAdvice(err as APIError) !== undefined
+    unsentRefusal && !trial && unavailableAdvice(err as APIError) !== undefined
       ? failed(err, advice === undefined, UNSENT_REFUSAL_ADVICE)
       : failed(err, advice === undefined);
   const [first, ...rest] = result.content;
@@ -144,6 +148,8 @@ export function keyedFailure(
   if (advice) text += `\n\nAbout its idempotency_key: ${advice}.`;
   if (keyedOutcomeUnknown(err)) {
     text += `\n\nTo retry without risking a second ${what}, call ${tool} again with idempotency_key "${key}".`;
+  } else if (unsentRefusal && trial) {
+    text += `\n\nNothing was sent, so idempotency_key "${key}" was released: if you call ${tool} again, send the SAME idempotency_key.`;
   } else if (unsentRefusal) {
     text +=
       `\n\nThe platform answered this itself and named no operation, so nothing may have been done: an answer like this is usually a refusal given before the call was sent anywhere, which releases idempotency_key "${key}". ` +

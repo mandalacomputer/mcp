@@ -313,6 +313,19 @@ export function codeAdvice(err: APIError): string | undefined {
       return 'the platform has turned public URLs off for this computer or this account. It is not a role, a credential or anything wrong with the computer, and neither retrying nor waiting changes it: say so to the user, who can contact support if they think it is a mistake';
     case 'PUBLIC_URLS_DISABLED':
       return 'public URLs are not enabled here at all. This is not a missing computer or URL, and waiting does not change it: say that public URLs are unavailable';
+    case 'TRIAL_LIMIT':
+      return 'this account is on a free trial, and the trial does not include this; the sentence says what. Nothing was done, and neither retrying nor waiting changes it: stay within what the trial includes, or say that a plan is needed for this';
+    case 'TRIAL_CREATES_USED':
+      return 'this trial has launched every computer it can, and deleting one does not give a launch back. Nothing was created, and waiting does not change it: use the computer the trial already has (list_computers), or say that a plan is needed to launch another';
+    case 'PLAN_REQUIRED':
+      return 'this account has no plan that covers this: a trial whose time is over, or no plan at all. Nothing was done, and neither retrying nor waiting changes it: say that a plan is needed';
+    case 'TRIAL_CREATE_PENDING':
+      // The earlier create can be absent from list_computers while it is under
+      // way (the platform refuses on it before it is listed), so the recovery
+      // is to poll for it, not to wait on a computer nobody has an id for. And
+      // never a timed resend (Codex round 2): the earlier create can finish
+      // in between, and a fresh create would then be a second computer.
+      return 'this trial\u2019s earlier create is still under way, and a trial makes one computer at a time. This call created nothing. Do not create another. The computer being made may not be listed yet: call list_computers every few seconds until it appears, then wait_for_computer with its computer_id. Never create again on a timer: the earlier create can finish just before a resend, which would then make a second computer and spend another launch. If the computer does not appear, look for the earlier create in list_operations, and if neither shows it, tell the user its outcome is not known yet';
     case 'WORKSPACE_MOVING':
       // The word decides, as it does in isTransient: `unsupported` is the
       // stuck change, which a step clears. Otherwise "send it again" is said
@@ -334,6 +347,10 @@ const CODE_STATUS: Readonly<Record<string, number>> = {
   PUBLIC_URLS_BLOCKED: 403,
   PUBLIC_URLS_DISABLED: 404,
   WORKSPACE_MOVING: 409,
+  TRIAL_LIMIT: 402,
+  TRIAL_CREATES_USED: 402,
+  PLAN_REQUIRED: 402,
+  TRIAL_CREATE_PENDING: 409,
 };
 
 /**
@@ -1090,6 +1107,54 @@ export function pausedForUpdate(err: unknown): boolean {
   );
 }
 
+/**
+ * Whether this is a free trial's create, start or resume refused before it
+ * was sent anywhere: a `503` whose top-level `code` is `TRIAL_FULL` (every
+ * trial slot is in use; it names a `Retry-After`) or `TRIAL_UNAVAILABLE`
+ * (trials are paused on the platform). The platform decides both before the
+ * request leaves it, so nothing happened and nothing was used up — unlike
+ * every other `503` answered to a change, whose outcome is unknown.
+ *
+ * Read in the shape the platform sends it, a flat `error` sentence beside the
+ * code and no `operation_id`, as {@link pausedForUpdate} reads its word. {@link isTransient} is not
+ * changed by it: the SDKs read these the same way, and only one of the two
+ * clears in seconds.
+ */
+export function trialUnavailable(err: unknown): err is UnavailableError {
+  if (!(err instanceof UnavailableError) || err.status !== 503) return false;
+  const body = err.body;
+  return (
+    record(body) &&
+    (body.code === 'TRIAL_FULL' || body.code === 'TRIAL_UNAVAILABLE') &&
+    typeof body.error === 'string' &&
+    // An answer that names an operation is evidence something was sent, which
+    // outranks the code (Codex round 3): it keeps the reconcile-first answer.
+    (body.operation_id === undefined || body.operation_id === null)
+  );
+}
+
+/** What to tell a model about a {@link trialUnavailable} refusal. */
+export function trialUnavailableAdvice(err: UnavailableError): string {
+  const nothing =
+    'This was refused before it was sent anywhere: NOTHING HAPPENED AND NOTHING WAS USED UP, so there is nothing to look for or clean up';
+  if (err.code === 'TRIAL_UNAVAILABLE')
+    return `trials are paused on the platform right now. ${nothing}. It does not clear in seconds: say so to the user, who can try again later or choose a plan`;
+  return `every free-trial slot is in use right now. ${nothing}. Send the same call again ${retryWait(err.retryAfterMs)}`;
+}
+
+/** "after N seconds", from a Retry-After, or a short wait where none is usable. */
+function retryWait(retryAfterMs: number | undefined): string {
+  // Anything that is not a usable wait — absent, NaN, infinite or negative — is
+  // said as no wait named, never as "NaN seconds".
+  const seconds =
+    retryAfterMs === undefined || !Number.isFinite(retryAfterMs) || retryAfterMs < 0
+      ? undefined
+      : Math.max(1, Math.ceil(retryAfterMs / 1000));
+  return seconds === undefined
+    ? 'after a short wait (the answer did not say how long)'
+    : `after ${seconds} second${seconds === 1 ? '' : 's'}, the Retry-After the platform named`;
+}
+
 /** Fields that record a run's work: present on a refusal, they say one ran. */
 const RUN_RECORD_FIELDS = ['steps', 'steps_taken', 'usage', 'cost_usd', 'thread_id', 'agent'];
 
@@ -1105,16 +1170,7 @@ export function pausedForUpdateAdvice(
   retryAfterMs: number | undefined,
   resend = 'send the same call again',
 ): string {
-  // Anything that is not a usable wait — absent, NaN, infinite or negative — is
-  // said as no wait named, never as "NaN seconds".
-  const seconds =
-    retryAfterMs === undefined || !Number.isFinite(retryAfterMs) || retryAfterMs < 0
-      ? undefined
-      : Math.max(1, Math.ceil(retryAfterMs / 1000));
-  const wait =
-    seconds === undefined
-      ? 'after a short wait (the answer did not say how long)'
-      : `after ${seconds} second${seconds === 1 ? '' : 's'}, the Retry-After the platform named`;
+  const wait = retryWait(retryAfterMs);
   return `the platform is updating and is not starting new agent runs for a few minutes. This was refused before anything started: NOTHING STARTED AND NOTHING WAS BILLED, so there is nothing to look for or clean up. ${resend.charAt(0).toUpperCase()}${resend.slice(1)} ${wait}`;
 }
 
