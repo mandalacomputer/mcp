@@ -1116,7 +1116,7 @@ export function pausedForUpdate(err: unknown): boolean {
  * every other `503` answered to a change, whose outcome is unknown.
  *
  * Read in the shape the platform sends it, a flat `error` sentence beside the
- * code, as {@link pausedForUpdate} reads its word. {@link isTransient} is not
+ * code and no `operation_id`, as {@link pausedForUpdate} reads its word. {@link isTransient} is not
  * changed by it: the SDKs read these the same way, and only one of the two
  * clears in seconds.
  */
@@ -1126,7 +1126,10 @@ export function trialUnavailable(err: unknown): err is UnavailableError {
   return (
     record(body) &&
     (body.code === 'TRIAL_FULL' || body.code === 'TRIAL_UNAVAILABLE') &&
-    typeof body.error === 'string'
+    typeof body.error === 'string' &&
+    // An answer that names an operation is evidence something was sent, which
+    // outranks the code (Codex round 3): it keeps the reconcile-first answer.
+    (body.operation_id === undefined || body.operation_id === null)
   );
 }
 

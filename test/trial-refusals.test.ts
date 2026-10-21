@@ -104,6 +104,18 @@ describe('a trial refused before anything was sent', () => {
     expect(said).not.toContain('after a short wait on a busy');
   });
 
+  it('a refusal that names an operation keeps only the reconcile-first answer', async () => {
+    postsAnswer('/computers', 503, { ...FULL, operation_id: 'op_1' }, { 'Retry-After': '60' });
+    const { call } = await open();
+    const said = textOf(await call('create_computer', { idempotency_key: 'trial-key-2' }));
+    expect(trialUnavailable(post(503, { ...FULL, operation_id: 'op_1' }))).toBe(false);
+    expect(said).not.toContain(NOTHING);
+    expect(said).not.toContain('every free-trial slot is in use');
+    expect(said).not.toContain('send the SAME idempotency_key');
+    expect(said).toContain('MAY OR MAY NOT HAVE HAPPENED');
+    expect(said).toContain('whether it took effect is unknown');
+  });
+
   it('only in the shape the platform sends: anything else keeps the unknown outcome', () => {
     for (const body of [
       { error: { message: 'x' }, code: 'TRIAL_FULL' },
