@@ -1165,7 +1165,7 @@ export const PUBLIC_URL_RESERVED_PORT = 22;
  * change, and its 400 says which rule a label broke. It is trimmed, the way the
  * platform reads it. Undefined fields are dropped: on an update that is what
  * "leave it as it is" means, and on a create it is what lets the platform pick
- * a label and default the access to public.
+ * a label and default access to public on paid plans, private on trials.
  */
 export function publicUrlBody(args: {
   port?: number;

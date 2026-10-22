@@ -79,7 +79,7 @@ const filteredInstructions = `Mandala Computer gives you access to a Linux deskt
 
 This session exposes a filtered set of tools. Use only the tools in its tool list; some desktop workflows may be unavailable. Pass computer_id explicitly on computer-specific calls unless a computer was already bound to this session. A running VM does not imply that its guest desktop is ready.
 
-Read each available tool's description before calling it. Read-only access follows the tool's readOnlyHint annotation: a read that can resume or bill a computer is not read-only. A running computer still costs money, and passive observation does not prevent idle suspension.
+Read each available tool's description before calling it. Read-only access follows the tool's readOnlyHint annotation: a read that can resume a computer is not read-only. A running computer consumes running capacity, and passive observation does not prevent idle suspension.
 
 Who you are is checked again while a call is in flight. A 401 or 403 means the credential or role stopped being accepted; a 402 means the current plan refuses the work. Do not resend these calls. Inspect any completed work attached before deciding what remains. A 409 may describe either a temporary condition or a decision that will not change on retry; read its message, and treat one that does not say it will clear as one that will not. A 400 never clears.`;
 

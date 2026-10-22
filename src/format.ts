@@ -529,7 +529,7 @@ export function secretsOnTheirWay(c: Computer): boolean {
 /**
  * A create or a clone can answer `{computer, start_error}` rather than a bare
  * computer: the guest was made and then would not boot, so the machine exists
- * and is billable and the caller needs its id. Flattened here, as the SDK
+ * and consumes resources and the caller needs its id. Flattened here, as the SDK
  * flattens it, so every reader of a computer sees the same shape and the
  * failure travels beside the fields rather than wrapping them.
  */
@@ -562,7 +562,7 @@ export function unwrapComputer(body: unknown): Computer {
     // The outer value wins, but only when there is one. Writing it
     // unconditionally would take a `start_error` the platform had nested with
     // the computer and replace it with nothing — discarding the reason a
-    // billable machine did not boot, in the function that exists to surface it.
+    // machine did not boot, in the function that exists to surface it.
     const nested = inner as Computer;
     // `operation_id` the same way (platform OPL-5055): on a create that would
     // not boot it is on the envelope, beside `start_error`.

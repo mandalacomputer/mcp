@@ -91,7 +91,7 @@ HTTP server never reads it, and its tools are unchanged.
 
 The skill — [`plugin/skills/mandala-computer/SKILL.md`](plugin/skills/mandala-computer/SKILL.md)
 — is the part the tools cannot say for themselves: when a cloud desktop is the
-right answer at all, that it costs money until it is suspended or stopped, that
+right answer at all, that it consumes running capacity until suspended or stopped, that
 `run_agent` is usually the right level and a screenshot per click is not, and
 which refusals are worth a second try. It is a description of *when and how*,
 not a second client; once the server is installed it stays out of the way.
@@ -273,9 +273,12 @@ but not add or remove them.
 **Showing an app on the internet** — `list_public_urls`, `create_public_url`,
 `update_public_url`, `delete_public_url`. A port inside a computer served at
 `https://<label>.<base_domain>` (the domain is in the `list_public_urls`
-answer, e.g. `mandala.dev`), on 443 with no port in the address. **Public by
-default: anyone with the link can open it**; `access: "private"` requires an API
-key of this account as `Authorization: Bearer`, which never reaches the app. The
+answer, e.g. `mandala.dev`), on 443 with no port in the address. **Omitted access
+defaults to public on paid plans and private on trials.** Public means anyone
+with the link can open it; trials requesting public receive
+`402 PUBLIC_ACCESS_REQUIRES_PLAN`. Private URLs accept an account API key as
+`Authorization: Bearer` (workspace-scoped keys must match the computer's workspace),
+or browser sign-in through the dashboard's Open button. The key never reaches the app. The
 app must listen on `0.0.0.0`, not `127.0.0.1`. Labels that read as the
 platform's or another company's address are refused. A deleted URL's label stays
 with the account: no other account can ever take it, and the account may use it
@@ -359,7 +362,7 @@ Set `MANDALA_READ_ONLY=1` to register only tools whose existing
 `on` for on and `0`, `false`, `no`, `off`, empty or unset for off, ignoring
 surrounding whitespace and letter case. Any other value fails at startup.
 Safety is not inferred from a tool's name or HTTP method: `read_file` and
-`cursor_position` can wake and bill a computer, so they are withheld. So are
+`cursor_position` can wake a computer and consume running capacity, so they are withheld. So are
 mixed read/write tools such as `wait_for_computer` and `snapshot_schedule`.
 `screenshot`, `read_clipboard` and `list_windows` retain their read-only hints.
 
@@ -580,21 +583,23 @@ The tool prints unknown and advisory guidance before the projected public fields
 plan; where this README mentions Windows it is describing behaviour the client
 already supports for when they are.
 
-**A running computer costs money, and a forgotten one keeps costing it.**
+**Running computers consume running capacity until suspended or stopped.**
+Runtime and individual exec calls do not add a charge to the monthly subscription;
+AI-credit usage is charged separately.
 `create_computer` says so in its own description, and so does everything that
 starts a machine by a side door — `restore_snapshot` boots a stopped computer,
 and `write_clipboard`, `read_file` and `cursor_position` each resume a suspended
 one, because each has to reach the guest agent to do its job. All of them are
-charged like any other start, and on a plan at its limit can come back 402
+subject to running-capacity limits, and on a plan at its limit can come back 402
 rather than a result. The two reads are the surprising half of that list, and
 are why neither is annotated `readOnlyHint`: a host that auto-approves
-read-only tools would otherwise wake and bill a machine with nobody asked.
+read-only tools would otherwise wake a machine and consume running capacity with nobody asked.
 `screenshot`, `read_clipboard` and `list_windows` genuinely do not start
 anything and keep the hint. When a stretch of work is over, `suspend_computer` (a pause:
 `start_computer` brings the same session back in about a second) or
 `stop_computer` (a shutdown: the disk is kept, the session is not). Idle
 suspend catches the ones a model forgets, but only after 30 minutes untouched.
-`get_usage` is what says what any of it cost.
+`get_usage` reports the resources used over time, not an invoice amount.
 
 **Some defaults here differ from the SDKs', on purpose.** `screenshot`'s
 `fresh` defaults to true (the SDKs default to false), because after a click a
@@ -809,8 +814,8 @@ account. Only automatic snapshots are ever aged out, so taking one with
 `create_snapshot` is how a model keeps something past it.
 
 **A usage total that is short does not look short.** `get_usage` answers what
-the account has spent — the read to make before and after a batch of computers,
-and the one to make when somebody asks what anything cost. Every figure in it is
+the account has used — read it before and after a batch to monitor resources.
+It reports usage, not a monetary cost. Every figure in it is
 a sum across the hypervisors the account's computers are on, so a host that could
 not be reached does not leave a gap: it leaves a total that is quietly too small.
 The answer says so in its FIRST line when that has happened, ahead of the
@@ -1036,7 +1041,7 @@ way a computer that has gone is ever shown — and an empty answer to a filtered
 listing is a fact about the filter rather than about the account, which is what
 it says rather than inviting you to create one.
 
-**Snapshots mid-deletion are billed but hidden.** A deletion that began and did
+**Snapshots mid-deletion still count against storage but are hidden.** A deletion that began and did
 not finish still holds objects and still counts against storage, and the default
 listing leaves it out — every ordinary caller is asking "what can I restore".
 `list_snapshots(include_unfinished: true)` is the flag for when the question is
@@ -1742,7 +1747,9 @@ change to the platform's route table, not a wider pass-through here.
 The platform allowlists every route `/api/v1` will answer and 404s the rest.
 `test/allowlist.ts` mirrors that table, and the tests assert two things: that
 every successful exercised call lands on an allowlisted route, and that no
-mirrored operation remains unexercised (`UNIMPLEMENTED` is empty). Tool names
+non-excluded mirrored operation remains unexercised. `UNIMPLEMENTED` in
+`test/allowlist.ts` documents the five intentional exclusions: API-key creation
+and deletion, and browser-connection creation, renewal and deletion. Tool names
 and exercise entries must match in both directions, and every tool must make
 an observed HTTP request during its callback. The independent public gate also
 detects a new published operation when the mirror has not yet been updated.
@@ -1793,7 +1800,7 @@ Please report anything security-sensitive privately — see
 
 `write_file_chunk`, `get_file_upload`, and `cancel_file_upload` expose Linux resumable uploads up to 2 GiB. Each tool write carries at most 256 KiB of decoded base64 to bound model-context transfers; prefer the SDK or CLI for large local datasets. Retain a fresh random 32-character lowercase hexadecimal `upload_id`, destination `path`, total `size`, and unchanged source. Send chunks at the confirmed `offset`. After any error, read status before retrying. The final chunk publishes atomically; `overwrite: false` refuses an occupied destination.
 
-Cancel removes only staging and the completion receipt, never the published destination. Staging consumes guest disk until cancelled and has no automatic expiry. These tools may resume a computer and incur running charges unless `no_wake` is set; they are included in the `files` tool group and excluded from read-only mode. They require Linux with Python 3 and an updated host. Existing `write_file` behavior is unchanged.
+Cancel removes only staging and the completion receipt, never the published destination. Staging consumes guest disk until cancelled and has no automatic expiry. These tools may resume a computer and consume running capacity unless `no_wake` is set; they are included in the `files` tool group and excluded from read-only mode. They require Linux with Python 3 and an updated host. Existing `write_file` behavior is unchanged.
 
 ## Licence
 

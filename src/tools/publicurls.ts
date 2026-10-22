@@ -45,8 +45,8 @@ const accessArg = (on: 'create' | 'update') =>
     .enum(['public', 'private'])
     .describe(
       on === 'create'
-        ? '`public` (the default): ANYONE WITH THE LINK can open it. `private`: only a request carrying an API key of this account as `Authorization: Bearer` can, and the key never reaches the app.'
-        : '`public`: anyone with the link can open it. `private`: only a request carrying an API key of this account as `Authorization: Bearer` can.',
+        ? '`public`: ANYONE WITH THE LINK can open it. Omitted access defaults to public on paid plans and private on trials; trials cannot request public access. `private`: an account API key as `Authorization: Bearer` (workspace-scoped keys must match the computer), or browser sign-in through the dashboard Open button. The key never reaches the app.'
+        : '`public`: anyone with the link can open it; unavailable on trials. `private`: an account API key as `Authorization: Bearer` (workspace-scoped keys must match the computer), or browser sign-in through the dashboard Open button.',
     );
 
 /** One public URL, checked: every field a sentence reads, or nothing. */
@@ -121,7 +121,7 @@ const reach = (u: PublicUrl): string =>
     ? `TURNED OFF BY THE PLATFORM: it answers 404 to everyone until the platform turns it back on (its access is set to ${u.access})`
     : u.access === 'public'
       ? 'PUBLIC: anyone with the link can open it'
-      : 'private: only requests with an API key of this account as `Authorization: Bearer` open it, and the key never reaches the app';
+      : 'private: an account API key as `Authorization: Bearer` (workspace-scoped keys must match the computer), or browser sign-in through the dashboard Open button, opens it; the key never reaches the app';
 
 /**
  * One URL in a line, for a listing. `past` is a URL beyond the computer's
@@ -150,7 +150,7 @@ const BROWSERS =
  * empty, `null` or non-JSON 2xx, a connection cut after the request went, a
  * cancellation. The platform may have done it, so the caller is sent to the
  * listing rather than told it failed: a create retried blind makes a second
- * URL open to anyone, and the first goes on answering, untracked (Codex, round
+ * URL, and the first may go on answering, untracked (Codex, round
  * 3 on #212). An HTTP refusal is not this, and keeps its own advice.
  */
 async function changed<T>(
@@ -171,7 +171,7 @@ export const registerPublicUrls: Registrar = (server, session) => {
     {
       title: 'List a computer’s public URLs',
       description:
-        'The public URLs of one computer, oldest first: each is `https://<label>.<base_domain>` serving a port inside the computer, public (anyone with the link) or private (an API key of this account). Also says whether they can answer here at all — `enabled` is false, with a reason, where public URLs are off or the account’s plan includes none, and the URLs are listed either way so you can delete them — and how many this computer may have. If the plan drops below the number a computer has, the oldest within the limit keep answering and the rest answer 404.',
+        'The public URLs of one computer, oldest first: each is `https://<label>.<base_domain>` serving a port inside the computer, public (anyone with the link) or private (an account API key (workspace-scoped keys must match the computer), or dashboard browser sign-in). Also says whether they can answer here at all — `enabled` is false, with a reason, where public URLs are off or the account’s plan includes none, and the URLs are listed either way so you can delete them — and how many this computer may have. If the plan drops below the number a computer has, the oldest within the limit keep answering and the rest answer 404.',
       inputSchema: z.object(idArg).strict(),
       annotations: { readOnlyHint: true },
     },
@@ -236,7 +236,7 @@ export const registerPublicUrls: Registrar = (server, session) => {
     {
       title: 'Serve a port on a public URL',
       description:
-        'Serve a port inside the computer at `https://<label>.<base_domain>` (e.g. `https://brave-otter-3f2a.mandala.dev`), on 443 with no port in the address. PUBLIC BY DEFAULT: anyone on the internet with the link can open it — pass access: "private" to require an API key of this account instead. The app must listen on 0.0.0.0:<port>, not 127.0.0.1. Without a label one is picked. A label is 3 to 40 letters, digits and hyphens, and the platform refuses names that read as its own or another company’s (www, login, brand names and their look-alikes) with a 400 that says why. Other refusals: 402 when the plan includes no public URLs; 403 PUBLIC_URLS_BLOCKED when the platform has turned public URLs off for this computer or account (not a role, and not something to retry — tell the user); 404 PUBLIC_URLS_DISABLED when public URLs are not enabled here at all (not a missing computer); 409 LABEL_TAKEN when the label is taken — a label is never given to a second account, so one another account has ever held, or one the platform has blocked, reads as taken — and 409 PUBLIC_URL_LIMIT when the computer has as many as its plan allows (Solo 2, Studio 5, Swarm 10); neither 409 clears by waiting. 429 after too many in a day, with Retry-After. Responses are marked noindex, cookies the app sets stay on its own host name, and a Mandala API key sent to a public URL never reaches the app. Not idempotent: a retry after a lost answer makes a second URL — list_public_urls first.',
+        'Serve a port inside the computer at `https://<label>.<base_domain>` (e.g. `https://brave-otter-3f2a.mandala.dev`), on 443 with no port in the address. Omitted access defaults to public on paid plans and private on trials. Public URLs are open to anyone with the link; trials cannot request public access. Pass access: "private" to require an account API key (workspace-scoped keys must match the computer) or browser sign-in through the dashboard Open button. The app must listen on 0.0.0.0:<port>, not 127.0.0.1. Without a label one is picked. A label is 3 to 40 letters, digits and hyphens, and the platform refuses names that read as its own or another company’s (www, login, brand names and their look-alikes) with a 400 that says why. Other refusals: 402 PLAN_REQUIRED when the plan includes no public URLs, or PUBLIC_ACCESS_REQUIRES_PLAN when a trial requests public access (use private access or choose a paid plan); 403 PUBLIC_URLS_BLOCKED when the platform has turned public URLs off for this computer or account (not a role, and not something to retry — tell the user); 404 PUBLIC_URLS_DISABLED when public URLs are not enabled here at all (not a missing computer); 409 LABEL_TAKEN when the label is taken — a label is never given to a second account, so one another account has ever held, or one the platform has blocked, reads as taken — and 409 PUBLIC_URL_LIMIT when the computer has as many as its plan allows (trial 1 private URL, Solo 2, Studio 5, Swarm 10); neither 409 clears by waiting. 429 after too many in a day, with Retry-After. Responses are marked noindex, cookies the app sets stay on its own host name, and a Mandala API key sent to a public URL never reaches the app. Not idempotent: a retry after a lost answer makes a second URL — list_public_urls first.',
       inputSchema: z
         .object({
           ...idArg,
@@ -259,12 +259,16 @@ export const registerPublicUrls: Registrar = (server, session) => {
       guarded(async () => {
         const id = session.resolve(computer_id);
         const sent = P.publicUrlBody({ port, label, access });
+        const uncertainAccess =
+          sent.access === undefined
+            ? 'its access is unknown until listed (the default depends on the plan)'
+            : `it is ${sent.access === 'private' ? 'private' : 'open to anyone with the link'}`;
         const path = P.publicUrls(id);
         const got = await changed(
           () => session.api.with(extra.signal).send<unknown>('POST', path, { body: sent }),
           (why) =>
             refused(
-              `The create on ${id} could not be read back (${why}). THE URL MAY HAVE BEEN CREATED, and if it was, it is ${sent.access === 'private' ? 'private' : 'open to anyone with the link'} — call list_public_urls for ${id} before creating another.`,
+              `The create on ${id} could not be read back (${why}). THE URL MAY HAVE BEEN CREATED, and if it was, ${uncertainAccess} — call list_public_urls for ${id} before creating another.`,
             ),
         );
         if ('refusal' in got) return got.refusal;
@@ -272,7 +276,7 @@ export const registerPublicUrls: Registrar = (server, session) => {
         const u = publicUrlOf(body);
         if (!u) {
           return refused(
-            `The create on ${id} answered with ${shapeOf(body)}, not a public URL. THE URL MAY HAVE BEEN CREATED, and if it was, it is ${sent.access === 'private' ? 'private' : 'open to anyone with the link'} — call list_public_urls for ${id} rather than creating a second one.`,
+            `The create on ${id} answered with ${shapeOf(body)}, not a public URL. THE URL MAY HAVE BEEN CREATED, and if it was, ${uncertainAccess} — call list_public_urls for ${id} rather than creating a second one.`,
             body,
           );
         }

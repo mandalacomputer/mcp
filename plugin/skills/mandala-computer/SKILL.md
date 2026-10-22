@@ -21,9 +21,10 @@ browser session that has to be logged in and clicked through, a desktop
 application, a file that has to be seen rendered, or a machine that must not be
 this one — untrusted code, a clean OS, a second network position.
 
-Do not reach for one to run a shell command. `exec` exists, but a Mandala
-computer is billed while it runs, and a command the local machine can run costs
-nothing. If the task is "run this script", run it here.
+Use local execution when a shell command needs no remote desktop or isolated
+environment. A running Mandala computer consumes running capacity; runtime and
+individual exec calls do not add a charge to the monthly subscription. AI-credit
+usage is charged separately. Use `exec` when the task belongs on the remote computer.
 
 ## Setup, once
 
@@ -92,7 +93,7 @@ Optional configuration:
   Like `MANDALA_NO_LIFECYCLE`, accepts `1`, `true`, `yes`, `on` or `0`,
   `false`, `no`, `off`; whitespace and letter case are ignored. Empty or
   unset means off; unknown values fail at startup. Reads that can resume and
-  bill a computer, including `read_file` and `cursor_position`, are withheld.
+  consume running capacity, including `read_file` and `cursor_position`, are withheld.
   Mixed tools such as `wait_for_computer` and `snapshot_schedule` are also
   withheld. `screenshot`, `read_clipboard` and `list_windows` keep the hint.
 - `MANDALA_TAGS=input,guest` — select a union of lowercase tool tags:
@@ -174,9 +175,9 @@ suspend_computer()  or  stop_computer()   ALWAYS, before you say you are done
    `until="guest"` before the first `screenshot`, `exec` or `open_url`. A
    screenshot of a boot screen is not a failure, it is impatience.
 4. **Do the work** — see the next two sections.
-5. **Leave nothing booted.** A running computer costs money and a forgotten one
-   keeps costing it. Idle suspend catches it after 30 minutes, which is 30
-   minutes of bill. `suspend_computer` is a pause (RAM to disk, resume in a
+5. **Release running capacity when finished.** A forgotten computer occupies
+   capacity until idle suspend catches it after 30 minutes. Suspending frees
+   capacity without reducing the monthly subscription charge. `suspend_computer` is a pause (RAM to disk, resume in a
    second, same session); `stop_computer` is a shutdown (disk kept, session
    gone). Say which you did and why in your final message, and name the
    computer so the user can find it. `delete_computer` only when the user asked
@@ -365,10 +366,12 @@ starting, so remove the binding first. Never repeat a value back to the user.
 
 `create_public_url` serves a port inside the computer at
 `https://<label>.<base_domain>` — the domain comes from `list_public_urls`, so
-do not assume one. **It is public by default: anyone on the internet with the
-link can open it.** Pass `access: "private"` unless the user wants it open to
-everyone; a private URL answers only requests carrying an API key of the
-account. The app must listen on `0.0.0.0`, not `127.0.0.1`. A label is never
+do not assume one. **Omitted access defaults to public on paid plans and private
+on trials.** Public means anyone with the link can open it; trials cannot request
+public access. Pass `access: "private"` unless the user wants it open to everyone.
+Private URLs accept an account API key (workspace-scoped keys must match the
+computer's workspace), or browser sign-in through the dashboard's Open button.
+The app must listen on `0.0.0.0`, not `127.0.0.1`. A label is never
 given to a second account: after `delete_public_url` it stays with this account,
 which may use it again unless the platform has blocked it, and a label another
 account has ever held reads as taken. Delete URLs you no longer need; a computer
@@ -399,10 +402,10 @@ application — stops being something you redo.
   filesystem; a memory one also saves the running session, so a fork of it comes
   up with the windows already open.
 - `restore_snapshot` puts the *same* computer back and discards everything on
-  that disk since, and it leaves the computer running — which is a start, and
-  is charged. `clone_snapshot` and `clone_computer` make a *new* computer
-  instead, which bills like any other: the cheap way to get five identical
-  desktops, and an easy way to leave five of them running.
+  that disk since, and it leaves the computer running, consuming running capacity.
+  `clone_snapshot` and `clone_computer` make a *new* computer instead, consuming
+  storage and, if started, running capacity. They can make identical desktops,
+  but each one counts against the account's limits.
 - A capture outlives the call that starts it: the platform accepts it and copies
   the disk over the next several minutes. `create_snapshot` waits that out for
   you and answers with the finished snapshot — pass `wait: false` only when you
@@ -541,6 +544,7 @@ off a listing that said `INCOMPLETE`.
   meant to go — it cannot be undone and the name can never be republished.
 - Do not delete snapshots as a side effect of deleting a computer without
   reading `snapshot_holdings` first and passing its fingerprint as `expect`.
-- Do not answer "what did this cost" from memory. `get_usage` is the read, and
-  its first line says if a hypervisor could not be reached and the figure is
-  low.
+- Use `get_usage` to answer how many resources the computers used. Its first
+  line says if a hypervisor could not be reached and the figure is low. It does
+  not report monetary cost; runtime does not add a subscription charge, and
+  AI-credit usage is separate.

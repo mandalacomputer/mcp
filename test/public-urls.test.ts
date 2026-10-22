@@ -46,7 +46,7 @@ describe('public URL tools', () => {
     await close();
   });
 
-  it('says a private one opens only with this account’s key, which never reaches the app', async () => {
+  it('describes both private authentication paths and workspace confinement', async () => {
     const { call, close } = await connect();
     const res = await call('create_public_url', {
       computer_id: 'vm-2',
@@ -59,8 +59,10 @@ describe('public URL tools', () => {
     expect(sent?.body).toEqual({ port: 8080, label: 'my-demo', access: 'private' });
     const text = textOf(res);
     expect(text).toContain('https://my-demo.mandala.dev');
-    expect(text).toContain('private: only requests with an API key of this account');
+    expect(text).toContain('private: an account API key');
     expect(text).not.toContain('anyone with the link');
+    expect(text).toContain('workspace-scoped keys must match the computer');
+    expect(text).toContain('browser sign-in through the dashboard Open button');
     await close();
   });
 
@@ -159,6 +161,12 @@ describe('public URL tools', () => {
   // the metadata, and none of them read as passing.
   it.each([
     [
+      402,
+      'PUBLIC_ACCESS_REQUIRES_PLAN',
+      'Trial accounts can only use private URLs.',
+      /trial accounts can use private URLs only.*access: "private"/,
+    ],
+    [
       409,
       'LABEL_TAKEN',
       'The label "my-demo" is taken; choose another.',
@@ -247,6 +255,41 @@ describe('public URL tools', () => {
       // A warning about what it would be, never a claim about what it is.
       expect(textOf(res)).not.toContain('can open it');
     }
+  });
+
+  it.each([undefined, 'private', 'public'] as const)(
+    'keeps uncertain create access honest for %s',
+    async (access) => {
+      const args = { port: 3000, ...(access === undefined ? {} : { access }) };
+      for (const result of [
+        await over({}, 201, 'create_public_url', args),
+        await overRaw('', 201, 'create_public_url', args),
+        await lostCreate(args),
+      ]) {
+        expect(result.isError).toBe(true);
+        const text = textOf(result);
+        expect(text).toContain('THE URL MAY HAVE BEEN CREATED');
+        expect(text).toContain('list_public_urls');
+        if (access === undefined) {
+          expect(text).toContain('its access is unknown until listed');
+          expect(text).not.toContain('it is private');
+          expect(text).not.toContain('open to anyone with the link');
+        } else {
+          expect(text).toContain(
+            access === 'private' ? 'it is private' : 'it is open to anyone with the link',
+          );
+        }
+      }
+    },
+  );
+
+  it('uses the returned private access when a trial omits access', async () => {
+    const result = await over({ ...PUBLIC_URL, access: 'private' }, 201, 'create_public_url', {
+      port: 3000,
+    });
+    expect(result.isError).toBeFalsy();
+    expect(textOf(result)).toContain('private: an account API key');
+    expect(textOf(result)).not.toContain('PUBLIC:');
   });
 
   it('reads a malformed link as no public URL on an update or in a listing too', async () => {
@@ -401,7 +444,8 @@ describe('public URL tools', () => {
       const create = await overRaw(raw, 201, 'create_public_url', { port: 3000 });
       expect(create.isError, `create ${JSON.stringify(raw)}`).toBe(true);
       expect(textOf(create)).toContain('THE URL MAY HAVE BEEN CREATED');
-      expect(textOf(create)).toContain('open to anyone with the link');
+      expect(textOf(create)).toContain('its access is unknown until listed');
+      expect(textOf(create)).not.toContain('open to anyone with the link');
       expect(textOf(create)).toContain('list_public_urls');
 
       const update = await overRaw(raw, 200, 'update_public_url', {
@@ -436,7 +480,8 @@ describe('public URL tools', () => {
       idempotentHint: true,
     });
     const create = tools.find((t) => t.name === 'create_public_url');
-    expect(create?.description).toContain('PUBLIC BY DEFAULT');
+    expect(create?.description).toContain('public on paid plans and private on trials');
+    expect(create?.description).toContain('PUBLIC_ACCESS_REQUIRES_PLAN');
     // P4 (OPL-5975): no word that a deleted URL's label is free for anyone.
     const del = tools.find((t) => t.name === 'delete_public_url');
     const words = `${del?.description} ${JSON.stringify(del?.inputSchema)}`;
@@ -476,6 +521,25 @@ async function overRaw(raw: string, status: number, tool: string, args: Record<s
     await close();
     return res;
   } finally {
+    globalThis.fetch = restore;
+  }
+}
+
+/** A dispatched create whose response is lost must not be replayed. */
+async function lostCreate(args: Record<string, unknown>) {
+  const restore = globalThis.fetch;
+  let requests = 0;
+  globalThis.fetch = (async () => {
+    requests++;
+    throw new TypeError('connection reset after dispatch');
+  }) as typeof fetch;
+  const { call, close } = await connect();
+  try {
+    const result = await call('create_public_url', args);
+    expect(requests).toBe(1);
+    return result;
+  } finally {
+    await close();
     globalThis.fetch = restore;
   }
 }
