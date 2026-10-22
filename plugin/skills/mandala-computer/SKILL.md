@@ -544,6 +544,7 @@ off a listing that said `INCOMPLETE`.
   meant to go — it cannot be undone and the name can never be republished.
 - Do not delete snapshots as a side effect of deleting a computer without
   reading `snapshot_holdings` first and passing its fingerprint as `expect`.
-- Do not answer "what did this cost" from memory. `get_usage` is the read, and
-  its first line says if a hypervisor could not be reached and the figure is
-  low.
+- Use `get_usage` to answer how many resources the computers used. Its first
+  line says if a hypervisor could not be reached and the figure is low. It does
+  not report monetary cost; runtime does not add a subscription charge, and
+  AI-credit usage is separate.

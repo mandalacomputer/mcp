@@ -150,7 +150,7 @@ const BROWSERS =
  * empty, `null` or non-JSON 2xx, a connection cut after the request went, a
  * cancellation. The platform may have done it, so the caller is sent to the
  * listing rather than told it failed: a create retried blind makes a second
- * URL open to anyone, and the first goes on answering, untracked (Codex, round
+ * URL, and the first may go on answering, untracked (Codex, round
  * 3 on #212). An HTTP refusal is not this, and keeps its own advice.
  */
 async function changed<T>(

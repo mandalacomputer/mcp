@@ -814,8 +814,8 @@ account. Only automatic snapshots are ever aged out, so taking one with
 `create_snapshot` is how a model keeps something past it.
 
 **A usage total that is short does not look short.** `get_usage` answers what
-the account has spent — the read to make before and after a batch of computers,
-and the one to make when somebody asks what anything cost. Every figure in it is
+the account has used — read it before and after a batch to monitor resources.
+It reports usage, not a monetary cost. Every figure in it is
 a sum across the hypervisors the account's computers are on, so a host that could
 not be reached does not leave a gap: it leaves a total that is quietly too small.
 The answer says so in its FIRST line when that has happened, ahead of the
@@ -1800,7 +1800,7 @@ Please report anything security-sensitive privately — see
 
 `write_file_chunk`, `get_file_upload`, and `cancel_file_upload` expose Linux resumable uploads up to 2 GiB. Each tool write carries at most 256 KiB of decoded base64 to bound model-context transfers; prefer the SDK or CLI for large local datasets. Retain a fresh random 32-character lowercase hexadecimal `upload_id`, destination `path`, total `size`, and unchanged source. Send chunks at the confirmed `offset`. After any error, read status before retrying. The final chunk publishes atomically; `overwrite: false` refuses an occupied destination.
 
-Cancel removes only staging and the completion receipt, never the published destination. Staging consumes guest disk until cancelled and has no automatic expiry. These tools may resume a computer and incur running charges unless `no_wake` is set; they are included in the `files` tool group and excluded from read-only mode. They require Linux with Python 3 and an updated host. Existing `write_file` behavior is unchanged.
+Cancel removes only staging and the completion receipt, never the published destination. Staging consumes guest disk until cancelled and has no automatic expiry. These tools may resume a computer and consume running capacity unless `no_wake` is set; they are included in the `files` tool group and excluded from read-only mode. They require Linux with Python 3 and an updated host. Existing `write_file` behavior is unchanged.
 
 ## Licence
 
