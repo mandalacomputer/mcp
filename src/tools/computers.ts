@@ -286,7 +286,7 @@ type Usage = {
  * `degraded`. Every figure is a sum across the hypervisors the account's
  * computers are on, so a host that did not contribute leaves a total that is
  * quietly too small rather than an obviously missing row — the one failure mode
- * a spend check must never present as fact. Saying it first is the difference
+ * a usage report must never present as fact. Saying it first is the difference
  * between a caveat that is present and a caveat that is read.
  *
  * The two are kept apart because only one of them clears: `degraded` is a host
@@ -294,20 +294,10 @@ type Usage = {
  * host running a daemon older than the meter, and telling a caller to wait for
  * that one is advice that never comes true.
  *
- * EVERY DIMENSION THE PLATFORM PRICES IS IN THE LINE. This sentence is what a
- * model reads before it acts on cost, and a dimension the account is billed on
- * that appears only in the JSON underneath is a figure nobody weighs. Two were
- * missing: `ram_gb_hours`, although the tool's own description promises hours
- * "weighted by cores and memory", and `snapshot_gb_months`, which the API
- * reference calls the unit snapshots are priced in — the figure that explains
- * the bill
- * of an account holding many durable snapshots and running almost nothing.
- *
- * The `_hours` twins of the two `_months` figures are deliberately NOT here.
- * `disk_gb_hours` and `snapshot_gb_hours` are the same integral in the unit the
- * platform does not price, so printing both spellings would double the length
- * of the line to say each thing twice. Add to this line when the platform
- * prices something new, not when it reports something new.
+ * Keep cores, memory, disk and snapshots visible in the sentence rather than
+ * only in the JSON. These are resource-use measurements, not invoice charges.
+ * The storage hours/months pairs are the same integral in different units;
+ * print one unit per dimension to avoid duplicating the line.
  *
  * Zeroes are printed rather than omitted, like every other figure here: an
  * account that ran nothing weighted by memory metered zero, and a clause that
@@ -330,8 +320,8 @@ const usageLine = (u: Usage): string => {
   if (!short.length) return head;
   return (
     `THESE TOTALS MAY BE TOO LOW: ${short.join(', and ')}. Every figure is a sum across the fleet, so ` +
-    `a host that did not answer leaves a short total rather than a missing row — do not reconcile ` +
-    `this against an invoice while it says so.\n\n${head}`
+    `a host that did not answer leaves a short total rather than a missing row — do not treat ` +
+    `this as complete usage while it says so.\n\n${head}`
   );
 };
 
@@ -408,7 +398,7 @@ export const registerComputers: Registrar = (server, session, opts) => {
     {
       title: 'List templates',
       description:
-        'The base images a computer can be created from — name, OS, the default CPU and RAM each one implies, and its minimum disk (a smaller disk_gb is raised to it and charged at it). For the templates the platform publishes, `name` is what a create takes as `template`; for one you published yourself, pass its `ref` (namespace/name@version) — a short name is not resolved to your own templates. A short name that is none of the published templates falls back to base, except while this list is INCOMPLETE (a host did not answer): then the create is refused with a retryable 503 that changed nothing, so send it again shortly with the same idempotency_key, or pass a ref to avoid the guess.',
+        'The base images a computer can be created from — name, OS, the default CPU and RAM each one implies, and its minimum disk (a smaller disk_gb is raised to it and counted against storage limits). For the templates the platform publishes, `name` is what a create takes as `template`; for one you published yourself, pass its `ref` (namespace/name@version) — a short name is not resolved to your own templates. A short name that is none of the published templates falls back to base, except while this list is INCOMPLETE (a host did not answer): then the create is refused with a retryable 503 that changed nothing, so send it again shortly with the same idempotency_key, or pass a ref to avoid the guess.',
       inputSchema: {},
       annotations: { readOnlyHint: true },
     },
@@ -524,7 +514,7 @@ export const registerComputers: Registrar = (server, session, opts) => {
         // Strict (OPL-6081), as the SDKs decode a listing: a row that is not
         // an object, or has no id, fails the call rather than being dropped
         // with a warning. A dropped row is a computer that exists and is
-        // running up a bill, left out of the answer a caller reads to find out.
+        // using running capacity, left out of the answer a caller reads to find out.
         const list = items.filter(
           (item): item is Computer =>
             item !== null &&
@@ -1255,7 +1245,7 @@ export const registerComputers: Registrar = (server, session, opts) => {
     {
       title: 'Read what this account has used',
       description:
-        'What this account has spent: running hours weighted by cores and memory, the storage it holds, and the per-computer breakdown behind the totals — the same figures the billing page shows. Read it before and after a batch of computers to know what one cost, and read it when asked how much anything has cost. Defaults to the current billing period, which is the window an invoice covers. READ THE FIRST LINE OF THE ANSWER: a hypervisor that could not be reached makes every total too LOW rather than absent, and that line is the only thing that says so.',
+        'What this account has used: running hours weighted by cores and memory, the storage it holds, and the per-computer breakdown behind the totals. Read it before and after a batch to monitor resource use. These measurements do not add a usage charge to the monthly subscription; AI-credit usage is separate. Defaults to the current billing period. READ THE FIRST LINE OF THE ANSWER: a hypervisor that could not be reached makes every total too LOW rather than absent, and that line is the only thing that says so.',
       inputSchema: {
         from: z
           .string()
@@ -1277,11 +1267,11 @@ export const registerComputers: Registrar = (server, session, opts) => {
         const body = (await session.api
           .with(extra.signal)
           .json('GET', P.USAGE, { query: P.usageQuery(from, to) })) as Usage;
-        // `0 vCPU-hours` is a bill, and a missing totals object is not one. The
+        // `0 vCPU-hours` is a usage total, and a missing totals object is not one. The
         // fields inside it still default — a meter that sent no `disk_gb_months`
         // is saying zero — but the object holding them has to have arrived, or
         // this answers with a figure nobody metered in the shape of one somebody
-        // did, on the one call whose output is compared against an invoice.
+        // did, on the one call whose output is used to compare resource use.
         const totals = body?.usage;
         if (totals === null || typeof totals !== 'object' || Array.isArray(totals)) {
           return refused(
@@ -1873,7 +1863,7 @@ export const registerComputers: Registrar = (server, session, opts) => {
     {
       title: 'Create a computer',
       description:
-        "Build a new cloud desktop and select it for this session. Creating and running a computer costs money on this account. Continue an image preparation refusal only as its result instructs, retaining all original create arguments, including template, and adding the returned preparation token as an argument. This token is not a create idempotency key. Stop after success; never automatically replay after a lost or ambiguous response without the idempotency_key that response names — with it, the same call answers the first one's result instead of building a second computer." +
+        "Build a new cloud desktop and select it for this session. Creating a computer consumes storage; running it consumes running capacity on this account. Continue an image preparation refusal only as its result instructs, retaining all original create arguments, including template, and adding the returned preparation token as an argument. This token is not a create idempotency key. Stop after success; never automatically replay after a lost or ambiguous response without the idempotency_key that response names — with it, the same call answers the first one's result instead of building a second computer." +
         createScopeDefault,
       inputSchema: {
         name: z.string().optional().describe('A label. The platform picks one if you do not.'),
@@ -1904,7 +1894,7 @@ export const registerComputers: Registrar = (server, session, opts) => {
           .min(1)
           .optional()
           .describe(
-            "The template's own disk is a FLOOR, not a default — read it from list_templates. A smaller number is raised to it silently and the account is charged the raised figure, so asking for less than the template needs spends more of the plan's disk pool than the number here suggests and can be refused outright.",
+            "The template's own disk is a FLOOR, not a default — read it from list_templates. A smaller number is raised to it silently and the raised figure counts against storage limits, so asking for less than the template needs spends more of the plan's disk pool than the number here suggests and can be refused outright.",
           ),
         resolution: z
           .string()

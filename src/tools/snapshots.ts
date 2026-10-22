@@ -674,7 +674,7 @@ export const registerSnapshots: Registrar = (server, session, opts) => {
     'restore_snapshot',
     {
       title: 'Restore a snapshot',
-      description: `Put a snapshot back onto the computer it came from, discarding everything on that disk since. Check \`restore_available\` in list_snapshots first: where it is false, the snapshot's usable copy is on a host its computer has left, and a restore is refused${opts.lifecycle ? ' while clone_snapshot still works' : ''}. Refused on an orphaned snapshot${opts.lifecycle ? ' — clone_snapshot is what works there' : ', and this server cannot fork one either: it was started with the lifecycle tools withheld'}. It leaves the computer RUNNING whatever state it was in: restoring a stopped one boots it, which is a start like any other and is charged. A disk snapshot comes back to a fresh boot, a memory one to the captured session, and either way a suspended session the computer was holding is discarded with the disk it was saved against.`,
+      description: `Put a snapshot back onto the computer it came from, discarding everything on that disk since. Check \`restore_available\` in list_snapshots first: where it is false, the snapshot's usable copy is on a host its computer has left, and a restore is refused${opts.lifecycle ? ' while clone_snapshot still works' : ''}. Refused on an orphaned snapshot${opts.lifecycle ? ' — clone_snapshot is what works there' : ', and this server cannot fork one either: it was started with the lifecycle tools withheld'}. It leaves the computer RUNNING whatever state it was in: restoring a stopped one boots it, which is a start like any other and consumes running capacity. A disk snapshot comes back to a fresh boot, a memory one to the captured session, and either way a suspended session the computer was holding is discarded with the disk it was saved against.`,
       inputSchema: {
         snapshot_id: z.string(),
         confirm: z
@@ -797,7 +797,7 @@ export const registerSnapshots: Registrar = (server, session, opts) => {
   // clone_snapshot was on the wrong side of it, which left MANDALA_NO_LIFECYCLE
   // withholding every way of making a computer except this one — an operator
   // who had turned creation off still had a tool that made computers, and the
-  // first they would learn of it is an invoice.
+  // first they would learn of it is an unexpected capacity refusal.
   if (!opts.lifecycle) return;
 
   server.registerTool(

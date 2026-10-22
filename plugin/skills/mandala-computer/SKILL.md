@@ -93,7 +93,7 @@ Optional configuration:
   Like `MANDALA_NO_LIFECYCLE`, accepts `1`, `true`, `yes`, `on` or `0`,
   `false`, `no`, `off`; whitespace and letter case are ignored. Empty or
   unset means off; unknown values fail at startup. Reads that can resume and
-  bill a computer, including `read_file` and `cursor_position`, are withheld.
+  consume running capacity, including `read_file` and `cursor_position`, are withheld.
   Mixed tools such as `wait_for_computer` and `snapshot_schedule` are also
   withheld. `screenshot`, `read_clipboard` and `list_windows` keep the hint.
 - `MANDALA_TAGS=input,guest` — select a union of lowercase tool tags:
@@ -175,9 +175,9 @@ suspend_computer()  or  stop_computer()   ALWAYS, before you say you are done
    `until="guest"` before the first `screenshot`, `exec` or `open_url`. A
    screenshot of a boot screen is not a failure, it is impatience.
 4. **Do the work** — see the next two sections.
-5. **Leave nothing booted.** A running computer costs money and a forgotten one
-   keeps costing it. Idle suspend catches it after 30 minutes, which is 30
-   minutes of bill. `suspend_computer` is a pause (RAM to disk, resume in a
+5. **Release running capacity when finished.** A forgotten computer occupies
+   capacity until idle suspend catches it after 30 minutes. Suspending frees
+   capacity without reducing the monthly subscription charge. `suspend_computer` is a pause (RAM to disk, resume in a
    second, same session); `stop_computer` is a shutdown (disk kept, session
    gone). Say which you did and why in your final message, and name the
    computer so the user can find it. `delete_computer` only when the user asked
@@ -402,10 +402,10 @@ application — stops being something you redo.
   filesystem; a memory one also saves the running session, so a fork of it comes
   up with the windows already open.
 - `restore_snapshot` puts the *same* computer back and discards everything on
-  that disk since, and it leaves the computer running — which is a start, and
-  is charged. `clone_snapshot` and `clone_computer` make a *new* computer
-  instead, which bills like any other: the cheap way to get five identical
-  desktops, and an easy way to leave five of them running.
+  that disk since, and it leaves the computer running, consuming running capacity.
+  `clone_snapshot` and `clone_computer` make a *new* computer instead, consuming
+  storage and, if started, running capacity. They can make identical desktops,
+  but each one counts against the account's limits.
 - A capture outlives the call that starts it: the platform accepts it and copies
   the disk over the next several minutes. `create_snapshot` waits that out for
   you and answers with the finished snapshot — pass `wait: false` only when you

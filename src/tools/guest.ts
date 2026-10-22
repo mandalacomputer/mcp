@@ -70,7 +70,7 @@ const noWakeArg = z
   .boolean()
   .default(false)
   .describe(
-    'true: do not resume a computer that is not running — refuse instead (409), so nothing is resumed and nothing is charged for a resume. Use it to look at a suspended computer’s files only if it is already awake. false (the default) resumes a suspended computer to answer, which is charged.',
+    'true: do not resume a computer that is not running — refuse instead (409), so nothing is resumed and no running capacity is consumed. Use it to look at a suspended computer’s files only if it is already awake. false (the default) resumes a suspended computer to answer, which consumes running capacity.',
   );
 
 /**
@@ -88,7 +88,7 @@ function noWakeRefusal(err: unknown, id: string, what: string): CallToolResult |
   return withErrorMetadata(
     refused(
       `${apiErrorMessage(err)} (HTTP ${err.status})\n\n${id} was not resumed, because no_wake was set: ` +
-        `most likely it is not running, and ${what}. start_computer wakes it (a resume is charged), ` +
+        `most likely it is not running, and ${what}. start_computer wakes it (a resume consumes running capacity), ` +
         'or call again without no_wake to let this resume it.',
     ),
     err,
@@ -615,7 +615,7 @@ export const registerGuest: Registrar = (server, session) => {
     {
       title: "Put text on the desktop's clipboard",
       description:
-        'Puts text on the computer\u2019s desktop clipboard, ready to paste. This leaves it on the clipboard and touches nothing on screen — follow it with press_key and keys ["ctrl","v"] to get the text into whatever has focus. Those are two separate key NAMES in the array, not one string "ctrl+v", which press_key would reject as an unknown key. Use this rather than the setsid/xclip/base64 recipe through exec: it is one call, it is confirmed, and it cannot be broken by a quote in the text. It requires a Linux desktop image with its desktop\u2019s clipboard tool installed — xclip on X11, wl-clipboard (wl-paste/wl-copy) on Wayland images such as Omarchy — and is refused on Windows. An image without that tool gets a 400 that names it and never clears; changing runtime state or retrying cannot fix that image dependency. Unlike read_clipboard this DRIVES the computer, so a suspended one is resumed to serve it and that resume is charged. At most 64 KiB of text goes in — half what comes out, because the text crosses to the guest inside a single command argument. Empty text ("") CLEARS the clipboard, and is the only way to: do it after pasting a secret, since otherwise the desktop keeps holding it. The platform confirms the write by reading the selection back before it answers, so a success here means the desktop is holding your text rather than that a command ran; a refusal saying the desktop did not take it means something else claimed the clipboard in that instant, and sending it again works. Not every refusal here is one of those, and the answer says which it is rather than leaving you to match on the sentence: a computer that is not running is a 409 that start_computer fixes and that retrying never will, while a guest agent still inside its boot window is worth another attempt. A desktop that is not answering is deliberately left unclassified — it can equally be a guest still coming up or a session nobody is logged into — so bound your attempts there instead of looping.',
+        'Puts text on the computer\u2019s desktop clipboard, ready to paste. This leaves it on the clipboard and touches nothing on screen — follow it with press_key and keys ["ctrl","v"] to get the text into whatever has focus. Those are two separate key NAMES in the array, not one string "ctrl+v", which press_key would reject as an unknown key. Use this rather than the setsid/xclip/base64 recipe through exec: it is one call, it is confirmed, and it cannot be broken by a quote in the text. It requires a Linux desktop image with its desktop\u2019s clipboard tool installed — xclip on X11, wl-clipboard (wl-paste/wl-copy) on Wayland images such as Omarchy — and is refused on Windows. An image without that tool gets a 400 that names it and never clears; changing runtime state or retrying cannot fix that image dependency. Unlike read_clipboard this DRIVES the computer, so a suspended one is resumed to serve it and that resume consumes running capacity. At most 64 KiB of text goes in — half what comes out, because the text crosses to the guest inside a single command argument. Empty text ("") CLEARS the clipboard, and is the only way to: do it after pasting a secret, since otherwise the desktop keeps holding it. The platform confirms the write by reading the selection back before it answers, so a success here means the desktop is holding your text rather than that a command ran; a refusal saying the desktop did not take it means something else claimed the clipboard in that instant, and sending it again works. Not every refusal here is one of those, and the answer says which it is rather than leaving you to match on the sentence: a computer that is not running is a 409 that start_computer fixes and that retrying never will, while a guest agent still inside its boot window is worth another attempt. A desktop that is not answering is deliberately left unclassified — it can equally be a guest still coming up or a session nobody is logged into — so bound your attempts there instead of looping.',
       inputSchema: {
         ...idArg,
         text: z
@@ -775,7 +775,7 @@ export const registerGuest: Registrar = (server, session) => {
     {
       title: 'Put a file into the guest',
       description:
-        'Write a file inside the computer. Paths must be absolute — the guest agent inherits whatever working directory it was started in, so a relative path resolves somewhere you did not name. By default a file already at the path is replaced. Pass overwrite: false to create the file only if nothing is there: a path that is taken is refused and that attempt writes nothing — retrying does not change that. Incomplete contents are never published at the path, but a failure while publishing or answering can leave the COMPLETE file there: after any error, read the path before retrying or overwriting, since what is there may be your own upload. A refusal saying this computer\u2019s host cannot do a create-only write, and a 503 on one, mean nothing was sent — but neither means the path is free. overwrite: false is for Linux computers; a Windows computer refuses it. A suspended computer is resumed to take the write, which is charged, unless no_wake is set.',
+        'Write a file inside the computer. Paths must be absolute — the guest agent inherits whatever working directory it was started in, so a relative path resolves somewhere you did not name. By default a file already at the path is replaced. Pass overwrite: false to create the file only if nothing is there: a path that is taken is refused and that attempt writes nothing — retrying does not change that. Incomplete contents are never published at the path, but a failure while publishing or answering can leave the COMPLETE file there: after any error, read the path before retrying or overwriting, since what is there may be your own upload. A refusal saying this computer\u2019s host cannot do a create-only write, and a 503 on one, mean nothing was sent — but neither means the path is free. overwrite: false is for Linux computers; a Windows computer refuses it. A suspended computer is resumed to take the write, which consumes running capacity, unless no_wake is set.',
       inputSchema: {
         ...idArg,
         path: absolutePath('path').describe(
@@ -911,7 +911,7 @@ export const registerGuest: Registrar = (server, session) => {
     {
       title: 'Get a file out of the guest',
       description:
-        'Read a file from inside the computer. Text comes back as text and images come back as images; anything else comes back base64. A large file comes back a window at a time rather than filling the conversation: `offset` says where the window starts, and the note under a truncated read gives the exact offset to pass next. There is no size a file can be that makes it unreadable this way — a 2 GB log is pages, not a refusal — but a file you want whole is still better pushed out of the guest than carried through a conversation, and the note says how. This reaches the guest agent to do it, so a suspended computer is resumed to answer and that resume is charged — it can even come back 402 — unless no_wake is set, which refuses instead. read_clipboard, by contrast, refuses a suspended computer rather than starting it.',
+        'Read a file from inside the computer. Text comes back as text and images come back as images; anything else comes back base64. A large file comes back a window at a time rather than filling the conversation: `offset` says where the window starts, and the note under a truncated read gives the exact offset to pass next. There is no size a file can be that makes it unreadable this way — a 2 GB log is pages, not a refusal — but a file you want whole is still better pushed out of the guest than carried through a conversation, and the note says how. This reaches the guest agent to do it, so a suspended computer is resumed to answer and that resume consumes running capacity — it can even come back 402 — unless no_wake is set, which refuses instead. read_clipboard, by contrast, refuses a suspended computer rather than starting it.',
       inputSchema: {
         ...idArg,
         path: absolutePath('path'),
@@ -928,7 +928,7 @@ export const registerGuest: Registrar = (server, session) => {
       },
       // Not readOnlyHint, for the reason cursor_position is not: the platform
       // marks `GET computers/:id/files` as spending, because reaching the guest
-      // agent resumes a suspended computer and a resume is charged — its own
+      // agent resumes a suspended computer and a resume consumes running capacity — its own
       // note says even reading a file out of an idle machine can come back 402.
       // The other two flags are set for the same reason, in opposite
       // directions: once readOnlyHint is false the spec defaults

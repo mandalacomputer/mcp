@@ -14,6 +14,17 @@ are wording changes, and they are behaviour changes in the way that matters.
 
 ## [Unreleased]
 
+### Fixed
+
+- Correct public-URL guidance: omitted access is public on paid plans and private
+  on trials; private URLs support appropriately scoped account API keys and
+  dashboard browser sign-in. Trials cannot request public access.
+- Describe runtime, storage and exec usage as resource consumption rather than
+  extra subscription charges. AI-credit and model-provider billing is unchanged.
+- After an uncertain URL creation with omitted access, report access as unknown
+  until listed instead of assuming public. Preserve the warning against replay.
+- Document the five intentional API operation exclusions in the surface check.
+
 ## [0.17.1] — 2026-10-21
 
 ### Changed

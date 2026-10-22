@@ -161,6 +161,12 @@ describe('public URL tools', () => {
   // the metadata, and none of them read as passing.
   it.each([
     [
+      402,
+      'PUBLIC_ACCESS_REQUIRES_PLAN',
+      'Trial accounts can only use private URLs.',
+      /trial accounts can use private URLs only.*access: "private"/,
+    ],
+    [
       409,
       'LABEL_TAKEN',
       'The label "my-demo" is taken; choose another.',
