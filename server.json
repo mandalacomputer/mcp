@@ -8,12 +8,12 @@
     "url": "https://github.com/mandalacomputer/mcp",
     "source": "github"
   },
-  "version": "0.18.0",
+  "version": "0.17.1",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "mandala-computer-mcp",
-      "version": "0.18.0",
+      "version": "0.17.1",
       "transport": {
         "type": "stdio"
       },
