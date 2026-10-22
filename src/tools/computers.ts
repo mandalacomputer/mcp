@@ -2024,13 +2024,13 @@ export const registerComputers: Registrar = (server, session, opts) => {
         // call drove the old computer, or none.
         if (!c.id) {
           return refused(
-            `Created ${describe(c)}, but the platform sent no id back, so nothing was selected and this session is still bound to whatever it was before. The machine may exist and be billable — list_computers will say.`,
+            `Created ${describe(c)}, but the platform sent no id back, so nothing was selected and this session is still bound to whatever it was before. The machine may exist and consume resources — list_computers will say.`,
             withoutCredentials(c),
           );
         }
         session.bind(c.id, c.resolution);
         // A create whose guest was made and then would not boot is not an
-        // error: the machine exists and is billable, so it comes back stopped
+        // error: the machine exists and consumes resources, so it comes back stopped
         // with the reason on it. Saying so plainly is the difference between a
         // model retrying the start and a model creating a second computer.
         const chosen = byDefault(named);
@@ -2077,7 +2077,7 @@ export const registerComputers: Registrar = (server, session, opts) => {
         const c = unwrapComputer(answer);
         if (!c.id) {
           return refused(
-            `The platform accepted the clone of ${id} but sent no id back, so the copy cannot be identified. It may exist and be billable — list_computers will say. The original stays selected.`,
+            `The platform accepted the clone of ${id} but sent no id back, so the copy cannot be identified. It may exist and consume resources — list_computers will say. The original stays selected.`,
             withoutCredentials(c),
           );
         }
@@ -2203,7 +2203,7 @@ export const registerComputers: Registrar = (server, session, opts) => {
           // platform's answer for an id that was never on this account — a typo,
           // or a computer belonging to somebody else — and "deleted" said over
           // a mistyped id leaves a caller believing a machine is gone while the
-          // real one keeps running and billing. Both readings are named, and the
+          // real one keeps running and consuming resources. Both readings are named, and the
           // one call that settles which is the one to make next.
           return said(
             `Nothing was deleted: the platform has no computer with the id ${computer_id} on this account. ` +

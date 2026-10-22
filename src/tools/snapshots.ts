@@ -253,7 +253,7 @@ export const registerSnapshots: Registrar = (server, session, opts) => {
           .boolean()
           .default(false)
           .describe(
-            'Also return deletions that began and did not finish. They are not usable — their state is "deleting" and nothing can be restored or cloned from one — but they still hold objects and are still billed, so this is the flag to set when the question is about storage rather than about what can be restored. It is also the flag to set when following a deletion: without it a snapshot stuck half-deleted is hidden, and a poll watching for the row to go cannot tell that from one that finished.',
+            'Also return deletions that began and did not finish. They are not usable — their state is "deleting" and nothing can be restored or cloned from one — but they still hold objects and still count against storage, so this is the flag to set when the question is about storage rather than about what can be restored. It is also the flag to set when following a deletion: without it a snapshot stuck half-deleted is hidden, and a poll watching for the row to go cannot tell that from one that finished.',
           ),
         allow_partial: z
           .boolean()
@@ -466,7 +466,7 @@ export const registerSnapshots: Registrar = (server, session, opts) => {
           // The deadline, or the caller, arriving while the POST is in flight.
           // The generic sentence for this says the request may have been
           // received and to treat what it would have changed as unknown, which
-          // is true and is not enough here: a capture that started is billable,
+          // is true and is not enough here: a capture that started consumes resources,
           // takes minutes, and — because the answer that carried its id is the
           // thing that was lost — cannot be polled for at all. Worse, the
           // obvious next move is wrong. A second capture while one is running is
@@ -518,7 +518,7 @@ export const registerSnapshots: Registrar = (server, session, opts) => {
         // A capture accepted under an id nobody was told cannot be polled for,
         // and it cannot be found again either — every later call takes the id.
         // `refused`, for clone_snapshot's reason one route over: the platform
-        // did something billable and the caller has no handle on it, which is
+        // did something that consumes resources and the caller has no handle on it, which is
         // not a result to report as success.
         //
         // BEFORE the wait: false branch, not after it, and Codex caught that it
@@ -790,7 +790,7 @@ export const registerSnapshots: Registrar = (server, session, opts) => {
       }),
   );
 
-  // clone_snapshot brings a billable machine into existence as surely as
+  // clone_snapshot brings a machine into existence as surely as
   // create_computer does, and delete_snapshot destroys bytes as surely as
   // delete_computer does, so both sit behind the gate those two sit behind.
   //
@@ -851,7 +851,7 @@ export const registerSnapshots: Registrar = (server, session, opts) => {
         const c = unwrapComputer(answer);
         if (!c.id) {
           return refused(
-            `The platform accepted the clone of ${snapshot_id} but sent no computer id back, so the copy cannot be identified. It may exist and be billable — list_computers will say. The selected computer is unchanged.`,
+            `The platform accepted the clone of ${snapshot_id} but sent no computer id back, so the copy cannot be identified. It may exist and consume resources — list_computers will say. The selected computer is unchanged.`,
             withoutCredentials(c),
           );
         }
@@ -1008,7 +1008,7 @@ export const registerSnapshots: Registrar = (server, session, opts) => {
           // Not reported as "Deleted", for delete_computer's reason: a 404 is
           // equally the answer for an id that was never on this account, and
           // "deleted" said over a typo leaves a caller believing a snapshot is
-          // gone while the real one is still held and still billed. Both
+          // gone while the real one is still held and still counted against storage. Both
           // readings are named, and the one call that settles which is named
           // with them.
           return said(

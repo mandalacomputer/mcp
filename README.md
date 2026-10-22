@@ -1036,7 +1036,7 @@ way a computer that has gone is ever shown — and an empty answer to a filtered
 listing is a fact about the filter rather than about the account, which is what
 it says rather than inviting you to create one.
 
-**Snapshots mid-deletion are billed but hidden.** A deletion that began and did
+**Snapshots mid-deletion still count against storage but are hidden.** A deletion that began and did
 not finish still holds objects and still counts against storage, and the default
 listing leaves it out — every ordinary caller is asking "what can I restore".
 `list_snapshots(include_unfinished: true)` is the flag for when the question is
@@ -1742,7 +1742,9 @@ change to the platform's route table, not a wider pass-through here.
 The platform allowlists every route `/api/v1` will answer and 404s the rest.
 `test/allowlist.ts` mirrors that table, and the tests assert two things: that
 every successful exercised call lands on an allowlisted route, and that no
-mirrored operation remains unexercised (`UNIMPLEMENTED` is empty). Tool names
+non-excluded mirrored operation remains unexercised. `UNIMPLEMENTED` in
+`test/allowlist.ts` documents the five intentional exclusions: API-key creation
+and deletion, and browser-connection creation, renewal and deletion. Tool names
 and exercise entries must match in both directions, and every tool must make
 an observed HTTP request during its callback. The independent public gate also
 detects a new published operation when the mirror has not yet been updated.

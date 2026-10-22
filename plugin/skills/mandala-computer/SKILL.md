@@ -21,9 +21,10 @@ browser session that has to be logged in and clicked through, a desktop
 application, a file that has to be seen rendered, or a machine that must not be
 this one — untrusted code, a clean OS, a second network position.
 
-Do not reach for one to run a shell command. `exec` exists, but a Mandala
-computer is billed while it runs, and a command the local machine can run costs
-nothing. If the task is "run this script", run it here.
+Use local execution when a shell command needs no remote desktop or isolated
+environment. A running Mandala computer consumes running capacity; runtime and
+individual exec calls do not add a charge to the monthly subscription. AI-credit
+usage is charged separately. Use `exec` when the task belongs on the remote computer.
 
 ## Setup, once
 
@@ -365,10 +366,12 @@ starting, so remove the binding first. Never repeat a value back to the user.
 
 `create_public_url` serves a port inside the computer at
 `https://<label>.<base_domain>` — the domain comes from `list_public_urls`, so
-do not assume one. **It is public by default: anyone on the internet with the
-link can open it.** Pass `access: "private"` unless the user wants it open to
-everyone; a private URL answers only requests carrying an API key of the
-account. The app must listen on `0.0.0.0`, not `127.0.0.1`. A label is never
+do not assume one. **Omitted access defaults to public on paid plans and private
+on trials.** Public means anyone with the link can open it; trials cannot request
+public access. Pass `access: "private"` unless the user wants it open to everyone.
+Private URLs accept an account API key (workspace-scoped keys must match the
+computer's workspace), or browser sign-in through the dashboard's Open button.
+The app must listen on `0.0.0.0`, not `127.0.0.1`. A label is never
 given to a second account: after `delete_public_url` it stays with this account,
 which may use it again unless the platform has blocked it, and a label another
 account has ever held reads as taken. Delete URLs you no longer need; a computer

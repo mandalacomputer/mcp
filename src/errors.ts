@@ -1385,7 +1385,7 @@ export class RedirectError extends APIError {
  *
  * Which makes a blind retry the thing to be careful about, and a model the
  * likeliest caller to attempt one. Re-sending a read costs nothing; re-sending a
- * create can leave two computers where one was meant, both billable, on the
+ * create can leave two computers where one was meant, both consuming resources, on the
  * strength of a failure that said the first never happened.
  *
  * It was filed with {@link OriginUnreachableError} at first, on the reading that
@@ -1737,7 +1737,7 @@ export function errorForStatus(
  * 502 and 504 USED to be here and are deliberately gone. The paragraph below
  * had already conceded the point that removes them: both can arrive after the
  * platform has acted, so replaying a `create_computer` through one can leave a
- * second billable computer behind a failure that read as nothing having
+ * second computer behind a failure that read as nothing having
  * happened. A status that is not safe for the riskiest caller of an exported
  * predicate does not belong in it. Nothing waits less as a result — the wait
  * tools ask {@link isTransientForPoll}, which still rides both out.
