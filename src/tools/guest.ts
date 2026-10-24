@@ -2,6 +2,7 @@ import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
 import type { Bytes } from '../api.js';
 import {
+  APIError,
   ConflictError,
   CreateOnlyConflictError,
   FileExistsError,
@@ -11,6 +12,7 @@ import {
 } from '../errors.js';
 import {
   apiErrorMessage,
+  failed,
   guarded,
   image,
   isInlineImage,
@@ -397,7 +399,7 @@ export const registerGuest: Registrar = (server, session) => {
       annotations: { destructiveHint: false, idempotentHint: false },
     },
     ({ computer_id, pid }, extra) =>
-      guarded(async () => {
+      pollGuarded(async () => {
         const id = session.resolve(computer_id);
         const res = await session.api
           .with(extra.signal)
@@ -1541,6 +1543,38 @@ function commandNote(res: unknown): string {
   if (cut == null || cut === false || cut === 0) return '';
   if (typeof cut === 'string' && ['false', '0'].includes(cut.trim().toLowerCase())) return '';
   return '\n\n`command` is only the first part of this command line (command_truncated): the platform kept at most its first 1 KiB across a restart of the service on the computer\u2019s host. Do not run it as written; it is not the whole command.';
+}
+
+/**
+ * A poll refused with a bare 409, reworded so it is neither a retry loop nor a
+ * reason to stop watching.
+ *
+ * On this route that is a command a restarted host service recovered, whose
+ * state the guest agent has not confirmed for five minutes. The general
+ * advice for an unclassified 409, never to send it again unchanged, would have
+ * a model abandon a command whose exit a later poll still reports. Only a 409
+ * that carries neither a reason nor a code is reworded; exec_kill keeps the
+ * general advice, because its refusal of a running recovered command holds for
+ * as long as the command runs.
+ */
+async function pollGuarded(fn: () => Promise<CallToolResult>): Promise<CallToolResult> {
+  try {
+    return await fn();
+  } catch (err) {
+    if (
+      err instanceof APIError &&
+      err.status === 409 &&
+      err.reason === undefined &&
+      err.code === undefined
+    ) {
+      return failed(
+        err,
+        true,
+        'the platform did not classify this, so do not poll again in a loop. For a command that was already running when the service on the computer\u2019s host restarted, it means the guest agent has not confirmed the command\u2019s state for five minutes: check that the computer is healthy, and a later poll answers again once the agent does or the command exits',
+      );
+    }
+    return failed(err);
+  }
 }
 
 /** The one line a model needs off an exec result, before the JSON. */

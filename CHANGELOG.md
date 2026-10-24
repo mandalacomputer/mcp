@@ -39,10 +39,12 @@ are wording changes, and they are behaviour changes in the way that matters.
   classification — `contention` worth sending again, a marked
   `output_unavailable` final, and an unclassified 409 not to be retried in a
   loop — where every 409 used to read the same.
-- `exec_poll`'s description no longer calls a refusal that is not marked worth
-  sending again final: for a recovered command it is the guest agent not having
-  confirmed its state for five minutes, which a later poll gets past once the
-  agent answers or the command exits.
+- `exec_poll` no longer calls a 409 with no reason final, in its description or
+  in the refusal itself: for a recovered command it is the guest agent not
+  having confirmed its state for five minutes, which a later poll gets past
+  once the agent answers or the command exits. The refusal says not to poll in
+  a loop and to check the computer's health. `exec_kill` keeps the general
+  advice, since its refusal holds while the command runs.
 - `exec_poll` and `exec_kill` say, above the JSON, when `command` is only the
   first part of a recovered command line (`command_truncated`, at most the first
   1 KiB). `command` and `command_truncated` stay in the JSON as sent.

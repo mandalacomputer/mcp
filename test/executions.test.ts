@@ -676,6 +676,42 @@ describe('authority and transport boundaries', () => {
     expect(textOf(result)).not.toContain('cannot be read');
   });
 
+  it('words a reasonless exec_poll 409 as a later poll, not an abandoned command', async () => {
+    let stale = true;
+    const { call, calls } = await setup(() =>
+      stale
+        ? Response.json({ error: 'not confirmed' }, { status: 409 })
+        : Response.json({
+            pid: 4242,
+            command: 'make all',
+            running: false,
+            exited: true,
+            exit_code: 0,
+            stdout_b64: '',
+            stderr_b64: '',
+            stdout_offset: 0,
+            stderr_offset: 0,
+            output_unavailable: 'daemon_restarted',
+          }),
+    );
+    const refused = await call('exec_poll', { pid: 4242 });
+    expect(refused.isError).toBe(true);
+    expect(textOf(refused)).toContain('do not poll again in a loop');
+    expect(textOf(refused)).toContain('a later poll answers again once the agent does');
+    expect(textOf(refused)).not.toContain('do not send it again unchanged');
+    expect(textOf(refused)).not.toContain('worth sending again');
+    stale = false;
+    const later = await call('exec_poll', { pid: 4242 });
+    expect(later.isError).toBeFalsy();
+    expect(bodyOf(later)).toMatchObject({ exit_code: 0 });
+    expect(calls).toHaveLength(2);
+    // A kill of a running recovered command stays refused while it runs.
+    const kill = await setup({ error: 'cannot stop this command here' }, 409);
+    const killed = await kill.call('exec_kill', { pid: 4242 });
+    expect(textOf(killed)).toContain('do not send it again unchanged');
+    expect(textOf(killed)).not.toContain('a later poll answers again');
+  });
+
   it('keeps a metadata 409 with no reason out of a retry loop without calling it final, and contention worth sending again', async () => {
     let stale = true;
     const final = await setup(() =>
