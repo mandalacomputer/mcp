@@ -186,6 +186,66 @@ export function protoKeyRefusal(
   };
 }
 
+/** Array elements plus object members in `value`, counting no further than one past `max`. */
+function elementCount(value: unknown, max: number): number {
+  let count = 0;
+  const stack = [value];
+  while (stack.length > 0) {
+    const node = stack.pop();
+    if (node === null || typeof node !== 'object') continue;
+    // for...in rather than Object.values, which would copy every member of a
+    // huge object before the count could stop.
+    if (Array.isArray(node)) {
+      for (const child of node) {
+        if (++count > max) return count;
+        if (child !== null && typeof child === 'object') stack.push(child);
+      }
+      continue;
+    }
+    for (const key in node) {
+      if (!Object.hasOwn(node, key)) continue;
+      if (++count > max) return count;
+      const child = (node as Record<string, unknown>)[key];
+      if (child !== null && typeof child === 'object') stack.push(child);
+    }
+  }
+  return count;
+}
+
+/**
+ * The refusal for a `tools/call` whose arguments hold more than
+ * {@link MAX_TOOL_INPUT_ELEMENTS} elements, or `undefined` for any other
+ * message.
+ *
+ * The SDK applies the same budget, but only once it has parsed the request
+ * envelope twice, and that parse visits and copies every top-level argument,
+ * so a flat object of millions of keys was paid for in full before the budget
+ * refused it. Counted here, before the SDK, in the SDK's own words. Any tool
+ * name, registered or not: the envelope is parsed before the name is looked up.
+ */
+export function oversizedArgumentsRefusal(message: JSONRPCMessage): JSONRPCMessage | undefined {
+  const m = message as { method?: unknown; id?: unknown; params?: unknown };
+  if (m.method !== 'tools/call' || (typeof m.id !== 'string' && typeof m.id !== 'number'))
+    return undefined;
+  const params = m.params as { name?: unknown; arguments?: unknown } | null | undefined;
+  if (!params || typeof params !== 'object') return undefined;
+  if (elementCount(params.arguments, MAX_TOOL_INPUT_ELEMENTS) <= MAX_TOOL_INPUT_ELEMENTS)
+    return undefined;
+  return {
+    jsonrpc: '2.0',
+    id: m.id,
+    result: {
+      content: [
+        {
+          type: 'text',
+          text: `MCP error ${ErrorCode.InvalidParams}: Invalid arguments for tool ${String(params.name)}: arguments contain more than the maximum of ${MAX_TOOL_INPUT_ELEMENTS} elements`,
+        },
+      ],
+      isError: true,
+    },
+  };
+}
+
 export type ServerConfig = SessionConfig &
   ToolFilters &
   Partial<ToolOptions> & {
@@ -289,8 +349,9 @@ export function createServer(cfg: ServerConfig): McpServer {
   }
 
   // A top-level `__proto__` argument is dropped by the SDK's own parse of the
-  // request, before any tool schema can refuse it, so it is refused on the way
-  // in (see protoKeyRefusal). Wrapped as the transport starts, which is after
+  // request, before any tool schema can refuse it, and arguments over the
+  // element budget are parsed in full before the SDK counts them, so both are
+  // refused on the way in (see protoKeyRefusal and oversizedArgumentsRefusal). Wrapped as the transport starts, which is after
   // the server has installed its message handler and before any message.
   const connect = server.connect.bind(server);
   server.connect = (transport: Transport) => {
@@ -299,7 +360,7 @@ export function createServer(cfg: ServerConfig): McpServer {
       const deliver = transport.onmessage;
       if (deliver) {
         transport.onmessage = (message, extra) => {
-          const refusal = protoKeyRefusal(message, names);
+          const refusal = oversizedArgumentsRefusal(message) ?? protoKeyRefusal(message, names);
           if (refusal) {
             transport.send(refusal).catch(() => undefined);
             return;

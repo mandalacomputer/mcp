@@ -1,7 +1,7 @@
-import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
+import type { CallToolResult, JSONRPCMessage } from '@modelcontextprotocol/sdk/types.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { z } from 'zod';
-import { MAX_TOOL_INPUT_ELEMENTS, strictInput } from '../src/server.js';
+import { MAX_TOOL_INPUT_ELEMENTS, oversizedArgumentsRefusal, strictInput } from '../src/server.js';
 import { connect, fakeEvents, installFakePlatform } from './harness.js';
 import { checkInventory, EXERCISE, FUNDED_EXERCISE } from './surface-exercise.js';
 
@@ -232,6 +232,85 @@ describe('oversized arguments', () => {
       const under = await call('run_agent_chat', { messages: [0] });
       expect(under.isError).toBe(true);
       expect(textOf(under)).toMatch(/expected object/);
+    } finally {
+      await close();
+    }
+  });
+});
+
+describe('oversizedArgumentsRefusal', () => {
+  const callOf = (args: unknown, name = 'delete_computer') =>
+    ({
+      jsonrpc: '2.0',
+      id: 9,
+      method: 'tools/call',
+      params: { name, arguments: args },
+    }) as JSONRPCMessage;
+  const flat = (n: number) => Object.fromEntries(Array.from({ length: n }, (_, i) => [`k${i}`, 0]));
+
+  // The SDK parses and copies every top-level argument before its own count,
+  // so a flat object of many keys has to be refused before it gets there.
+  it('refuses a flat object over the budget before the SDK sees it', () => {
+    const refusal = oversizedArgumentsRefusal(
+      callOf(flat(MAX_TOOL_INPUT_ELEMENTS + 1)),
+    ) as unknown as {
+      id: number;
+      result: CallToolResult;
+    };
+    expect(refusal.id).toBe(9);
+    expect(refusal.result.isError).toBe(true);
+    expect(textOf(refusal.result)).toContain(
+      `more than the maximum of ${MAX_TOOL_INPUT_ELEMENTS} elements`,
+    );
+    expect(oversizedArgumentsRefusal(callOf(flat(MAX_TOOL_INPUT_ELEMENTS)))).toBeUndefined();
+  });
+
+  it('counts nested elements, and any tool name, but only on tools/call', () => {
+    const nested = { a: [Array.from({ length: MAX_TOOL_INPUT_ELEMENTS }, () => ({}))] };
+    expect(oversizedArgumentsRefusal(callOf(nested, 'no_such_tool'))).toBeDefined();
+    expect(
+      oversizedArgumentsRefusal({
+        jsonrpc: '2.0',
+        id: 9,
+        method: 'tools/list',
+        params: { arguments: flat(MAX_TOOL_INPUT_ELEMENTS + 1) },
+      } as JSONRPCMessage),
+    ).toBeUndefined();
+  });
+
+  // Only a refusal on the way in can answer this: the SDK would parse the
+  // envelope and then say the tool does not exist.
+  it('is applied as the message arrives, before the SDK looks the tool up', async () => {
+    const { call, close } = await connect();
+    try {
+      const res = await call('no_such_tool', flat(MAX_TOOL_INPUT_ELEMENTS + 1)).catch(
+        (err: unknown): CallToolResult => ({
+          isError: true,
+          content: [{ type: 'text', text: String(err) }],
+        }),
+      );
+      expect(res.isError).toBe(true);
+      expect(textOf(res)).toContain(`more than the maximum of ${MAX_TOOL_INPUT_ELEMENTS} elements`);
+    } finally {
+      await close();
+    }
+  });
+
+  it('uses the words the SDK uses for the same budget', async () => {
+    const { server, close } = await connect();
+    try {
+      const args = flat(MAX_TOOL_INPUT_ELEMENTS + 1);
+      const sdk = server as unknown as {
+        validateToolInput(tool: unknown, args: unknown, name: string): Promise<unknown>;
+      };
+      const thrown = await sdk
+        .validateToolInput(registeredOf(server).delete_computer, args, 'delete_computer')
+        .then(
+          () => 'accepted',
+          (err: unknown) => String((err as Error).message),
+        );
+      const ours = oversizedArgumentsRefusal(callOf(args)) as unknown as { result: CallToolResult };
+      expect(textOf(ours.result)).toBe(thrown);
     } finally {
       await close();
     }
