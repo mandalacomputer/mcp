@@ -599,6 +599,9 @@ describe('authority and transport boundaries', () => {
           const result = await call(tool, { pid: 4242 });
           expect(result.isError).toBeFalsy();
           expect(textOf(result)).toContain(`output cannot be read (output_unavailable: ${shown})`);
+          // Running or exited cleanly, the command already did what it does.
+          expect(textOf(result)).toContain('do not run it again to recover the output');
+          expect(textOf(result)).not.toMatch(/\b(?:then|so) run it again\b|output matters, run it/);
           expect(bodyOf(result)).toMatchObject({
             ...state,
             output_unavailable: why,

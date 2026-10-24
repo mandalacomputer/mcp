@@ -1520,7 +1520,7 @@ function unavailableNote(res: unknown): string {
   if (!res || typeof res !== 'object' || Array.isArray(res)) return '';
   const why = (res as Record<string, unknown>).output_unavailable;
   if (why == null || why === '') return '';
-  return `\n\nThis command's output cannot be read (output_unavailable: ${JSON.stringify(why)}): stdout and stderr are empty because nothing was returned, not because it printed nothing, and later polls will not return it either. Its running state and exit code are still reported. If its output matters, run it again.`;
+  return `\n\nThis command's output cannot be read (output_unavailable: ${JSON.stringify(why)}): stdout and stderr are empty because nothing was returned, not because it printed nothing, and later polls will not return it either. Its running state and exit code are still reported. Losing the output did not undo the command, so do not run it again to recover the output: that repeats whatever it did, and while it is still running starts a second copy beside it. Inspect what it changed inside the computer instead, and start it again only once repeating it is known to be safe.`;
 }
 
 /** The one line a model needs off an exec result, before the JSON. */
