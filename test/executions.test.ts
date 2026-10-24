@@ -709,6 +709,25 @@ describe('authority and transport boundaries', () => {
     expect(calls).toHaveLength(1);
   });
 
+  it('keeps an output 409 output_unavailable without a marker open to a later read', async () => {
+    let first = true;
+    const { call, calls } = await setup(() => {
+      if (!first) return Response.json(output);
+      first = false;
+      return Response.json({ error: 'log not open', code: 'output_unavailable' }, { status: 409 });
+    });
+    const refused = await call('read_execution_output', zero);
+    expect(refused.isError).toBe(true);
+    expect(textOf(refused)).toContain('a later read at the same offsets can return the output');
+    expect(textOf(refused)).not.toContain('will not change that');
+    expect(textOf(refused)).not.toContain('final');
+    expect(textOf(refused)).toContain('Do not run the command again to recover the output');
+    const later = await call('read_execution_output', zero);
+    expect(later.isError).toBeFalsy();
+    expect(bodyOf(later)).toMatchObject({ stdout: 'hi' });
+    expect(calls).toHaveLength(2);
+  });
+
   it('describes the 409s of a command running across a host restart', async () => {
     const { client } = await setup();
     const { tools } = await client.listTools();
@@ -716,8 +735,9 @@ describe('authority and transport boundaries', () => {
     expect(describe('get_execution')).toContain('output_unavailable');
     expect(describe('get_execution')).toContain('`contention`, which is worth sending again');
     expect(describe('get_execution')).toContain('a 409 with no reason is final');
+    expect(describe('read_execution_output')).toContain('is final: the output cannot be read');
     expect(describe('read_execution_output')).toContain(
-      'A 409 with code `output_unavailable` is final',
+      'a later read at the same offsets can succeed',
     );
     expect(describe('read_execution_output')).toContain('daemon_restarted');
     expect(describe('exec_poll')).toContain('`command_truncated: true` says it was cut');

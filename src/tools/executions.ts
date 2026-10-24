@@ -78,20 +78,33 @@ async function readResult(
  *
  * The reason first, as everywhere else: `contention` is a command whose state
  * the platform has not checked yet, which clears in seconds. A code of
- * `output_unavailable` is output that cannot be read, which no retry changes,
- * and a 409 with no reason is the platform's final answer. Saying neither left
- * a model to its instinct on a 409, which is to send it again.
+ * `output_unavailable` is two different answers, told apart by the marker
+ * beside it. With one, the output was lost and no retry changes that. Without
+ * one, a guest log could not be opened, which is also what a read sent in the
+ * moment before a just-started command has created its logs is answered, so a
+ * later read at the same offsets can still return it. A 409 with no reason is
+ * the platform's final answer. Saying none of this left a model to its
+ * instinct on a 409, which is to send it again.
  */
 function conflictAdvice(err: APIError): string {
   if (err.reason === 'contention')
     return 'Something was in flight (for a command that was running when the service on the computer\u2019s host restarted, a check of its state that has not been made yet), so this read is worth sending again in a moment; no resume was requested.';
-  if (err.code === 'output_unavailable')
+  if (err.code === 'output_unavailable' && outputLost(err.body))
     return 'This execution\u2019s output cannot be read, and sending the read again will not change that; get_execution still reports its state and exit code. Do not run the command again to recover the output: that repeats whatever it did. Inspect what it changed inside the computer instead.';
+  if (err.code === 'output_unavailable')
+    return 'A guest log for this execution could not be opened. Just after a command starts, its logs may not exist yet, so a later read at the same offsets can return the output; if it keeps answering this, the logs have been removed. Do not run the command again to recover the output: that repeats whatever it did.';
   if (err.reason === 'unavailable')
     return 'The computer is stopped or suspended, and no resume was requested.';
   if (err.reason === undefined)
     return 'This answer is final: sending the same read again will not help, and no resume was requested.';
   return 'The output is unavailable in the current state; no resume was requested.';
+}
+
+/** Whether a refusal says the output itself was lost, rather than a log not opened yet. */
+function outputLost(body: unknown): boolean {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return false;
+  const why = (body as Record<string, unknown>).output_unavailable;
+  return why != null && why !== '';
 }
 
 /** The sentence that keeps a model from reading the output route's refusal as a passing fault. */
@@ -131,7 +144,7 @@ export const registerExecutions: Registrar = (server, session) => {
     {
       title: 'Read an independent execution output chunk',
       description:
-        'Read volatile, mutable guest output once at explicit independent stdout_offset and stderr_offset byte positions. Performs guest I/O but does not refresh activity, resume, change shared PID cursors, retry, tail, capture or replay a command. Unsuitable for passive Activities/history. Each stream is limited to 4096 bytes by default, at most 16384. Text is lossless UTF-8 (BOM preserved); NUL, binary and split UTF-8 remain exact base64. False more flags mean current EOF, not completion. Diagnostics repeat independently; only the first 4096 diagnostic bytes are displayed, with distinct available/displayed counts and display/daemon truncation flags. A 409 with code `output_unavailable` is final: the output cannot be read, and sending the read again will not help. That is the answer for a command that was already running when the service on the computer\u2019s host restarted (`output_unavailable: "daemon_restarted"`, also on get_execution); its status is still on get_execution, and running the command again repeats what it did rather than recovering its output.',
+        'Read volatile, mutable guest output once at explicit independent stdout_offset and stderr_offset byte positions. Performs guest I/O but does not refresh activity, resume, change shared PID cursors, retry, tail, capture or replay a command. Unsuitable for passive Activities/history. Each stream is limited to 4096 bytes by default, at most 16384. Text is lossless UTF-8 (BOM preserved); NUL, binary and split UTF-8 remain exact base64. False more flags mean current EOF, not completion. Diagnostics repeat independently; only the first 4096 diagnostic bytes are displayed, with distinct available/displayed counts and display/daemon truncation flags. A 409 with code `output_unavailable` that also carries `output_unavailable` (today `"daemon_restarted"`, for a command that was already running when the service on the computer\u2019s host restarted, and on get_execution too) is final: the output cannot be read, and sending the read again will not help; its status is still on get_execution. Without that marker it means a guest log could not be opened, which just after a command starts can be a log not created yet, so a later read at the same offsets can succeed. Either way, running the command again repeats what it did rather than recovering its output.',
       inputSchema: {
         ...identity,
         stdout_offset: offset,

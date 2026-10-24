@@ -28,10 +28,13 @@ are wording changes, and they are behaviour changes in the way that matters.
   that is not a short lowercase word reads `"unknown"`. Its description explains
   the route's 409s: `contention` is worth sending again shortly after the host
   service restarts, and a 409 with no reason is final.
-- `read_execution_output` says a 409 with code `output_unavailable` (for a
-  recovered command, `output_unavailable: "daemon_restarted"`) is final: sending
-  the read again will not help. The refusal text of both execution reads now
-  follows the platform's classification — `contention` worth sending again,
+- `read_execution_output` says a 409 with code `output_unavailable` that also
+  carries the `output_unavailable` marker (for a recovered command,
+  `"daemon_restarted"`) is final: sending the read again will not help. Without
+  the marker it is a guest log that could not be opened, which just after a
+  command starts can be one not created yet, so a later read can succeed. The
+  refusal text of both execution reads now follows the platform's
+  classification — `contention` worth sending again, a marked
   `output_unavailable` and an unclassified 409 final — where every 409 used to
   read the same.
 - `exec_poll` and `exec_kill` say, above the JSON, when `command` is only the

@@ -857,7 +857,9 @@ was cut. `get_execution` answers for its `execution_id` with the same
 `output_unavailable`, refused with a 409 `contention` (worth sending again) for
 those first seconds and with a 409 carrying no reason (final) once the guest
 agent has stopped answering; `read_execution_output` refuses it with a 409
-`output_unavailable` that no retry changes. Do not run the command again to
+`output_unavailable` carrying the same marker, which no retry changes (without
+the marker, the same code is a log not opened, possibly not created yet, and a
+later read can succeed). Do not run the command again to
 recover its output: that repeats whatever it did.
 
 **Stable background reads.** When an accepted `exec` returns `execution_id`,
