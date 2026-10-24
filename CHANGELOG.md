@@ -14,6 +14,8 @@ are wording changes, and they are behaviour changes in the way that matters.
 
 ## [Unreleased]
 
+## [0.18.0] - 2026-10-24
+
 ### Added
 
 - `exec_poll` and `exec_kill` say, above the JSON, when a background command's
@@ -1436,7 +1438,8 @@ No effect on the tool surface, listed because it is most of the window.
 - Several parser fixes landed before that scanner was retired, each ported to
   and from the TypeScript SDK's byte-identical copy.
 
-[Unreleased]: https://github.com/mandalacomputer/mcp/compare/v0.17.2...HEAD
+[Unreleased]: https://github.com/mandalacomputer/mcp/compare/v0.18.0...HEAD
+[0.18.0]: https://github.com/mandalacomputer/mcp/compare/v0.17.2...v0.18.0
 [0.17.2]: https://github.com/mandalacomputer/mcp/compare/v0.17.1...v0.17.2
 [0.17.1]: https://github.com/mandalacomputer/mcp/compare/v0.17.0...v0.17.1
 [0.17.0]: https://github.com/mandalacomputer/mcp/compare/v0.16.0...v0.17.0
