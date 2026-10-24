@@ -88,6 +88,25 @@ function timestamp(value: unknown, field: string): string {
   return value;
 }
 
+/**
+ * Why this execution's output cannot be read, as a field to spread; empty when
+ * nothing says it cannot.
+ *
+ * Absent, null and the empty string are all "not said". Anything else is still
+ * a claim that the output is not there, so it reads as `unknown` rather than
+ * being dropped: dropping it would leave a model to try the output read and take
+ * its refusal for a passing fault. Text is kept only when it is the short
+ * lowercase word the platform sends, because this presentation never echoes a
+ * payload value it cannot vouch for.
+ */
+function outputUnavailable(value: unknown): { output_unavailable?: string } {
+  if (value == null || value === '') return {};
+  return {
+    output_unavailable:
+      typeof value === 'string' && /^[a-z][a-z0-9_]{0,63}$/.test(value) ? value : 'unknown',
+  };
+}
+
 export function executionMetadata(value: unknown, computerId: string, executionId: string) {
   const d = record(value, executionId);
   if (d.computer_id !== computerId) invalid('computer_id does not match the requested computer');
@@ -103,6 +122,7 @@ export function executionMetadata(value: unknown, computerId: string, executionI
     status: d.status,
     started_at: started,
     output_source: 'volatile_guest_files',
+    ...outputUnavailable(d.output_unavailable),
   };
   if (d.status === 'exited') {
     return {

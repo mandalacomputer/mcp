@@ -851,7 +851,14 @@ it ends, its `exit_code` — but both streams stay empty and `output_unavailable
 above the JSON. For a few seconds after the restart a poll can be refused as
 worth sending again; a refusal that does not say so is final. `exec_kill` on
 such a command is refused while it still runs, so stop it from inside the
-computer with `exec`.
+computer with `exec`. Its `command` is the copy the platform kept, at most the
+first 1 KiB, and `command_truncated: true` (said above the JSON too) means it
+was cut. `get_execution` answers for its `execution_id` with the same
+`output_unavailable`, refused with a 409 `contention` (worth sending again) for
+those first seconds and with a 409 carrying no reason (final) once the guest
+agent has stopped answering; `read_execution_output` refuses it with a 409
+`output_unavailable` that no retry changes. Do not run the command again to
+recover its output: that repeats whatever it did.
 
 **Stable background reads.** When an accepted `exec` returns `execution_id`,
 use `get_execution` for its last observed `running`, `exited` or `lost` state.

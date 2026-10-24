@@ -22,6 +22,21 @@ are wording changes, and they are behaviour changes in the way that matters.
   restarted, so its status and exit code are reported with empty streams. The
   two tool descriptions explain the case, including that `exec_kill` is refused
   for such a command while it still runs.
+- `get_execution` passes `output_unavailable` through and says, above the JSON,
+  that the execution's output cannot be read and that running the command again
+  does not recover it. Absent, `null` and empty leave it unset; any other value
+  that is not a short lowercase word reads `"unknown"`. Its description explains
+  the route's 409s: `contention` is worth sending again shortly after the host
+  service restarts, and a 409 with no reason is final.
+- `read_execution_output` says a 409 with code `output_unavailable` (for a
+  recovered command, `output_unavailable: "daemon_restarted"`) is final: sending
+  the read again will not help. The refusal text of both execution reads now
+  follows the platform's classification — `contention` worth sending again,
+  `output_unavailable` and an unclassified 409 final — where every 409 used to
+  read the same.
+- `exec_poll` and `exec_kill` say, above the JSON, when `command` is only the
+  first part of a recovered command line (`command_truncated`, at most the first
+  1 KiB). `command` and `command_truncated` stay in the JSON as sent.
 
 ### Security
 

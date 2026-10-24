@@ -637,6 +637,127 @@ describe('authority and transport boundaries', () => {
     }
   });
 
+  it.each([
+    ['daemon_restarted', 'daemon_restarted'],
+    ['some_later_reason', 'some_later_reason'],
+    [true, 'unknown'],
+    [7, 'unknown'],
+    [{}, 'unknown'],
+    ['PRIVATE-NOT-A-WORD', 'unknown'],
+  ] as const)(
+    'reads execution output_unavailable %j as %j and says the output cannot be read',
+    async (why, shown) => {
+      for (const state of [
+        { status: 'running' },
+        { status: 'exited', ended_at: '2026-09-15T12:00:01Z', exit_code: 3 },
+      ]) {
+        const { call } = await setup({ ...metadata, ...state, output_unavailable: why });
+        const result = await call('get_execution', { execution_id: ID });
+        expect(result.isError).toBeFalsy();
+        expect(bodyOf(result)).toEqual({ ...metadata, ...state, output_unavailable: shown });
+        expect(textOf(result)).toContain(
+          `output cannot be read (output_unavailable: ${JSON.stringify(shown)})`,
+        );
+        expect(textOf(result)).toContain('do not run it again to recover the output');
+        expect(textOf(result)).not.toMatch(/\b(?:then|so) run it again\b/);
+        expect(textOf(result)).not.toContain('PRIVATE-');
+      }
+    },
+  );
+
+  it.each([undefined, null, ''])('leaves execution output_unavailable %j unset', async (why) => {
+    const { call } = await setup({
+      ...metadata,
+      ...(why === undefined ? {} : { output_unavailable: why }),
+    });
+    const result = await call('get_execution', { execution_id: ID });
+    expect(result.isError).toBeFalsy();
+    expect(bodyOf(result)).toEqual(metadata);
+    expect(textOf(result)).not.toContain('cannot be read');
+  });
+
+  it('keeps a metadata 409 with no reason final, and contention worth sending again', async () => {
+    const final = await setup({ error: 'not answering' }, 409);
+    const refused = await final.call('get_execution', { execution_id: ID });
+    expect(refused.isError).toBe(true);
+    expect(textOf(refused)).toContain('This answer is final');
+    expect(textOf(refused)).not.toContain('worth sending again');
+    expect(final.calls).toHaveLength(1);
+    const busy = await setup({ error: 'not yet checked', reason: 'contention' }, 409);
+    const retry = await busy.call('get_execution', { execution_id: ID });
+    expect(retry.isError).toBe(true);
+    expect(textOf(retry)).toContain('worth sending again');
+    expect(textOf(retry)).not.toContain('final');
+    expect(busy.calls).toHaveLength(1);
+  });
+
+  it('keeps an output 409 output_unavailable final without advising a rerun', async () => {
+    const { call, calls } = await setup(
+      {
+        error: 'output unavailable',
+        code: 'output_unavailable',
+        output_unavailable: 'daemon_restarted',
+      },
+      409,
+    );
+    const result = await call('read_execution_output', zero);
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toContain('sending the read again will not change that');
+    expect(textOf(result)).toContain('Do not run the command again to recover the output');
+    expect(textOf(result)).not.toContain('worth sending again');
+    expect(textOf(result)).toContain('"code": "output_unavailable"');
+    expect(calls).toHaveLength(1);
+  });
+
+  it('describes the 409s of a command running across a host restart', async () => {
+    const { client } = await setup();
+    const { tools } = await client.listTools();
+    const describe = (name: string) => tools.find((tool) => tool.name === name)?.description ?? '';
+    expect(describe('get_execution')).toContain('output_unavailable');
+    expect(describe('get_execution')).toContain('`contention`, which is worth sending again');
+    expect(describe('get_execution')).toContain('a 409 with no reason is final');
+    expect(describe('read_execution_output')).toContain(
+      'A 409 with code `output_unavailable` is final',
+    );
+    expect(describe('read_execution_output')).toContain('daemon_restarted');
+    expect(describe('exec_poll')).toContain('`command_truncated: true` says it was cut');
+  });
+
+  it('says when a recovered command line was cut, and passes command through', async () => {
+    const recovered = {
+      pid: 4242,
+      command: 'make all',
+      running: false,
+      exited: true,
+      exit_code: 0,
+      stdout_b64: '',
+      stderr_b64: '',
+      stdout_offset: 0,
+      stderr_offset: 0,
+      output_unavailable: 'daemon_restarted',
+    };
+    for (const cut of [true, 1, 'true', 'cut']) {
+      const { call } = await setup({ ...recovered, command_truncated: cut });
+      for (const tool of ['exec_poll', 'exec_kill']) {
+        const result = await call(tool, { pid: 4242 });
+        expect(result.isError).toBeFalsy();
+        expect(textOf(result)).toContain('`command` is only the first part of this command line');
+        expect(bodyOf(result)).toMatchObject({ command: 'make all', command_truncated: cut });
+      }
+    }
+    for (const cut of [undefined, null, false, 0, 'false']) {
+      const { call } = await setup({
+        ...recovered,
+        ...(cut === undefined ? {} : { command_truncated: cut }),
+      });
+      for (const tool of ['exec_poll', 'exec_kill']) {
+        const result = await call(tool, { pid: 4242 });
+        expect(textOf(result)).not.toContain('only the first part');
+        expect(bodyOf(result)).toMatchObject({ command: 'make all' });
+      }
+    }
+  });
+
   it('preserves an accepted command on older platforms without inventing stable identity', async () => {
     const { call } = await setup({ pid: 4242, running: true, stdout_b64: '', stderr_b64: '' });
     const result = await call('exec', { command: 'true', background: true });
