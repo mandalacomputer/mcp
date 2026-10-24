@@ -753,6 +753,8 @@ describe('authority and transport boundaries', () => {
     );
     expect(describe('read_execution_output')).toContain('daemon_restarted');
     expect(describe('exec_poll')).toContain('`command_truncated: true` says it was cut');
+    expect(describe('exec_poll')).toContain('a later poll answers again once the agent does');
+    expect(describe('exec_poll')).not.toContain('does not say so is final');
   });
 
   it('says when a recovered command line was cut, and passes command through', async () => {

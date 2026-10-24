@@ -849,7 +849,9 @@ already running still answers `exec_poll` with whether it is running and, once
 it ends, its `exit_code` — but both streams stay empty and `output_unavailable`
 (today `"daemon_restarted"`) says the output cannot be read; the tool says so
 above the JSON. For a few seconds after the restart a poll can be refused as
-worth sending again; a refusal that does not say so is final. `exec_kill` on
+worth sending again; a refusal that does not say so is not worth sending again
+at once — the guest agent has not confirmed the command for five minutes — and
+a later poll answers again once it does or the command exits. `exec_kill` on
 such a command is refused while it still runs, so stop it from inside the
 computer with `exec`. Its `command` is the copy the platform kept, at most the
 first 1 KiB, and `command_truncated: true` (said above the JSON too) means it
