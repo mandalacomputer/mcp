@@ -151,7 +151,7 @@ describe('input coordinates', () => {
     );
     await close();
     expect(res.isError).toBe(true);
-    expect(textOf(res)).toMatch(/integer/i);
+    expect(textOf(res)).toMatch(/\bint(eger)?\b/i);
     expect(platform.calls.slice(before)).toEqual([]);
   });
 });

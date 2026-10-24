@@ -41,6 +41,19 @@ export { SERVER_VERSION };
 export const SERVER_NAME = 'mandala-computer';
 
 /**
+ * The most array elements and object members one tool call's arguments may
+ * hold, counted before any schema runs.
+ *
+ * A schema only bounds what it declares: an array with no maximum, and every
+ * element of it that is wrong, is validated in full and leaves an issue per
+ * element, so a body of millions of small invalid entries cost far more to
+ * refuse than it cost to send. Over HTTP one process serves every session. The
+ * largest legitimate arguments are a chat transcript, and the platform refuses
+ * one over 1 MiB, which no ordinary transcript fills with this many.
+ */
+export const MAX_TOOL_INPUT_ELEMENTS = 100_000;
+
+/**
  * Told to the client on connect, and shown to the model before any tool is
  * called. It is the only place to say the things that are true of the whole
  * server rather than of one tool — chiefly that a screenshot is how you find
@@ -97,39 +110,40 @@ export function offersFundedAgent(cfg: ToolFilters & { modelKey?: string }): boo
  * A tool's input schema, made to refuse any key it does not declare.
  *
  * The SDK accepts either a field map or a Zod schema. A field map becomes an
- * object that strips unknown keys, and so does a `z.object` without
- * `.strict()`: the listed JSON Schema still says `additionalProperties: false`,
- * but the call goes ahead with the unknown key silently dropped. That turned a
- * misspelt `workspace_id` into a secret stored account-wide, a misspelt
- * `resume_only` into a full start, and a misspelt flag on a delete into a
- * delete. Every schema leaves here strict.
+ * object that strips unknown keys, and so does a plain `z.object`: the listed
+ * JSON Schema still says `additionalProperties: false`, but the call goes
+ * ahead with the unknown key silently dropped. That turned a misspelt
+ * `workspace_id` into a secret stored account-wide, a misspelt `resume_only`
+ * into a full start, and a misspelt flag on a delete into a delete. Every schema leaves here strict.
  *
  * Anything that cannot be made strict here is refused at registration, so a
  * tool added later cannot reintroduce the stripping by its shape: a schema that
- * is not an object, one that passes unknown keys through or has a catch-all,
- * and an object wrapped in a refinement whose inner object is not strict
- * already (a refinement's inner object cannot be replaced without losing it).
+ * is not an object, and one that passes unknown keys through or has a
+ * catch-all. A refined object is still an object, and making it strict keeps
+ * its refinements.
  */
-export function strictInput(name: string, schema: unknown): z.ZodTypeAny {
+export function strictInput(name: string, schema: unknown): z.ZodType {
   if (schema === undefined) {
     throw new Error(`Tool ${name} declares no input schema; give it one, even if empty.`);
   }
   if (!(schema instanceof z.ZodType)) {
-    return z.object(schema as z.ZodRawShape).strict();
+    return z.strictObject(schema as z.ZodRawShape);
   }
   if (schema instanceof z.ZodObject) {
-    if (!(schema._def.catchall instanceof z.ZodNever)) {
-      throw new Error(`Tool ${name}'s input schema has a catch-all; it must refuse unknown keys.`);
-    }
-    if (schema._def.unknownKeys === 'strict') return schema;
-    if (schema._def.unknownKeys === 'passthrough') {
+    // A strict object's catch-all is `never`; a loose one's is `unknown`; a
+    // stripping one has none.
+    const { catchall } = schema._zod.def;
+    if (catchall instanceof z.ZodNever) return schema;
+    if (catchall instanceof z.ZodUnknown) {
       throw new Error(`Tool ${name}'s input schema passes unknown keys through.`);
     }
+    if (catchall !== undefined) {
+      throw new Error(`Tool ${name}'s input schema has a catch-all; it must refuse unknown keys.`);
+    }
+    // The method rather than z.strictObject(schema.shape): it copies the whole
+    // definition, refinements included, where rebuilding from the shape would
+    // drop them.
     return schema.strict();
-  }
-  if (schema instanceof z.ZodEffects) {
-    const inner = schema.innerType();
-    if (inner instanceof z.ZodObject && inner._def.unknownKeys === 'strict') return schema;
   }
   throw new Error(`Tool ${name}'s input schema must be a strict object.`);
 }
@@ -164,7 +178,92 @@ export function protoKeyRefusal(
       content: [
         {
           type: 'text',
-          text: `MCP error ${ErrorCode.InvalidParams}: Input validation error: Invalid arguments for tool ${name}: Unrecognized key(s) in object: '__proto__'`,
+          text: `MCP error ${ErrorCode.InvalidParams}: Input validation error: Invalid arguments for tool ${name}: Unrecognized key: "__proto__"`,
+        },
+      ],
+      isError: true,
+    },
+  };
+}
+
+/** Array elements plus object members in `value`, counting no further than one past `max`. */
+function elementCount(value: unknown, max: number): number {
+  let count = 0;
+  const stack = [value];
+  while (stack.length > 0) {
+    const node = stack.pop();
+    if (node === null || typeof node !== 'object') continue;
+    // for...in rather than Object.values, which would copy every member of a
+    // huge object before the count could stop.
+    if (Array.isArray(node)) {
+      for (const child of node) {
+        if (++count > max) return count;
+        if (child !== null && typeof child === 'object') stack.push(child);
+      }
+      continue;
+    }
+    for (const key in node) {
+      if (!Object.hasOwn(node, key)) continue;
+      if (++count > max) return count;
+      const child = (node as Record<string, unknown>)[key];
+      if (child !== null && typeof child === 'object') stack.push(child);
+    }
+  }
+  return count;
+}
+
+/**
+ * Whether the `tools/call` requests in an HTTP batch hold more than
+ * {@link MAX_TOOL_INPUT_ELEMENTS} argument elements between them.
+ *
+ * Each call is counted on its own as it arrives, but a batch's calls are all
+ * dispatched before any is answered, so their validations run side by side:
+ * a hundred calls just under the budget cost a hundred times what one is
+ * allowed to. The whole batch is held to the one budget instead.
+ */
+export function batchOverBudget(messages: readonly unknown[]): boolean {
+  let left = MAX_TOOL_INPUT_ELEMENTS;
+  for (const message of messages) {
+    const m = message as { method?: unknown; params?: unknown } | null;
+    if (!m || typeof m !== 'object' || m.method !== 'tools/call') continue;
+    const params = m.params as { arguments?: unknown } | null | undefined;
+    if (!params || typeof params !== 'object') continue;
+    left -= elementCount(params.arguments, left);
+    if (left < 0) return true;
+  }
+  return false;
+}
+
+/**
+ * The refusal for a `tools/call` whose arguments hold more than
+ * {@link MAX_TOOL_INPUT_ELEMENTS} elements, or `undefined` for any other
+ * message.
+ *
+ * The SDK applies the same budget, but only once it has parsed the request
+ * envelope twice, and that parse visits and copies every top-level argument,
+ * so a flat object of millions of keys was paid for in full before the budget
+ * refused it. Counted here, before the SDK, in the SDK's own words. Any tool
+ * name, registered or not: the envelope is parsed before the name is looked up.
+ */
+export function oversizedArgumentsRefusal(message: JSONRPCMessage): JSONRPCMessage | undefined {
+  const m = message as { method?: unknown; id?: unknown; params?: unknown };
+  if (m.method !== 'tools/call' || (typeof m.id !== 'string' && typeof m.id !== 'number'))
+    return undefined;
+  const params = m.params as { name?: unknown; arguments?: unknown } | null | undefined;
+  if (!params || typeof params !== 'object') return undefined;
+  if (elementCount(params.arguments, MAX_TOOL_INPUT_ELEMENTS) <= MAX_TOOL_INPUT_ELEMENTS)
+    return undefined;
+  // Nothing has checked the name yet, and coercing an object to a string can
+  // throw, which would take the rest of an HTTP batch down with this answer.
+  const tool = typeof params.name === 'string' ? `tool ${params.name}` : 'this tool call';
+  return {
+    jsonrpc: '2.0',
+    id: m.id,
+    result: {
+      content: [
+        {
+          type: 'text',
+          text: `MCP error ${ErrorCode.InvalidParams}: Invalid arguments for ${tool}: arguments contain more than the maximum of ${MAX_TOOL_INPUT_ELEMENTS} elements`,
         },
       ],
       isError: true,
@@ -196,6 +295,7 @@ export function createServer(cfg: ServerConfig): McpServer {
     {
       capabilities: { logging: {}, tools: {} },
       instructions: filter.filtered ? filteredInstructions : instructions(opts.lifecycle),
+      maxToolInputElements: MAX_TOOL_INPUT_ELEMENTS,
     },
   );
 
@@ -274,8 +374,9 @@ export function createServer(cfg: ServerConfig): McpServer {
   }
 
   // A top-level `__proto__` argument is dropped by the SDK's own parse of the
-  // request, before any tool schema can refuse it, so it is refused on the way
-  // in (see protoKeyRefusal). Wrapped as the transport starts, which is after
+  // request, before any tool schema can refuse it, and arguments over the
+  // element budget are parsed in full before the SDK counts them, so both are
+  // refused on the way in (see protoKeyRefusal and oversizedArgumentsRefusal). Wrapped as the transport starts, which is after
   // the server has installed its message handler and before any message.
   const connect = server.connect.bind(server);
   server.connect = (transport: Transport) => {
@@ -284,7 +385,7 @@ export function createServer(cfg: ServerConfig): McpServer {
       const deliver = transport.onmessage;
       if (deliver) {
         transport.onmessage = (message, extra) => {
-          const refusal = protoKeyRefusal(message, names);
+          const refusal = oversizedArgumentsRefusal(message) ?? protoKeyRefusal(message, names);
           if (refusal) {
             transport.send(refusal).catch(() => undefined);
             return;

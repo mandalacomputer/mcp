@@ -3,7 +3,7 @@ import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import type { Server } from 'node:http';
 import { BlockList, isIP } from 'node:net';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
-import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
+import { ErrorCode, isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
 import express, { type Request, type Response } from 'express';
 import { Api, MODEL_KEY_HEADER } from './api.js';
 import { fundedAccount } from './credits.js';
@@ -11,7 +11,9 @@ import { APIError } from './errors.js';
 import { MeteredBody } from './http-body.js';
 import { WHOAMI } from './paths.js';
 import {
+  batchOverBudget,
   createServer,
+  MAX_TOOL_INPUT_ELEMENTS,
   offersFundedAgent,
   SERVER_NAME,
   SERVER_VERSION,
@@ -1327,6 +1329,17 @@ export async function runHttp(cfg: HttpConfig): Promise<Server> {
             return notFound(res, 'Unknown session. Initialize a new one.', rpcId(req));
           }
           return unauthorized(res, 'This session belongs to a different API key.', rpcId(req));
+        }
+        // Refused whole, before any of it is dispatched: answering only the
+        // calls past the budget would still run the ones before them, and a
+        // batch is answered all at once or not at all.
+        if (Array.isArray(req.body) && batchOverBudget(req.body)) {
+          return rpcError(
+            res,
+            413,
+            ErrorCode.InvalidRequest,
+            `The tool calls in this batch hold more than ${MAX_TOOL_INPUT_ELEMENTS} array elements and object members between them, so none of them was run. Send them in smaller batches or one at a time.`,
+          );
         }
         // In flight from here, not only once it is dispatched: the bearer
         // check below awaits the platform, for up to BEARER_CHECK_TIMEOUT_MS on

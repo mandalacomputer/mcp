@@ -424,13 +424,12 @@ export const registerInput: Registrar = (server, session) => {
             'Reuse the capture name returned by an earlier screenshot of this computer, so a region is cut from the frame it was measured on. Omit fresh or set it to false. If the capture is no longer held, take a new screenshot without capture and remeasure the region; never reuse the old crop on an unseen frame.',
           ),
         region: z
-          .object({
+          .strictObject({
             x: z.number().int().min(0),
             y: z.number().int().min(0),
             width: z.number().int().min(1),
             height: z.number().int().min(1),
           })
-          .strict()
           .optional()
           .describe(
             "Crop to this rectangle of the capture. x, y, width and height are full-size capture pixels, measured before any scaling; use the returned capture size, which can differ from the computer record's resolution. Give capture to pin the crop to the frame you measured. A region outside it is refused rather than clipped. The picture that comes back starts at (0, 0), so add x and y to a position in it before clicking there.",

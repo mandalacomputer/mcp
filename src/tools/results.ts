@@ -13,17 +13,15 @@ import {
   scopeId,
 } from '../results.js';
 import type { Registrar } from './types.js';
-export const retentionSchema = z
-  .object({
-    max_bytes_per_stream: z
-      .number()
-      .int()
-      .min(1)
-      .max(4 * 1024 * 1024)
-      .optional(),
-    retention_seconds: z.number().int().min(1).max(604800).optional(),
-  })
-  .strict();
+export const retentionSchema = z.strictObject({
+  max_bytes_per_stream: z
+    .number()
+    .int()
+    .min(1)
+    .max(4 * 1024 * 1024)
+    .optional(),
+  retention_seconds: z.number().int().min(1).max(604800).optional(),
+});
 export const computerSchema = z
   .string()
   .min(1)

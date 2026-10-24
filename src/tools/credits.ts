@@ -22,24 +22,22 @@ export const registerCredits: Registrar = (server, session) => {
       title: 'Read AI credits',
       description:
         "This account's Mandala AI credits, which pay for run_agent when no model key is configured: available (balance minus debt and credits held for runs in progress; can be negative, and zero while frozen), balance, held, debt, frozen (no plan or a suspended account: credits are kept and still expire, but cannot be spent), this billing period's plan grant, the unexpired lots, and the journal, newest first. Amounts are integer USD micros (1,000,000 = $1). A key confined to a workspace is refused (403): the ledger is the whole account's.",
-      inputSchema: z
-        .object({
-          before: z
-            .number()
-            .int()
-            .min(1)
-            .max(Number.MAX_SAFE_INTEGER)
-            .optional()
-            .describe('Older journal entries: the next_before of the page before.'),
-          limit: z
-            .number()
-            .int()
-            .min(1)
-            .max(PAGE_MAX)
-            .optional()
-            .describe(`Journal entries per page, 1 to ${PAGE_MAX}; the platform defaults to 50.`),
-        })
-        .strict(),
+      inputSchema: z.strictObject({
+        before: z
+          .number()
+          .int()
+          .min(1)
+          .max(Number.MAX_SAFE_INTEGER)
+          .optional()
+          .describe('Older journal entries: the next_before of the page before.'),
+        limit: z
+          .number()
+          .int()
+          .min(1)
+          .max(PAGE_MAX)
+          .optional()
+          .describe(`Journal entries per page, 1 to ${PAGE_MAX}; the platform defaults to 50.`),
+      }),
       annotations: readAnnotations,
     },
     ({ before, limit }, extra) =>

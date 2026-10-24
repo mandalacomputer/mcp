@@ -23,6 +23,45 @@ are wording changes, and they are behaviour changes in the way that matters.
   two tool descriptions explain the case, including that `exec_kill` is refused
   for such a command while it still runs.
 
+### Security
+
+- **Lockfile takes `body-parser` 2.4.0 and `fast-uri` 3.1.9.** `body-parser`
+  2.0.0–2.3.0 could be held busy by trailing bytes after a compressed request
+  body, which reaches the `--http` server through Express; `fast-uri` before
+  3.1.9 had several URI parsing issues. Both are within the existing ranges.
+- **Tool arguments are validated with zod 4.** zod before 4.6.6 could exhaust
+  memory validating an oversized constrained collection (GHSA-mrhx-c7xc-m3w5),
+  and no 3.x release is patched, so the server now requires zod `^4.6.7`. Over
+  `--http` that is every caller's arguments.
+- **A tool call's arguments may hold at most 100,000 array elements and object
+  members.** The count is taken as the request arrives, before it is parsed or
+  any schema runs, because an array with no maximum of its own was validated
+  element by element, keeping an issue for each bad one, however many arrived.
+  A call over it, to any tool name, is refused with
+  `arguments contain more than the maximum of 100000 elements`. Over `--http`
+  the budget covers a whole batch, whose calls are validated side by side: a
+  batch whose `tools/call` arguments exceed it between them is refused with a
+  `413` and none of its calls is run.
+
+### Changed
+
+- **Refusals of invalid tool arguments use zod 4's wording.** Each still names
+  the argument and what was wrong with it, in different words: `Required`
+  becomes `Invalid input: expected string, received undefined`,
+  `Expected number, received string` becomes
+  `Invalid input: expected number, received string`, an unknown argument is
+  `Unrecognized key: "name"` rather than `Unrecognized key(s) in object: 'name'`,
+  an enum miss is `Invalid option: expected one of "a"|"b"`, a bound is
+  `Too small: expected number to be >=1`, and a fraction where a whole number
+  is needed is `expected int, received number`.
+- **Integer arguments are limited to the safe-integer range, and say so.** An
+  integer argument with no upper or lower bound of its own now lists
+  `minimum`/`maximum` of ±9007199254740991 in `tools/list`, and a value
+  beyond it is refused rather than sent. An integer argument that reuses
+  another's definition is now listed in full rather than as a `$ref` to it,
+  and a map argument (`env`) lists `propertyNames: {"type": "string"}`.
+  Nothing else in any tool's input schema changed.
+
 ## [0.17.2] — 2026-10-22
 
 ### Fixed
