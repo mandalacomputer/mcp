@@ -227,14 +227,12 @@ export const registerThreads: Registrar = (server, session) => {
       title: 'Delete a kept agent conversation',
       description:
         "Permanently delete a kept conversation: its turns are gone and its id can no longer be continued. Nothing else changes — no run is stopped (cancel_agent_run stops a background run), and what its runs did to the desktop stands. Delete only a thread this conversation started or one the user asked to remove: every thread on the account is visible to this key, including other people's. It is for removing a prompt that held private text, or making room: the account keeps 1000 threads, replacing the least recently used, and a key that can delete none of them gets runs that are not kept. Needs confirm: true.",
-      inputSchema: z
-        .object({
-          thread_id: threadIdArg,
-          confirm: z
-            .literal(true)
-            .describe('Must be true. The conversation is gone for good and cannot be continued.'),
-        })
-        .strict(),
+      inputSchema: z.strictObject({
+        thread_id: threadIdArg,
+        confirm: z
+          .literal(true)
+          .describe('Must be true. The conversation is gone for good and cannot be continued.'),
+      }),
       annotations: { destructiveHint: true, idempotentHint: true },
     },
     ({ thread_id }, extra) =>

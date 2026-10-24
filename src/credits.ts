@@ -16,7 +16,8 @@ import * as P from './paths.js';
  * session the tool; failing open costs it a tool that refuses every call.
  */
 
-const micros = z.number().int().safe();
+// .int() admits only safe integers, so an amount past 2^53 is refused.
+const micros = z.number().int();
 const amount = micros.nonnegative();
 const instant = z.string().min(1);
 

@@ -95,10 +95,12 @@ function noWakeRefusal(err: unknown, id: string, what: string): CallToolResult |
   );
 }
 
+// A pattern rather than .startsWith: both refuse the same strings, but the
+// listed JSON Schema for .startsWith carries a `format` no validator knows.
 const absolutePath = (what: string) =>
   z
     .string()
-    .startsWith('/', `${what} must be an absolute path starting with /`)
+    .regex(/^\//, `${what} must be an absolute path starting with /`)
     .describe(`Absolute path ${what === 'cwd' ? 'to run in' : 'inside the guest'}.`);
 
 /**
@@ -443,7 +445,7 @@ export const registerGuest: Registrar = (server, session) => {
       title: 'Open a URL on the desktop',
       description:
         "Put a web page on the screen in the guest's browser: the first of firefox-esr, firefox or chromium the image has (the Debian desktops open firefox-esr, Omarchy opens chromium). An image with none of them is an error, not a silent success. The command returns before the window draws — on a cold browser that gap has been as long as ten seconds — so screenshot until the screen changes rather than concluding from one frame that nothing launched.",
-      inputSchema: { ...idArg, url: z.string().url() },
+      inputSchema: { ...idArg, url: z.url() },
     },
     ({ computer_id, url }, extra) =>
       guarded(async () => {
