@@ -855,8 +855,9 @@ computer with `exec`. Its `command` is the copy the platform kept, at most the
 first 1 KiB, and `command_truncated: true` (said above the JSON too) means it
 was cut. `get_execution` answers for its `execution_id` with the same
 `output_unavailable`, refused with a 409 `contention` (worth sending again) for
-those first seconds and with a 409 carrying no reason (final) once the guest
-agent has stopped answering; `read_execution_output` refuses it with a 409
+those first seconds and with a 409 carrying no reason once the guest agent has
+not confirmed it for five minutes (not worth retrying at once; a later read
+answers again when the agent does or the command exits); `read_execution_output` refuses it with a 409
 `output_unavailable` carrying the same marker, which no retry changes (without
 the marker, the same code is a log not opened, possibly not created yet, and a
 later read can succeed). Do not run the command again to

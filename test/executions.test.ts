@@ -676,13 +676,24 @@ describe('authority and transport boundaries', () => {
     expect(textOf(result)).not.toContain('cannot be read');
   });
 
-  it('keeps a metadata 409 with no reason final, and contention worth sending again', async () => {
-    const final = await setup({ error: 'not answering' }, 409);
+  it('keeps a metadata 409 with no reason out of a retry loop without calling it final, and contention worth sending again', async () => {
+    let stale = true;
+    const final = await setup(() =>
+      stale
+        ? Response.json({ error: 'not answering' }, { status: 409 })
+        : Response.json({ ...metadata, output_unavailable: 'daemon_restarted' }),
+    );
     const refused = await final.call('get_execution', { execution_id: ID });
     expect(refused.isError).toBe(true);
-    expect(textOf(refused)).toContain('This answer is final');
+    expect(textOf(refused)).toContain('do not retry it in a loop');
+    expect(textOf(refused)).toContain('a later read answers again once the agent does');
     expect(textOf(refused)).not.toContain('worth sending again');
+    expect(textOf(refused)).not.toContain('final');
     expect(final.calls).toHaveLength(1);
+    stale = false;
+    const recovered = await final.call('get_execution', { execution_id: ID });
+    expect(recovered.isError).toBeFalsy();
+    expect(bodyOf(recovered)).toMatchObject({ status: 'running' });
     const busy = await setup({ error: 'not yet checked', reason: 'contention' }, 409);
     const retry = await busy.call('get_execution', { execution_id: ID });
     expect(retry.isError).toBe(true);
@@ -734,7 +745,8 @@ describe('authority and transport boundaries', () => {
     const describe = (name: string) => tools.find((tool) => tool.name === name)?.description ?? '';
     expect(describe('get_execution')).toContain('output_unavailable');
     expect(describe('get_execution')).toContain('`contention`, which is worth sending again');
-    expect(describe('get_execution')).toContain('a 409 with no reason is final');
+    expect(describe('get_execution')).toContain('which an immediate retry will not clear');
+    expect(describe('get_execution')).not.toContain('a 409 with no reason is final');
     expect(describe('read_execution_output')).toContain('is final: the output cannot be read');
     expect(describe('read_execution_output')).toContain(
       'a later read at the same offsets can succeed',

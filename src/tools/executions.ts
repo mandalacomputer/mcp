@@ -83,8 +83,11 @@ async function readResult(
  * one, a guest log could not be opened, which is also what a read sent in the
  * moment before a just-started command has created its logs is answered, so a
  * later read at the same offsets can still return it. A 409 with no reason is
- * the platform's final answer. Saying none of this left a model to its
- * instinct on a 409, which is to send it again.
+ * one the platform does not expect a retry to clear, so it is not to be looped
+ * on, but it is not a verdict either: for a recovered command it is the guest
+ * agent not having confirmed the state for five minutes, and the same read
+ * answers again once the agent does or the command exits. Saying none of this
+ * left a model to its instinct on a 409, which is to send it again.
  */
 function conflictAdvice(err: APIError): string {
   if (err.reason === 'contention')
@@ -96,7 +99,7 @@ function conflictAdvice(err: APIError): string {
   if (err.reason === 'unavailable')
     return 'The computer is stopped or suspended, and no resume was requested.';
   if (err.reason === undefined)
-    return 'This answer is final: sending the same read again will not help, and no resume was requested.';
+    return 'The platform does not expect sending the same read again to clear this, so do not retry it in a loop; no resume was requested. For a command that was running when the service on the computer\u2019s host restarted, it means the guest agent has not confirmed the command\u2019s state for five minutes: check that the computer is healthy, and a later read answers again once the agent does or the command exits.';
   return 'The output is unavailable in the current state; no resume was requested.';
 }
 
@@ -117,7 +120,7 @@ export const registerExecutions: Registrar = (server, session) => {
     {
       title: 'Read a stable execution observation',
       description:
-        'Read one background execution by stable execution_id. Last-observed running, exited or lost; running is not proof the computer is awake, and lost establishes no success or failure. Metadata only: no guest I/O, activity refresh, resume, polling loop, PID fallback or command replay. Handles are volatile and can become unavailable after restart, replacement, expiry or cleanup. A command that was already running when the service on the computer\u2019s host restarted keeps its execution_id and answers with `output_unavailable` (today `"daemon_restarted"`): its status and exit code are still reported, but its output cannot be read. For a few seconds after such a restart this read is refused with a 409 whose reason is `contention`, which is worth sending again; a 409 with no reason is final, and sending it again will not help.',
+        'Read one background execution by stable execution_id. Last-observed running, exited or lost; running is not proof the computer is awake, and lost establishes no success or failure. Metadata only: no guest I/O, activity refresh, resume, polling loop, PID fallback or command replay. Handles are volatile and can become unavailable after restart, replacement, expiry or cleanup. A command that was already running when the service on the computer\u2019s host restarted keeps its execution_id and answers with `output_unavailable` (today `"daemon_restarted"`): its status and exit code are still reported, but its output cannot be read. For a few seconds after such a restart this read is refused with a 409 whose reason is `contention`, which is worth sending again; a 409 with no reason means the guest agent has not confirmed the command\u2019s state for five minutes, which an immediate retry will not clear: check that the computer is healthy, and a later read answers again once the agent does or the command exits.',
       inputSchema: identity,
       annotations,
     },

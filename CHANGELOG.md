@@ -27,7 +27,9 @@ are wording changes, and they are behaviour changes in the way that matters.
   does not recover it. Absent, `null` and empty leave it unset; any other value
   that is not a short lowercase word reads `"unknown"`. Its description explains
   the route's 409s: `contention` is worth sending again shortly after the host
-  service restarts, and a 409 with no reason is final.
+  service restarts, and a 409 with no reason is the guest agent not having
+  confirmed the command for five minutes, which a later read can get past once
+  it does but an immediate retry does not.
 - `read_execution_output` says a 409 with code `output_unavailable` that also
   carries the `output_unavailable` marker (for a recovered command,
   `"daemon_restarted"`) is final: sending the read again will not help. Without
@@ -35,8 +37,8 @@ are wording changes, and they are behaviour changes in the way that matters.
   command starts can be one not created yet, so a later read can succeed. The
   refusal text of both execution reads now follows the platform's
   classification — `contention` worth sending again, a marked
-  `output_unavailable` and an unclassified 409 final — where every 409 used to
-  read the same.
+  `output_unavailable` final, and an unclassified 409 not to be retried in a
+  loop — where every 409 used to read the same.
 - `exec_poll` and `exec_kill` say, above the JSON, when `command` is only the
   first part of a recovered command line (`command_truncated`, at most the first
   1 KiB). `command` and `command_truncated` stay in the JSON as sent.
