@@ -2,6 +2,7 @@ import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
 import type { Bytes } from '../api.js';
 import {
+  APIError,
   ConflictError,
   CreateOnlyConflictError,
   FileExistsError,
@@ -11,6 +12,7 @@ import {
 } from '../errors.js';
 import {
   apiErrorMessage,
+  failed,
   guarded,
   image,
   isInlineImage,
@@ -368,7 +370,7 @@ export const registerGuest: Registrar = (server, session) => {
     {
       title: 'Read a background command',
       description:
-        "What a backgrounded command has printed since the last time you asked, and whether it has finished. The output is a cursor, not a buffer: each poll gives you only the new bytes, so two readers on one pid split the output between them rather than each seeing all of it. Finishing is also what releases a computer's background slot, so this is how you tell which of your handles still hold one — the poll itself frees nothing. Output comes back as `stdout` and `stderr` when it is text and as `stdout_b64` and `stderr_b64` when it is not; a chunk cut through the middle of a character keeps both halves, with the text stopping at the last whole one and a note naming the bytes the next poll begins with. A command that was already running when the service on the computer's host restarted still answers whether it is running and its exit code, but never its output: both streams stay empty and `output_unavailable` says why. Shortly after such a restart a poll can be refused as worth sending again; a refusal that does not say so is final.",
+        "What a backgrounded command has printed since the last time you asked, and whether it has finished. The output is a cursor, not a buffer: each poll gives you only the new bytes, so two readers on one pid split the output between them rather than each seeing all of it. Finishing is also what releases a computer's background slot, so this is how you tell which of your handles still hold one — the poll itself frees nothing. Output comes back as `stdout` and `stderr` when it is text and as `stdout_b64` and `stderr_b64` when it is not; a chunk cut through the middle of a character keeps both halves, with the text stopping at the last whole one and a note naming the bytes the next poll begins with. A command that was already running when the service on the computer's host restarted still answers whether it is running and its exit code, but never its output: both streams stay empty and `output_unavailable` says why. Its `command` is then the platform's kept copy, only the first 1 KiB at most, and `command_truncated: true` says it was cut. Shortly after such a restart a poll can be refused as worth sending again; a refusal that does not say so is not worth sending again at once: for such a command it means the guest agent has not confirmed its state for five minutes, and a later poll answers again once the agent does or the command exits.",
       inputSchema: {
         ...idArg,
         pid: pidSchema,
@@ -397,7 +399,7 @@ export const registerGuest: Registrar = (server, session) => {
       annotations: { destructiveHint: false, idempotentHint: false },
     },
     ({ computer_id, pid }, extra) =>
-      guarded(async () => {
+      pollGuarded(async () => {
         const id = session.resolve(computer_id);
         const res = await session.api
           .with(extra.signal)
@@ -409,7 +411,10 @@ export const registerGuest: Registrar = (server, session) => {
         // a character the previous chunk cut in half arrives here as leading
         // continuation bytes, and those are not the start of binary output.
         const { body, note } = decodeExec(res, true);
-        return said(`${execSummary(res)}${more}${unavailableNote(res)}${note}`, body);
+        return said(
+          `${execSummary(res)}${more}${unavailableNote(res)}${commandNote(res)}${note}`,
+          body,
+        );
       }),
   );
 
@@ -435,7 +440,7 @@ export const registerGuest: Registrar = (server, session) => {
         // Also a cursor read — the kill answers with whatever the command
         // printed that no poll had taken yet.
         const { body, note } = decodeExec(res, true);
-        return said(`Killed pid ${pid}.${unavailableNote(res)}${note}`, body);
+        return said(`Killed pid ${pid}.${unavailableNote(res)}${commandNote(res)}${note}`, body);
       }),
   );
 
@@ -1523,6 +1528,53 @@ function unavailableNote(res: unknown): string {
   const why = (res as Record<string, unknown>).output_unavailable;
   if (why == null || why === '') return '';
   return `\n\nThis command's output cannot be read (output_unavailable: ${JSON.stringify(why)}): stdout and stderr are empty because nothing was returned, not because it printed nothing, and later polls will not return it either. Its running state and exit code are still reported. Losing the output did not undo the command, so do not run it again to recover the output: that repeats whatever it did, and while it is still running starts a second copy beside it. Inspect what it changed inside the computer instead, and start it again only once repeating it is known to be safe.`;
+}
+
+/**
+ * The sentence that keeps a cut command line from reading as the whole one.
+ *
+ * Read as a caveat: `true`, `1` and their text forms say it was cut, `false`,
+ * `0`, absent and null say nothing, and any other value is itself a reason to
+ * doubt the command line beside it, so it is said too.
+ */
+function commandNote(res: unknown): string {
+  if (!res || typeof res !== 'object' || Array.isArray(res)) return '';
+  const cut = (res as Record<string, unknown>).command_truncated;
+  if (cut == null || cut === false || cut === 0) return '';
+  if (typeof cut === 'string' && ['false', '0'].includes(cut.trim().toLowerCase())) return '';
+  return '\n\n`command` is only the first part of this command line (command_truncated): the platform kept at most its first 1 KiB across a restart of the service on the computer\u2019s host. Do not run it as written; it is not the whole command.';
+}
+
+/**
+ * A poll refused with a bare 409, reworded so it is neither a retry loop nor a
+ * reason to stop watching.
+ *
+ * On this route that is a command a restarted host service recovered, whose
+ * state the guest agent has not confirmed for five minutes. The general
+ * advice for an unclassified 409, never to send it again unchanged, would have
+ * a model abandon a command whose exit a later poll still reports. Only a 409
+ * that carries neither a reason nor a code is reworded; exec_kill keeps the
+ * general advice, because its refusal of a running recovered command holds for
+ * as long as the command runs.
+ */
+async function pollGuarded(fn: () => Promise<CallToolResult>): Promise<CallToolResult> {
+  try {
+    return await fn();
+  } catch (err) {
+    if (
+      err instanceof APIError &&
+      err.status === 409 &&
+      err.reason === undefined &&
+      err.code === undefined
+    ) {
+      return failed(
+        err,
+        true,
+        'the platform did not classify this, so do not poll again in a loop. For a command that was already running when the service on the computer\u2019s host restarted, it means the guest agent has not confirmed the command\u2019s state for five minutes: check that the computer is healthy, and a later poll answers again once the agent does or the command exits',
+      );
+    }
+    return failed(err);
+  }
 }
 
 /** The one line a model needs off an exec result, before the JSON. */

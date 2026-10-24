@@ -3633,6 +3633,12 @@ describe('the tools our own prose tells a model to call', () => {
     // exec_poll names it: the field that says a background command's output
     // cannot be read. A response field, not a tool.
     'output_unavailable',
+    // get_execution and read_execution_output name it: today's one value of
+    // output_unavailable. A response value, not a tool.
+    'daemon_restarted',
+    // exec_poll names it: the field that says a recovered command line was
+    // cut. A response field, not a tool.
+    'command_truncated',
     // list_public_urls and create_public_url name it: the domain every public
     // URL's label sits under, a field of the listing. Not a tool.
     'base_domain',

@@ -22,6 +22,32 @@ are wording changes, and they are behaviour changes in the way that matters.
   restarted, so its status and exit code are reported with empty streams. The
   two tool descriptions explain the case, including that `exec_kill` is refused
   for such a command while it still runs.
+- `get_execution` passes `output_unavailable` through and says, above the JSON,
+  that the execution's output cannot be read and that running the command again
+  does not recover it. Absent, `null` and empty leave it unset; any other value
+  that is not a short lowercase word reads `"unknown"`. Its description explains
+  the route's 409s: `contention` is worth sending again shortly after the host
+  service restarts, and a 409 with no reason is the guest agent not having
+  confirmed the command for five minutes, which a later read can get past once
+  it does but an immediate retry does not.
+- `read_execution_output` says a 409 with code `output_unavailable` that also
+  carries the `output_unavailable` marker (for a recovered command,
+  `"daemon_restarted"`) is final: sending the read again will not help. Without
+  the marker it is a guest log that could not be opened, which just after a
+  command starts can be one not created yet, so a later read can succeed. The
+  refusal text of both execution reads now follows the platform's
+  classification — `contention` worth sending again, a marked
+  `output_unavailable` final, and an unclassified 409 not to be retried in a
+  loop — where every 409 used to read the same.
+- `exec_poll` no longer calls a 409 with no reason final, in its description or
+  in the refusal itself: for a recovered command it is the guest agent not
+  having confirmed its state for five minutes, which a later poll gets past
+  once the agent answers or the command exits. The refusal says not to poll in
+  a loop and to check the computer's health. `exec_kill` keeps the general
+  advice, since its refusal holds while the command runs.
+- `exec_poll` and `exec_kill` say, above the JSON, when `command` is only the
+  first part of a recovered command line (`command_truncated`, at most the first
+  1 KiB). `command` and `command_truncated` stay in the JSON as sent.
 
 ### Security
 
