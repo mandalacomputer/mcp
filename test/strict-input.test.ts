@@ -1,7 +1,7 @@
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { z } from 'zod';
-import { strictInput } from '../src/server.js';
+import { MAX_TOOL_INPUT_ELEMENTS, strictInput } from '../src/server.js';
 import { connect, fakeEvents, installFakePlatform } from './harness.js';
 import { checkInventory, EXERCISE, FUNDED_EXERCISE } from './surface-exercise.js';
 
@@ -198,6 +198,41 @@ describe('unknown arguments', () => {
         }
       }
       expect(loose).toEqual([]);
+      await close();
+    }
+  });
+});
+
+describe('oversized arguments', () => {
+  let platform: ReturnType<typeof installFakePlatform>;
+  beforeEach(() => {
+    platform = installFakePlatform();
+  });
+  afterEach(() => platform.restore());
+
+  // An array whose schema has no maximum is otherwise validated element by
+  // element, with an issue kept for every bad one, before the call is refused.
+  it('refuses arguments over the element budget before validating them', async () => {
+    const { call, close } = await connect({ modelKey: 'sk-ant-fixture' });
+    try {
+      const messages = Array.from({ length: MAX_TOOL_INPUT_ELEMENTS + 1 }, () => 0);
+      const res = await call('run_agent_chat', { messages }).catch(
+        (err: unknown): CallToolResult => ({
+          isError: true,
+          content: [{ type: 'text', text: String(err) }],
+        }),
+      );
+      expect(res.isError).toBe(true);
+      expect(textOf(res)).toContain(
+        `arguments contain more than the maximum of ${MAX_TOOL_INPUT_ELEMENTS} elements`,
+      );
+      expect(textOf(res)).not.toMatch(/expected object/);
+      expect(platform.calls).toEqual([]);
+      // Just under the budget is left to the schema, which names what is wrong.
+      const under = await call('run_agent_chat', { messages: [0] });
+      expect(under.isError).toBe(true);
+      expect(textOf(under)).toMatch(/expected object/);
+    } finally {
       await close();
     }
   });

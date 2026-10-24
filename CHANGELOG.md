@@ -24,6 +24,11 @@ are wording changes, and they are behaviour changes in the way that matters.
   memory validating an oversized constrained collection (GHSA-mrhx-c7xc-m3w5),
   and no 3.x release is patched, so the server now requires zod `^4.6.7`. Over
   `--http` that is every caller's arguments.
+- **A tool call's arguments may hold at most 100,000 array elements and object
+  members.** The count is taken before any schema runs, because an array with
+  no maximum of its own was validated element by element, keeping an issue for
+  each bad one, however many arrived. A call over it is refused with
+  `arguments contain more than the maximum of 100000 elements`.
 
 ### Changed
 

@@ -41,6 +41,19 @@ export { SERVER_VERSION };
 export const SERVER_NAME = 'mandala-computer';
 
 /**
+ * The most array elements and object members one tool call's arguments may
+ * hold, counted before any schema runs.
+ *
+ * A schema only bounds what it declares: an array with no maximum, and every
+ * element of it that is wrong, is validated in full and leaves an issue per
+ * element, so a body of millions of small invalid entries cost far more to
+ * refuse than it cost to send. Over HTTP one process serves every session. The
+ * largest legitimate arguments are a chat transcript, and the platform refuses
+ * one over 1 MiB, which no ordinary transcript fills with this many.
+ */
+export const MAX_TOOL_INPUT_ELEMENTS = 100_000;
+
+/**
  * Told to the client on connect, and shown to the model before any tool is
  * called. It is the only place to say the things that are true of the whole
  * server rather than of one tool — chiefly that a screenshot is how you find
@@ -197,6 +210,7 @@ export function createServer(cfg: ServerConfig): McpServer {
     {
       capabilities: { logging: {}, tools: {} },
       instructions: filter.filtered ? filteredInstructions : instructions(opts.lifecycle),
+      maxToolInputElements: MAX_TOOL_INPUT_ELEMENTS,
     },
   );
 
