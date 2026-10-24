@@ -14,6 +14,15 @@ are wording changes, and they are behaviour changes in the way that matters.
 
 ## [Unreleased]
 
+### Added
+
+- `exec_poll` and `exec_kill` say, above the JSON, when a background command's
+  output cannot be read (`output_unavailable`, today `"daemon_restarted"`): the
+  command was already running when the service on the computer's host
+  restarted, so its status and exit code are reported with empty streams. The
+  two tool descriptions explain the case, including that `exec_kill` is refused
+  for such a command while it still runs.
+
 ### Security
 
 - **Lockfile takes `body-parser` 2.4.0 and `fast-uri` 3.1.9.** `body-parser`

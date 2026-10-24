@@ -3630,6 +3630,9 @@ describe('the tools our own prose tells a model to call', () => {
     'credentials_secret_id',
     // Chat agent.stop terminal value, not a callable tool.
     'end_turn',
+    // exec_poll names it: the field that says a background command's output
+    // cannot be read. A response field, not a tool.
+    'output_unavailable',
     // list_public_urls and create_public_url name it: the domain every public
     // URL's label sits under, a field of the listing. Not a tool.
     'base_domain',

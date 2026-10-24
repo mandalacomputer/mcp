@@ -368,7 +368,7 @@ export const registerGuest: Registrar = (server, session) => {
     {
       title: 'Read a background command',
       description:
-        "What a backgrounded command has printed since the last time you asked, and whether it has finished. The output is a cursor, not a buffer: each poll gives you only the new bytes, so two readers on one pid split the output between them rather than each seeing all of it. Finishing is also what releases a computer's background slot, so this is how you tell which of your handles still hold one — the poll itself frees nothing. Output comes back as `stdout` and `stderr` when it is text and as `stdout_b64` and `stderr_b64` when it is not; a chunk cut through the middle of a character keeps both halves, with the text stopping at the last whole one and a note naming the bytes the next poll begins with.",
+        "What a backgrounded command has printed since the last time you asked, and whether it has finished. The output is a cursor, not a buffer: each poll gives you only the new bytes, so two readers on one pid split the output between them rather than each seeing all of it. Finishing is also what releases a computer's background slot, so this is how you tell which of your handles still hold one — the poll itself frees nothing. Output comes back as `stdout` and `stderr` when it is text and as `stdout_b64` and `stderr_b64` when it is not; a chunk cut through the middle of a character keeps both halves, with the text stopping at the last whole one and a note naming the bytes the next poll begins with. A command that was already running when the service on the computer's host restarted still answers whether it is running and its exit code, but never its output: both streams stay empty and `output_unavailable` says why. Shortly after such a restart a poll can be refused as worth sending again; a refusal that does not say so is final.",
       inputSchema: {
         ...idArg,
         pid: pidSchema,
@@ -409,7 +409,7 @@ export const registerGuest: Registrar = (server, session) => {
         // a character the previous chunk cut in half arrives here as leading
         // continuation bytes, and those are not the start of binary output.
         const { body, note } = decodeExec(res, true);
-        return said(`${execSummary(res)}${more}${note}`, body);
+        return said(`${execSummary(res)}${more}${unavailableNote(res)}${note}`, body);
       }),
   );
 
@@ -418,7 +418,7 @@ export const registerGuest: Registrar = (server, session) => {
     {
       title: 'Stop a background command',
       description:
-        'Kill a backgrounded command and everything it started. Answers with its final state, including whatever it printed that you had not read. Also how you make room when a computer is already running its maximum of sixteen background commands: the slot comes back with the command.',
+        'Kill a backgrounded command and everything it started. Answers with its final state, including whatever it printed that you had not read. Also how you make room when a computer is already running its maximum of sixteen background commands: the slot comes back with the command. A command that was already running when the service on the computer\u2019s host restarted cannot be stopped here while it runs — that is refused, and sending it again does not help — so stop it from inside the computer with exec.',
       inputSchema: { ...idArg, pid: pidSchema },
       annotations: { destructiveHint: true },
     },
@@ -435,7 +435,7 @@ export const registerGuest: Registrar = (server, session) => {
         // Also a cursor read — the kill answers with whatever the command
         // printed that no poll had taken yet.
         const { body, note } = decodeExec(res, true);
-        return said(`Killed pid ${pid}.${note}`, body);
+        return said(`Killed pid ${pid}.${unavailableNote(res)}${note}`, body);
       }),
   );
 
@@ -1509,6 +1509,20 @@ function decodeExec(res: unknown, continued: boolean): { body: unknown; note: st
     }
   }
   return { body, note: notes.length > 0 ? `\n\n${notes.join('\n')}` : '' };
+}
+
+/**
+ * The sentence that keeps empty streams from reading as a quiet command.
+ *
+ * Any value counts, including one this version does not name and one that is
+ * not text: the field exists only to say the output is not there, and leaving
+ * a model to infer that from two empty strings is the mistake it prevents.
+ */
+function unavailableNote(res: unknown): string {
+  if (!res || typeof res !== 'object' || Array.isArray(res)) return '';
+  const why = (res as Record<string, unknown>).output_unavailable;
+  if (why == null || why === '') return '';
+  return `\n\nThis command's output cannot be read (output_unavailable: ${JSON.stringify(why)}): stdout and stderr are empty because nothing was returned, not because it printed nothing, and later polls will not return it either. Its running state and exit code are still reported. Losing the output did not undo the command, so do not run it again to recover the output: that repeats whatever it did, and while it is still running starts a second copy beside it. Inspect what it changed inside the computer instead, and start it again only once repeating it is known to be safe.`;
 }
 
 /** The one line a model needs off an exec result, before the JSON. */

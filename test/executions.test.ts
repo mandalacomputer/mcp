@@ -575,6 +575,68 @@ describe('authority and transport boundaries', () => {
     }
   });
 
+  it('says when a command running across a host restart has no output to give', async () => {
+    const recovered = {
+      pid: 4242,
+      command: '',
+      execution_id: '',
+      stdout_b64: '',
+      stderr_b64: '',
+      stdout_offset: 0,
+      stderr_offset: 0,
+    };
+    for (const [why, shown] of [
+      ['daemon_restarted', '"daemon_restarted"'],
+      ['some_later_reason', '"some_later_reason"'],
+      [true, 'true'],
+    ] as const) {
+      for (const state of [
+        { running: true, exited: false },
+        { running: false, exited: true, exit_code: 3 },
+      ]) {
+        const { call } = await setup({ ...recovered, ...state, output_unavailable: why });
+        for (const tool of ['exec_poll', 'exec_kill']) {
+          const result = await call(tool, { pid: 4242 });
+          expect(result.isError).toBeFalsy();
+          expect(textOf(result)).toContain(`output cannot be read (output_unavailable: ${shown})`);
+          // Running or exited cleanly, the command already did what it does.
+          expect(textOf(result)).toContain('do not run it again to recover the output');
+          expect(textOf(result)).not.toMatch(/\b(?:then|so) run it again\b|output matters, run it/);
+          expect(bodyOf(result)).toMatchObject({
+            ...state,
+            output_unavailable: why,
+            stdout: '',
+            stderr: '',
+          });
+          expect(bodyOf(result).execution_id).toBeUndefined();
+        }
+      }
+    }
+    for (const why of [undefined, null, '']) {
+      const { call } = await setup({
+        ...recovered,
+        running: false,
+        exit_code: 0,
+        ...(why === undefined ? {} : { output_unavailable: why }),
+      });
+      for (const tool of ['exec_poll', 'exec_kill'])
+        expect(textOf(await call(tool, { pid: 4242 }))).not.toContain('cannot be read');
+    }
+  });
+
+  it('keeps a 409 with no reason on a background command final, and contention retryable', async () => {
+    for (const tool of ['exec_poll', 'exec_kill']) {
+      const final = await setup({ error: 'cannot stop this command here' }, 409);
+      const refused = await final.call(tool, { pid: 4242 });
+      expect(refused.isError).toBe(true);
+      expect(textOf(refused)).toContain('cannot stop this command here');
+      expect(textOf(refused)).not.toContain('worth sending again');
+      expect(final.calls).toHaveLength(1);
+      const busy = await setup({ error: 'not yet checked', reason: 'contention' }, 409);
+      expect(textOf(await busy.call(tool, { pid: 4242 }))).toContain('worth sending again');
+    }
+  });
+
   it('preserves an accepted command on older platforms without inventing stable identity', async () => {
     const { call } = await setup({ pid: 4242, running: true, stdout_b64: '', stderr_b64: '' });
     const result = await call('exec', { command: 'true', background: true });

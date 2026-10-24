@@ -843,6 +843,16 @@ foreground comes back as a timeout, with the work still going inside the guest
 and its output unreadable. With a handle you get the exit code and the output,
 and `exec_kill` stops it.
 
+**A command running across a host restart keeps its status, not its output.**
+When the service on the computer's host restarts, a background command that was
+already running still answers `exec_poll` with whether it is running and, once
+it ends, its `exit_code` — but both streams stay empty and `output_unavailable`
+(today `"daemon_restarted"`) says the output cannot be read; the tool says so
+above the JSON. For a few seconds after the restart a poll can be refused as
+worth sending again; a refusal that does not say so is final. `exec_kill` on
+such a command is refused while it still runs, so stop it from inside the
+computer with `exec`.
+
 **Stable background reads.** When an accepted `exec` returns `execution_id`,
 use `get_execution` for its last observed `running`, `exited` or `lost` state.
 Only `exited` carries an `ended_at` and signed `exit_code`; `running` does not
