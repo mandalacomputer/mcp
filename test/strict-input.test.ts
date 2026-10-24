@@ -25,7 +25,7 @@ const registeredOf = (server: unknown) =>
   (server as { _registeredTools: Registered })._registeredTools;
 
 /** Every object schema reachable inside `schema`, with where it is. */
-function objectsIn(schema: unknown, at: string, out: [string, z.AnyZodObject][]): void {
+function objectsIn(schema: unknown, at: string, out: [string, z.ZodObject][]): void {
   if (schema instanceof z.ZodObject) {
     out.push([at, schema]);
     for (const [key, field] of Object.entries(schema.shape as Record<string, unknown>))
@@ -34,28 +34,29 @@ function objectsIn(schema: unknown, at: string, out: [string, z.AnyZodObject][])
     schema instanceof z.ZodOptional ||
     schema instanceof z.ZodNullable ||
     schema instanceof z.ZodDefault ||
+    schema instanceof z.ZodPrefault ||
+    schema instanceof z.ZodNonOptional ||
     schema instanceof z.ZodReadonly ||
     schema instanceof z.ZodCatch
   ) {
-    objectsIn(schema._def.innerType, at, out);
-  } else if (schema instanceof z.ZodEffects) {
-    objectsIn(schema.innerType(), at, out);
-  } else if (schema instanceof z.ZodBranded) {
-    objectsIn(schema.unwrap(), at, out);
-  } else if (schema instanceof z.ZodPipeline) {
-    objectsIn(schema._def.in, at, out);
+    objectsIn(schema._zod.def.innerType, at, out);
+  } else if (schema instanceof z.ZodPipe) {
+    objectsIn(schema._zod.def.in, at, out);
+  } else if (schema instanceof z.ZodLazy) {
+    objectsIn(schema._zod.def.getter(), at, out);
   } else if (schema instanceof z.ZodArray) {
     objectsIn(schema.element, `${at}[]`, out);
-  } else if (schema instanceof z.ZodUnion || schema instanceof z.ZodDiscriminatedUnion) {
+  } else if (schema instanceof z.ZodUnion) {
+    // A discriminated union is a union too.
     for (const [i, option] of (schema.options as unknown[]).entries())
       objectsIn(option, `${at}|${i}`, out);
   } else if (schema instanceof z.ZodIntersection) {
-    objectsIn(schema._def.left, at, out);
-    objectsIn(schema._def.right, at, out);
+    objectsIn(schema._zod.def.left, at, out);
+    objectsIn(schema._zod.def.right, at, out);
   } else if (schema instanceof z.ZodRecord) {
-    objectsIn(schema.valueSchema, `${at}{}`, out);
+    objectsIn(schema._zod.def.valueType, `${at}{}`, out);
   } else if (schema instanceof z.ZodTuple) {
-    for (const [i, item] of (schema.items as unknown[]).entries())
+    for (const [i, item] of (schema._zod.def.items as unknown[]).entries())
       objectsIn(item, `${at}[${i}]`, out);
   }
 }
@@ -94,7 +95,7 @@ describe('unknown arguments', () => {
             );
             expect(res.isError, name).toBe(true);
             expect(textOf(res), name).toContain(UNKNOWN);
-            expect(textOf(res), name).toMatch(/Unrecognized key/);
+            expect(textOf(res), name).toMatch(/Unrecognized keys?:/);
             expect(platform.calls.slice(before), name).toEqual([]);
             checked++;
           }
@@ -125,7 +126,7 @@ describe('unknown arguments', () => {
         }),
       )) as CallToolResult;
       expect(res.isError).toBe(true);
-      expect(textOf(res)).toContain("Unrecognized key(s) in object: '__proto__'");
+      expect(textOf(res)).toContain('Unrecognized key: "__proto__"');
       expect(platform.calls).toEqual([]);
       // The same call without it goes through, so the refusal was the key.
       const ok = (await client.callTool({
@@ -134,6 +135,37 @@ describe('unknown arguments', () => {
       })) as CallToolResult;
       expect(ok.isError).toBeFalsy();
       expect(platform.calls.map((c) => c.method)).toEqual(['DELETE']);
+    } finally {
+      await close();
+    }
+  });
+
+  // The __proto__ refusal is written by hand, so it has to keep up with the
+  // words the SDK and its validator use for every other unknown argument: a
+  // model told two different things about the same mistake reads them as two.
+  it('refuses __proto__ in the same words as any other unknown argument', async () => {
+    const { client, close } = await connect();
+    try {
+      const refusal = async (json: string) => {
+        const res = (await client
+          .callTool({
+            name: 'delete_computer',
+            arguments: JSON.parse(json) as Record<string, unknown>,
+          })
+          .catch(
+            (err: unknown): CallToolResult => ({
+              isError: true,
+              content: [{ type: 'text', text: String(err) }],
+            }),
+          )) as CallToolResult;
+        expect(res.isError).toBe(true);
+        return textOf(res);
+      };
+      const other = await refusal('{"computer_id":"vm-1","confirm":true,"zz_proto":1}');
+      const proto = await refusal('{"computer_id":"vm-1","confirm":true,"__proto__":1}');
+      expect(other).toContain('zz_proto');
+      expect(proto).toBe(other.replace('zz_proto', '__proto__'));
+      expect(platform.calls).toEqual([]);
     } finally {
       await close();
     }
@@ -158,11 +190,11 @@ describe('unknown arguments', () => {
       const { server, close } = await connect(cfg);
       const loose: string[] = [];
       for (const [name, tool] of Object.entries(registeredOf(server))) {
-        const found: [string, z.AnyZodObject][] = [];
+        const found: [string, z.ZodObject][] = [];
         objectsIn(tool.inputSchema, name, found);
         expect(found.length, name).toBeGreaterThan(0);
         for (const [at, object] of found) {
-          if (object._def.unknownKeys !== 'strict') loose.push(at);
+          if (!(object._zod.def.catchall instanceof z.ZodNever)) loose.push(at);
         }
       }
       expect(loose).toEqual([]);
@@ -182,25 +214,28 @@ describe('strictInput', () => {
   });
 
   it('keeps a refinement whose object is already strict', () => {
-    const refined = z
-      .object({ a: z.number() })
-      .strict()
-      .refine((v) => v.a > 0);
+    const refined = z.strictObject({ a: z.number() }).refine((v) => v.a > 0);
     const kept = strictInput('t', refined);
     expect(kept.safeParse({ a: -1 }).success).toBe(false);
     expect(kept.safeParse({ a: 1, b: 1 }).success).toBe(false);
   });
 
+  // A refinement sits on the object itself, so making the object strict has to
+  // carry it across rather than rebuild the object from its fields.
+  it('makes a refined stripping object strict and keeps the refinement', () => {
+    const refined = z.object({ a: z.number() }).refine((v) => v.a > 0, 'a must be positive');
+    const strict = strictInput('t', refined);
+    expect(strict.safeParse({ a: 1 }).success).toBe(true);
+    expect(strict.safeParse({ a: 1, b: 1 }).success).toBe(false);
+    const refusal = strict.safeParse({ a: -1 });
+    expect(refusal.success).toBe(false);
+    expect(refusal.error?.issues.map((i) => i.message)).toEqual(['a must be positive']);
+  });
+
   it('refuses at registration what it cannot make strict', () => {
     expect(() => strictInput('t', undefined)).toThrow(/no input schema/);
-    expect(() => strictInput('t', z.object({}).passthrough())).toThrow(/through/);
+    expect(() => strictInput('t', z.looseObject({}))).toThrow(/through/);
     expect(() => strictInput('t', z.object({}).catchall(z.string()))).toThrow(/catch-all/);
-    expect(() =>
-      strictInput(
-        't',
-        z.object({ a: z.number() }).refine(() => true),
-      ),
-    ).toThrow(/strict object/);
     expect(() => strictInput('t', z.string())).toThrow(/strict object/);
   });
 });

@@ -26,9 +26,9 @@ import type { Registrar } from './types.js';
 
 const content = z.union([
   z.string(),
-  z.array(z.object({ type: z.literal('text'), text: z.string() }).strict()),
+  z.array(z.strictObject({ type: z.literal('text'), text: z.string() })),
 ]);
-const message = z.object({ role: z.enum(['system', 'user', 'assistant']), content }).strict();
+const message = z.strictObject({ role: z.enum(['system', 'user', 'assistant']), content });
 const usage = z.object({ prompt_tokens: count, completion_tokens: count, total_tokens: count });
 const choice = z.object({
   index: count,

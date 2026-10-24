@@ -12,7 +12,7 @@ const report = z
   .object({
     scope: z.literal('account'),
     advisory: z.literal(true),
-    observed_at: z.string().datetime(),
+    observed_at: z.iso.datetime(),
     plan: z.object({ id: label, label }),
     limits: z.object({
       max_computers: count,
@@ -172,7 +172,7 @@ export const registerAccount: Registrar = (server, session) => {
       title: 'Who this credential is',
       description:
         'Who the API key this server runs with belongs to: the person (id, email, name), the account it acts on (id, name, plan, status: active or suspended), the role it acts with now (owner, member or viewer), the workspace it is confined to (null for the whole account), and the key itself (id, name, prefix, and manage_keys: whether it may manage API keys). For a key confined to a workspace the email, both names and the plan are null: the platform withholds them from a key that may be in the hands of an end customer. Needs no permission and any role; a suspended account can call it. No arguments.',
-      inputSchema: z.object({}).strict(),
+      inputSchema: z.strictObject({}),
       annotations: readAnnotations,
     },
     (_args, extra) =>
@@ -200,7 +200,7 @@ export const registerAccount: Registrar = (server, session) => {
       title: 'List your API keys',
       description:
         "The API keys of the person this server's key belongs to, on the account it acts on, newest first: id, name, prefix (display only), scope, when last used, manage_keys, and minted_by_key_id: the key that minted this one (null for a key minted from the dashboard); revoking a key does not revoke the keys it minted. Never a raw key. Needs this server's key to be allowed to manage keys, which only a person can turn on in the dashboard (Settings → Credentials → API keys → the key's menu → Allow managing keys); without it the answer is a 403 that says so — relay it rather than retrying. A key confined to a workspace sees only keys confined to that workspace. Minting and revoking keys are deliberately not tools here, so a raw key never lands in this transcript and a model never revokes one on its own reading of this list: a person does both in the dashboard or with the mandala CLI (mandala api-keys create / revoke).",
-      inputSchema: z.object({}).strict(),
+      inputSchema: z.strictObject({}),
       annotations: readAnnotations,
     },
     (_args, extra) =>
@@ -224,7 +224,7 @@ export const registerAccount: Registrar = (server, session) => {
       title: 'List workspaces',
       description:
         "The account's workspaces, oldest first: id, name and created_at. A workspace partitions the account's computers: a key confined to one reaches that workspace's computers only, and a computer's workspace_id names the one it is in. A key confined to a workspace lists only that one. create_workspace, rename_workspace and delete_workspace change them. No arguments.",
-      inputSchema: z.object({}).strict(),
+      inputSchema: z.strictObject({}),
       annotations: readAnnotations,
     },
     (_args, extra) =>
@@ -248,7 +248,7 @@ export const registerAccount: Registrar = (server, session) => {
       title: 'Read a workspace',
       description:
         "One workspace: id, name and created_at. An id this key cannot see is not found, the same as one that does not exist — another account's, any workspace but its own for a key confined to one, and a deleted workspace a computer's workspace_id can still name.",
-      inputSchema: z.object({ workspace_id: workspaceIdArg }).strict(),
+      inputSchema: z.strictObject({ workspace_id: workspaceIdArg }),
       annotations: readAnnotations,
     },
     ({ workspace_id }, extra) =>
@@ -267,7 +267,7 @@ export const registerAccount: Registrar = (server, session) => {
       title: "List a workspace's members",
       description:
         "The people who reach a workspace, oldest member first: user_id, email, name (null when unset), role, accepted_at, suspended (a sign-in suspension: they cannot sign in anywhere) and seat_suspended (true while they wait for a seat on this account and cannot act on it; it returns to false when their seat is restored). Either flag, or both, can be true. Workspaces do not divide people — everybody on the account reaches every workspace at their account role — so this is the account's accepted members; invitations not yet accepted are left out. A key confined to a workspace is refused with 403, because the list is the whole account's: relay that rather than retrying, and use an account-wide key.",
-      inputSchema: z.object({ workspace_id: workspaceIdArg }).strict(),
+      inputSchema: z.strictObject({ workspace_id: workspaceIdArg }),
       annotations: readAnnotations,
     },
     ({ workspace_id }, extra) =>
@@ -315,7 +315,7 @@ export const registerAccount: Registrar = (server, session) => {
     {
       title: 'Create a workspace',
       description: `Make a workspace on this account: a partition of its computers, which API keys can be confined to. Answers its id, name and created_at. A name the account already uses, a blank or over-long one, or an account already holding 500 workspaces is refused with 400. ${OWNER_ACCOUNT_WIDE} NOT safe to repeat blind: if the answer is lost, list_workspaces before creating again, since it may exist.`,
-      inputSchema: z.object({ name: workspaceNameArg }).strict(),
+      inputSchema: z.strictObject({ name: workspaceNameArg }),
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
     },
     ({ name }, extra) =>
@@ -333,7 +333,7 @@ export const registerAccount: Registrar = (server, session) => {
     {
       title: 'Rename a workspace',
       description: `Rename a workspace. Its id does not change, so the API keys confined to it and the computers in it are untouched. The name follows create_workspace's rules; a name the account already uses is refused with 400, and an id this key cannot see is not found. ${OWNER_ACCOUNT_WIDE}`,
-      inputSchema: z.object({ workspace_id: workspaceIdArg, name: workspaceNameArg }).strict(),
+      inputSchema: z.strictObject({ workspace_id: workspaceIdArg, name: workspaceNameArg }),
       // Not destructiveHint: false: the old name is replaced, as update_computer's is.
       annotations: { readOnlyHint: false, idempotentHint: true },
     },
@@ -355,14 +355,12 @@ export const registerAccount: Registrar = (server, session) => {
     {
       title: 'Delete a workspace',
       description: `Permanently delete a workspace. It REVOKES every API key confined to it, whoever holds it, in the same step: anything using one of those keys — a person's CI, another agent — is refused from its next request, and this cannot be undone. The answer says how many were revoked. Webhook subscriptions confined to the workspace (those created with a key scoped to it) are deleted with it in the same step, with every delivery record they hold, pending ones included, as delete_webhook does; the answer does not count them, and account-wide subscriptions are not affected. Only an empty workspace can be deleted: one that still holds computers (counting one an unfinished workspace change is moving into it) or active secrets is refused with 409, saying how many, and nothing is deleted or revoked. To empty it, move its computers to another workspace with move_computer_to_workspace (or in the dashboard) or delete them, and delete its secrets with delete_secret, giving their workspace_id and current revision_id; then send this again. Say what is in it before moving or deleting anything to empty it. A 503 means the platform could not confirm it is empty: nothing was deleted, and it can be sent again shortly. Snapshots taken in it remain, and an account-wide key can still clone them. Needs confirm: true. ${OWNER_ACCOUNT_WIDE}`,
-      inputSchema: z
-        .object({
-          workspace_id: workspaceIdArg,
-          confirm: z
-            .literal(true)
-            .describe('Must be true. Every API key confined to this workspace is revoked with it.'),
-        })
-        .strict(),
+      inputSchema: z.strictObject({
+        workspace_id: workspaceIdArg,
+        confirm: z
+          .literal(true)
+          .describe('Must be true. Every API key confined to this workspace is revoked with it.'),
+      }),
       annotations: deleteAnnotations,
     },
     ({ workspace_id }, extra) =>
@@ -385,7 +383,7 @@ export const registerAccount: Registrar = (server, session) => {
       title: 'Read current account quota',
       description:
         'Read account-wide plan ceilings, per-computer maxima, current consumption and advisory remaining quota. Viewer or stronger; workspace-scoped keys receive aggregates without resource identities. No arguments, selected computer or model key. Incomplete computer/snapshot groups have null consumption and remaining values, meaning unknown. Snapshot headroom covers indexed stored bytes, excludes in-flight capture reservations and cannot promise that a capture will fit. This observation reserves nothing; later mutations still enforce quota.',
-      inputSchema: z.object({}).strict(),
+      inputSchema: z.strictObject({}),
       annotations: readAnnotations,
     },
     (_args, extra) =>

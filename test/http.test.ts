@@ -2121,9 +2121,7 @@ describe('a tools/call carrying a __proto__ argument', () => {
     };
     expect(reply.id).toBe(7);
     expect(reply.result?.isError).toBe(true);
-    expect(reply.result?.content?.[0]?.text).toContain(
-      "Unrecognized key(s) in object: '__proto__'",
-    );
+    expect(reply.result?.content?.[0]?.text).toContain('Unrecognized key: "__proto__"');
     expect(platform.calls.slice(before).filter((c) => c.method === 'DELETE')).toEqual([]);
   });
 });

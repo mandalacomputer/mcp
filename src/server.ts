@@ -97,39 +97,40 @@ export function offersFundedAgent(cfg: ToolFilters & { modelKey?: string }): boo
  * A tool's input schema, made to refuse any key it does not declare.
  *
  * The SDK accepts either a field map or a Zod schema. A field map becomes an
- * object that strips unknown keys, and so does a `z.object` without
- * `.strict()`: the listed JSON Schema still says `additionalProperties: false`,
- * but the call goes ahead with the unknown key silently dropped. That turned a
- * misspelt `workspace_id` into a secret stored account-wide, a misspelt
- * `resume_only` into a full start, and a misspelt flag on a delete into a
- * delete. Every schema leaves here strict.
+ * object that strips unknown keys, and so does a plain `z.object`: the listed
+ * JSON Schema still says `additionalProperties: false`, but the call goes
+ * ahead with the unknown key silently dropped. That turned a misspelt
+ * `workspace_id` into a secret stored account-wide, a misspelt `resume_only`
+ * into a full start, and a misspelt flag on a delete into a delete. Every schema leaves here strict.
  *
  * Anything that cannot be made strict here is refused at registration, so a
  * tool added later cannot reintroduce the stripping by its shape: a schema that
- * is not an object, one that passes unknown keys through or has a catch-all,
- * and an object wrapped in a refinement whose inner object is not strict
- * already (a refinement's inner object cannot be replaced without losing it).
+ * is not an object, and one that passes unknown keys through or has a
+ * catch-all. A refined object is still an object, and making it strict keeps
+ * its refinements.
  */
-export function strictInput(name: string, schema: unknown): z.ZodTypeAny {
+export function strictInput(name: string, schema: unknown): z.ZodType {
   if (schema === undefined) {
     throw new Error(`Tool ${name} declares no input schema; give it one, even if empty.`);
   }
   if (!(schema instanceof z.ZodType)) {
-    return z.object(schema as z.ZodRawShape).strict();
+    return z.strictObject(schema as z.ZodRawShape);
   }
   if (schema instanceof z.ZodObject) {
-    if (!(schema._def.catchall instanceof z.ZodNever)) {
-      throw new Error(`Tool ${name}'s input schema has a catch-all; it must refuse unknown keys.`);
-    }
-    if (schema._def.unknownKeys === 'strict') return schema;
-    if (schema._def.unknownKeys === 'passthrough') {
+    // A strict object's catch-all is `never`; a loose one's is `unknown`; a
+    // stripping one has none.
+    const { catchall } = schema._zod.def;
+    if (catchall instanceof z.ZodNever) return schema;
+    if (catchall instanceof z.ZodUnknown) {
       throw new Error(`Tool ${name}'s input schema passes unknown keys through.`);
     }
+    if (catchall !== undefined) {
+      throw new Error(`Tool ${name}'s input schema has a catch-all; it must refuse unknown keys.`);
+    }
+    // The method rather than z.strictObject(schema.shape): it copies the whole
+    // definition, refinements included, where rebuilding from the shape would
+    // drop them.
     return schema.strict();
-  }
-  if (schema instanceof z.ZodEffects) {
-    const inner = schema.innerType();
-    if (inner instanceof z.ZodObject && inner._def.unknownKeys === 'strict') return schema;
   }
   throw new Error(`Tool ${name}'s input schema must be a strict object.`);
 }
@@ -164,7 +165,7 @@ export function protoKeyRefusal(
       content: [
         {
           type: 'text',
-          text: `MCP error ${ErrorCode.InvalidParams}: Input validation error: Invalid arguments for tool ${name}: Unrecognized key(s) in object: '__proto__'`,
+          text: `MCP error ${ErrorCode.InvalidParams}: Input validation error: Invalid arguments for tool ${name}: Unrecognized key: "__proto__"`,
         },
       ],
       isError: true,

@@ -6,7 +6,7 @@ import * as P from '../paths.js';
 import { computerSchema, readAnnotations } from './results.js';
 import type { Registrar } from './types.js';
 
-export const count = z.number().int().nonnegative().safe();
+export const count = z.number().int().nonnegative();
 export const label = z.string().min(1);
 export const exitCode = z.number().int().min(-2147483648).max(2147483647);
 export const executionId = z.string().regex(/^exec_[a-f0-9]{32}$/);
@@ -90,7 +90,8 @@ export const registerDirectory: Registrar = (server, session) => {
         computer_id: computerSchema,
         path: z
           .string()
-          .startsWith('/')
+          // Not .startsWith, whose listed schema has a nonstandard `format`.
+          .regex(/^\//, 'path must be an absolute path starting with /')
           .refine(
             (path) =>
               ![...path].some((char) => char.charCodeAt(0) < 32 || char.charCodeAt(0) === 127) &&

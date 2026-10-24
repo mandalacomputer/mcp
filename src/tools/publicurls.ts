@@ -172,7 +172,7 @@ export const registerPublicUrls: Registrar = (server, session) => {
       title: 'List a computer’s public URLs',
       description:
         'The public URLs of one computer, oldest first: each is `https://<label>.<base_domain>` serving a port inside the computer, public (anyone with the link) or private (an account API key (workspace-scoped keys must match the computer), or dashboard browser sign-in). Also says whether they can answer here at all — `enabled` is false, with a reason, where public URLs are off or the account’s plan includes none, and the URLs are listed either way so you can delete them — and how many this computer may have. If the plan drops below the number a computer has, the oldest within the limit keep answering and the rest answer 404.',
-      inputSchema: z.object(idArg).strict(),
+      inputSchema: z.strictObject(idArg),
       annotations: { readOnlyHint: true },
     },
     ({ computer_id }, extra) =>
@@ -237,23 +237,21 @@ export const registerPublicUrls: Registrar = (server, session) => {
       title: 'Serve a port on a public URL',
       description:
         'Serve a port inside the computer at `https://<label>.<base_domain>` (e.g. `https://brave-otter-3f2a.mandala.dev`), on 443 with no port in the address. Omitted access defaults to public on paid plans and private on trials. Public URLs are open to anyone with the link; trials cannot request public access. Pass access: "private" to require an account API key (workspace-scoped keys must match the computer) or browser sign-in through the dashboard Open button. The app must listen on 0.0.0.0:<port>, not 127.0.0.1. Without a label one is picked. A label is 3 to 40 letters, digits and hyphens, and the platform refuses names that read as its own or another company’s (www, login, brand names and their look-alikes) with a 400 that says why. Other refusals: 402 PLAN_REQUIRED when the plan includes no public URLs, or PUBLIC_ACCESS_REQUIRES_PLAN when a trial requests public access (use private access or choose a paid plan); 403 PUBLIC_URLS_BLOCKED when the platform has turned public URLs off for this computer or account (not a role, and not something to retry — tell the user); 404 PUBLIC_URLS_DISABLED when public URLs are not enabled here at all (not a missing computer); 409 LABEL_TAKEN when the label is taken — a label is never given to a second account, so one another account has ever held, or one the platform has blocked, reads as taken — and 409 PUBLIC_URL_LIMIT when the computer has as many as its plan allows (trial 1 private URL, Solo 2, Studio 5, Swarm 10); neither 409 clears by waiting. 429 after too many in a day, with Retry-After. Responses are marked noindex, cookies the app sets stay on its own host name, and a Mandala API key sent to a public URL never reaches the app. Not idempotent: a retry after a lost answer makes a second URL — list_public_urls first.',
-      inputSchema: z
-        .object({
-          ...idArg,
-          port: portArg('create'),
-          label: z
-            .string()
-            .optional()
-            .describe(
-              'The name before the domain, lowercased. Leave it out to have one like `brave-otter-3f2a` picked.',
-            ),
-          access: accessArg('create').optional(),
-        })
-        // Strict, above all here: a misspelled `access: "private"` stripped
-        // as an unknown key would create a URL anyone can open (Codex, round
-        // 1 on #212). Every tool in this file refuses an argument it does not
-        // know, rather than acting without it.
-        .strict(),
+      // Strict, above all here: a misspelled `access: "private"` stripped as an
+      // unknown key would create a URL anyone can open (Codex, round 1 on
+      // #212). Every tool in this file refuses an argument it does not know,
+      // rather than acting without it.
+      inputSchema: z.strictObject({
+        ...idArg,
+        port: portArg('create'),
+        label: z
+          .string()
+          .optional()
+          .describe(
+            'The name before the domain, lowercased. Leave it out to have one like `brave-otter-3f2a` picked.',
+          ),
+        access: accessArg('create').optional(),
+      }),
     },
     ({ computer_id, port, label, access }, extra) =>
       guarded(async () => {
@@ -293,14 +291,12 @@ export const registerPublicUrls: Registrar = (server, session) => {
       title: 'Change a public URL’s port or access',
       description:
         'Point a public URL at another port, switch it between public and private, or both. The label is the URL and does not change — delete it and create another for a new name. Fields you leave out are kept; name at least one.',
-      inputSchema: z
-        .object({
-          ...idArg,
-          ...urlIdArg,
-          port: portArg('update').optional(),
-          access: accessArg('update').optional(),
-        })
-        .strict(),
+      inputSchema: z.strictObject({
+        ...idArg,
+        ...urlIdArg,
+        port: portArg('update').optional(),
+        access: accessArg('update').optional(),
+      }),
       annotations: { idempotentHint: true },
     },
     ({ computer_id, url_id, port, access }, extra) =>
@@ -339,13 +335,11 @@ export const registerPublicUrls: Registrar = (server, session) => {
       title: 'Remove a public URL',
       description:
         'The URL stops answering at once. Its label stays with this account: no other account can ever take it, and this account may use it again (create_public_url with that label) unless the platform has blocked it. The app inside the computer keeps running. A URL made again is a new id.',
-      inputSchema: z
-        .object({
-          ...idArg,
-          ...urlIdArg,
-          confirm: z.literal(true).describe('Must be true. The URL stops answering at once.'),
-        })
-        .strict(),
+      inputSchema: z.strictObject({
+        ...idArg,
+        ...urlIdArg,
+        confirm: z.literal(true).describe('Must be true. The URL stops answering at once.'),
+      }),
       annotations: { destructiveHint: true, idempotentHint: true },
     },
     ({ computer_id, url_id }, extra) =>
