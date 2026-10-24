@@ -231,6 +231,9 @@ export function oversizedArgumentsRefusal(message: JSONRPCMessage): JSONRPCMessa
   if (!params || typeof params !== 'object') return undefined;
   if (elementCount(params.arguments, MAX_TOOL_INPUT_ELEMENTS) <= MAX_TOOL_INPUT_ELEMENTS)
     return undefined;
+  // Nothing has checked the name yet, and coercing an object to a string can
+  // throw, which would take the rest of an HTTP batch down with this answer.
+  const tool = typeof params.name === 'string' ? `tool ${params.name}` : 'this tool call';
   return {
     jsonrpc: '2.0',
     id: m.id,
@@ -238,7 +241,7 @@ export function oversizedArgumentsRefusal(message: JSONRPCMessage): JSONRPCMessa
       content: [
         {
           type: 'text',
-          text: `MCP error ${ErrorCode.InvalidParams}: Invalid arguments for tool ${String(params.name)}: arguments contain more than the maximum of ${MAX_TOOL_INPUT_ELEMENTS} elements`,
+          text: `MCP error ${ErrorCode.InvalidParams}: Invalid arguments for ${tool}: arguments contain more than the maximum of ${MAX_TOOL_INPUT_ELEMENTS} elements`,
         },
       ],
       isError: true,

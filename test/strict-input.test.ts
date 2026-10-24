@@ -296,6 +296,18 @@ describe('oversizedArgumentsRefusal', () => {
     }
   });
 
+  // The name is unchecked when this runs; a throw here would abandon every
+  // other answer in the same HTTP batch.
+  it('answers a call whose name is not a string without throwing', () => {
+    const name = JSON.parse('{"toString":null}') as unknown as string;
+    const refusal = oversizedArgumentsRefusal(
+      callOf(flat(MAX_TOOL_INPUT_ELEMENTS + 1), name),
+    ) as unknown as { result: CallToolResult };
+    expect(textOf(refusal.result)).toBe(
+      `MCP error -32602: Invalid arguments for this tool call: arguments contain more than the maximum of ${MAX_TOOL_INPUT_ELEMENTS} elements`,
+    );
+  });
+
   it('uses the words the SDK uses for the same budget', async () => {
     const { server, close } = await connect();
     try {
