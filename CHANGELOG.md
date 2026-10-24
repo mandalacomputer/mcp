@@ -14,6 +14,13 @@ are wording changes, and they are behaviour changes in the way that matters.
 
 ## [Unreleased]
 
+### Security
+
+- **Lockfile takes `body-parser` 2.4.0 and `fast-uri` 3.1.9.** `body-parser`
+  2.0.0–2.3.0 could be held busy by trailing bytes after a compressed request
+  body, which reaches the `--http` server through Express; `fast-uri` before
+  3.1.9 had several URI parsing issues. Both are within the existing ranges.
+
 ## [0.17.2] — 2026-10-22
 
 ### Fixed
