@@ -10,6 +10,7 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { runHttp } from '../src/http.js';
 import { MeteredBody } from '../src/http-body.js';
+import { MAX_TOOL_INPUT_ELEMENTS } from '../src/server.js';
 import { BASE, installFakePlatform } from './harness.js';
 
 const INIT = {
@@ -2102,6 +2103,46 @@ describe('a tools/call carrying a __proto__ argument', () => {
   /** The JSON-RPC answer, from a JSON body or the first SSE data line. */
   const answer = (text: string) =>
     JSON.parse(text.trim().startsWith('{') ? text : (/^data: (.*)$/m.exec(text)?.[1] ?? '{}'));
+
+  // A batch's calls are all dispatched before any is answered, so each one
+  // under the budget is not enough: together they would be validated side by
+  // side. The whole batch is refused, and nothing in it runs.
+  it('refuses a batch whose calls together exceed the argument budget, running none', async () => {
+    const opened = await post(JSON.stringify(INIT));
+    const session = opened.headers.get('mcp-session-id') as string;
+    await opened.text();
+    await (
+      await post(JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }), session)
+    ).text();
+    const half = Math.floor(MAX_TOOL_INPUT_ELEMENTS / 2) + 1;
+    const batch = (size: number) =>
+      JSON.stringify([
+        {
+          jsonrpc: '2.0',
+          id: 1,
+          method: 'tools/call',
+          params: { name: 'delete_computer', arguments: { computer_id: 'vm-1', confirm: true } },
+        },
+        ...[2, 3].map((id) => ({
+          jsonrpc: '2.0',
+          id,
+          method: 'tools/call',
+          params: { name: 'press_key', arguments: { keys: Array.from({ length: size }, () => 0) } },
+        })),
+      ]);
+    const before = platform.calls.length;
+    const res = await post(batch(half), session);
+    expect(res.status).toBe(413);
+    const body = (await res.json()) as { error?: { code?: number; message?: string } };
+    expect(body.error?.code).toBe(-32600);
+    expect(body.error?.message).toContain('none of them was run');
+    expect(platform.calls.slice(before)).toEqual([]);
+    // The same batch under the budget is dispatched: the delete in it runs.
+    const ok = await post(batch(10), session);
+    expect(ok.status).toBe(200);
+    await ok.text();
+    expect(platform.calls.slice(before).map((c) => c.method)).toContain('DELETE');
+  });
 
   it('is refused before the platform is asked', async () => {
     const opened = await post(JSON.stringify(INIT));

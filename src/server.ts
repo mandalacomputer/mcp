@@ -213,6 +213,28 @@ function elementCount(value: unknown, max: number): number {
 }
 
 /**
+ * Whether the `tools/call` requests in an HTTP batch hold more than
+ * {@link MAX_TOOL_INPUT_ELEMENTS} argument elements between them.
+ *
+ * Each call is counted on its own as it arrives, but a batch's calls are all
+ * dispatched before any is answered, so their validations run side by side:
+ * a hundred calls just under the budget cost a hundred times what one is
+ * allowed to. The whole batch is held to the one budget instead.
+ */
+export function batchOverBudget(messages: readonly unknown[]): boolean {
+  let left = MAX_TOOL_INPUT_ELEMENTS;
+  for (const message of messages) {
+    const m = message as { method?: unknown; params?: unknown } | null;
+    if (!m || typeof m !== 'object' || m.method !== 'tools/call') continue;
+    const params = m.params as { arguments?: unknown } | null | undefined;
+    if (!params || typeof params !== 'object') continue;
+    left -= elementCount(params.arguments, left);
+    if (left < 0) return true;
+  }
+  return false;
+}
+
+/**
  * The refusal for a `tools/call` whose arguments hold more than
  * {@link MAX_TOOL_INPUT_ELEMENTS} elements, or `undefined` for any other
  * message.

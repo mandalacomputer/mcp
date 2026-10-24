@@ -29,7 +29,10 @@ are wording changes, and they are behaviour changes in the way that matters.
   any schema runs, because an array with no maximum of its own was validated
   element by element, keeping an issue for each bad one, however many arrived.
   A call over it, to any tool name, is refused with
-  `arguments contain more than the maximum of 100000 elements`.
+  `arguments contain more than the maximum of 100000 elements`. Over `--http`
+  the budget covers a whole batch, whose calls are validated side by side: a
+  batch whose `tools/call` arguments exceed it between them is refused with a
+  `413` and none of its calls is run.
 
 ### Changed
 
