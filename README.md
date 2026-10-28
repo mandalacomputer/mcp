@@ -1655,8 +1655,15 @@ including string content or arrays of `{type:"text",text:"..."}` parts. The
 **last user message** supplies the task; system messages supply standing
 instructions; the user and assistant messages before it are given to the model as
 the conversation so far, told they are done. With `thread_id` the thread's own
-turns are the conversation instead, and earlier messages are not read. Optional
-`model` selects a computer-capable Anthropic or OpenAI model. `max_steps` is 1–100,
+turns are the conversation instead, and earlier messages are not read.
+
+All agent runs have a fixed 60-minute wall-clock limit. Reaching it ends the
+run with `stop: "time_limit"`, preserving the work already done. A background
+status of `completed` means the loop ended; only `stop: "end_turn"` means the
+task finished. Background runs accept 1–500 steps (default 20); foreground
+sync, streaming and chat runs accept 1–100 (default 20).
+
+Optional `model` selects a computer-capable Anthropic or OpenAI model. `max_steps` is 1–100,
 default 20. This is computer control, not hosted general-purpose inference or a
 chat UI; it adds no key storage or model billing service.
 

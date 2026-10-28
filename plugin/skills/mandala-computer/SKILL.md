@@ -204,7 +204,9 @@ configured filters before explaining which mechanism applies; an HTTP user
 needs their own header rather than the operator's environment variable, and
 `get_credits` shows the account's credits.
 
-- `max_steps` (default 20, max 100) bounds actions, not time, model calls or
+- All agent runs stop after a fixed 60-minute wall-clock limit with `stop: time_limit`.
+  A background `completed` status only means the loop ended; check for `stop: end_turn`.
+- `max_steps` (default 20, max 100 foreground / 500 background) bounds actions, not time, model calls or
   spending. A client needs `progressToken` plus `resetTimeoutOnProgress` to
   keep long calls alive; otherwise choose a smaller value.
 - Read the first line of the answer. `finished` is done. `RAN OUT OF STEPS` is

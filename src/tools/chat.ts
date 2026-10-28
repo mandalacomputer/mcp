@@ -279,7 +279,15 @@ export const registerChat: Registrar = (server, session) => {
           .string()
           .refine((v) => v.trim().length > 0, 'model must not be blank')
           .optional(),
-        max_steps: z.number().int().min(1).max(P.AGENT_MAX_STEPS).default(20),
+        max_steps: z
+          .number()
+          .int()
+          .min(1)
+          .max(P.AGENT_MAX_STEPS)
+          .default(20)
+          .describe(
+            'Maximum desktop actions, 1 to 100 (default 20). All agent runs have a fixed 60-minute wall-clock limit, ending with stop time_limit.',
+          ),
         thread_id: threadIdArg,
         store: storeArg,
       },

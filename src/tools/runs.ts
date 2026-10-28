@@ -11,6 +11,7 @@ import {
   BYOK_RUN_ARGS,
   FUNDED_BILLING,
   FUNDED_RUN_ARGS,
+  maxSteps,
   preRunRefusal,
   RUN_AGENT_ANNOTATIONS,
   stopReason,
@@ -232,7 +233,7 @@ const listLine = (run: AgentRun): string =>
   `${run.id}: ${run.status}${run.result ? ` (stop ${run.result.stop})` : ''}${finishedRun(run) ? ', finished' : run.status === 'running' ? '' : ', NOT finished'} on ${run.computer_id} — ${run.steps} step(s), started ${run.created_at}: ${JSON.stringify(title(run.prompt))}`;
 
 const POLL =
-  'Only status completed with stop end_turn means the task was finished. completed with any other stop (max_steps, max_cost, credits_exhausted, rate_limited, refusal, …) stopped without finishing; failed carries the error that ended it; cancelled was stopped by cancel_agent_run; interrupted means the platform restarted while it was going, or its ending was not recorded, and it was not resumed — it MAY HAVE DONE MORE THAN IT RECORDED. Whatever the ending, the steps a run took stand: take a screenshot before deciding what is left, and continue with its thread_id rather than running the whole task again.';
+  'Only status completed with stop end_turn means the task was finished. completed with any other stop (time_limit, max_steps, max_cost, credits_exhausted, rate_limited, refusal, …) stopped without finishing; failed carries the error that ended it; cancelled was stopped by cancel_agent_run; interrupted means the platform restarted while it was going, or its ending was not recorded, and it was not resumed — it MAY HAVE DONE MORE THAN IT RECORDED. Whatever the ending, the steps a run took stand: take a screenshot before deciding what is left, and continue with its thread_id rather than running the whole task again.';
 
 const START =
   "Start the platform's agent loop on a computer in the BACKGROUND and answer at once with the run's id: the same loop run_agent drives — screenshot, decide, click, type, repeat — but this call does not wait for it.";
@@ -330,7 +331,15 @@ export const registerRuns: Registrar = (server, session) => {
       {
         title: 'Start a background agent run',
         description: `${START} ${BYOK_BILLING} ${WHEN} ${POLL} ${RULES}`,
-        inputSchema: { ...BYOK_RUN_ARGS, thread_id: threadIdArg },
+        inputSchema: {
+          ...BYOK_RUN_ARGS,
+          max_steps: maxSteps(
+            'what your key is billed',
+            'budget the bill on the key itself',
+            P.AGENT_MAX_BACKGROUND_STEPS,
+          ),
+          thread_id: threadIdArg,
+        },
         annotations: RUN_AGENT_ANNOTATIONS,
       },
       start,
@@ -341,7 +350,15 @@ export const registerRuns: Registrar = (server, session) => {
       {
         title: 'Start a background agent run',
         description: `${START} ${FUNDED_BILLING} ${WHEN} ${POLL} ${RULES}`,
-        inputSchema: { ...FUNDED_RUN_ARGS, thread_id: threadIdArg },
+        inputSchema: {
+          ...FUNDED_RUN_ARGS,
+          max_steps: maxSteps(
+            'what a run costs',
+            'the spend with max_cost_usd',
+            P.AGENT_MAX_BACKGROUND_STEPS,
+          ),
+          thread_id: threadIdArg,
+        },
         annotations: RUN_AGENT_ANNOTATIONS,
       },
       start,
