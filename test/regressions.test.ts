@@ -3628,8 +3628,9 @@ describe('the tools our own prose tells a model to call', () => {
     // field, not tools.
     'browser_proxy',
     'credentials_secret_id',
-    // Chat agent.stop terminal value, not a callable tool.
+    // Agent stop terminal values, not callable tools.
     'end_turn',
+    'time_limit',
     // exec_poll names it: the field that says a background command's output
     // cannot be read. A response field, not a tool.
     'output_unavailable',
