@@ -40,16 +40,16 @@ async function tools() {
 }
 
 describe('stop_computer', () => {
-  // A graceful stop already forces the computer off after 20 seconds, so
+  // A graceful stop already forces the computer off after 45 seconds, so
   // `force` only skips that wait. It was described as the fix for a stop that
   // fails, which sent agents to cut power for nothing.
   it('says an ordinary stop forces the computer off itself, and force only skips the wait', async () => {
     const stop = (await tools()).byName.get('stop_computer');
-    expect(stop?.description).toContain('up to 20 seconds');
+    expect(stop?.description).toContain('up to 45 seconds');
     expect(stop?.description).toContain('forced off by the platform');
     const force = (stop?.inputSchema.properties?.force as { description?: string } | undefined)
       ?.description;
-    expect(force).toContain('only saves those 20 seconds');
+    expect(force).toContain('only saves those 45 seconds');
     expect(force).not.toMatch(/second attempt|refuse the polite stop/);
   });
 });
