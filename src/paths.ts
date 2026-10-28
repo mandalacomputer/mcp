@@ -1131,6 +1131,7 @@ export const signals = (id: string) => `${computer(id)}/signals`;
  * `max_steps` is a 400 there, so it is refused here before the call.
  */
 export const AGENT_MAX_STEPS = LIMITS['agent.maxSteps'];
+export const AGENT_MAX_BACKGROUND_STEPS = LIMITS['agent.maxBackgroundSteps'];
 export const CHAT_COMPLETIONS = 'chat/completions';
 export function chatBody(args: {
   computer_id: string;

@@ -314,6 +314,7 @@ describe('the manifest limits this server checks before sending (M1)', () => {
     expect(Object.keys(LIMITS).sort()).toEqual(
       [
         'agent.maxSteps',
+        'agent.maxBackgroundSteps',
         'clipboard.writeMaxBytes',
         'exec.maxEnvEntries',
         'exec.maxEnvEntryBytes',

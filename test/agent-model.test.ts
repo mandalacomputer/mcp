@@ -68,6 +68,10 @@ it('takes the max_steps and exec timeout ceilings from the platform limits it mi
       tools.find((t) => t.name === tool)?.inputSchema.properties?.[name];
     for (const tool of ['run_agent', 'run_agent_chat'])
       expect(prop(tool, 'max_steps'), tool).toMatchObject({ maximum: LIMITS['agent.maxSteps'] });
+    expect(prop('start_agent_run', 'max_steps')).toMatchObject({
+      maximum: LIMITS['agent.maxBackgroundSteps'],
+      default: 20,
+    });
     expect(prop('exec', 'timeout_s')).toMatchObject({
       maximum: LIMITS['exec.maxTimeoutSeconds'],
     });

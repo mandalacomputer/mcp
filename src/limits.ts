@@ -14,6 +14,7 @@
  */
 export const LIMITS = {
   'agent.maxSteps': 100,
+  'agent.maxBackgroundSteps': 500,
   'clipboard.writeMaxBytes': 64 * 1024,
   /** Entries in one exec's `env`. */
   'exec.maxEnvEntries': 64,

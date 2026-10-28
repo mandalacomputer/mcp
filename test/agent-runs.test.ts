@@ -283,6 +283,20 @@ describe('start_agent_run', () => {
     expect(await names({ funded: true })).toContain('start_agent_run');
   });
 
+  it.each([{ modelKey: 'sk-ant-test' }, { funded: true }])(
+    'accepts 500 background steps and refuses 501: %j',
+    async (config) => {
+      const { call } = await open(config);
+      const accepted = await call('start_agent_run', { prompt: 'go', max_steps: 500 });
+      expect(accepted.isError).toBeFalsy();
+      expect(platform.calls.at(-1)?.body).toMatchObject({ max_steps: 500 });
+      const count = platform.calls.length;
+      const rejected = await call('start_agent_run', { prompt: 'go', max_steps: 501 });
+      expect(rejected.isError).toBe(true);
+      expect(platform.calls).toHaveLength(count);
+    },
+  );
+
   it('starts a keyed run with the key and no stream, and says to poll it', async () => {
     const { call } = await open({ modelKey: 'sk-ant-test' });
     const res = await call('start_agent_run', {
@@ -444,6 +458,14 @@ describe('get_agent_run', () => {
     expect(textOf(res)).toContain(`Thread: ${THREAD_ID}.`);
     expect(textOf(res)).toContain('1. took a screenshot');
     expect(textOf(res)).toContain('The invoices are in ~/invoices.');
+  });
+
+  it('reads a time-limited completed run as unfinished', async () => {
+    const said = textOf(
+      await read({ ...AGENT_RUN, result: { ...AGENT_RUN.result, stop: 'time_limit' } }),
+    );
+    expect(said).toContain('WITHOUT FINISHING (stop time_limit)');
+    expect(said).toContain('60-MINUTE WALL-CLOCK LIMIT');
   });
 
   it('reads a completed run that stopped early as unfinished', async () => {

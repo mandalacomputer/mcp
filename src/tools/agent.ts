@@ -46,7 +46,6 @@ const computerId = z
   .describe('Which computer. Defaults to the one selected with use_computer.');
 const prompt = z.string().describe('The task, in plain language.');
 const nonblankModel = z.string().refine((v) => v.trim().length > 0, 'model must not be blank');
-const STEPS_CAP = `Defaults to 20 and is capped at ${P.AGENT_MAX_STEPS} here, so a larger value is refused before the call rather than after it.`;
 
 /** A run on credits' admission budget. */
 const maxCostArg = z
@@ -59,15 +58,15 @@ const maxCostArg = z
   );
 
 /** How many actions, told the way each payer needs it told. */
-const maxSteps = (bill: string, bound: string) =>
+export const maxSteps = (bill: string, bound: string, cap: number = P.AGENT_MAX_STEPS) =>
   z
     .number()
     .int()
     .min(1)
-    .max(P.AGENT_MAX_STEPS)
+    .max(cap)
     .default(20)
     .describe(
-      `How many ACTIONS the loop may take on the desktop. Not a count of model calls and not a proxy for ${bill}: one model reply can ask for several actions and spends a step on each, a paused turn is resubmitted for tokens and no step, and a bash call or a cursor read takes no screenshot. So a run can make more model calls than steps AND more steps than screenshots — bound the work with this, and ${bound}. ${STEPS_CAP}`,
+      `How many ACTIONS the loop may take on the desktop. Not a count of model calls and not a proxy for ${bill}: one model reply can ask for several actions and spends a step on each, a paused turn is resubmitted for tokens and no step, and a bash call or a cursor read takes no screenshot. So a run can make more model calls than steps AND more steps than screenshots — bound the work with this, and ${bound}. Defaults to 20; accepts 1 to ${cap}. All agent runs have a fixed 60-minute wall-clock limit and end with stop time_limit when it is reached.`,
     );
 
 type RunArgs = {
