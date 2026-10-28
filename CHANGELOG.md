@@ -14,6 +14,25 @@ are wording changes, and they are behaviour changes in the way that matters.
 
 ## [Unreleased]
 
+## [0.19.0] - 2026-10-28
+
+### Added
+
+- `start_agent_run` accepts `max_steps` up to 500 (default 20). The foreground
+  `run_agent` and chat tools keep the ceiling of 100.
+- `time_limit` stop reason. Every agent run has a fixed 60-minute wall-clock
+  limit; reaching it ends the run with `stop: time_limit` and keeps the work
+  already done. `get_agent_run` says so above the JSON, and the run tools'
+  descriptions now say that a background `completed` status only means the
+  loop ended: `stop: end_turn` is the one that means the task finished.
+
+### Changed
+
+- `stop` tells the model the guest now gets up to 45 seconds to shut down on
+  its own (was 20), that an ordinary stop can take about 83 seconds to answer,
+  and that the MCP client should allow at least 95 seconds for the call;
+  `force` saves those 45 seconds. The README and the plugin skill say the same.
+
 ## [0.18.0] - 2026-10-24
 
 ### Added
@@ -1438,7 +1457,8 @@ No effect on the tool surface, listed because it is most of the window.
 - Several parser fixes landed before that scanner was retired, each ported to
   and from the TypeScript SDK's byte-identical copy.
 
-[Unreleased]: https://github.com/mandalacomputer/mcp/compare/v0.18.0...HEAD
+[Unreleased]: https://github.com/mandalacomputer/mcp/compare/v0.19.0...HEAD
+[0.19.0]: https://github.com/mandalacomputer/mcp/compare/v0.18.0...v0.19.0
 [0.18.0]: https://github.com/mandalacomputer/mcp/compare/v0.17.2...v0.18.0
 [0.17.2]: https://github.com/mandalacomputer/mcp/compare/v0.17.1...v0.17.2
 [0.17.1]: https://github.com/mandalacomputer/mcp/compare/v0.17.0...v0.17.1
