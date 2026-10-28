@@ -518,7 +518,7 @@ says what to do. The judgement it cannot make for you:
   clear by retrying. `move_computer` takes the offer up; it copies the disk,
   so say what that costs before calling it.
 - **A stop does not need `force`.** An ordinary stop asks the guest, waits up
-  to 20 seconds, and then forces it off itself, so a modal dialog or a hung
+  to 45 seconds, and then forces it off itself, so a modal dialog or a hung
   session still ends stopped. `force: true` only skips that wait, and loses
   whatever the guest had not written to disk; leave it out unless the user
   wants the computer off at once.

@@ -1010,12 +1010,13 @@ does not.
 machine go down under it.
 
 **A stop asks first, then forces.** `stop_computer` asks the guest to shut
-down and gives it up to 20 seconds; a guest still up after that — a hung X
+down and gives it up to 45 seconds; a guest still up after that — a hung X
 session, a modal "unsaved changes" dialog, a service that ignores its own
 shutdown — is forced off by the platform, so an ordinary stop ends stopped and
-can take up to about a minute to answer. `force: true` skips the asking and the
+can take about 83 seconds to answer. Configure the MCP client to allow at least
+95 seconds for a stop; caller cancellation is still honored. `force: true` skips the asking and the
 wait and pulls the power at once — the equivalent of holding the button in — and
-whatever the guest had not written to disk goes with it. It saves 20 seconds,
+whatever the guest had not written to disk goes with it. It saves 45 seconds,
 not a failed stop, so leave it out unless the computer must be off immediately.
 
 **Purging snapshots is bound to the set you were shown.** Deleting a computer

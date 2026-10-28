@@ -385,7 +385,7 @@ const POWER_NEXT: Record<string, string> = {
 const POWER_DESCRIPTIONS: Record<string, string> = {
   start:
     "Boot a computer, or resume a suspended one — a resume restores the saved session, same processes and windows, in about a second. A resumed guest's clock is set to the current time within a few seconds, best effort through its guest agent (one whose agent does not answer keeps the old time until NTP corrects it), and the desktop panel's clock can show the old time for up to a minute after that.",
-  stop: 'Shut a computer down: the guest is asked, and given up to 20 seconds to do it; a guest still up after that is forced off by the platform, so an ordinary stop always ends stopped and can take up to about a minute to answer. On a suspended computer this discards the saved session, and the next start is a fresh boot. The disk is kept. `force` skips the asking and the 20-second wait and pulls the power at once.',
+  stop: 'Shut a computer down: the guest is asked, and given up to 45 seconds to do it; a guest still up after that is forced off by the platform, so an ordinary stop always ends stopped and can take about 83 seconds to answer. Configure the MCP caller to allow at least 95 seconds; caller cancellation is still honored. On a suspended computer this discards the saved session, and the next start is a fresh boot. The disk is kept. `force` skips the asking and the 45-second wait and pulls the power at once.',
   suspend:
     "Write the guest's RAM to disk and give the host its memory back. A pause, not a stop: start_computer resumes the same session. A computer that holds secrets suspends only on a host that seals saved sessions (its memory is encrypted on the way to disk); elsewhere, and while its secrets are still being delivered, it is refused with 409. After a change to its secret bindings that dropped a secret or moved one to another revision while it ran, it cannot be suspended until it restarts, since its memory may still hold the old value.",
   restart:
@@ -818,7 +818,7 @@ export const registerComputers: Registrar = (server, session, opts) => {
           .boolean()
           .optional()
           .describe(
-            'Pull the power at once instead of asking, the way holding the button in does. Anything the guest had not written to disk is lost. It is rarely needed: an ordinary stop already forces the computer off if the guest has not shut down within 20 seconds, so `force` only saves those 20 seconds, and it takes from the guest the chance to write its data first. Leave it out unless the user wants the computer off immediately.',
+            'Pull the power at once instead of asking, the way holding the button in does. Anything the guest had not written to disk is lost. It is rarely needed: an ordinary stop already forces the computer off if the guest has not shut down within 45 seconds, so `force` only saves those 45 seconds, and it takes from the guest the chance to write its data first. Leave it out unless the user wants the computer off immediately.',
           ),
         idempotency_key: idempotencyKeyArg,
       },
