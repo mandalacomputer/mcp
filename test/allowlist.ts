@@ -15,6 +15,10 @@ export type Route = { method: string; pattern: string };
 const r = (method: string, pattern: string): Route => ({ method, pattern });
 
 export const V1_ROUTES: Route[] = [
+  // Credential gateway management is API-first; use direct HTTP until wrappers ship.
+  r('GET', 'computers/:id/credential-gateway'),
+  r('POST', 'computers/:id/credential-gateway'),
+  r('DELETE', 'computers/:id/credential-gateway/:binding'),
   r('GET', 'templates'),
   // The template document format (OPL-3568): the published JSON
   // Schema, and a check of a document against it that stores nothing.
@@ -213,6 +217,12 @@ export const V1_ROUTES: Route[] = [
  * comparison is against what the platform actually reads.
  */
 export const PARAMETERS: ReadonlyMap<string, readonly string[]> = new Map([
+  ['GET computers/:id/credential-gateway', []],
+  ['DELETE computers/:id/credential-gateway/:binding', []],
+  [
+    'POST computers/:id/credential-gateway',
+    ['body:methods', 'body:origin', 'body:path_prefix', 'body:secret_id'],
+  ],
   [
     'POST computers/:id/browser-connections',
     ['body:lifecycle_version', 'body:lease_seconds', 'body:max_duration_seconds'],
@@ -621,6 +631,10 @@ export const ALLOWED = new Set(V1_ROUTES.map(key));
  * be exercised; parameter exceptions stay separate.
  */
 export const UNIMPLEMENTED = new Set<string>([
+  // API-first credential gateway management, without SDK wrappers yet.
+  'GET computers/:id/credential-gateway',
+  'POST computers/:id/credential-gateway',
+  'DELETE computers/:id/credential-gateway/:binding',
   // DECISION (OPL-5878, OPL-5880). A browser connection answers a raw
   // capability to drive the guest's browser, and a model's context is the
   // wrong place for one: the SDKs' browser drivers create, renew and revoke it
@@ -683,6 +697,8 @@ export function patternFor(path: string): string {
       if (i === 3 && parts[0] === 'computers' && parts[2] === 'executions') return ':executionId';
       if (i === 3 && parts[0] === 'computers' && parts[2] === 'results') return ':resultId';
       if (i === 3 && parts[0] === 'computers' && parts[2] === 'artifacts') return ':artifactId';
+      if (i === 3 && parts[0] === 'computers' && parts[2] === 'credential-gateway')
+        return ':binding';
       if (i === 3 && parts[0] === 'computers' && parts[2] === 'public-urls') return ':urlId';
       // An agent thread's and a background run's id, second segment under
       // `agent` only, as the platform pins them.

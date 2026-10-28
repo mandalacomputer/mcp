@@ -14,7 +14,16 @@ it('covers every operation in the anonymously published OpenAPI contract', async
   const summary = compareCoverage(
     publication.contract,
     operationEvidence(await collectExercises()),
-    { unsent: UNIMPLEMENTED },
+    {
+      unsent: UNIMPLEMENTED,
+      // Management API contract lands before its server rollout. Keep the
+      // missing publication visible and time-bounded rather than silently skip it.
+      prepublication: [
+        'GET computers/:id/credential-gateway',
+        'POST computers/:id/credential-gateway',
+        'DELETE computers/:id/credential-gateway/:binding',
+      ].map((operation) => ({ operation, expiresAt: '2026-11-27T00:00:00.000Z' })),
+    },
   );
   console.info(
     JSON.stringify({
