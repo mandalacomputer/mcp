@@ -697,6 +697,8 @@ export function patternFor(path: string): string {
       if (i === 3 && parts[0] === 'computers' && parts[2] === 'executions') return ':executionId';
       if (i === 3 && parts[0] === 'computers' && parts[2] === 'results') return ':resultId';
       if (i === 3 && parts[0] === 'computers' && parts[2] === 'artifacts') return ':artifactId';
+      if (i === 3 && parts[0] === 'computers' && parts[2] === 'credential-gateway')
+        return ':binding';
       if (i === 3 && parts[0] === 'computers' && parts[2] === 'public-urls') return ':urlId';
       // An agent thread's and a background run's id, second segment under
       // `agent` only, as the platform pins them.
