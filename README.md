@@ -355,6 +355,16 @@ before a request is sent — replaces the setting whole, and `null` removes it.
 says "its egress proxy is waiting for credentials; connections are closed until
 they arrive".
 
+**An end time** — `ends_at` (an RFC 3339 time) or `ends_in_hours` (hours from
+now, fractions allowed) on `create_computer` and `update_computer` makes the
+computer stop by itself at that time, as `stop_computer` would; its disk is
+kept. It fires once and is then cleared. On create the time must be at least
+10 minutes and at most 366 days away; on `update_computer` it only has to be in
+the future, it goes alone — beside any other field it is refused before a
+request is sent — and `null` clears it. Send one spelling, not both.
+`get_computer` shows it as `ends_at`, and its summary says "stops by itself at
+…". A host that cannot keep an end time answers 409 with reason `unsupported`.
+
 **Delegating** — `run_agent`, `start_agent_run`, `run_agent_chat`, registered when a
 model key is present: `MANDALA_MODEL_KEY` on stdio, or the caller's own `X-Model-Key`
 header over HTTP. Without a key, `run_agent` and `start_agent_run` are registered

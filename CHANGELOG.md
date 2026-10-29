@@ -14,6 +14,21 @@ are wording changes, and they are behaviour changes in the way that matters.
 
 ## [Unreleased]
 
+### Added
+
+- **A computer's end time: `ends_at` and `ends_in_hours` on `create_computer`
+  and `update_computer`.** The computer stops by itself at that time, as
+  `stop_computer` would, with its disk kept; it fires once. Give an RFC 3339
+  time or a number of hours from now (fractions allowed), not both. On
+  `update_computer` it must be the only field, and `null` clears it; both
+  mistakes are refused before any request. `get_computer` and the computer's
+  summary line show `ends_at` when one is set.
+- **API key limits in `whoami` and `list_api_keys`.** Each key now carries
+  `expires_at` (when it stops working, `null` for never) and `computer_ids`
+  (the only computers it may reach, `null` for every computer its scope
+  reaches). An expired key is refused with 401 `API key expired`. Minting
+  keys stays out of this server, as before.
+
 ## [0.20.0] - 2026-10-29
 
 ### Added

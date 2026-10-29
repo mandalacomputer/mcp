@@ -328,7 +328,17 @@ export function createBody(args: {
   egress_proxy?: { server: string; credentials_secret_id?: string | null };
   /** The workspace to create in; checked by the tool's schema. */
   workspace_id?: string;
+  /**
+   * When the computer stops by itself: an RFC 3339 time, or a number of hours
+   * from now. One or the other; the platform's limits on how near and how far
+   * are its own.
+   */
+  ends_at?: string;
+  ends_in_hours?: number;
 }): Json {
+  if (args.ends_at !== undefined && args.ends_in_hours !== undefined) {
+    throw new Error('Give ends_at or ends_in_hours, not both.');
+  }
   if (args.template_transfer !== undefined) {
     if (typeof args.template_transfer !== 'string' || !args.template_transfer.trim()) {
       throw new Error('template_transfer must be a nonblank string.');

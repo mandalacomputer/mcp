@@ -116,6 +116,21 @@ const EGRESS_PROXY_ABOUT =
   "Sends ALL of the computer's outbound TCP through a proxy — exec, terminals, package managers and browsers alike — taken on its host, so nothing inside the computer can opt out. There is no bypass list. It FAILS CLOSED: when the proxy is down or refuses, or its credentials have not reached the host yet (get_computer then says its egress proxy is waiting for credentials), the connection fails and nothing is sent directly. UDP to the internet and ICMP are dropped (QUIC falls back to TCP; NTP and other UDP stop working). DNS lookups are NOT proxied; they go to the platform's resolver. Connections open through the proxy are closed when the setting changes. A host that cannot take it yet — or cannot take an https:// one, or one naming credentials — answers 409 with reason unsupported; one that cannot put it into effect now answers 503, and nothing is changed unless that error says the new setting was stored.";
 
 /**
+ * An end time (platform: a one-shot stop at a set time). Checked here for shape
+ * only; how near and how far it may be are the platform's rules.
+ */
+const endsAtArg = z
+  .string()
+  .refine(
+    (v) => v.trim().length > 0 && !Number.isNaN(Date.parse(v)),
+    'ends_at must be an RFC 3339 time, e.g. 2026-11-01T18:00:00Z',
+  );
+const endsInHoursArg = z.number().positive();
+
+const END_TIME_ABOUT =
+  "When the computer stops by itself: at that time its host stops it, as stop_computer would, and its disk is kept; get_computer's ends_at says when, and is gone once it has fired or been cleared. It fires once. A host that cannot keep an end time answers 409 with reason unsupported.";
+
+/**
  * The answer to a wait the caller ended.
  *
  * `refused`, not `said`: the wait never reached what it was told to wait for,
@@ -847,7 +862,7 @@ export const registerComputers: Registrar = (server, session, opts) => {
     {
       title: 'Rename or resize a computer',
       description:
-        "Change a computer's name, its size, its idle window, its browser proxy, or its egress proxy. The platform refuses these in combination on purpose — a resize needs the computer stopped and the others do not, so one request cannot honour both without applying half of it. A SUSPENDED computer counts as stopped for a resize, and its saved desktop cannot survive one: the vCPU count and the memory size are part of the saved state, so it is discarded and the next start is a cold boot. Resume it and finish what is open before resizing, or say so before you do it.",
+        "Change a computer's name, its size, its idle window, its browser proxy, its egress proxy, or its end time. The platform refuses these in combination on purpose — a resize needs the computer stopped and the others do not, so one request cannot honour both without applying half of it. A SUSPENDED computer counts as stopped for a resize, and its saved desktop cannot survive one: the vCPU count and the memory size are part of the saved state, so it is discarded and the next start is a cold boot. Resume it and finish what is open before resizing, or say so before you do it.",
       inputSchema: {
         ...idArg,
         name: z.string().optional(),
@@ -881,14 +896,26 @@ export const registerComputers: Registrar = (server, session, opts) => {
           .describe(
             `${EGRESS_PROXY_ABOUT} Replaces the setting whole; null removes it and the computer's traffic goes directly again. To change the server of the same proxy, start from the egress proxy get_computer returns and copy its credentials_secret_id to keep it: leaving it out removes the credentials, and the proxy then refuses every connection. Do not carry credentials_secret_id to a different server unless the user says those credentials are for that server. Send this ON ITS OWN — never beside name, a resize, idle_suspend_min or browser_proxy. A running computer has it when the answer arrives; a stopped or suspended one is given it before it starts. After any other 5xx that names no operation_id, send the setting again with the SAME idempotency_key (not a new one or none): the platform most likely refused it before sending it anywhere. After a 5xx that names an operation_id, or no answer, it may or may not have taken effect: call get_computer, and if it does not show the setting you sent, or its egress proxy names credentials and is still waiting for them after a few seconds, send the setting again — with a new idempotency_key, or none, after a 5xx that names an operation_id; with the key the answer named after no answer at all.`,
           ),
+        ends_at: endsAtArg
+          .nullable()
+          .optional()
+          .describe(
+            `${END_TIME_ABOUT} An RFC 3339 time in the future, replacing any end time it has; null clears it. Send this ON ITS OWN, and not beside ends_in_hours.`,
+          ),
+        ends_in_hours: endsInHoursArg
+          .nullable()
+          .optional()
+          .describe(
+            `${END_TIME_ABOUT} Hours from now, fractions allowed, replacing any end time it has; null clears it. Send this ON ITS OWN, and not beside ends_at.`,
+          ),
         idempotency_key: idempotencyKeyArg,
       },
     },
     ({ computer_id, idempotency_key, ...fields }, extra) =>
       guarded(async () => {
         const id = session.resolve(computer_id);
-        // `null` is meaningful for idle_suspend_min, browser_proxy and
-        // egress_proxy and must survive the filter; every other absent field is
+        // `null` is meaningful for idle_suspend_min, browser_proxy,
+        // egress_proxy, ends_at and ends_in_hours and must survive the filter; every other absent field is
         // dropped so the platform leaves it alone.
         const body: Record<string, unknown> = Object.fromEntries(
           Object.entries(fields).filter(([, v]) => v !== undefined),
@@ -896,7 +923,18 @@ export const registerComputers: Registrar = (server, session, opts) => {
         if (fields.egress_proxy) body.egress_proxy = P.egressProxyBody(fields.egress_proxy);
         if (!Object.keys(body).length) {
           return refused(
-            'Nothing to change — give at least one of name, cpu, ram_mb, disk_gb, idle_suspend_min, browser_proxy, egress_proxy.',
+            'Nothing to change — give at least one of name, cpu, ram_mb, disk_gb, idle_suspend_min, browser_proxy, egress_proxy, ends_at, ends_in_hours.',
+          );
+        }
+        // An end time travels alone too, and as one of its two spellings.
+        const endFields = Object.keys(body).filter((k) => k === 'ends_at' || k === 'ends_in_hours');
+        if (endFields.length > 1) {
+          return refused('Give ends_at or ends_in_hours, not both. Nothing was changed.');
+        }
+        if (endFields.length && Object.keys(body).length > 1) {
+          const beside = Object.keys(body).filter((k) => k !== endFields[0]);
+          return refused(
+            `${endFields[0]} must be sent on its own, not beside ${beside.join(', ')}. Send it in an update_computer call of its own. Nothing was changed.`,
           );
         }
         // The platform refuses it beside anything else; said here, before a
@@ -1924,6 +1962,16 @@ export const registerComputers: Registrar = (server, session, opts) => {
           .describe(
             "The workspace to create the computer in, an id from list_workspaces. Its secrets and an egress proxy's credentials_secret_id are then named from that workspace's scope: its own secrets and the account-wide ones. Left out, the computer goes in this key's workspace, or in none for an account-wide key. A workspace this key cannot reach — another account's, one that does not exist, or any but its own for a key confined to a workspace — is not found, and nothing is created." +
               createScopeDefault,
+          ),
+        ends_at: endsAtArg
+          .optional()
+          .describe(
+            `${END_TIME_ABOUT} An RFC 3339 time at least 10 minutes and at most 366 days from now, e.g. "2026-11-01T18:00:00Z". Give this or ends_in_hours, not both.`,
+          ),
+        ends_in_hours: endsInHoursArg
+          .optional()
+          .describe(
+            `${END_TIME_ABOUT} Hours from now, fractions allowed (0.5 is half an hour); the platform turns it into ends_at. Give this or ends_at, not both.`,
           ),
         idempotency_key: buildIdempotencyKeyArg,
       },
