@@ -3646,6 +3646,11 @@ describe('the tools our own prose tells a model to call', () => {
     // The MANDALA_TAGS tag for the four public URL tools, named in the skill's
     // list of tags; the first tag with an underscore in it. Not a tool.
     'public_urls',
+    // The credential gateway tools name these: fields of a binding, and the
+    // MANDALA_TAGS tag for the three tools (OPL-6246). Not tools.
+    'base_url',
+    'path_prefix',
+    'credential_gateway',
     // whoami and list_api_keys name it: the field saying whether a key may
     // manage API keys (OPL-5053). A response field, not a tool.
     'manage_keys',

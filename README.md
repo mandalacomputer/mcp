@@ -292,6 +292,18 @@ its fetch metadata, or, without fetch metadata, `Accept: text/html` from a
 client that sets headers skips it with `mandala-skip-warning: 1`; in the
 computer's own browser, where `open_url` cannot send headers, click Continue.
 
+**Calling an API without handing the computer the key** —
+`list_credential_gateway_bindings`, `create_credential_gateway_binding`,
+`delete_credential_gateway_binding`. A binding names a secret from the
+account's store, an exact `https://` origin, a path prefix and the HTTP methods
+allowed. Programs inside the computer send requests to the binding's `base_url`
+followed by the provider path, with `Authorization: Bearer <placeholder>` (both
+are in the answer), and the platform sends them on with the secret in their
+place: **the secret never reaches the computer.** Up to 8 per computer; a
+binding cannot be changed, only deleted and made again. Owners create and
+delete them; members can list them. Origins, paths and methods that can only
+be refused are refused before any request.
+
 **Secrets** — `list_secrets`, `get_secret`, `create_secret`, `set_secret`,
 `replace_secret`, `delete_secret` for the account's secret store, and
 `get_computer_secrets`, `set_computer_secrets` and `create_computer`'s `secrets`
@@ -390,6 +402,7 @@ with an error listing all valid tags.
 | `webhooks` | All webhook tools listed above |
 | `ssh` | All SSH tools listed above |
 | `public_urls` | `list_public_urls`, `create_public_url`, `update_public_url`, `delete_public_url` |
+| `credential_gateway` | `list_credential_gateway_bindings`, `create_credential_gateway_binding`, `delete_credential_gateway_binding` |
 | `secrets` | `list_secrets`, `get_secret`, `create_secret`, `set_secret`, `replace_secret`, `delete_secret`, `get_computer_secrets`, `set_computer_secrets` |
 | `agent` | `run_agent`, `run_agent_chat`, `start_agent_run`, `get_agent_run`, `list_agent_runs`, `cancel_agent_run`, `list_agent_threads`, `get_agent_thread`, `delete_agent_thread` |
 | `activities` | `list_activities`, `get_activity`, `get_activity_results` |

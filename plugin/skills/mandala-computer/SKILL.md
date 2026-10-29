@@ -97,9 +97,9 @@ Optional configuration:
   Mixed tools such as `wait_for_computer` and `snapshot_schedule` are also
   withheld. `screenshot`, `read_clipboard` and `list_windows` keep the hint.
 - `MANDALA_TAGS=input,guest` — select a union of lowercase tool tags:
-  `activities`, `agent`, `artifacts`, `computers`, `events`, `executions`, `files`, `guest`,
-  `input`, `lifecycle`, `public_urls`, `results`, `secrets`, `signals`, `snapshots`, `ssh`,
-  `templates`, `usage`, `webhooks`.
+  `activities`, `agent`, `artifacts`, `computers`, `credential_gateway`, `events`,
+  `executions`, `files`, `guest`, `input`, `lifecycle`, `public_urls`, `results`, `secrets`,
+  `signals`, `snapshots`, `ssh`, `templates`, `usage`, `webhooks`.
   Entries are comma-separated, trimmed and deduplicated; empty entries are
   ignored, and empty or unset means unfiltered. Unknown tags, including
   uppercase names, fail at startup and name the valid set. `files` means
@@ -363,6 +363,16 @@ restart. A command that needs a bound variable runs with `exec` and
 file binding at once, and new desktop shells get an env binding on images that
 support it. `delete_secret` stops a computer that is still bound to it from
 starting, so remove the binding first. Never repeat a value back to the user.
+
+## Calling an API without giving the computer the key
+
+When code inside the computer needs an API key the user would rather it never
+held, store the key with `create_secret` and bind it with
+`create_credential_gateway_binding`: an exact `https://` origin, a path prefix
+and the methods allowed, as narrow as the task needs. The computer then calls
+the answered `base_url` followed by the provider path with
+`Authorization: Bearer <placeholder>`, and the platform adds the real key.
+Bindings cannot be edited: delete and create again. Up to 8 per computer.
 
 ## Showing an app: public URLs
 

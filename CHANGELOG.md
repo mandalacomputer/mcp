@@ -14,6 +14,21 @@ are wording changes, and they are behaviour changes in the way that matters.
 
 ## [Unreleased]
 
+### Added
+
+- **Credential gateway: `list_credential_gateway_bindings`,
+  `create_credential_gateway_binding`, `delete_credential_gateway_binding`.**
+  Let programs inside a computer call an HTTPS API with a secret from the
+  account's store without the secret ever reaching the computer: they call the
+  binding's `base_url` with a placeholder Bearer token, and the platform sends
+  the request on with the secret, for the one origin, path prefix and methods
+  the binding allows. The create's answer says how to call it. An origin with
+  a path, query, port or credentials, a relative path prefix, and an empty,
+  repeated or unknown method are refused before any request. An answer that is
+  not a binding is never described as one, and a delete of an id that is not
+  there says nothing was revoked. The new `credential_gateway` tag selects the
+  three tools.
+
 ## [0.19.1] - 2026-10-29
 
 ### Fixed

@@ -310,6 +310,22 @@ export const PUBLIC_URL = {
   updated_at: '2026-10-12T12:00:00.000Z',
 };
 
+/**
+ * One credential gateway binding as the platform answers it (OPL-6246). The
+ * base URL is a stand-in: the tools read it from the answer, never write one.
+ */
+export const GATEWAY_BINDING = {
+  id: 'cgw-0123456789abcdef01234567',
+  computer_id: 'vm-1',
+  secret_id: 'csec-0123456789abcdef',
+  origin: 'https://api.example.com',
+  path_prefix: '/v1',
+  methods: ['GET'],
+  created_at: '2026-10-29T12:00:00.000Z',
+  base_url: 'http://gateway.invalid/cgw-0123456789abcdef01234567',
+  placeholder: 'mandala-placeholder',
+};
+
 /** The same subscription as a create or a rotate answers it: with the secret. */
 export const WEBHOOK_CREATED = {
   ...WEBHOOK,
@@ -1053,6 +1069,15 @@ function respond(
       },
       method === 'POST' ? 201 : 200,
     );
+  }
+  // The credential gateway (OPL-6246). A create answers what it was sent, so
+  // a tool that dropped or changed a field is caught; a delete is the ack.
+  const gateway = /^\/computers\/([^/]+)\/credential-gateway(?:\/([^/]+))?$/.exec(path);
+  if (gateway) {
+    if (!gateway[2] && method === 'GET') return json({ bindings: [GATEWAY_BINDING] });
+    if (method === 'DELETE') return json({ ok: true });
+    const sent = (body ?? {}) as Record<string, unknown>;
+    return json({ ...GATEWAY_BINDING, computer_id: decodeURIComponent(gateway[1]!), ...sent }, 201);
   }
   // The account's secret store. A create answers the name it was sent and a
   // replace a moved revision; neither ever carries the value it was sent, and a

@@ -126,6 +126,11 @@ export const TOOL_TAGS = {
   ],
   ssh: ['list_ssh_keys', 'add_ssh_key', 'remove_ssh_key', 'get_computer_ssh', 'set_computer_ssh'],
   public_urls: ['list_public_urls', 'create_public_url', 'update_public_url', 'delete_public_url'],
+  credential_gateway: [
+    'list_credential_gateway_bindings',
+    'create_credential_gateway_binding',
+    'delete_credential_gateway_binding',
+  ],
   usage: ['get_usage', 'get_credits'],
   webhooks: [
     'list_webhooks',

@@ -195,6 +195,19 @@ export const EXERCISE: Record<string, Record<string, unknown>[]> = {
     { url_id: 'pu-0123456789abcdef', access: 'public' },
   ],
   delete_public_url: [{ url_id: 'pu-0123456789abcdef', confirm: true }],
+  // The credential gateway (OPL-6246). The create sends every body field.
+  list_credential_gateway_bindings: [{}],
+  create_credential_gateway_binding: [
+    {
+      secret_id: 'csec-0123456789abcdef',
+      origin: 'https://api.example.com',
+      path_prefix: '/v1',
+      methods: ['GET', 'POST'],
+    },
+  ],
+  delete_credential_gateway_binding: [
+    { binding_id: 'cgw-0123456789abcdef01234567', confirm: true },
+  ],
   // Secret bindings. `version` is sent on one of the two sets, because the
   // parameter sweep is what proves it can be.
   get_computer_secrets: [{}],
