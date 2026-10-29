@@ -117,6 +117,8 @@ jobs:
           node-version: '22'
           cache: npm
       - run: npm ci
+      # dist/ is not committed, and `npm pack` does not run prepublishOnly.
+      - run: npm run build
       - run: npm pack --pack-destination "$RUNNER_TEMP"
       - name: Install the tarball with no lockfile
         run: |
