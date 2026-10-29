@@ -1,6 +1,6 @@
 {
   "name": "mandala-computer-mcp",
-  "version": "0.19.1",
+  "version": "0.20.0",
   "mcpName": "io.github.mandalacomputer/mcp",
   "description": "MCP server for Mandala Computer — cloud desktops for AI agents",
   "keywords": [
