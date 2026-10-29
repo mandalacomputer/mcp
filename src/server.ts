@@ -330,10 +330,11 @@ export function createServer(cfg: ServerConfig): McpServer {
         }
       };
     }
-    if (!registered) {
-      server.server.removeRequestHandler('tools/list');
-      server.server.removeRequestHandler('tools/call');
-    }
+    // The SDK's own tools/list and tools/call handlers are left in place.
+    // From @modelcontextprotocol/sdk 1.32.2 they are installed when the server
+    // is constructed (because `tools` is a declared capability) and never
+    // again, so removing them here left a fresh install with no tools at all
+    // (OPL-6241). Earlier versions install them on this first registration.
     const tool = register(...args);
     registered = true;
     names.add(name);
@@ -364,8 +365,10 @@ export function createServer(cfg: ServerConfig): McpServer {
   registerSignals(server, session, opts);
   registerChat(server, session, opts);
 
-  // The SDK installs tool handlers on the first registration. An empty
-  // selection still needs a valid tools/list response and must refuse calls.
+  // The SDK installs its tool handlers either at construction or on the first
+  // registration, depending on its version. An empty selection still needs a
+  // valid tools/list response and a clear refusal for calls, so these replace
+  // whichever the SDK did or did not install.
   if (!registered) {
     server.server.setRequestHandler(ListToolsRequestSchema, () => ({ tools: [] }));
     server.server.setRequestHandler(CallToolRequestSchema, () => {

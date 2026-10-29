@@ -46,7 +46,7 @@
     "check:internals": "node scripts/check-internals.mjs"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.32.1",
+    "@modelcontextprotocol/sdk": "1.32.2",
     "express": "^5.1.0",
     "undici": "^6.29.1",
     "zod": "^4.6.7"

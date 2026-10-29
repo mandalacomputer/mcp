@@ -14,6 +14,16 @@ are wording changes, and they are behaviour changes in the way that matters.
 
 ## [Unreleased]
 
+### Fixed
+
+- A fresh install (`npx mandala-computer-mcp`, `npm i mandala-computer-mcp`)
+  listed no tools: `tools/list` answered `-32601 Method not found`. Since
+  2026-10-23 such installs resolved `@modelcontextprotocol/sdk` 1.32.2, which
+  sets up its tool handlers when the server is built, and the server then
+  removed them. Every 0.x release from 0.13.0 to 0.19.0 is affected on a fresh
+  install. The handlers are now left in place, and the SDK is pinned to an exact
+  version.
+
 ## [0.19.0] - 2026-10-28
 
 ### Added
