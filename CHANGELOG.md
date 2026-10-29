@@ -28,10 +28,14 @@ are wording changes, and they are behaviour changes in the way that matters.
   as a platform that predates end times answers), or one still there after
   clearing it. The computer is left as it is, never stopped or deleted. A
   same-key retry answered with the first request's stored answer has its
-  `ends_in_hours` end time checked against when the first request was sent,
-  which the server remembers for an hour; when the first request was sent from
-  elsewhere, the answer succeeds but says the end time is UNCONFIRMED, shows
-  it, and asks for `get_computer` to check it. A relative end time is checked
+  `ends_in_hours` end time checked against the first request's own exchange
+  (sent to answered, or sent plus two minutes when its answer was lost), which
+  the server remembers for an hour, so a later retry never widens it. When the
+  first request was sent from elsewhere (this server's first try was itself
+  answered as a replay), that answer and every later retry of the key succeed
+  but say the end time is UNCONFIRMED, show it, and ask for `get_computer` to
+  check it; one past what the platform could have counted to by the first
+  answer seen is still an error. A relative end time is checked
   against the platform's own clock (the answer's `Date` header), so a local
   clock that is off does not refuse an end time that was applied; without that
   header the local window is widened by ten minutes either way.
