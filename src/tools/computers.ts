@@ -141,6 +141,9 @@ const HOUR_MS = 3_600_000;
  * - `ends_in_hours`: the platform counts from when it read the request, which
  *   is somewhere between `sentAt` and `answeredAt`; a second of slack below
  *   for truncation and a minute above for its clock against this one.
+ *   A replayed answer (same idempotency key, answered from the platform's
+ *   store) was counted from the first request, so only the upper bound is
+ *   checked for it; an absolute `ends_at` is checked exactly either way.
  * - `null` (clear): the answer must carry none.
  */
 export function endTimeProblem(
@@ -148,6 +151,7 @@ export function endTimeProblem(
   returned: unknown,
   sentAt: number,
   answeredAt: number,
+  replayed = false,
 ): string | undefined {
   const clearing =
     asked.ends_at === null || (asked.ends_at === undefined && asked.ends_in_hours === null);
@@ -165,7 +169,9 @@ export function endTimeProblem(
   }
   if (typeof asked.ends_in_hours === 'number') {
     const span = asked.ends_in_hours * HOUR_MS;
-    if (at < sentAt + span - 1000 || at > answeredAt + span + 60_000)
+    // A replayed answer is the first request's, counted from when THAT one was
+    // handled — any time before this one — so only the upper bound holds.
+    if ((!replayed && at < sentAt + span - 1000) || at > answeredAt + span + 60_000)
       return `the answer's ends_at ${returned} is not ${asked.ends_in_hours} hours from the request`;
   }
   return undefined;
@@ -992,12 +998,13 @@ export const registerComputers: Registrar = (server, session, opts) => {
         const sentAt = Date.now();
         const key = idempotencyKeyFor(idempotency_key);
         let c: Computer;
+        let replayed = false;
         try {
-          c = unwrapComputer(
-            await session.api
-              .with(extra.signal)
-              .json('PATCH', P.computer(id), { body, headers: idempotencyHeaders(key) }),
-          );
+          const answer = await session.api
+            .with(extra.signal)
+            .jsonReplayed('PATCH', P.computer(id), { body, headers: idempotencyHeaders(key) });
+          replayed = answer.replayed;
+          c = unwrapComputer(answer.value);
         } catch (err) {
           // The one refusal on this route that is an offer rather than an end
           // (OPL-3775). Caught here and nowhere else because this is the only
@@ -1014,7 +1021,7 @@ export const registerComputers: Registrar = (server, session, opts) => {
         // same. The computer is left exactly as it is.
         if ('ends_at' in body || 'ends_in_hours' in body) {
           const asked = body as { ends_at?: string | null; ends_in_hours?: number | null };
-          const problem = endTimeProblem(asked, c.ends_at, sentAt, answeredAt);
+          const problem = endTimeProblem(asked, c.ends_at, sentAt, answeredAt, replayed);
           if (problem) {
             const clearing = asked.ends_at === null || asked.ends_in_hours === null;
             return refused(
@@ -2051,12 +2058,15 @@ export const registerComputers: Registrar = (server, session, opts) => {
         const args = { ...rest, workspace_id };
         const key = idempotencyKeyFor(idempotency_key);
         let data: unknown;
+        let replayed = false;
         const sentAt = Date.now();
         try {
-          data = await session.api.with(extra.signal).json('POST', P.COMPUTERS, {
-            body: P.createBody(args),
-            headers: idempotencyHeaders(key),
-          });
+          ({ value: data, replayed } = await session.api
+            .with(extra.signal)
+            .jsonReplayed('POST', P.COMPUTERS, {
+              body: P.createBody(args),
+              headers: idempotencyHeaders(key),
+            }));
         } catch (error) {
           const body =
             error instanceof ConflictError
@@ -2137,7 +2147,7 @@ export const registerComputers: Registrar = (server, session, opts) => {
         // believes it stops by itself. The computer is left exactly as it is.
         const endProblem =
           args.ends_at !== undefined || args.ends_in_hours !== undefined
-            ? endTimeProblem(args, c.ends_at, sentAt, answeredAt)
+            ? endTimeProblem(args, c.ends_at, sentAt, answeredAt, replayed)
             : undefined;
         if (endProblem) {
           return refused(

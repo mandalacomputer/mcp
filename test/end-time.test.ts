@@ -17,7 +17,7 @@ const textOf = (res: CallToolResult) =>
 type Seen = { method: string; path: string; body?: unknown };
 
 async function platform<T>(
-  respond: (seen: Seen) => [number, unknown],
+  respond: (seen: Seen) => [number, unknown] | [number, unknown, Record<string, string>],
   fn: (seen: Seen[]) => Promise<T>,
 ): Promise<T> {
   const restore = globalThis.fetch;
@@ -30,10 +30,10 @@ async function platform<T>(
       body: typeof init?.body === 'string' ? JSON.parse(init.body) : undefined,
     };
     seen.push(call);
-    const [status, body] = respond(call);
+    const [status, body, headers = {}] = respond(call);
     return new Response(JSON.stringify(body), {
       status,
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...headers },
     });
   }) as typeof fetch;
   try {
@@ -301,6 +301,107 @@ describe('endTimeProblem checks the value, not only its presence', () => {
     [{ ends_in_hours: null }, ENDS, 'still carries ends_at'],
   ])('refuses %j answered with %j', (asked, returned, says) => {
     expect(endTimeProblem(asked, returned, t0, t1)).toContain(says);
+  });
+});
+
+// A keyed request sent again later is answered from the platform's store: the
+// FIRST request's answer, whose relative end time was counted from then. It
+// must not read as an end time that was not applied.
+describe('a replayed answer to a keyed request', () => {
+  const REPLAYED = { 'Idempotent-Replayed': 'true' };
+  const KEY = 'end-time-0123456789';
+  /** The ends_at a first request two hours ago, for `hours`, was answered with. */
+  const earlier = (hours: number) =>
+    new Date(Math.floor((Date.now() - 2 * 3_600_000 + hours * 3_600_000) / 1000) * 1000)
+      .toISOString()
+      .replace('.000Z', 'Z');
+
+  it('create_computer: a delayed same-key replay of ends_in_hours succeeds', async () => {
+    await platform(
+      () => [201, box({ ends_at: earlier(8) }), REPLAYED],
+      async () => {
+        const { call, close } = await connect({ computerId: undefined });
+        const args = { template: 'base', ends_in_hours: 8, idempotency_key: KEY };
+        const r = await call('create_computer', args);
+        await close();
+        expect(r.isError, textOf(r)).toBeFalsy();
+        expect(textOf(r)).toContain(`stops by itself at ${earlier(8)}`);
+      },
+    );
+  });
+
+  it('update_computer: a delayed same-key replay of ends_in_hours succeeds', async () => {
+    await platform(
+      () => [200, box({ ends_at: earlier(3) }), REPLAYED],
+      async () => {
+        const { call, close } = await connect();
+        const r = await call('update_computer', { ends_in_hours: 3, idempotency_key: KEY });
+        await close();
+        expect(r.isError, textOf(r)).toBeFalsy();
+      },
+    );
+  });
+
+  it('the same answer without the replay header is still refused', async () => {
+    await platform(
+      () => [200, box({ ends_at: earlier(3) })],
+      async () => {
+        const { call, close } = await connect();
+        const r = await call('update_computer', { ends_in_hours: 3, idempotency_key: KEY });
+        await close();
+        expect(r.isError).toBe(true);
+        expect(textOf(r)).toContain('end time of computer vm-1 was NOT applied');
+      },
+    );
+  });
+
+  it('a replay still refuses a relative end time past the upper bound', async () => {
+    await platform(
+      () => [200, box({ ends_at: earlier(6) }), REPLAYED],
+      async () => {
+        const { call, close } = await connect();
+        const r = await call('update_computer', { ends_in_hours: 3, idempotency_key: KEY });
+        await close();
+        expect(r.isError).toBe(true);
+      },
+    );
+  });
+
+  it('a replay still checks an absolute ends_at exactly', async () => {
+    await platform(
+      () => [201, box({ ends_at: '2026-10-30T09:00:00Z' }), REPLAYED],
+      async () => {
+        const { call, close } = await connect({ computerId: undefined });
+        const r = await call('create_computer', {
+          template: 'base',
+          ends_at: ENDS,
+          idempotency_key: KEY,
+        });
+        await close();
+        expect(r.isError).toBe(true);
+        expect(textOf(r)).toContain('END TIME WAS NOT APPLIED');
+      },
+    );
+  });
+
+  it('endTimeProblem drops only the lower bound for a replay', () => {
+    const t0 = Date.parse('2026-10-29T12:00:00Z');
+    const t1 = t0 + 2000;
+    expect(endTimeProblem({ ends_in_hours: 2 }, '2026-10-29T11:00:00Z', t0, t1, true)).toBe(
+      undefined,
+    );
+    expect(endTimeProblem({ ends_in_hours: 2 }, '2026-10-29T11:00:00Z', t0, t1)).toContain(
+      'not 2 hours',
+    );
+    expect(endTimeProblem({ ends_in_hours: 2 }, '2026-10-29T14:01:03Z', t0, t1, true)).toContain(
+      'not 2 hours',
+    );
+    expect(endTimeProblem({ ends_in_hours: 2 }, 'nope', t0, t1, true)).toContain(
+      'not a valid time',
+    );
+    expect(endTimeProblem({ ends_at: ENDS }, '2026-11-01T18:00:02Z', t0, t1, true)).toContain(
+      'is not the',
+    );
   });
 });
 

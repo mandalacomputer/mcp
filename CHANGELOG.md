@@ -26,7 +26,10 @@ are wording changes, and they are behaviour changes in the way that matters.
   the end time asked for is a tool error naming the computer: no `ends_at`, a
   malformed one, a different one (such as an earlier end time left in place,
   as a platform that predates end times answers), or one still there after
-  clearing it. The computer is left as it is, never stopped or deleted.
+  clearing it. The computer is left as it is, never stopped or deleted. A
+  same-key retry answered with the first request's stored answer is not
+  mistaken for one: its `ends_in_hours` end time was counted from the first
+  request, so only its upper bound is checked.
 - **API key limits in `whoami` and `list_api_keys`.** Each key now carries
   `expires_at` (when it stops working, `null` for never) and `computer_ids`
   (the only computers it may reach, `null` for every computer its scope
