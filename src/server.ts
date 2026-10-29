@@ -17,6 +17,7 @@ import { RUN_AGENT_ANNOTATIONS, registerAgent } from './tools/agent.js';
 import { registerArtifacts } from './tools/artifacts.js';
 import { registerChat } from './tools/chat.js';
 import { registerComputers } from './tools/computers.js';
+import { registerCredentialGateway } from './tools/credentialgateway.js';
 import { registerCredits } from './tools/credits.js';
 import { registerDirectory } from './tools/directory.js';
 import { registerEvents } from './tools/events.js';
@@ -355,6 +356,7 @@ export function createServer(cfg: ServerConfig): McpServer {
   registerWebhooks(server, session, opts);
   registerSSH(server, session, opts);
   registerPublicUrls(server, session, opts);
+  registerCredentialGateway(server, session, opts);
   registerSecrets(server, session, opts);
   registerCredits(server, session, opts);
   registerAgent(server, session, opts);

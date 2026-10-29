@@ -1187,3 +1187,86 @@ export function publicUrlBody(args: {
   if (label === '') throw new Error('label must not be empty; leave it out to have one picked');
   return omitUndefined({ port: args.port, label, access: args.access });
 }
+
+/**
+ * A computer's credential gateway bindings: a secret the platform adds as a
+ * Bearer credential to the guest's requests for one HTTPS origin, path prefix
+ * and set of methods, without the secret ever reaching the guest. The binding
+ * id is `cgw-`-shaped.
+ */
+export const credentialGateway = (id: string) => `${computer(id)}/credential-gateway`;
+export const credentialGatewayBinding = (id: string, bindingId: string) =>
+  `${credentialGateway(id)}/${segment('binding_id', bindingId)}`;
+
+/** The HTTP methods a binding may allow, as the platform spells them. */
+export const CREDENTIAL_GATEWAY_METHODS = [
+  'GET',
+  'HEAD',
+  'POST',
+  'PUT',
+  'PATCH',
+  'DELETE',
+] as const;
+export type CredentialGatewayMethod = (typeof CREDENTIAL_GATEWAY_METHODS)[number];
+
+/**
+ * The body for a credential gateway binding, with the platform's shape rules
+ * mirrored where a call can only fail: an origin that is not a bare `https://`
+ * host (no path, query, fragment, credentials or port), a path prefix that is
+ * not absolute, and a method list that is empty, too long, repeated or holds a
+ * method the gateway never allows. Which hosts the platform will reach (no IP
+ * addresses, no private names) and which secrets it will use stay its own to
+ * answer, and its 400 does. Sent as given apart from the origin, which is sent
+ * as the origin it parsed to, the way the platform stores it.
+ */
+export function credentialGatewayBody(args: {
+  secret_id: string;
+  origin: string;
+  path_prefix: string;
+  methods: string[];
+}): Json {
+  const secretId = args.secret_id.trim();
+  if (!secretId) throw new Error('secret_id must not be empty');
+  let url: URL;
+  try {
+    url = new URL(args.origin);
+  } catch {
+    throw new Error(
+      `origin must be an https:// origin such as https://api.example.com, not ${JSON.stringify(args.origin)}`,
+    );
+  }
+  if (
+    url.protocol !== 'https:' ||
+    url.username ||
+    url.password ||
+    url.port ||
+    url.pathname !== '/' ||
+    url.search ||
+    url.hash ||
+    // An empty `?` or `#` parses away; it is still not a bare origin.
+    /[?#]/.test(args.origin)
+  ) {
+    throw new Error(
+      `origin must be https:// and a host alone — no path, query, fragment, credentials or port — such as https://api.example.com, not ${JSON.stringify(args.origin)}; put the path in path_prefix`,
+    );
+  }
+  const prefix = args.path_prefix;
+  if (!prefix.startsWith('/') || prefix.startsWith('//') || /[?#\s]/.test(prefix)) {
+    throw new Error(
+      `path_prefix must be an absolute path such as /v1 or /, starting with a single slash and without a query, fragment or spaces, not ${JSON.stringify(prefix)}`,
+    );
+  }
+  const methods = args.methods;
+  if (!methods.length || methods.length > CREDENTIAL_GATEWAY_METHODS.length) {
+    throw new Error(`methods must name 1 to ${CREDENTIAL_GATEWAY_METHODS.length} HTTP methods`);
+  }
+  for (const m of methods) {
+    if (!(CREDENTIAL_GATEWAY_METHODS as readonly string[]).includes(m)) {
+      throw new Error(
+        `methods may only be ${CREDENTIAL_GATEWAY_METHODS.join(', ')} (uppercase), not ${JSON.stringify(m)}`,
+      );
+    }
+  }
+  if (new Set(methods).size !== methods.length) throw new Error('methods must not repeat a method');
+  return { secret_id: secretId, origin: url.origin, path_prefix: prefix, methods: [...methods] };
+}
