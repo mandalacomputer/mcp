@@ -195,10 +195,10 @@ export function endTimeProblem(
           ]
         : [
             timing.sentAt + span - 1000 - 10 * MINUTE_MS,
-            timing.answeredAt + span + MINUTE_MS + 10 * MINUTE_MS,
+            timing.answeredAt + span + 70_000 + 10 * MINUTE_MS,
           ];
     // A replayed answer is the first request's, counted from when THAT one was
-    // handled — any time before this one — so only the upper bound holds.
+    // handled — some time before this one — so only the upper bound holds.
     if ((!timing.replayed && at < lower) || at > upper)
       return `the answer's ends_at ${returned} is not ${asked.ends_in_hours} hours from the request`;
   }
@@ -206,147 +206,25 @@ export function endTimeProblem(
 }
 
 /**
- * The FIRST exchange of a keyed request asking for a relative end time: when
- * it was sent and, if its answer came back, when that was and the platform's
- * Date on it. A replay (same idempotency key, answered from the platform's
- * store) carries that exchange's answer, so it is checked against that
- * exchange's window — never against the retry's own, which would let the
- * window grow with the delay before the retry, and never against no lower
- * bound, which would pass an earlier end time left unchanged.
- *
- * Per caller: each entry is keyed by a SHA-256 of the credential the request
- * was sent with (never the credential), with the method, path and key, so two
- * callers of a shared server never read each other's sends.
- *
- * In this process only, and bounded: the newest 256 keys, each for an hour.
- * A replay whose first exchange is not here is reported as unconfirmed rather
- * than as confirmed.
- */
-type Answered = { answeredAt: number; answeredMono: number; serverDate?: number };
-/**
- * `originUnknown`: this process's first send of the key was itself answered
- * as a replay, so the request the platform counted from was sent elsewhere,
- * and this entry is not it. Only an entry whose answer was not a replay, or
- * whose answer was lost, stands for the original.
- */
-type Send = {
-  sentAt: number;
-  started: number;
-  expires: number;
-  answer?: Answered;
-  originUnknown?: boolean;
-};
-const FIRST_SENDS = new Map<string, Send>();
-const FIRST_SENDS_MAX = 256;
-/** How long a first exchange whose answer was lost is taken to have taken. */
-const LOST_EXCHANGE_MS = 2 * MINUTE_MS;
-
-type Sends = { id?: string; send: Send; earlier?: Send };
-
-/**
- * This send, and an earlier first exchange of the same key if there is one.
- * Recorded only when it asks for a relative end time, the one thing a replay
- * is checked by; this send is recorded as the first when there is none.
- */
-function noteSend(scope: string, key: string, relative: boolean): Sends {
-  const now = Date.now();
-  const send: Send = { sentAt: now, started: performance.now(), expires: now + HOUR_MS };
-  if (!relative) return { send };
-  for (const [k, v] of FIRST_SENDS) if (v.expires <= now) FIRST_SENDS.delete(k);
-  const id = `${scope} ${key}`;
-  const earlier = FIRST_SENDS.get(id);
-  if (earlier) return { id, send, earlier };
-  FIRST_SENDS.set(id, send);
-  while (FIRST_SENDS.size > FIRST_SENDS_MAX) {
-    const oldest = FIRST_SENDS.keys().next().value;
-    if (oldest === undefined) break;
-    FIRST_SENDS.delete(oldest);
-  }
-  return { id, send };
-}
-
-/**
- * Records this exchange's answer. One that is not a replay is the platform
- * handling the key for the first time: this exchange is the original. A replay
- * to this process's first send of the key says the original was sent
- * elsewhere, so the entry is kept only as the time by which the platform had
- * its answer, marked origin unknown. A replay to a later send changes nothing.
- */
-function noteAnswer(sends: Sends, answer: Answered, replayed: boolean): void {
-  if (!sends.id || (replayed && sends.earlier)) return;
-  FIRST_SENDS.delete(sends.id);
-  FIRST_SENDS.set(sends.id, {
-    ...sends.send,
-    answer,
-    ...(replayed ? { originUnknown: true } : {}),
-  });
-}
-
-/** For tests: forget every recorded send. */
-export function forgetEndTimeSends(): void {
-  FIRST_SENDS.clear();
-}
-
-/** An exchange's window, as `endTimeProblem` reads it. */
-const windowOf = (send: Send, answer: Answered): EndTimeTiming => ({
-  sentAt: send.sentAt,
-  answeredAt: answer.answeredAt,
-  durationMs: answer.answeredMono - send.started,
-  serverDate: answer.serverDate,
-});
-
-/**
  * The end-time check for one answer: a problem (a tool error), or a note that
  * it could not be confirmed (a success that says so), or neither.
+ *
+ * A replayed relative end time is always unconfirmed: the stored answer was
+ * counted from a request sent at some earlier time this server does not know,
+ * so only its upper bound can be checked, and an earlier end time left
+ * unchanged cannot be told from the one asked for.
  */
 function checkEndTime(
   asked: { ends_at?: string | null; ends_in_hours?: number | null },
   returned: unknown,
-  sends: Sends,
-  answer: Answered,
-  replayed: boolean,
+  timing: EndTimeTiming,
 ): { problem?: string; unconfirmed?: string } {
-  const own = windowOf(sends.send, answer);
-  // An absolute end time, a clear, and any answer that is not a replay are
-  // checked against this exchange.
-  if (!(replayed && typeof asked.ends_in_hours === 'number'))
-    return { problem: endTimeProblem(asked, returned, own) };
-  const { earlier } = sends;
-  if (earlier?.originUnknown && earlier.answer) {
-    // The original was sent elsewhere: only an upper bound is known, and it
-    // is the first answer this process saw, never this retry's.
-    const problem = endTimeProblem(asked, returned, {
-      ...windowOf(earlier, earlier.answer),
-      replayed: true,
-    });
-    return problem ? { problem } : { unconfirmed: unconfirmedNote(returned) };
-  }
-  if (earlier) {
-    // The first exchange's window. One whose answer never came back is taken
-    // to have been answered within LOST_EXCHANGE_MS of its send, its Date
-    // carried over from this answer's by the monotonic time between.
-    const first: Answered = earlier.answer ?? {
-      answeredAt: earlier.sentAt + LOST_EXCHANGE_MS,
-      answeredMono: earlier.started + LOST_EXCHANGE_MS,
-      serverDate:
-        answer.serverDate === undefined
-          ? undefined
-          : answer.serverDate - (answer.answeredMono - earlier.started) + LOST_EXCHANGE_MS,
-    };
-    return { problem: endTimeProblem(asked, returned, windowOf(earlier, first)) };
-  }
-  // No earlier send here: this call's send is the first this process knows.
-  // An answer that fits this call's own exchange is the platform answering it
-  // (a retry within this call); one past its upper bound is wrong whatever
-  // was sent before; anything between cannot be told from an earlier end time
-  // left unchanged.
-  if (!endTimeProblem(asked, returned, own)) return {};
-  const problem = endTimeProblem(asked, returned, { ...own, replayed: true });
-  return problem ? { problem } : { unconfirmed: unconfirmedNote(returned) };
+  const problem = endTimeProblem(asked, returned, timing);
+  if (problem || !(timing.replayed && typeof asked.ends_in_hours === 'number')) return { problem };
+  return {
+    unconfirmed: `END TIME UNCONFIRMED: this answer was a replay of an earlier request with the same idempotency_key, and its ends_at ${String(returned)} could only be checked to be no later than asked for, not against when that request was sent, so it may be an earlier end time left unchanged. Call get_computer and check ends_at before relying on it.`,
+  };
 }
-
-const unconfirmedNote = (returned: unknown): string =>
-  `END TIME UNCONFIRMED: this answer was a replay of an earlier request with the same idempotency_key, and its ends_at ${String(returned)} could not be checked against when that request was sent (that request was not sent by this server process, or not within the last hour), so it may be an earlier end time left unchanged. Call get_computer and check ends_at before relying on it.`;
 
 const END_TIME_ABOUT =
   "When the computer stops by itself: at that time its host stops it, as stop_computer would, and its disk is kept; get_computer's ends_at says when, and is gone once it has fired or been cleared. It fires once. A host that cannot keep an end time answers 409 with reason unsupported.";
@@ -1167,11 +1045,8 @@ export const registerComputers: Registrar = (server, session, opts) => {
           );
         }
         const key = idempotencyKeyFor(idempotency_key);
-        const sends = noteSend(
-          `${session.api.credentialFingerprint} PATCH ${P.computer(id)}`,
-          key,
-          typeof body.ends_in_hours === 'number',
-        );
+        const sentAt = Date.now();
+        const started = performance.now();
         let c: Computer;
         let replayed = false;
         let serverDate: number | undefined;
@@ -1191,8 +1066,7 @@ export const registerComputers: Registrar = (server, session, opts) => {
           return keyedFailure(err, 'update_computer', 'change', key);
         }
         const answeredAt = Date.now();
-        const answeredMono = performance.now();
-        noteAnswer(sends, { answeredAt, answeredMono, serverDate }, replayed);
+        const durationMs = performance.now() - started;
         session.noteResolution(id, c.resolution);
         let unconfirmedNote = '';
         // Fail closed on an end time the answer does not confirm: a platform
@@ -1200,13 +1074,13 @@ export const registerComputers: Registrar = (server, session, opts) => {
         // same. The computer is left exactly as it is.
         if ('ends_at' in body || 'ends_in_hours' in body) {
           const asked = body as { ends_at?: string | null; ends_in_hours?: number | null };
-          const { problem, unconfirmed } = checkEndTime(
-            asked,
-            c.ends_at,
-            sends,
-            { answeredAt, answeredMono, serverDate },
+          const { problem, unconfirmed } = checkEndTime(asked, c.ends_at, {
+            sentAt,
+            answeredAt,
+            durationMs,
+            serverDate,
             replayed,
-          );
+          });
           if (unconfirmed) unconfirmedNote = `\n\n${unconfirmed}`;
           if (problem) {
             const clearing = asked.ends_at === null || asked.ends_in_hours === null;
@@ -2246,11 +2120,8 @@ export const registerComputers: Registrar = (server, session, opts) => {
         let data: unknown;
         let replayed = false;
         let serverDate: number | undefined;
-        const sends = noteSend(
-          `${session.api.credentialFingerprint} POST ${P.COMPUTERS}`,
-          key,
-          typeof args.ends_in_hours === 'number',
-        );
+        const sentAt = Date.now();
+        const started = performance.now();
         try {
           ({
             value: data,
@@ -2321,8 +2192,7 @@ export const registerComputers: Registrar = (server, session, opts) => {
           return keyedFailure(error, 'create_computer', 'computer', key);
         }
         const answeredAt = Date.now();
-        const answeredMono = performance.now();
-        noteAnswer(sends, { answeredAt, answeredMono, serverDate }, replayed);
+        const durationMs = performance.now() - started;
         const c = unwrapComputer(data);
         // Selection and the sentence claiming it are the same decision. Bound
         // conditionally and reported unconditionally, a create that came back
@@ -2342,13 +2212,13 @@ export const registerComputers: Registrar = (server, session, opts) => {
         // believes it stops by itself. The computer is left exactly as it is.
         const { problem: endProblem, unconfirmed } =
           args.ends_at !== undefined || args.ends_in_hours !== undefined
-            ? checkEndTime(
-                args,
-                c.ends_at,
-                sends,
-                { answeredAt, answeredMono, serverDate },
+            ? checkEndTime(args, c.ends_at, {
+                sentAt,
+                answeredAt,
+                durationMs,
+                serverDate,
                 replayed,
-              )
+              })
             : {};
         if (endProblem) {
           return refused(

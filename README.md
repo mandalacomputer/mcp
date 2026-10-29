@@ -366,7 +366,10 @@ request is sent — and `null` clears it. Send one spelling, not both.
 …". A host that cannot keep an end time answers 409 with reason `unsupported`.
 An answer that does not confirm the end time asked for (no `ends_at`, a
 malformed or different one, or one still there after clearing it) is an error
-naming the computer; the computer is left as it is.
+naming the computer; the computer is left as it is. A same-key retry answered
+with the first request's stored answer can only have an `ends_in_hours` end
+time checked to be no later than asked for, so it succeeds with a line saying
+the end time is UNCONFIRMED; read it back with `get_computer`.
 
 **Delegating** — `run_agent`, `start_agent_run`, `run_agent_chat`, registered when a
 model key is present: `MANDALA_MODEL_KEY` on stdio, or the caller's own `X-Model-Key`

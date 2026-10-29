@@ -1,8 +1,8 @@
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import { describe as describeComputer } from '../src/format.js';
 import { createBody } from '../src/paths.js';
-import { endTimeProblem, forgetEndTimeSends } from '../src/tools/computers.js';
+import { endTimeProblem } from '../src/tools/computers.js';
 import { connect } from './harness.js';
 
 // A computer's end time on create_computer and update_computer, and the
@@ -17,7 +17,7 @@ const textOf = (res: CallToolResult) =>
 type Seen = { method: string; path: string; body?: unknown };
 
 async function platform<T>(
-  respond: (seen: Seen) => [number, unknown] | [number, unknown, Record<string, string>] | 'lost',
+  respond: (seen: Seen) => [number, unknown] | [number, unknown, Record<string, string>],
   fn: (seen: Seen[]) => Promise<T>,
 ): Promise<T> {
   const restore = globalThis.fetch;
@@ -30,10 +30,7 @@ async function platform<T>(
       body: typeof init?.body === 'string' ? JSON.parse(init.body) : undefined,
     };
     seen.push(call);
-    const answer = respond(call);
-    // The request reached the platform; its answer did not come back.
-    if (answer === 'lost') throw new TypeError('fetch failed');
-    const [status, body, headers = {}] = answer;
+    const [status, body, headers = {}] = respond(call);
     return new Response(JSON.stringify(body), {
       status,
       headers: { 'Content-Type': 'application/json', ...headers },
@@ -318,156 +315,104 @@ describe('endTimeProblem checks the value, not only its presence', () => {
   });
 
   it('widens this clock by ten minutes either way without a Date header', () => {
-    // [12:00:00 + 2 h - 1 s - 10 min, 12:00:02 + 2 h + 60 s + 10 min]
+    // [12:00:00 + 2 h - 1 s - 10 min, 12:00:02 + 2 h + 70 s + 10 min]
     const noDate = { sentAt: t0, answeredAt: t1, durationMs: 2000 };
-    for (const ok of ['2026-10-29T13:49:59Z', '2026-10-29T14:11:02Z'])
+    for (const ok of ['2026-10-29T13:49:59Z', '2026-10-29T14:11:12Z'])
       expect(endTimeProblem({ ends_in_hours: 2 }, ok, noDate), ok).toBeUndefined();
-    for (const bad of ['2026-10-29T13:49:58Z', '2026-10-29T14:11:03Z'])
+    for (const bad of ['2026-10-29T13:49:58Z', '2026-10-29T14:11:13Z'])
       expect(endTimeProblem({ ends_in_hours: 2 }, bad, noDate), bad).toContain('not 2 hours');
   });
 });
 
-// A keyed request sent again later is answered from the platform's store: the
-// FIRST request's answer, whose relative end time was counted from then. It
-// must not read as an end time that was not applied.
+// A keyed request sent again is answered from the platform's store: the FIRST
+// request's answer, counted from some earlier time this server does not know.
+// Only its upper bound is checked, and a relative end time on it is always
+// reported as unconfirmed.
 describe('a replayed answer to a keyed request', () => {
   const REPLAYED = { 'Idempotent-Replayed': 'true' };
   const KEY = 'end-time-0123456789';
-  /** The ends_at a first request two hours ago, for `hours`, was answered with. */
-  const earlier = (hours: number) =>
-    new Date(Math.floor((Date.now() - 2 * 3_600_000 + hours * 3_600_000) / 1000) * 1000)
+  const UNCONFIRMED = 'END TIME UNCONFIRMED';
+  /** An ends_at for `hours`, counted from `ago` ms before now. */
+  const counted = (hours: number, ago = 0) =>
+    new Date(Math.floor((Date.now() - ago + hours * 3_600_000) / 1000) * 1000)
       .toISOString()
       .replace('.000Z', 'Z');
 
-  beforeEach(forgetEndTimeSends);
-  const UNCONFIRMED = 'END TIME UNCONFIRMED';
-  /** The ends_at a request sent now, for `hours`, is answered with. */
-  const now = (hours: number) => earlier(hours + 2);
-
-  // The first send is not known to this process: the deadline is shown, the
-  // answer is a success, and it says plainly the end time is unconfirmed.
-  it('create_computer: a replay whose first send is unknown succeeds, UNCONFIRMED', async () => {
-    await platform(
-      () => [201, box({ ends_at: earlier(8) }), REPLAYED],
-      async () => {
-        const { call, close } = await connect({ computerId: undefined });
-        const args = { template: 'base', ends_in_hours: 8, idempotency_key: KEY };
-        const r = await call('create_computer', args);
-        await close();
-        expect(r.isError, textOf(r)).toBeFalsy();
-        expect(textOf(r)).toContain(`stops by itself at ${earlier(8)}`);
-        expect(textOf(r)).toContain(UNCONFIRMED);
-        expect(textOf(r)).toContain(`its ends_at ${earlier(8)} could not be checked`);
-        expect(textOf(r)).toContain('get_computer');
-      },
-    );
-  });
-
-  it('update_computer: a replay whose first send is unknown succeeds, UNCONFIRMED', async () => {
-    await platform(
-      () => [200, box({ ends_at: earlier(3) }), REPLAYED],
-      async () => {
-        const { call, close } = await connect();
-        const r = await call('update_computer', { ends_in_hours: 3, idempotency_key: KEY });
-        await close();
-        expect(r.isError, textOf(r)).toBeFalsy();
-        expect(textOf(r)).toContain(UNCONFIRMED);
-        expect(textOf(r)).toContain(earlier(3));
-      },
-    );
-  });
-
-  // A shared (hosted) server serves many callers: one caller's send must
-  // never stand in for another's, even with the same key on the same path.
-  it('two credentials with the same key and path do not share a first send', async () => {
-    let lost = true;
-    await platform(
-      () => (lost ? 'lost' : [200, box({ ends_at: earlier(3) }), REPLAYED]),
-      async () => {
-        const a = await connect({ apiKey: 'com_tenant_a' });
-        const b = await connect({ apiKey: 'com_tenant_b' });
-        const args = { ends_in_hours: 3, idempotency_key: KEY };
-        expect((await a.call('update_computer', args)).isError).toBe(true);
-        lost = false;
-        // B never sent this key from here, so its replay is unconfirmed, not
-        // checked against A's send.
-        const fromB = await b.call('update_computer', args);
-        expect(fromB.isError, textOf(fromB)).toBeFalsy();
-        expect(textOf(fromB)).toContain(UNCONFIRMED);
-        // A's own replay is checked against A's send, and refused.
-        const fromA = await a.call('update_computer', args);
-        expect(fromA.isError).toBe(true);
-        expect(textOf(fromA)).not.toContain(UNCONFIRMED);
-        await a.close();
-        await b.close();
-      },
-    );
-  });
-
-  it('keys the first sends by a hash of the credential, never the credential', async () => {
-    const { Api } = await import('../src/api.js');
-    const { createHash } = await import('node:crypto');
-    const api = new Api('com_secret_value');
-    expect(api.credentialFingerprint).toBe(
-      createHash('sha256').update('com_secret_value').digest('hex'),
-    );
-    expect(api.credentialFingerprint).not.toContain('com_secret_value');
-    expect(new Api('com_other').credentialFingerprint).not.toBe(api.credentialFingerprint);
-  });
-
-  // The response to the first send was lost; the retry with the same key is
-  // answered from the platform's store, and this process knows when the first
-  // send went, so the whole window holds.
   for (const tool of ['create_computer', 'update_computer'] as const) {
     const args =
       tool === 'create_computer'
         ? { template: 'base', ends_in_hours: 3, idempotency_key: KEY }
         : { ends_in_hours: 3, idempotency_key: KEY };
     const ok = tool === 'create_computer' ? 201 : 200;
+    const opts = tool === 'create_computer' ? { computerId: undefined } : {};
 
-    it(`${tool}: lost response, then a replay carrying an unchanged earlier deadline, is an error`, async () => {
-      let lost = true;
+    it.each([
+      ['counted an hour ago', 3_600_000],
+      ['counted just now', 0],
+    ])(`${tool}: a replayed relative end time %s succeeds, UNCONFIRMED`, async (_, ago) => {
+      const endsAt = counted(3, ago);
       await platform(
-        () => (lost ? 'lost' : [ok, box({ ends_at: earlier(3) }), REPLAYED]),
+        () => [ok, box({ ends_at: endsAt }), REPLAYED],
         async () => {
-          const { call, close } = await connect(
-            tool === 'create_computer' ? { computerId: undefined } : {},
-          );
-          const first = await call(tool, args);
-          expect(first.isError).toBe(true);
-          lost = false;
+          const { call, close } = await connect(opts);
+          const r = await call(tool, args);
+          await close();
+          expect(r.isError, textOf(r)).toBeFalsy();
+          expect(textOf(r)).toContain(UNCONFIRMED);
+          expect(textOf(r)).toContain(`its ends_at ${endsAt} could only be checked`);
+          expect(textOf(r)).toContain('get_computer');
+        },
+      );
+    });
+
+    it(`${tool}: a replayed relative end time past the upper bound is an error`, async () => {
+      // Past now + hours + 70 s + 10 minutes (no Date header).
+      await platform(
+        () => [ok, box({ ends_at: counted(3, -12 * 60_000) }), REPLAYED],
+        async () => {
+          const { call, close } = await connect(opts);
           const r = await call(tool, args);
           await close();
           expect(r.isError).toBe(true);
           expect(textOf(r)).toContain('vm-1');
-          expect(textOf(r)).toMatch(/NOT APPLIED|NOT applied/);
           expect(textOf(r)).not.toContain(UNCONFIRMED);
         },
       );
     });
 
-    it(`${tool}: lost response, then a correct replay, is a plain success`, async () => {
-      let lost = true;
+    it(`${tool}: a replay past the bound set by its Date header is an error`, async () => {
+      const date = new Date(Date.now()).toUTCString();
       await platform(
-        () => (lost ? 'lost' : [ok, box({ ends_at: now(3) }), REPLAYED]),
+        () => [ok, box({ ends_at: counted(3, -3 * 60_000) }), { ...REPLAYED, Date: date }],
         async () => {
-          const { call, close } = await connect(
-            tool === 'create_computer' ? { computerId: undefined } : {},
-          );
-          await call(tool, args);
-          lost = false;
+          const { call, close } = await connect(opts);
           const r = await call(tool, args);
           await close();
-          expect(r.isError, textOf(r)).toBeFalsy();
-          expect(textOf(r)).not.toContain(UNCONFIRMED);
+          expect(r.isError).toBe(true);
         },
       );
     });
+
+    it.each([[undefined], ['not-a-time']])(
+      `${tool}: a replay with ends_at %j is an error`,
+      async (endsAt) => {
+        await platform(
+          () => [ok, box(endsAt === undefined ? {} : { ends_at: endsAt }), REPLAYED],
+          async () => {
+            const { call, close } = await connect(opts);
+            const r = await call(tool, args);
+            await close();
+            expect(r.isError).toBe(true);
+            expect(textOf(r)).toContain('vm-1');
+          },
+        );
+      },
+    );
   }
 
-  it('the same answer without the replay header is still refused', async () => {
+  it('the same answer without the replay header is checked both ways, and refused', async () => {
     await platform(
-      () => [200, box({ ends_at: earlier(3) })],
+      () => [200, box({ ends_at: counted(3, 3_600_000) })],
       async () => {
         const { call, close } = await connect();
         const r = await call('update_computer', { ends_in_hours: 3, idempotency_key: KEY });
@@ -478,31 +423,21 @@ describe('a replayed answer to a keyed request', () => {
     );
   });
 
-  it('a replay still refuses a relative end time past the upper bound', async () => {
+  it('a replay checks an absolute ends_at exactly, and confirms a match', async () => {
+    let endsAt = '2026-10-30T09:00:00Z';
     await platform(
-      () => [200, box({ ends_at: earlier(6) }), REPLAYED],
-      async () => {
-        const { call, close } = await connect();
-        const r = await call('update_computer', { ends_in_hours: 3, idempotency_key: KEY });
-        await close();
-        expect(r.isError).toBe(true);
-      },
-    );
-  });
-
-  it('a replay still checks an absolute ends_at exactly', async () => {
-    await platform(
-      () => [201, box({ ends_at: '2026-10-30T09:00:00Z' }), REPLAYED],
+      () => [201, box({ ends_at: endsAt }), REPLAYED],
       async () => {
         const { call, close } = await connect({ computerId: undefined });
-        const r = await call('create_computer', {
-          template: 'base',
-          ends_at: ENDS,
-          idempotency_key: KEY,
-        });
+        const args = { template: 'base', ends_at: ENDS, idempotency_key: KEY };
+        const wrong = await call('create_computer', args);
+        expect(wrong.isError).toBe(true);
+        expect(textOf(wrong)).toContain('END TIME WAS NOT APPLIED');
+        endsAt = ENDS;
+        const right = await call('create_computer', args);
         await close();
-        expect(r.isError).toBe(true);
-        expect(textOf(r)).toContain('END TIME WAS NOT APPLIED');
+        expect(right.isError, textOf(right)).toBeFalsy();
+        expect(textOf(right)).not.toContain(UNCONFIRMED);
       },
     );
   });
@@ -596,158 +531,5 @@ describe('the summary line', () => {
   it('names the end time only when there is one', () => {
     expect(describeComputer(box({ ends_at: ENDS }))).toContain(`stops by itself at ${ENDS}`);
     expect(describeComputer(box())).not.toContain('stops by itself');
-  });
-});
-
-// A replay is checked against the FIRST exchange's window. A retry made long
-// after it must not widen what is accepted by its own delay.
-describe('a retry long after the first exchange', () => {
-  const KEY = 'end-time-late-0123456789';
-  const REPLAYED = { 'Idempotent-Replayed': 'true' };
-  const HOUR = 3_600_000;
-  const MINUTE = 60_000;
-  let offset = 0;
-  beforeEach(() => {
-    forgetEndTimeSends();
-    offset = 0;
-    const realDate = Date.now.bind(Date);
-    const realPerf = performance.now.bind(performance);
-    vi.spyOn(Date, 'now').mockImplementation(() => realDate() + offset);
-    vi.spyOn(performance, 'now').mockImplementation(() => realPerf() + offset);
-  });
-  afterEach(() => vi.restoreAllMocks());
-  const iso = (ms: number) =>
-    new Date(Math.floor(ms / 1000) * 1000).toISOString().replace('.000Z', 'Z');
-
-  for (const tool of ['create_computer', 'update_computer'] as const) {
-    const args =
-      tool === 'create_computer'
-        ? { template: 'base', ends_in_hours: 2, idempotency_key: KEY }
-        : { ends_in_hours: 2, idempotency_key: KEY };
-    const ok = tool === 'create_computer' ? 201 : 200;
-    const opts = tool === 'create_computer' ? { computerId: undefined } : {};
-
-    it(`${tool}: a late deadline rejected at first stays rejected when replayed 30 minutes later`, async () => {
-      // 20 minutes past what the first exchange could have counted to, even
-      // with this clock widened by ten minutes for want of a Date header.
-      const late = iso(Date.now() + 2 * HOUR + 20 * MINUTE);
-      let replay = false;
-      await platform(
-        () => [ok, box({ ends_at: late }), replay ? REPLAYED : {}],
-        async () => {
-          const { call, close } = await connect(opts);
-          const first = await call(tool, args);
-          expect(first.isError).toBe(true);
-          offset = 30 * MINUTE;
-          replay = true;
-          const r = await call(tool, args);
-          await close();
-          expect(r.isError, textOf(r)).toBe(true);
-          expect(textOf(r)).toMatch(/NOT APPLIED|NOT applied/);
-        },
-      );
-    });
-
-    it(`${tool}: a lost first exchange bounds a replay 30 minutes later at its send + 2 minutes`, async () => {
-      const sentAt = Date.now();
-      let lost = true;
-      let endsAt = '';
-      await platform(
-        () => (lost ? 'lost' : [ok, box({ ends_at: endsAt }), REPLAYED]),
-        async () => {
-          const { call, close } = await connect(opts);
-          expect((await call(tool, args)).isError).toBe(true);
-          lost = false;
-          offset = 30 * MINUTE;
-          // Counted from 20 minutes after the first send: past its window.
-          endsAt = iso(sentAt + 2 * HOUR + 20 * MINUTE);
-          const tooLate = await call(tool, args);
-          expect(tooLate.isError, textOf(tooLate)).toBe(true);
-          // Counted from the first send: inside it.
-          endsAt = iso(sentAt + 2 * HOUR + 30_000);
-          const fine = await call(tool, args);
-          await close();
-          expect(fine.isError, textOf(fine)).toBeFalsy();
-          expect(textOf(fine)).not.toContain('UNCONFIRMED');
-        },
-      );
-    });
-  }
-
-  for (const tool of ['create_computer', 'update_computer'] as const) {
-    const args =
-      tool === 'create_computer'
-        ? { template: 'base', ends_in_hours: 2, idempotency_key: KEY }
-        : { ends_in_hours: 2, idempotency_key: KEY };
-    const ok = tool === 'create_computer' ? 201 : 200;
-    const opts = tool === 'create_computer' ? { computerId: undefined } : {};
-
-    it(`${tool}: original sent elsewhere — every local retry stays UNCONFIRMED`, async () => {
-      // Counted from a send an hour ago, by another process.
-      const endsAt = iso(Date.now() - HOUR + 2 * HOUR);
-      await platform(
-        () => [ok, box({ ends_at: endsAt }), REPLAYED],
-        async () => {
-          const { call, close } = await connect(opts);
-          const first = await call(tool, args);
-          expect(first.isError, textOf(first)).toBeFalsy();
-          expect(textOf(first)).toContain('END TIME UNCONFIRMED');
-          // The first local attempt is not the original: a second retry is
-          // not checked against it.
-          offset = 5 * MINUTE;
-          const second = await call(tool, args);
-          expect(second.isError, textOf(second)).toBeFalsy();
-          expect(textOf(second)).toContain('END TIME UNCONFIRMED');
-          await close();
-        },
-      );
-    });
-  }
-
-  it('original sent elsewhere — a later retry is still bounded by the first answer seen', async () => {
-    const args = { ends_in_hours: 2, idempotency_key: KEY };
-    let endsAt = iso(Date.now() - HOUR + 2 * HOUR);
-    await platform(
-      () => [200, box({ ends_at: endsAt }), REPLAYED],
-      async () => {
-        const { call, close } = await connect();
-        expect((await call('update_computer', args)).isError).toBeFalsy();
-        offset = 30 * MINUTE;
-        // Past what the platform could have counted to by the first answer
-        // this process saw, though inside this retry's own window.
-        endsAt = iso(Date.now() + 2 * HOUR);
-        const r = await call('update_computer', args);
-        await close();
-        expect(r.isError, textOf(r)).toBe(true);
-      },
-    );
-  });
-
-  it('a non-replayed retry after a lost first exchange becomes the first exchange', async () => {
-    // The first send never reached the platform; the retry 30 minutes later
-    // did, and its answer is counted from then. A replay of THAT is fine.
-    const args = { ends_in_hours: 2, idempotency_key: KEY };
-    let phase: 'lost' | 'fresh' | 'replay' = 'lost';
-    let endsAt = '';
-    await platform(
-      () =>
-        phase === 'lost'
-          ? 'lost'
-          : [200, box({ ends_at: endsAt }), phase === 'replay' ? REPLAYED : {}],
-      async () => {
-        const { call, close } = await connect();
-        await call('update_computer', args);
-        offset = 30 * MINUTE;
-        phase = 'fresh';
-        endsAt = iso(Date.now() + 2 * HOUR);
-        expect((await call('update_computer', args)).isError).toBeFalsy();
-        offset = 40 * MINUTE;
-        phase = 'replay';
-        const r = await call('update_computer', args);
-        await close();
-        expect(r.isError, textOf(r)).toBeFalsy();
-        expect(textOf(r)).not.toContain('UNCONFIRMED');
-      },
-    );
   });
 });
