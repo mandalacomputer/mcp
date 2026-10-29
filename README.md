@@ -355,6 +355,25 @@ before a request is sent — replaces the setting whole, and `null` removes it.
 says "its egress proxy is waiting for credentials; connections are closed until
 they arrive".
 
+**An end time** — `ends_at` (an RFC 3339 time) or `ends_in_hours` (hours from
+now, fractions allowed) on `create_computer` and `update_computer` makes the
+computer stop by itself at that time, as `stop_computer` would; its disk is
+kept. It fires once and is then cleared. On create the time must be at least
+10 minutes and at most 366 days away; on `update_computer` it only has to be in
+the future, it goes alone — beside any other field it is refused before a
+request is sent — and `null` clears it. Send one spelling, not both.
+`get_computer` shows it as `ends_at`, and its summary says "stops by itself at
+…". A host that cannot keep an end time answers 409 with reason `unsupported`.
+An answer that does not confirm the end time asked for (no `ends_at`, a
+malformed or different one, or one still there after clearing it) is an error
+naming the computer; the computer is left as it is. A same-key retry answered
+with the first request's stored answer can only have an `ends_in_hours` end
+time checked to be no later than asked for, so it succeeds with a line saying
+the end time is UNCONFIRMED; read it back with `get_computer`. So does an
+answer with no `Date` header, which leaves only this machine's clock to check
+an `ends_in_hours` end time against. A clear is confirmed by the absence of
+`ends_at` in the answer.
+
 **Delegating** — `run_agent`, `start_agent_run`, `run_agent_chat`, registered when a
 model key is present: `MANDALA_MODEL_KEY` on stdio, or the caller's own `X-Model-Key`
 header over HTTP. Without a key, `run_agent` and `start_agent_run` are registered

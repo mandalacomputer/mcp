@@ -95,6 +95,11 @@ const apiKey = z.object({
   // The key that minted this one over the API, or null for a key minted from
   // the dashboard (OPL-5261). Kept after that key is revoked.
   minted_by_key_id: z.string().nullable(),
+  // When the key stops working (null: never), and the computers it is limited
+  // to (null: every computer its scope reaches). Optional so a platform that
+  // predates them still lists keys.
+  expires_at: z.string().nullable().optional(),
+  computer_ids: z.array(z.string()).nullable().optional(),
 });
 // email and plan are null, and both names too, when the key is confined to a
 // workspace: the platform does not tell a key that may be in an end customer's
@@ -171,7 +176,7 @@ export const registerAccount: Registrar = (server, session) => {
     {
       title: 'Who this credential is',
       description:
-        'Who the API key this server runs with belongs to: the person (id, email, name), the account it acts on (id, name, plan, status: active or suspended), the role it acts with now (owner, member or viewer), the workspace it is confined to (null for the whole account), and the key itself (id, name, prefix, and manage_keys: whether it may manage API keys). For a key confined to a workspace the email, both names and the plan are null: the platform withholds them from a key that may be in the hands of an end customer. Needs no permission and any role; a suspended account can call it. No arguments.',
+        'Who the API key this server runs with belongs to: the person (id, email, name), the account it acts on (id, name, plan, status: active or suspended), the role it acts with now (owner, member or viewer), the workspace it is confined to (null for the whole account), and the key itself (id, name, prefix, manage_keys: whether it may manage API keys, expires_at: when it stops working, null for never, and computer_ids: the only computers it may reach, null for every computer its scope reaches). An expired key is refused with 401 API key expired; a person mints a new one. For a key confined to a workspace the email, both names and the plan are null: the platform withholds them from a key that may be in the hands of an end customer. Needs no permission and any role; a suspended account can call it. No arguments.',
       inputSchema: z.strictObject({}),
       annotations: readAnnotations,
     },
@@ -199,7 +204,7 @@ export const registerAccount: Registrar = (server, session) => {
     {
       title: 'List your API keys',
       description:
-        "The API keys of the person this server's key belongs to, on the account it acts on, newest first: id, name, prefix (display only), scope, when last used, manage_keys, and minted_by_key_id: the key that minted this one (null for a key minted from the dashboard); revoking a key does not revoke the keys it minted. Never a raw key. Needs this server's key to be allowed to manage keys, which only a person can turn on in the dashboard (Settings → Credentials → API keys → the key's menu → Allow managing keys); without it the answer is a 403 that says so — relay it rather than retrying. A key confined to a workspace sees only keys confined to that workspace. Minting and revoking keys are deliberately not tools here, so a raw key never lands in this transcript and a model never revokes one on its own reading of this list: a person does both in the dashboard or with the mandala CLI (mandala api-keys create / revoke).",
+        "The API keys of the person this server's key belongs to, on the account it acts on, newest first: id, name, prefix (display only), scope, when last used, manage_keys, expires_at (null for never), computer_ids (null for every computer its scope reaches), and minted_by_key_id: the key that minted this one (null for a key minted from the dashboard); revoking a key does not revoke the keys it minted. Never a raw key. Needs this server's key to be allowed to manage keys, which only a person can turn on in the dashboard (Settings → Credentials → API keys → the key's menu → Allow managing keys); without it the answer is a 403 that says so — relay it rather than retrying. A key confined to a workspace sees only keys confined to that workspace. Minting and revoking keys are deliberately not tools here, so a raw key never lands in this transcript and a model never revokes one on its own reading of this list: a person does both in the dashboard or with the mandala CLI (mandala api-keys create / revoke).",
       inputSchema: z.strictObject({}),
       annotations: readAnnotations,
     },

@@ -112,6 +112,10 @@ export const EXERCISE: Record<string, Record<string, unknown>[]> = {
       },
     },
     { egress_proxy: null },
+    // An end time, in both spellings, and the null that clears it.
+    { ends_at: '2026-11-01T18:00:00Z' },
+    { ends_in_hours: 2.5 },
+    { ends_at: null },
   ],
   // All three sizing fields in one call, because the platform reads exactly
   // these three off a move and the parameter sweep below is what proves it. A
@@ -287,6 +291,9 @@ export const EXERCISE: Record<string, Record<string, unknown>[]> = {
     { template: 'base', egress_proxy: { server: 'socks5://proxy.example.com:1080' } },
     // Into a workspace, by an account-wide key (OPL-5543).
     { template: 'base', workspace_id: 'wsp-0123456789ab' },
+    // An end time, in both spellings.
+    { template: 'base', ends_at: '2026-11-01T18:00:00Z' },
+    { template: 'base', ends_in_hours: 8 },
   ],
   clone_computer: [{ name: 'copy' }],
   delete_computer: [

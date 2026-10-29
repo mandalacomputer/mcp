@@ -400,6 +400,8 @@ export type Computer = {
   build?: { started?: string; source?: string; failed?: boolean };
   suspended?: { at?: string };
   idle_suspend_min?: number;
+  /** When its host stops it by itself (RFC 3339 UTC); absent when no end time is set. */
+  ends_at?: string;
   snapshot_schedule?: unknown;
   unreachable?: boolean;
   /** RFC 3339, present once the record has said `deleted` or `lost` respectively. */
@@ -626,6 +628,7 @@ export function describe(c: Computer): string {
   if (c.status && state) bits.push(state);
   if (c.resolution) bits.push(c.resolution);
   if (c.suspended?.at) bits.push(`suspended ${c.suspended.at}`);
+  if (typeof c.ends_at === 'string' && c.ends_at) bits.push(`stops by itself at ${c.ends_at}`);
   if (c.unreachable) bits.push('UNREACHABLE — its hypervisor could not be reached');
   // Secrets, only where there is something to say: `false` and absent say
   // nothing, and `null` is the platform saying it could not check — not that

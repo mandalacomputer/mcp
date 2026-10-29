@@ -193,3 +193,21 @@ it.each(['whoami', 'list_api_keys'])(
     expect(platform.calls).toEqual([]);
   },
 );
+
+it('list_api_keys and whoami keep expires_at and computer_ids', async () => {
+  const limited = {
+    ...API_KEY,
+    id: 'key-0a0b0c0d0e0f',
+    expires_at: '2026-12-01T00:00:00Z',
+    computer_ids: ['vm-1', 'vm-2'],
+  };
+  const open_ended = { ...API_KEY, expires_at: null, computer_ids: null };
+  respond([limited, open_ended]);
+  const listed = await (await open()).call('list_api_keys');
+  expect(listed.isError).not.toBe(true);
+  expect(data(listed)).toEqual([limited, open_ended]);
+  respond({ ...WHOAMI, key: { ...WHOAMI.key, ...limited } });
+  const who = await (await open()).call('whoami');
+  expect(data(who).key.expires_at).toBe('2026-12-01T00:00:00Z');
+  expect(data(who).key.computer_ids).toEqual(['vm-1', 'vm-2']);
+});

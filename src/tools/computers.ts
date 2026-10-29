@@ -116,6 +116,124 @@ const EGRESS_PROXY_ABOUT =
   "Sends ALL of the computer's outbound TCP through a proxy — exec, terminals, package managers and browsers alike — taken on its host, so nothing inside the computer can opt out. There is no bypass list. It FAILS CLOSED: when the proxy is down or refuses, or its credentials have not reached the host yet (get_computer then says its egress proxy is waiting for credentials), the connection fails and nothing is sent directly. UDP to the internet and ICMP are dropped (QUIC falls back to TCP; NTP and other UDP stop working). DNS lookups are NOT proxied; they go to the platform's resolver. Connections open through the proxy are closed when the setting changes. A host that cannot take it yet — or cannot take an https:// one, or one naming credentials — answers 409 with reason unsupported; one that cannot put it into effect now answers 503, and nothing is changed unless that error says the new setting was stored.";
 
 /**
+ * An end time (platform: a one-shot stop at a set time). Checked here for shape
+ * only; how near and how far it may be are the platform's rules.
+ */
+const endsAtArg = z
+  .string()
+  .refine(
+    (v) => v.trim().length > 0 && !Number.isNaN(Date.parse(v)),
+    'ends_at must be an RFC 3339 time, e.g. 2026-11-01T18:00:00Z',
+  );
+const endsInHoursArg = z.number().positive();
+
+const RFC3339 = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$/i;
+const HOUR_MS = 3_600_000;
+
+/**
+ * When a request carrying an end time was sent and answered, for checking a
+ * relative one. `sentAt` and `answeredAt` are this machine's wall clock;
+ * `durationMs` is the same span from a monotonic clock; `serverDate` is the
+ * answer's `Date` header, the platform's own now, when it sent a usable one.
+ */
+export type EndTimeTiming = {
+  sentAt: number;
+  answeredAt: number;
+  durationMs: number;
+  serverDate?: number;
+  replayed?: boolean;
+};
+
+const MINUTE_MS = 60_000;
+
+/**
+ * What is wrong with the end time an answer carries, given what was asked, or
+ * undefined when it is the one asked for. Checked by VALUE, not presence: a
+ * platform that ignored the field may still carry an earlier end time, and
+ * that is as unapplied as none.
+ *
+ * - `ends_at`: the answer must name the same instant, to the second (the
+ *   platform keeps whole seconds), within a second either way.
+ * - `ends_in_hours`: the platform counts from its own clock, between the
+ *   request's arrival and the `Date` it stamps on the answer, in whole
+ *   seconds. With that header the window is [Date + hours − request duration
+ *   − 2 s, Date + hours + 2 s]; this machine's clock does not enter into it.
+ *   Without one, this machine's send and answer times bound it, widened by
+ *   ten minutes either way for a clock that is off — too wide to confirm it,
+ *   which the caller reports.
+ *   A replayed answer (same idempotency key, answered from the platform's
+ *   store) was counted from the first request, so only the upper bound is
+ *   checked for it; an absolute `ends_at` is checked exactly either way.
+ * - `null` (clear): the answer must carry none.
+ */
+export function endTimeProblem(
+  asked: { ends_at?: string | null; ends_in_hours?: number | null },
+  returned: unknown,
+  timing: EndTimeTiming,
+): string | undefined {
+  const clearing =
+    asked.ends_at === null || (asked.ends_at === undefined && asked.ends_in_hours === null);
+  const present = returned !== undefined && returned !== null && returned !== '';
+  if (clearing) return present ? `the answer still carries ends_at ${String(returned)}` : undefined;
+  if (!present) return 'the answer carries no ends_at';
+  const at = typeof returned === 'string' && RFC3339.test(returned) ? Date.parse(returned) : NaN;
+  if (Number.isNaN(at))
+    return `the answer's ends_at ${JSON.stringify(returned)} is not a valid time`;
+  if (typeof asked.ends_at === 'string') {
+    const want = Math.floor(Date.parse(asked.ends_at) / 1000) * 1000;
+    if (Math.abs(at - want) > 1000)
+      return `the answer's ends_at ${returned} is not the ${asked.ends_at} asked for`;
+    return undefined;
+  }
+  if (typeof asked.ends_in_hours === 'number') {
+    const span = asked.ends_in_hours * HOUR_MS;
+    const { serverDate } = timing;
+    const [lower, upper] =
+      serverDate !== undefined
+        ? [serverDate + span - Math.max(0, timing.durationMs) - 2000, serverDate + span + 2000]
+        : [
+            timing.sentAt + span - 1000 - 10 * MINUTE_MS,
+            timing.answeredAt + span + 70_000 + 10 * MINUTE_MS,
+          ];
+    // A replayed answer is the first request's, counted from when THAT one was
+    // handled — some time before this one — so only the upper bound holds.
+    if ((!timing.replayed && at < lower) || at > upper)
+      return `the answer's ends_at ${returned} is not ${asked.ends_in_hours} hours from the request`;
+  }
+  return undefined;
+}
+
+/**
+ * The end-time check for one answer: a problem (a tool error), or a note that
+ * it could not be confirmed (a success that says so), or neither.
+ *
+ * A relative end time is unconfirmed on a replay — the stored answer was
+ * counted from a request sent at some earlier time this server does not know,
+ * so only its upper bound can be checked — and on an answer with no `Date`
+ * header, whose window this machine's clock widens too far to tell.
+ */
+function checkEndTime(
+  asked: { ends_at?: string | null; ends_in_hours?: number | null },
+  returned: unknown,
+  timing: EndTimeTiming,
+): { problem?: string; unconfirmed?: string } {
+  const problem = endTimeProblem(asked, returned, timing);
+  if (problem || typeof asked.ends_in_hours !== 'number') return { problem };
+  if (timing.replayed)
+    return {
+      unconfirmed: `END TIME UNCONFIRMED: this answer was a replay of an earlier request with the same idempotency_key, and its ends_at ${String(returned)} could only be checked to be no later than asked for, not against when that request was sent, so it may be an earlier end time left unchanged. Call get_computer and check ends_at before relying on it.`,
+    };
+  if (timing.serverDate === undefined)
+    return {
+      unconfirmed: `END TIME UNCONFIRMED: the answer carried no Date header, so its ends_at ${String(returned)} could only be checked against this machine's clock, within ten minutes either way. Call get_computer and check ends_at before relying on it.`,
+    };
+  return {};
+}
+
+const END_TIME_ABOUT =
+  "When the computer stops by itself: at that time its host stops it, as stop_computer would, and its disk is kept; get_computer's ends_at says when, and is gone once it has fired or been cleared. It fires once. A host that cannot keep an end time answers 409 with reason unsupported.";
+
+/**
  * The answer to a wait the caller ended.
  *
  * `refused`, not `said`: the wait never reached what it was told to wait for,
@@ -847,7 +965,7 @@ export const registerComputers: Registrar = (server, session, opts) => {
     {
       title: 'Rename or resize a computer',
       description:
-        "Change a computer's name, its size, its idle window, its browser proxy, or its egress proxy. The platform refuses these in combination on purpose — a resize needs the computer stopped and the others do not, so one request cannot honour both without applying half of it. A SUSPENDED computer counts as stopped for a resize, and its saved desktop cannot survive one: the vCPU count and the memory size are part of the saved state, so it is discarded and the next start is a cold boot. Resume it and finish what is open before resizing, or say so before you do it.",
+        "Change a computer's name, its size, its idle window, its browser proxy, its egress proxy, or its end time. The platform refuses these in combination on purpose — a resize needs the computer stopped and the others do not, so one request cannot honour both without applying half of it. A SUSPENDED computer counts as stopped for a resize, and its saved desktop cannot survive one: the vCPU count and the memory size are part of the saved state, so it is discarded and the next start is a cold boot. Resume it and finish what is open before resizing, or say so before you do it.",
       inputSchema: {
         ...idArg,
         name: z.string().optional(),
@@ -881,14 +999,26 @@ export const registerComputers: Registrar = (server, session, opts) => {
           .describe(
             `${EGRESS_PROXY_ABOUT} Replaces the setting whole; null removes it and the computer's traffic goes directly again. To change the server of the same proxy, start from the egress proxy get_computer returns and copy its credentials_secret_id to keep it: leaving it out removes the credentials, and the proxy then refuses every connection. Do not carry credentials_secret_id to a different server unless the user says those credentials are for that server. Send this ON ITS OWN — never beside name, a resize, idle_suspend_min or browser_proxy. A running computer has it when the answer arrives; a stopped or suspended one is given it before it starts. After any other 5xx that names no operation_id, send the setting again with the SAME idempotency_key (not a new one or none): the platform most likely refused it before sending it anywhere. After a 5xx that names an operation_id, or no answer, it may or may not have taken effect: call get_computer, and if it does not show the setting you sent, or its egress proxy names credentials and is still waiting for them after a few seconds, send the setting again — with a new idempotency_key, or none, after a 5xx that names an operation_id; with the key the answer named after no answer at all.`,
           ),
+        ends_at: endsAtArg
+          .nullable()
+          .optional()
+          .describe(
+            `${END_TIME_ABOUT} An RFC 3339 time in the future, replacing any end time it has; null clears it. Send this ON ITS OWN, and not beside ends_in_hours.`,
+          ),
+        ends_in_hours: endsInHoursArg
+          .nullable()
+          .optional()
+          .describe(
+            `${END_TIME_ABOUT} Hours from now, fractions allowed, replacing any end time it has; null clears it. Send this ON ITS OWN, and not beside ends_at.`,
+          ),
         idempotency_key: idempotencyKeyArg,
       },
     },
     ({ computer_id, idempotency_key, ...fields }, extra) =>
       guarded(async () => {
         const id = session.resolve(computer_id);
-        // `null` is meaningful for idle_suspend_min, browser_proxy and
-        // egress_proxy and must survive the filter; every other absent field is
+        // `null` is meaningful for idle_suspend_min, browser_proxy,
+        // egress_proxy, ends_at and ends_in_hours and must survive the filter; every other absent field is
         // dropped so the platform leaves it alone.
         const body: Record<string, unknown> = Object.fromEntries(
           Object.entries(fields).filter(([, v]) => v !== undefined),
@@ -896,7 +1026,18 @@ export const registerComputers: Registrar = (server, session, opts) => {
         if (fields.egress_proxy) body.egress_proxy = P.egressProxyBody(fields.egress_proxy);
         if (!Object.keys(body).length) {
           return refused(
-            'Nothing to change — give at least one of name, cpu, ram_mb, disk_gb, idle_suspend_min, browser_proxy, egress_proxy.',
+            'Nothing to change — give at least one of name, cpu, ram_mb, disk_gb, idle_suspend_min, browser_proxy, egress_proxy, ends_at, ends_in_hours.',
+          );
+        }
+        // An end time travels alone too, and as one of its two spellings.
+        const endFields = Object.keys(body).filter((k) => k === 'ends_at' || k === 'ends_in_hours');
+        if (endFields.length > 1) {
+          return refused('Give ends_at or ends_in_hours, not both. Nothing was changed.');
+        }
+        if (endFields.length && Object.keys(body).length > 1) {
+          const beside = Object.keys(body).filter((k) => k !== endFields[0]);
+          return refused(
+            `${endFields[0]} must be sent on its own, not beside ${beside.join(', ')}. Send it in an update_computer call of its own. Nothing was changed.`,
           );
         }
         // The platform refuses it beside anything else; said here, before a
@@ -908,13 +1049,17 @@ export const registerComputers: Registrar = (server, session, opts) => {
           );
         }
         const key = idempotencyKeyFor(idempotency_key);
+        const sentAt = Date.now();
+        const started = performance.now();
         let c: Computer;
+        let replayed = false;
+        let serverDate: number | undefined;
         try {
-          c = unwrapComputer(
-            await session.api
-              .with(extra.signal)
-              .json('PATCH', P.computer(id), { body, headers: idempotencyHeaders(key) }),
-          );
+          const answer = await session.api
+            .with(extra.signal)
+            .jsonReplayed('PATCH', P.computer(id), { body, headers: idempotencyHeaders(key) });
+          ({ replayed, serverDate } = answer);
+          c = unwrapComputer(answer.value);
         } catch (err) {
           // The one refusal on this route that is an offer rather than an end
           // (OPL-3775). Caught here and nowhere else because this is the only
@@ -924,10 +1069,36 @@ export const registerComputers: Registrar = (server, session, opts) => {
           if (err instanceof MoveRequiredError) return moveOffered(id, err);
           return keyedFailure(err, 'update_computer', 'change', key);
         }
+        const answeredAt = Date.now();
+        const durationMs = performance.now() - started;
         session.noteResolution(id, c.resolution);
+        let unconfirmedNote = '';
+        // Fail closed on an end time the answer does not confirm: a platform
+        // that predates end times ignores the field and answers 200 all the
+        // same. The computer is left exactly as it is.
+        if ('ends_at' in body || 'ends_in_hours' in body) {
+          const asked = body as { ends_at?: string | null; ends_in_hours?: number | null };
+          const { problem, unconfirmed } = checkEndTime(asked, c.ends_at, {
+            sentAt,
+            answeredAt,
+            durationMs,
+            serverDate,
+            replayed,
+          });
+          if (unconfirmed) unconfirmedNote = `\n\n${unconfirmed}`;
+          if (problem) {
+            const clearing = asked.ends_at === null || asked.ends_in_hours === null;
+            return refused(
+              clearing
+                ? `The end time of computer ${id} was NOT cleared: ${problem}, so it may still stop by itself. Nothing else about it was changed. ${describe(c)}`
+                : `The end time of computer ${id} was NOT applied as asked: ${problem}, so do not rely on it stopping by itself then. Nothing else about it was changed. ${describe(c)}`,
+              withoutCredentials(c),
+            );
+          }
+        }
         // A resize is recorded as an operation and its answer carries the id;
         // a rename or a setting change carries none, and the clause is empty.
-        return said(`${describe(c)}${operationClause(c)}`, withoutCredentials(c));
+        return said(`${describe(c)}${operationClause(c)}${unconfirmedNote}`, withoutCredentials(c));
       }),
   );
 
@@ -1925,6 +2096,16 @@ export const registerComputers: Registrar = (server, session, opts) => {
             "The workspace to create the computer in, an id from list_workspaces. Its secrets and an egress proxy's credentials_secret_id are then named from that workspace's scope: its own secrets and the account-wide ones. Left out, the computer goes in this key's workspace, or in none for an account-wide key. A workspace this key cannot reach — another account's, one that does not exist, or any but its own for a key confined to a workspace — is not found, and nothing is created." +
               createScopeDefault,
           ),
+        ends_at: endsAtArg
+          .optional()
+          .describe(
+            `${END_TIME_ABOUT} An RFC 3339 time at least 10 minutes and at most 366 days from now, e.g. "2026-11-01T18:00:00Z". Give this or ends_in_hours, not both.`,
+          ),
+        ends_in_hours: endsInHoursArg
+          .optional()
+          .describe(
+            `${END_TIME_ABOUT} Hours from now, fractions allowed (0.5 is half an hour); the platform turns it into ends_at. Give this or ends_at, not both.`,
+          ),
         idempotency_key: buildIdempotencyKeyArg,
       },
       annotations: { destructiveHint: false, openWorldHint: true },
@@ -1941,11 +2122,19 @@ export const registerComputers: Registrar = (server, session, opts) => {
         const args = { ...rest, workspace_id };
         const key = idempotencyKeyFor(idempotency_key);
         let data: unknown;
+        let replayed = false;
+        let serverDate: number | undefined;
+        const sentAt = Date.now();
+        const started = performance.now();
         try {
-          data = await session.api.with(extra.signal).json('POST', P.COMPUTERS, {
+          ({
+            value: data,
+            replayed,
+            serverDate,
+          } = await session.api.with(extra.signal).jsonReplayed('POST', P.COMPUTERS, {
             body: P.createBody(args),
             headers: idempotencyHeaders(key),
-          });
+          }));
         } catch (error) {
           const body =
             error instanceof ConflictError
@@ -2006,6 +2195,8 @@ export const registerComputers: Registrar = (server, session, opts) => {
           }
           return keyedFailure(error, 'create_computer', 'computer', key);
         }
+        const answeredAt = Date.now();
+        const durationMs = performance.now() - started;
         const c = unwrapComputer(data);
         // Selection and the sentence claiming it are the same decision. Bound
         // conditionally and reported unconditionally, a create that came back
@@ -2019,6 +2210,26 @@ export const registerComputers: Registrar = (server, session, opts) => {
           );
         }
         session.bind(c.id, c.resolution);
+        // Fail closed on an end time the answer does not carry: a platform
+        // that predates end times ignores the field it does not know, and the
+        // computer would then run until someone stops it while the model
+        // believes it stops by itself. The computer is left exactly as it is.
+        const { problem: endProblem, unconfirmed } =
+          args.ends_at !== undefined || args.ends_in_hours !== undefined
+            ? checkEndTime(args, c.ends_at, {
+                sentAt,
+                answeredAt,
+                durationMs,
+                serverDate,
+                replayed,
+              })
+            : {};
+        if (endProblem) {
+          return refused(
+            `Created and selected ${describe(c)}${operationClause(c)}, but its END TIME WAS NOT APPLIED as asked: ${endProblem} for computer ${c.id}, so do not rely on it stopping by itself. It was not stopped or deleted, and it counts against the plan; do not create another.${c.start_error ? ` It also did not start: ${c.start_error}` : ''} Tell the user, and stop or delete it when the work is done.`,
+            withoutCredentials(c),
+          );
+        }
         // A create whose guest was made and then would not boot is not an
         // error: the machine exists and consumes resources, so it comes back stopped
         // with the reason on it. Saying so plainly is the difference between a
@@ -2029,9 +2240,10 @@ export const registerComputers: Registrar = (server, session, opts) => {
           ? `Created ${describe(c)}${where}${operationClause(c)}, but it did not start: ${c.start_error}\nThe computer exists, is stopped, is selected and counts against the plan; do not create another. Read the reason above before calling start_computer: a start refused for lack of disk space or capacity on its host answers the same way until space there is freed, so wait rather than retrying it in a loop, and say so.`
           : `Created and selected ${describe(c)}${where}${operationClause(c)}.`;
         return said(
-          args.template_transfer === undefined
+          (args.template_transfer === undefined
             ? note
-            : `${note} Stop retrying this create; the template_transfer token is not a create idempotency key.`,
+            : `${note} Stop retrying this create; the template_transfer token is not a create idempotency key.`) +
+            (unconfirmed ? `\n\n${unconfirmed}` : ''),
           withoutCredentials(c),
         );
       }),

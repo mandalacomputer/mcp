@@ -762,6 +762,35 @@ export class Api {
     return body;
   }
 
+  /**
+   * `json`, plus whether the platform answered a keyed request from its store
+   * (`Idempotent-Replayed: true`): the first request's answer, written when
+   * that one was handled rather than now. A caller checking anything relative
+   * to when it sent the request needs to know which. `serverDate` is the
+   * answer's `Date` header, when it has a parseable one.
+   */
+  async jsonReplayed<T = unknown>(
+    method: string,
+    path: string,
+    opts: RequestOptions = {},
+  ): Promise<{ value: T; replayed: boolean; serverDate?: number }> {
+    return this.#guard(method, path, opts, async () => {
+      const resp = await this.#fetch(method, path, opts);
+      const value = await this.#decode<T>(resp, method, path, opts.signal ?? this.#signal);
+      if (value === undefined || value === null) {
+        throw new MandalaError(
+          `${method} ${path} answered ${resp.status} with ${value === null ? 'JSON null' : 'an empty body'}, where a JSON value was expected`,
+        );
+      }
+      const replayed =
+        (resp.headers.get('Idempotent-Replayed') ?? '').trim().toLowerCase() === 'true';
+      // The platform's own now, for a check that must not depend on this
+      // machine's clock; absent when the header is missing or unparseable.
+      const date = Date.parse(resp.headers.get('Date') ?? '');
+      return { value, replayed, ...(Number.isNaN(date) ? {} : { serverDate: date }) };
+    });
+  }
+
   /** JSON decoding plus observed status, for operations requiring a specific success status. */
   async jsonWithStatus<T>(
     method: string,

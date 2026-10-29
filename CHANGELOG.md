@@ -14,6 +14,36 @@ are wording changes, and they are behaviour changes in the way that matters.
 
 ## [Unreleased]
 
+### Added
+
+- **A computer's end time: `ends_at` and `ends_in_hours` on `create_computer`
+  and `update_computer`.** The computer stops by itself at that time, as
+  `stop_computer` would, with its disk kept; it fires once. Give an RFC 3339
+  time or a number of hours from now (fractions allowed), not both. On
+  `update_computer` it must be the only field, and `null` clears it; both
+  mistakes are refused before any request. `get_computer` and the computer's
+  summary line show `ends_at` when one is set. An answer that does not confirm
+  the end time asked for is a tool error naming the computer: no `ends_at`, a
+  malformed one, a different one (such as an earlier end time left in place,
+  as a platform that predates end times answers), or one still there after
+  clearing it. The computer is left as it is, never stopped or deleted. An
+  `ends_at` must come back as the same instant, to the second. An
+  `ends_in_hours` end time is checked against the platform's own clock (the
+  answer's `Date` header), so a local clock that is off does not refuse one
+  that was applied: it must lie within [Date + hours − request duration − 2 s,
+  Date + hours + 2 s]. Without that header the local window is widened by ten
+  minutes either way, and the answer succeeds but says the end time is
+  UNCONFIRMED. A clear is confirmed by the absence of `ends_at`. A same-key retry answered with the first request's stored
+  answer (a replay) can only be checked to be no later than asked for: past
+  that (Date + hours + 2 s with a `Date` header) it is an error, and otherwise
+  the answer succeeds but says the end time is UNCONFIRMED, shows it, and asks
+  for `get_computer` to check it.
+- **API key limits in `whoami` and `list_api_keys`.** Each key now carries
+  `expires_at` (when it stops working, `null` for never) and `computer_ids`
+  (the only computers it may reach, `null` for every computer its scope
+  reaches). An expired key is refused with 401 `API key expired`. Minting
+  keys stays out of this server, as before.
+
 ## [0.20.0] - 2026-10-29
 
 ### Added

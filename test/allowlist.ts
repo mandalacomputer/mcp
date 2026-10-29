@@ -276,6 +276,8 @@ export const PARAMETERS: ReadonlyMap<string, readonly string[]> = new Map([
       'body:browser_proxy',
       'body:egress_proxy',
       'body:workspace_id',
+      'body:ends_at',
+      'body:ends_in_hours',
       // Every lifecycle call carries one (platform OPL-5127).
       'header:Idempotency-Key',
     ],
@@ -294,6 +296,8 @@ export const PARAMETERS: ReadonlyMap<string, readonly string[]> = new Map([
       'body:idle_suspend_min',
       'body:browser_proxy',
       'body:egress_proxy',
+      'body:ends_at',
+      'body:ends_in_hours',
       'header:Idempotency-Key',
     ],
   ],
@@ -546,7 +550,17 @@ export const PARAMETERS: ReadonlyMap<string, readonly string[]> = new Map([
   // Who the credential is, and the holder's own API keys (OPL-5053).
   ['GET whoami', []],
   ['GET api-keys', []],
-  ['POST api-keys', ['body:manage_keys', 'body:name', 'body:workspace_id']],
+  [
+    'POST api-keys',
+    [
+      'body:computer_ids',
+      'body:expires_at',
+      'body:expires_in_hours',
+      'body:manage_keys',
+      'body:name',
+      'body:workspace_id',
+    ],
+  ],
   ['DELETE api-keys/:id', []],
 
   // Lifecycle operations, read only (OPL-5055).

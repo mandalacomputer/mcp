@@ -3615,6 +3615,10 @@ describe('the tools our own prose tells a model to call', () => {
     'ram_mb',
     'disk_gb',
     'idle_suspend_min',
+    // A computer's end time, in its two spellings: parameters of
+    // create_computer and update_computer, and a field get_computer answers.
+    'ends_at',
+    'ends_in_hours',
     'timeout_s',
     // run_agent's own loop bound, named in its description because a client
     // that cannot hold the request open past its default timeout has to lower
@@ -3654,6 +3658,10 @@ describe('the tools our own prose tells a model to call', () => {
     // whoami and list_api_keys name it: the field saying whether a key may
     // manage API keys (OPL-5053). A response field, not a tool.
     'manage_keys',
+    // And these two: when a key stops working, and the computers it is limited
+    // to. Response fields, not tools.
+    'expires_at',
+    'computer_ids',
     // The lifecycle operation tools name the id a lifecycle answer carries,
     // and the platform's failure codes a failed one carries (OPL-5124).
     // Response fields and values, not tools.
