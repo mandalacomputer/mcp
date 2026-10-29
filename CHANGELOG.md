@@ -22,7 +22,11 @@ are wording changes, and they are behaviour changes in the way that matters.
   time or a number of hours from now (fractions allowed), not both. On
   `update_computer` it must be the only field, and `null` clears it; both
   mistakes are refused before any request. `get_computer` and the computer's
-  summary line show `ends_at` when one is set.
+  summary line show `ends_at` when one is set. An answer that does not confirm
+  the end time asked for is a tool error naming the computer: no `ends_at`, a
+  malformed one, a different one (such as an earlier end time left in place,
+  as a platform that predates end times answers), or one still there after
+  clearing it. The computer is left as it is, never stopped or deleted.
 - **API key limits in `whoami` and `list_api_keys`.** Each key now carries
   `expires_at` (when it stops working, `null` for never) and `computer_ids`
   (the only computers it may reach, `null` for every computer its scope

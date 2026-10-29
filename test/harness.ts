@@ -1147,7 +1147,7 @@ function respond(
     return json(
       method === 'GET'
         ? [{ ...COMPUTER, status, running_ram_mb: runningRamFor(status) }]
-        : { ...COMPUTER, running_ram_mb: runningRamFor(COMPUTER.status) },
+        : { ...COMPUTER, running_ram_mb: runningRamFor(COMPUTER.status), ...endTimeFor(body) },
     );
   // The four power actions answer the platform's Ack and not a computer record
   // (the API reference documents an Ack response for each). The catch-all below answered a
@@ -1190,7 +1190,28 @@ function respond(
         : { ok: true, snapshots_deleted: 0 },
     );
   }
-  return json({ ...COMPUTER, status, running_ram_mb: runningRamFor(status) });
+  return json({
+    ...COMPUTER,
+    status,
+    running_ram_mb: runningRamFor(status),
+    ...(method === 'PATCH' ? endTimeFor(body) : {}),
+  });
+}
+
+/**
+ * The end time a create or update asked for, as the platform answers it: an
+ * `ends_at` once one is set, and none when it was cleared or never asked for.
+ */
+function endTimeFor(body: unknown): { ends_at?: string } {
+  const b = (body ?? {}) as { ends_at?: unknown; ends_in_hours?: unknown };
+  if (typeof b.ends_at === 'string') return { ends_at: b.ends_at };
+  if (typeof b.ends_in_hours === 'number')
+    return {
+      ends_at: new Date(Math.floor((Date.now() + b.ends_in_hours * 3_600_000) / 1000) * 1000)
+        .toISOString()
+        .replace('.000Z', 'Z'),
+    };
+  return {};
 }
 
 /**

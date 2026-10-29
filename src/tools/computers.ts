@@ -127,6 +127,50 @@ const endsAtArg = z
   );
 const endsInHoursArg = z.number().positive();
 
+const RFC3339 = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$/i;
+const HOUR_MS = 3_600_000;
+
+/**
+ * What is wrong with the end time an answer carries, given what was asked, or
+ * undefined when it is the one asked for. Checked by VALUE, not presence: a
+ * platform that ignored the field may still carry an earlier end time, and
+ * that is as unapplied as none.
+ *
+ * - `ends_at`: the answer must name the same instant, to the second (the
+ *   platform keeps whole seconds), within a second either way.
+ * - `ends_in_hours`: the platform counts from when it read the request, which
+ *   is somewhere between `sentAt` and `answeredAt`; a second of slack below
+ *   for truncation and a minute above for its clock against this one.
+ * - `null` (clear): the answer must carry none.
+ */
+export function endTimeProblem(
+  asked: { ends_at?: string | null; ends_in_hours?: number | null },
+  returned: unknown,
+  sentAt: number,
+  answeredAt: number,
+): string | undefined {
+  const clearing =
+    asked.ends_at === null || (asked.ends_at === undefined && asked.ends_in_hours === null);
+  const present = returned !== undefined && returned !== null && returned !== '';
+  if (clearing) return present ? `the answer still carries ends_at ${String(returned)}` : undefined;
+  if (!present) return 'the answer carries no ends_at';
+  const at = typeof returned === 'string' && RFC3339.test(returned) ? Date.parse(returned) : NaN;
+  if (Number.isNaN(at))
+    return `the answer's ends_at ${JSON.stringify(returned)} is not a valid time`;
+  if (typeof asked.ends_at === 'string') {
+    const want = Math.floor(Date.parse(asked.ends_at) / 1000) * 1000;
+    if (Math.abs(at - want) > 1000)
+      return `the answer's ends_at ${returned} is not the ${asked.ends_at} asked for`;
+    return undefined;
+  }
+  if (typeof asked.ends_in_hours === 'number') {
+    const span = asked.ends_in_hours * HOUR_MS;
+    if (at < sentAt + span - 1000 || at > answeredAt + span + 60_000)
+      return `the answer's ends_at ${returned} is not ${asked.ends_in_hours} hours from the request`;
+  }
+  return undefined;
+}
+
 const END_TIME_ABOUT =
   "When the computer stops by itself: at that time its host stops it, as stop_computer would, and its disk is kept; get_computer's ends_at says when, and is gone once it has fired or been cleared. It fires once. A host that cannot keep an end time answers 409 with reason unsupported.";
 
@@ -945,6 +989,7 @@ export const registerComputers: Registrar = (server, session, opts) => {
             `egress_proxy must be sent on its own, not beside ${beside.join(', ')}. Send it in an update_computer call of its own. Nothing was changed.`,
           );
         }
+        const sentAt = Date.now();
         const key = idempotencyKeyFor(idempotency_key);
         let c: Computer;
         try {
@@ -962,7 +1007,24 @@ export const registerComputers: Registrar = (server, session, opts) => {
           if (err instanceof MoveRequiredError) return moveOffered(id, err);
           return keyedFailure(err, 'update_computer', 'change', key);
         }
+        const answeredAt = Date.now();
         session.noteResolution(id, c.resolution);
+        // Fail closed on an end time the answer does not confirm: a platform
+        // that predates end times ignores the field and answers 200 all the
+        // same. The computer is left exactly as it is.
+        if ('ends_at' in body || 'ends_in_hours' in body) {
+          const asked = body as { ends_at?: string | null; ends_in_hours?: number | null };
+          const problem = endTimeProblem(asked, c.ends_at, sentAt, answeredAt);
+          if (problem) {
+            const clearing = asked.ends_at === null || asked.ends_in_hours === null;
+            return refused(
+              clearing
+                ? `The end time of computer ${id} was NOT cleared: ${problem}, so it may still stop by itself. Nothing else about it was changed. ${describe(c)}`
+                : `The end time of computer ${id} was NOT applied as asked: ${problem}, so do not rely on it stopping by itself then. Nothing else about it was changed. ${describe(c)}`,
+              withoutCredentials(c),
+            );
+          }
+        }
         // A resize is recorded as an operation and its answer carries the id;
         // a rename or a setting change carries none, and the clause is empty.
         return said(`${describe(c)}${operationClause(c)}`, withoutCredentials(c));
@@ -1989,6 +2051,7 @@ export const registerComputers: Registrar = (server, session, opts) => {
         const args = { ...rest, workspace_id };
         const key = idempotencyKeyFor(idempotency_key);
         let data: unknown;
+        const sentAt = Date.now();
         try {
           data = await session.api.with(extra.signal).json('POST', P.COMPUTERS, {
             body: P.createBody(args),
@@ -2054,6 +2117,7 @@ export const registerComputers: Registrar = (server, session, opts) => {
           }
           return keyedFailure(error, 'create_computer', 'computer', key);
         }
+        const answeredAt = Date.now();
         const c = unwrapComputer(data);
         // Selection and the sentence claiming it are the same decision. Bound
         // conditionally and reported unconditionally, a create that came back
@@ -2067,6 +2131,20 @@ export const registerComputers: Registrar = (server, session, opts) => {
           );
         }
         session.bind(c.id, c.resolution);
+        // Fail closed on an end time the answer does not carry: a platform
+        // that predates end times ignores the field it does not know, and the
+        // computer would then run until someone stops it while the model
+        // believes it stops by itself. The computer is left exactly as it is.
+        const endProblem =
+          args.ends_at !== undefined || args.ends_in_hours !== undefined
+            ? endTimeProblem(args, c.ends_at, sentAt, answeredAt)
+            : undefined;
+        if (endProblem) {
+          return refused(
+            `Created and selected ${describe(c)}${operationClause(c)}, but its END TIME WAS NOT APPLIED as asked: ${endProblem} for computer ${c.id}, so do not rely on it stopping by itself. It was not stopped or deleted, and it counts against the plan; do not create another.${c.start_error ? ` It also did not start: ${c.start_error}` : ''} Tell the user, and stop or delete it when the work is done.`,
+            withoutCredentials(c),
+          );
+        }
         // A create whose guest was made and then would not boot is not an
         // error: the machine exists and consumes resources, so it comes back stopped
         // with the reason on it. Saying so plainly is the difference between a

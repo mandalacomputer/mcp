@@ -364,6 +364,9 @@ the future, it goes alone — beside any other field it is refused before a
 request is sent — and `null` clears it. Send one spelling, not both.
 `get_computer` shows it as `ends_at`, and its summary says "stops by itself at
 …". A host that cannot keep an end time answers 409 with reason `unsupported`.
+An answer that does not confirm the end time asked for (no `ends_at`, a
+malformed or different one, or one still there after clearing it) is an error
+naming the computer; the computer is left as it is.
 
 **Delegating** — `run_agent`, `start_agent_run`, `run_agent_chat`, registered when a
 model key is present: `MANDALA_MODEL_KEY` on stdio, or the caller's own `X-Model-Key`

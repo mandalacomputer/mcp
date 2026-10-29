@@ -2,6 +2,7 @@ import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { describe, expect, it } from 'vitest';
 import { describe as describeComputer } from '../src/format.js';
 import { createBody } from '../src/paths.js';
+import { endTimeProblem } from '../src/tools/computers.js';
 import { connect } from './harness.js';
 
 // A computer's end time on create_computer and update_computer, and the
@@ -43,6 +44,18 @@ async function platform<T>(
 }
 
 const ENDS = '2026-11-01T18:00:00Z';
+/** The end time a request asked for, as a platform that keeps it answers. */
+const echoed = (body: unknown): Record<string, unknown> => {
+  const b = (body ?? {}) as { ends_at?: unknown; ends_in_hours?: unknown };
+  if (typeof b.ends_at === 'string') return { ends_at: b.ends_at };
+  if (typeof b.ends_in_hours === 'number')
+    return {
+      ends_at: new Date(Math.floor((Date.now() + b.ends_in_hours * 3_600_000) / 1000) * 1000)
+        .toISOString()
+        .replace('.000Z', 'Z'),
+    };
+  return {};
+};
 const box = (extra: Record<string, unknown> = {}) => ({
   id: 'vm-1',
   name: 'box',
@@ -73,7 +86,7 @@ describe('createBody with an end time', () => {
 describe('create_computer with an end time', () => {
   it('sends ends_in_hours and reports the end time', async () => {
     const res = await platform(
-      () => [201, box({ ends_at: ENDS })],
+      (req) => [201, box(echoed(req.body))],
       async (seen) => {
         const { call, close } = await connect({ computerId: undefined });
         const r = await call('create_computer', { template: 'base', ends_in_hours: 8 });
@@ -84,7 +97,7 @@ describe('create_computer with an end time', () => {
       },
     );
     expect(res.isError).toBeFalsy();
-    expect(textOf(res)).toContain(`stops by itself at ${ENDS}`);
+    expect(textOf(res)).toContain('stops by itself at ');
   });
 
   it.each([
@@ -115,7 +128,7 @@ describe('update_computer with an end time', () => {
     [{ ends_in_hours: null }],
   ])('sends %j alone', async (fields) => {
     await platform(
-      () => [200, box()],
+      (req) => [200, box(echoed(req.body))],
       async (seen) => {
         const { call, close } = await connect();
         const r = await call('update_computer', fields);
@@ -143,6 +156,151 @@ describe('update_computer with an end time', () => {
         expect(seen).toEqual([]);
       },
     );
+  });
+});
+
+// An older platform ignores a body field it does not know and answers as if
+// it had been applied. An end time the answer does not confirm is an error,
+// and the computer is left alone: no stop, no delete.
+describe('an end time the answer does not confirm', () => {
+  it('create_computer: errors naming the computer, and sends nothing more', async () => {
+    await platform(
+      () => [201, box()],
+      async (seen) => {
+        const { call, close } = await connect({ computerId: undefined });
+        const r = await call('create_computer', { template: 'base', ends_in_hours: 2 });
+        // The computer exists, so it is still the selected one.
+        const next = await call('get_computer', {});
+        await close();
+        expect(r.isError).toBe(true);
+        expect(textOf(r)).toContain('vm-1');
+        expect(textOf(r)).toContain('END TIME WAS NOT APPLIED');
+        expect(textOf(r)).toContain('was not stopped or deleted');
+        expect(next.isError).toBeFalsy();
+        expect(seen.filter((s) => s.method !== 'GET').map((s) => [s.method, s.path])).toEqual([
+          ['POST', '/computers'],
+        ]);
+        expect(seen.some((s) => s.method === 'GET' && s.path === '/computers/vm-1')).toBe(true);
+      },
+    );
+  });
+
+  it('create_computer without an end time does not ask for one', async () => {
+    await platform(
+      () => [201, box()],
+      async () => {
+        const { call, close } = await connect({ computerId: undefined });
+        const r = await call('create_computer', { template: 'base' });
+        await close();
+        expect(r.isError).toBeFalsy();
+      },
+    );
+  });
+
+  it.each([[{ ends_at: ENDS }], [{ ends_in_hours: 1 }]])(
+    'update_computer %j: errors when the answer has no ends_at',
+    async (fields) => {
+      await platform(
+        () => [200, box()],
+        async (seen) => {
+          const { call, close } = await connect();
+          const r = await call('update_computer', fields);
+          await close();
+          expect(r.isError).toBe(true);
+          expect(textOf(r)).toContain('end time of computer vm-1 was NOT applied');
+          expect(seen.map((s) => [s.method, s.path])).toEqual([['PATCH', '/computers/vm-1']]);
+        },
+      );
+    },
+  );
+
+  it.each([
+    [{ ends_at: ENDS }, '2026-10-30T09:00:00Z'],
+    [{ ends_at: ENDS }, 'not-a-time'],
+    [{ ends_in_hours: 3 }, ENDS],
+  ])('update_computer %j: errors when the answer carries %s instead', async (fields, other) => {
+    await platform(
+      () => [200, box({ ends_at: other })],
+      async (seen) => {
+        const { call, close } = await connect();
+        const r = await call('update_computer', fields);
+        await close();
+        expect(r.isError).toBe(true);
+        expect(textOf(r)).toContain('end time of computer vm-1 was NOT applied');
+        expect(seen.map((s) => [s.method, s.path])).toEqual([['PATCH', '/computers/vm-1']]);
+      },
+    );
+  });
+
+  it('create_computer: errors when the answer carries a different end time', async () => {
+    await platform(
+      () => [201, box({ ends_at: '2026-10-30T09:00:00Z' })],
+      async (seen) => {
+        const { call, close } = await connect({ computerId: undefined });
+        const r = await call('create_computer', { template: 'base', ends_at: ENDS });
+        await close();
+        expect(r.isError).toBe(true);
+        expect(textOf(r)).toContain('END TIME WAS NOT APPLIED');
+        expect(textOf(r)).toContain('vm-1');
+        expect(seen.filter((s) => s.method !== 'GET').map((s) => s.method)).toEqual(['POST']);
+      },
+    );
+  });
+
+  it.each([[{ ends_at: null }], [{ ends_in_hours: null }]])(
+    'update_computer %j: errors when the answer still has ends_at',
+    async (fields) => {
+      await platform(
+        () => [200, box({ ends_at: ENDS })],
+        async (seen) => {
+          const { call, close } = await connect();
+          const r = await call('update_computer', fields);
+          await close();
+          expect(r.isError).toBe(true);
+          expect(textOf(r)).toContain(`end time of computer vm-1 was NOT cleared`);
+          expect(textOf(r)).toContain(ENDS);
+          expect(seen.map((s) => [s.method, s.path])).toEqual([['PATCH', '/computers/vm-1']]);
+        },
+      );
+    },
+  );
+});
+
+describe('endTimeProblem checks the value, not only its presence', () => {
+  const t0 = Date.parse('2026-10-29T12:00:00Z');
+  const t1 = t0 + 2000;
+  it.each([
+    [{ ends_at: ENDS }, ENDS],
+    [{ ends_at: '2026-11-01T18:00:00.900Z' }, ENDS],
+    [{ ends_at: '2026-11-01T20:00:00+02:00' }, ENDS],
+    [{ ends_at: ENDS }, '2026-11-01T18:00:01Z'],
+    [{ ends_in_hours: 2 }, '2026-10-29T14:00:00Z'],
+    [{ ends_in_hours: 2 }, '2026-10-29T13:59:59Z'],
+    [{ ends_in_hours: 2 }, '2026-10-29T14:01:02Z'],
+    [{ ends_in_hours: 0.5 }, '2026-10-29T12:30:01Z'],
+    [{ ends_at: null }, undefined],
+    [{ ends_in_hours: null }, undefined],
+  ])('accepts %j answered with %s', (asked, returned) => {
+    expect(endTimeProblem(asked, returned, t0, t1)).toBeUndefined();
+  });
+
+  it.each([
+    [{ ends_at: ENDS }, undefined, 'carries no ends_at'],
+    [{ ends_at: ENDS }, '', 'carries no ends_at'],
+    [{ ends_at: ENDS }, 'tomorrow', 'not a valid time'],
+    [{ ends_at: ENDS }, '2026-11-01', 'not a valid time'],
+    [{ ends_at: ENDS }, 1793556000, 'not a valid time'],
+    [{ ends_at: ENDS }, '2026-13-45T99:00:00Z', 'not a valid time'],
+    // An unchanged earlier end time is not the one asked for.
+    [{ ends_at: ENDS }, '2026-10-30T09:00:00Z', 'is not the'],
+    [{ ends_at: ENDS }, '2026-11-01T18:00:02Z', 'is not the'],
+    [{ ends_in_hours: 2 }, '2026-10-29T13:59:58Z', 'not 2 hours'],
+    [{ ends_in_hours: 2 }, '2026-10-29T14:01:03Z', 'not 2 hours'],
+    [{ ends_in_hours: 2 }, ENDS, 'not 2 hours'],
+    [{ ends_at: null }, ENDS, 'still carries ends_at'],
+    [{ ends_in_hours: null }, ENDS, 'still carries ends_at'],
+  ])('refuses %j answered with %j', (asked, returned, says) => {
+    expect(endTimeProblem(asked, returned, t0, t1)).toContain(says);
   });
 });
 
