@@ -29,7 +29,10 @@ are wording changes, and they are behaviour changes in the way that matters.
   clearing it. The computer is left as it is, never stopped or deleted. A
   same-key retry answered with the first request's stored answer is not
   mistaken for one: its `ends_in_hours` end time was counted from the first
-  request, so only its upper bound is checked.
+  request, so only its upper bound is checked. A relative end time is checked
+  against the platform's own clock (the answer's `Date` header), so a local
+  clock that is off does not refuse an end time that was applied; without that
+  header the local window is widened by ten minutes either way.
 - **API key limits in `whoami` and `list_api_keys`.** Each key now carries
   `expires_at` (when it stops working, `null` for never) and `computer_ids`
   (the only computers it may reach, `null` for every computer its scope
