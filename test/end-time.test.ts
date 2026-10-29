@@ -1,8 +1,8 @@
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
-import { describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
 import { describe as describeComputer } from '../src/format.js';
 import { createBody } from '../src/paths.js';
-import { endTimeProblem } from '../src/tools/computers.js';
+import { endTimeProblem, forgetEndTimeSends } from '../src/tools/computers.js';
 import { connect } from './harness.js';
 
 // A computer's end time on create_computer and update_computer, and the
@@ -17,7 +17,7 @@ const textOf = (res: CallToolResult) =>
 type Seen = { method: string; path: string; body?: unknown };
 
 async function platform<T>(
-  respond: (seen: Seen) => [number, unknown] | [number, unknown, Record<string, string>],
+  respond: (seen: Seen) => [number, unknown] | [number, unknown, Record<string, string>] | 'lost',
   fn: (seen: Seen[]) => Promise<T>,
 ): Promise<T> {
   const restore = globalThis.fetch;
@@ -30,7 +30,10 @@ async function platform<T>(
       body: typeof init?.body === 'string' ? JSON.parse(init.body) : undefined,
     };
     seen.push(call);
-    const [status, body, headers = {}] = respond(call);
+    const answer = respond(call);
+    // The request reached the platform; its answer did not come back.
+    if (answer === 'lost') throw new TypeError('fetch failed');
+    const [status, body, headers = {}] = answer;
     return new Response(JSON.stringify(body), {
       status,
       headers: { 'Content-Type': 'application/json', ...headers },
@@ -336,7 +339,14 @@ describe('a replayed answer to a keyed request', () => {
       .toISOString()
       .replace('.000Z', 'Z');
 
-  it('create_computer: a delayed same-key replay of ends_in_hours succeeds', async () => {
+  beforeEach(forgetEndTimeSends);
+  const UNCONFIRMED = 'END TIME UNCONFIRMED';
+  /** The ends_at a request sent now, for `hours`, is answered with. */
+  const now = (hours: number) => earlier(hours + 2);
+
+  // The first send is not known to this process: the deadline is shown, the
+  // answer is a success, and it says plainly the end time is unconfirmed.
+  it('create_computer: a replay whose first send is unknown succeeds, UNCONFIRMED', async () => {
     await platform(
       () => [201, box({ ends_at: earlier(8) }), REPLAYED],
       async () => {
@@ -346,11 +356,14 @@ describe('a replayed answer to a keyed request', () => {
         await close();
         expect(r.isError, textOf(r)).toBeFalsy();
         expect(textOf(r)).toContain(`stops by itself at ${earlier(8)}`);
+        expect(textOf(r)).toContain(UNCONFIRMED);
+        expect(textOf(r)).toContain(`its ends_at ${earlier(8)} could not be checked`);
+        expect(textOf(r)).toContain('get_computer');
       },
     );
   });
 
-  it('update_computer: a delayed same-key replay of ends_in_hours succeeds', async () => {
+  it('update_computer: a replay whose first send is unknown succeeds, UNCONFIRMED', async () => {
     await platform(
       () => [200, box({ ends_at: earlier(3) }), REPLAYED],
       async () => {
@@ -358,9 +371,61 @@ describe('a replayed answer to a keyed request', () => {
         const r = await call('update_computer', { ends_in_hours: 3, idempotency_key: KEY });
         await close();
         expect(r.isError, textOf(r)).toBeFalsy();
+        expect(textOf(r)).toContain(UNCONFIRMED);
+        expect(textOf(r)).toContain(earlier(3));
       },
     );
   });
+
+  // The response to the first send was lost; the retry with the same key is
+  // answered from the platform's store, and this process knows when the first
+  // send went, so the whole window holds.
+  for (const tool of ['create_computer', 'update_computer'] as const) {
+    const args =
+      tool === 'create_computer'
+        ? { template: 'base', ends_in_hours: 3, idempotency_key: KEY }
+        : { ends_in_hours: 3, idempotency_key: KEY };
+    const ok = tool === 'create_computer' ? 201 : 200;
+
+    it(`${tool}: lost response, then a replay carrying an unchanged earlier deadline, is an error`, async () => {
+      let lost = true;
+      await platform(
+        () => (lost ? 'lost' : [ok, box({ ends_at: earlier(3) }), REPLAYED]),
+        async () => {
+          const { call, close } = await connect(
+            tool === 'create_computer' ? { computerId: undefined } : {},
+          );
+          const first = await call(tool, args);
+          expect(first.isError).toBe(true);
+          lost = false;
+          const r = await call(tool, args);
+          await close();
+          expect(r.isError).toBe(true);
+          expect(textOf(r)).toContain('vm-1');
+          expect(textOf(r)).toMatch(/NOT APPLIED|NOT applied/);
+          expect(textOf(r)).not.toContain(UNCONFIRMED);
+        },
+      );
+    });
+
+    it(`${tool}: lost response, then a correct replay, is a plain success`, async () => {
+      let lost = true;
+      await platform(
+        () => (lost ? 'lost' : [ok, box({ ends_at: now(3) }), REPLAYED]),
+        async () => {
+          const { call, close } = await connect(
+            tool === 'create_computer' ? { computerId: undefined } : {},
+          );
+          await call(tool, args);
+          lost = false;
+          const r = await call(tool, args);
+          await close();
+          expect(r.isError, textOf(r)).toBeFalsy();
+          expect(textOf(r)).not.toContain(UNCONFIRMED);
+        },
+      );
+    });
+  }
 
   it('the same answer without the replay header is still refused', async () => {
     await platform(

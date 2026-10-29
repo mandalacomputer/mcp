@@ -27,9 +27,11 @@ are wording changes, and they are behaviour changes in the way that matters.
   malformed one, a different one (such as an earlier end time left in place,
   as a platform that predates end times answers), or one still there after
   clearing it. The computer is left as it is, never stopped or deleted. A
-  same-key retry answered with the first request's stored answer is not
-  mistaken for one: its `ends_in_hours` end time was counted from the first
-  request, so only its upper bound is checked. A relative end time is checked
+  same-key retry answered with the first request's stored answer has its
+  `ends_in_hours` end time checked against when the first request was sent,
+  which the server remembers for an hour; when the first request was sent from
+  elsewhere, the answer succeeds but says the end time is UNCONFIRMED, shows
+  it, and asks for `get_computer` to check it. A relative end time is checked
   against the platform's own clock (the answer's `Date` header), so a local
   clock that is off does not refuse an end time that was applied; without that
   header the local window is widened by ten minutes either way.

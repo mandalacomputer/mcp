@@ -205,6 +205,89 @@ export function endTimeProblem(
   return undefined;
 }
 
+/**
+ * When a keyed request asking for a relative end time was first sent, so that
+ * a replay of it can be checked against the request the platform actually
+ * counted from. A replay (same idempotency key, answered from the platform's
+ * store) carries the FIRST request's answer; checked against the retry's own
+ * send time it would fail, and checked against no lower bound at all an
+ * unchanged earlier end time would pass.
+ *
+ * In this process only, and bounded: the newest 256 keys, each for an hour.
+ * A replay whose first send is not here is reported as unconfirmed rather
+ * than as confirmed.
+ */
+type Send = { sentAt: number; started: number; expires: number };
+const FIRST_SENDS = new Map<string, Send>();
+const FIRST_SENDS_MAX = 256;
+
+/**
+ * This send, and an earlier one of the same key if there is one. Recorded only
+ * when it asks for a relative end time, the one thing a replay is checked by.
+ */
+function noteSend(scope: string, key: string, relative: boolean): { send: Send; earlier?: Send } {
+  const now = Date.now();
+  const send = { sentAt: now, started: performance.now(), expires: now + HOUR_MS };
+  if (!relative) return { send };
+  for (const [k, v] of FIRST_SENDS) if (v.expires <= now) FIRST_SENDS.delete(k);
+  const id = `${scope} ${key}`;
+  const earlier = FIRST_SENDS.get(id);
+  if (earlier) return { send, earlier };
+  FIRST_SENDS.set(id, send);
+  while (FIRST_SENDS.size > FIRST_SENDS_MAX) {
+    const oldest = FIRST_SENDS.keys().next().value;
+    if (oldest === undefined) break;
+    FIRST_SENDS.delete(oldest);
+  }
+  return { send };
+}
+
+/** For tests: forget every recorded send. */
+export function forgetEndTimeSends(): void {
+  FIRST_SENDS.clear();
+}
+
+/**
+ * The end-time check for one answer: a problem (a tool error), or a note that
+ * it could not be confirmed (a success that says so), or neither.
+ */
+function checkEndTime(
+  asked: { ends_at?: string | null; ends_in_hours?: number | null },
+  returned: unknown,
+  t: {
+    send: Send;
+    earlier?: Send;
+    answeredAt: number;
+    answeredMono: number;
+    serverDate?: number;
+    replayed: boolean;
+  },
+): { problem?: string; unconfirmed?: string } {
+  const relative = typeof asked.ends_in_hours === 'number';
+  const from = (send: Send, replayed: boolean): EndTimeTiming => ({
+    sentAt: send.sentAt,
+    answeredAt: t.answeredAt,
+    durationMs: t.answeredMono - send.started,
+    serverDate: t.serverDate,
+    replayed,
+  });
+  if (!(t.replayed && relative))
+    return { problem: endTimeProblem(asked, returned, from(t.send, t.replayed)) };
+  // A replay counted from the first send: with that send known, the whole
+  // window holds, from it to this answer.
+  if (t.earlier) return { problem: endTimeProblem(asked, returned, from(t.earlier, false)) };
+  // The first send is not known here. One that fits the whole window of THIS
+  // send is confirmed (the platform's own retry of this call is answered so);
+  // one past the upper bound is wrong whatever the first send was; anything
+  // between cannot be told from an earlier end time left unchanged.
+  if (!endTimeProblem(asked, returned, from(t.send, false))) return {};
+  const problem = endTimeProblem(asked, returned, from(t.send, true));
+  if (problem) return { problem };
+  return {
+    unconfirmed: `END TIME UNCONFIRMED: this answer was a replay of an earlier request with the same idempotency_key, and its ends_at ${String(returned)} could not be checked against when that request was sent (that request was not sent by this server process within the last hour), so it may be an earlier end time left unchanged. Call get_computer and check ends_at before relying on it.`,
+  };
+}
+
 const END_TIME_ABOUT =
   "When the computer stops by itself: at that time its host stops it, as stop_computer would, and its disk is kept; get_computer's ends_at says when, and is gone once it has fired or been cleared. It fires once. A host that cannot keep an end time answers 409 with reason unsupported.";
 
@@ -1023,9 +1106,12 @@ export const registerComputers: Registrar = (server, session, opts) => {
             `egress_proxy must be sent on its own, not beside ${beside.join(', ')}. Send it in an update_computer call of its own. Nothing was changed.`,
           );
         }
-        const sentAt = Date.now();
-        const started = performance.now();
         const key = idempotencyKeyFor(idempotency_key);
+        const sends = noteSend(
+          `PATCH ${P.computer(id)}`,
+          key,
+          typeof body.ends_in_hours === 'number',
+        );
         let c: Computer;
         let replayed = false;
         let serverDate: number | undefined;
@@ -1045,20 +1131,22 @@ export const registerComputers: Registrar = (server, session, opts) => {
           return keyedFailure(err, 'update_computer', 'change', key);
         }
         const answeredAt = Date.now();
-        const durationMs = performance.now() - started;
+        const answeredMono = performance.now();
         session.noteResolution(id, c.resolution);
+        let unconfirmedNote = '';
         // Fail closed on an end time the answer does not confirm: a platform
         // that predates end times ignores the field and answers 200 all the
         // same. The computer is left exactly as it is.
         if ('ends_at' in body || 'ends_in_hours' in body) {
           const asked = body as { ends_at?: string | null; ends_in_hours?: number | null };
-          const problem = endTimeProblem(asked, c.ends_at, {
-            sentAt,
+          const { problem, unconfirmed } = checkEndTime(asked, c.ends_at, {
+            ...sends,
             answeredAt,
-            durationMs,
+            answeredMono,
             serverDate,
             replayed,
           });
+          if (unconfirmed) unconfirmedNote = `\n\n${unconfirmed}`;
           if (problem) {
             const clearing = asked.ends_at === null || asked.ends_in_hours === null;
             return refused(
@@ -1071,7 +1159,7 @@ export const registerComputers: Registrar = (server, session, opts) => {
         }
         // A resize is recorded as an operation and its answer carries the id;
         // a rename or a setting change carries none, and the clause is empty.
-        return said(`${describe(c)}${operationClause(c)}`, withoutCredentials(c));
+        return said(`${describe(c)}${operationClause(c)}${unconfirmedNote}`, withoutCredentials(c));
       }),
   );
 
@@ -2097,8 +2185,7 @@ export const registerComputers: Registrar = (server, session, opts) => {
         let data: unknown;
         let replayed = false;
         let serverDate: number | undefined;
-        const sentAt = Date.now();
-        const started = performance.now();
+        const sends = noteSend(`POST ${P.COMPUTERS}`, key, typeof args.ends_in_hours === 'number');
         try {
           ({
             value: data,
@@ -2169,7 +2256,7 @@ export const registerComputers: Registrar = (server, session, opts) => {
           return keyedFailure(error, 'create_computer', 'computer', key);
         }
         const answeredAt = Date.now();
-        const durationMs = performance.now() - started;
+        const answeredMono = performance.now();
         const c = unwrapComputer(data);
         // Selection and the sentence claiming it are the same decision. Bound
         // conditionally and reported unconditionally, a create that came back
@@ -2187,16 +2274,16 @@ export const registerComputers: Registrar = (server, session, opts) => {
         // that predates end times ignores the field it does not know, and the
         // computer would then run until someone stops it while the model
         // believes it stops by itself. The computer is left exactly as it is.
-        const endProblem =
+        const { problem: endProblem, unconfirmed } =
           args.ends_at !== undefined || args.ends_in_hours !== undefined
-            ? endTimeProblem(args, c.ends_at, {
-                sentAt,
+            ? checkEndTime(args, c.ends_at, {
+                ...sends,
                 answeredAt,
-                durationMs,
+                answeredMono,
                 serverDate,
                 replayed,
               })
-            : undefined;
+            : {};
         if (endProblem) {
           return refused(
             `Created and selected ${describe(c)}${operationClause(c)}, but its END TIME WAS NOT APPLIED as asked: ${endProblem} for computer ${c.id}, so do not rely on it stopping by itself. It was not stopped or deleted, and it counts against the plan; do not create another.${c.start_error ? ` It also did not start: ${c.start_error}` : ''} Tell the user, and stop or delete it when the work is done.`,
@@ -2213,9 +2300,10 @@ export const registerComputers: Registrar = (server, session, opts) => {
           ? `Created ${describe(c)}${where}${operationClause(c)}, but it did not start: ${c.start_error}\nThe computer exists, is stopped, is selected and counts against the plan; do not create another. Read the reason above before calling start_computer: a start refused for lack of disk space or capacity on its host answers the same way until space there is freed, so wait rather than retrying it in a loop, and say so.`
           : `Created and selected ${describe(c)}${where}${operationClause(c)}.`;
         return said(
-          args.template_transfer === undefined
+          (args.template_transfer === undefined
             ? note
-            : `${note} Stop retrying this create; the template_transfer token is not a create idempotency key.`,
+            : `${note} Stop retrying this create; the template_transfer token is not a create idempotency key.`) +
+            (unconfirmed ? `\n\n${unconfirmed}` : ''),
           withoutCredentials(c),
         );
       }),
