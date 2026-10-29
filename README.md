@@ -369,7 +369,10 @@ malformed or different one, or one still there after clearing it) is an error
 naming the computer; the computer is left as it is. A same-key retry answered
 with the first request's stored answer can only have an `ends_in_hours` end
 time checked to be no later than asked for, so it succeeds with a line saying
-the end time is UNCONFIRMED; read it back with `get_computer`.
+the end time is UNCONFIRMED; read it back with `get_computer`. So does an
+answer with no `Date` header, which leaves only this machine's clock to check
+an `ends_in_hours` end time against. A clear is confirmed by the absence of
+`ends_at` in the answer.
 
 **Delegating** — `run_agent`, `start_agent_run`, `run_agent_chat`, registered when a
 model key is present: `MANDALA_MODEL_KEY` on stdio, or the caller's own `X-Model-Key`

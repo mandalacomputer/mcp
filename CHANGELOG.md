@@ -30,11 +30,14 @@ are wording changes, and they are behaviour changes in the way that matters.
   `ends_at` must come back as the same instant, to the second. An
   `ends_in_hours` end time is checked against the platform's own clock (the
   answer's `Date` header), so a local clock that is off does not refuse one
-  that was applied; without that header the local window is widened by ten
-  minutes either way. A same-key retry answered with the first request's stored
+  that was applied: it must lie within [Date + hours − request duration − 2 s,
+  Date + hours + 2 s]. Without that header the local window is widened by ten
+  minutes either way, and the answer succeeds but says the end time is
+  UNCONFIRMED. A clear is confirmed by the absence of `ends_at`. A same-key retry answered with the first request's stored
   answer (a replay) can only be checked to be no later than asked for: past
-  that it is an error, and otherwise the answer succeeds but says the end time
-  is UNCONFIRMED, shows it, and asks for `get_computer` to check it.
+  that (Date + hours + 2 s with a `Date` header) it is an error, and otherwise
+  the answer succeeds but says the end time is UNCONFIRMED, shows it, and asks
+  for `get_computer` to check it.
 - **API key limits in `whoami` and `list_api_keys`.** Each key now carries
   `expires_at` (when it stops working, `null` for never) and `computer_ids`
   (the only computers it may reach, `null` for every computer its scope

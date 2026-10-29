@@ -154,12 +154,13 @@ const MINUTE_MS = 60_000;
  *
  * - `ends_at`: the answer must name the same instant, to the second (the
  *   platform keeps whole seconds), within a second either way.
- * - `ends_in_hours`: the platform counts from when it read the request. With
- *   its `Date` header, that is no later than the header (a minute of slack for
- *   its whole-second resolution) and no earlier than the header less the
- *   request's duration (and the same minute); this machine's clock does not
- *   enter into it. Without one, this machine's send and answer times bound it,
- *   widened by ten minutes either way for a clock that is off.
+ * - `ends_in_hours`: the platform counts from its own clock, between the
+ *   request's arrival and the `Date` it stamps on the answer, in whole
+ *   seconds. With that header the window is [Date + hours − request duration
+ *   − 2 s, Date + hours + 2 s]; this machine's clock does not enter into it.
+ *   Without one, this machine's send and answer times bound it, widened by
+ *   ten minutes either way for a clock that is off — too wide to confirm it,
+ *   which the caller reports.
  *   A replayed answer (same idempotency key, answered from the platform's
  *   store) was counted from the first request, so only the upper bound is
  *   checked for it; an absolute `ends_at` is checked exactly either way.
@@ -189,10 +190,7 @@ export function endTimeProblem(
     const { serverDate } = timing;
     const [lower, upper] =
       serverDate !== undefined
-        ? [
-            serverDate + span - MINUTE_MS - Math.max(0, timing.durationMs),
-            serverDate + span + MINUTE_MS,
-          ]
+        ? [serverDate + span - Math.max(0, timing.durationMs) - 2000, serverDate + span + 2000]
         : [
             timing.sentAt + span - 1000 - 10 * MINUTE_MS,
             timing.answeredAt + span + 70_000 + 10 * MINUTE_MS,
@@ -209,10 +207,10 @@ export function endTimeProblem(
  * The end-time check for one answer: a problem (a tool error), or a note that
  * it could not be confirmed (a success that says so), or neither.
  *
- * A replayed relative end time is always unconfirmed: the stored answer was
+ * A relative end time is unconfirmed on a replay — the stored answer was
  * counted from a request sent at some earlier time this server does not know,
- * so only its upper bound can be checked, and an earlier end time left
- * unchanged cannot be told from the one asked for.
+ * so only its upper bound can be checked — and on an answer with no `Date`
+ * header, whose window this machine's clock widens too far to tell.
  */
 function checkEndTime(
   asked: { ends_at?: string | null; ends_in_hours?: number | null },
@@ -220,10 +218,16 @@ function checkEndTime(
   timing: EndTimeTiming,
 ): { problem?: string; unconfirmed?: string } {
   const problem = endTimeProblem(asked, returned, timing);
-  if (problem || !(timing.replayed && typeof asked.ends_in_hours === 'number')) return { problem };
-  return {
-    unconfirmed: `END TIME UNCONFIRMED: this answer was a replay of an earlier request with the same idempotency_key, and its ends_at ${String(returned)} could only be checked to be no later than asked for, not against when that request was sent, so it may be an earlier end time left unchanged. Call get_computer and check ends_at before relying on it.`,
-  };
+  if (problem || typeof asked.ends_in_hours !== 'number') return { problem };
+  if (timing.replayed)
+    return {
+      unconfirmed: `END TIME UNCONFIRMED: this answer was a replay of an earlier request with the same idempotency_key, and its ends_at ${String(returned)} could only be checked to be no later than asked for, not against when that request was sent, so it may be an earlier end time left unchanged. Call get_computer and check ends_at before relying on it.`,
+    };
+  if (timing.serverDate === undefined)
+    return {
+      unconfirmed: `END TIME UNCONFIRMED: the answer carried no Date header, so its ends_at ${String(returned)} could only be checked against this machine's clock, within ten minutes either way. Call get_computer and check ends_at before relying on it.`,
+    };
+  return {};
 }
 
 const END_TIME_ABOUT =

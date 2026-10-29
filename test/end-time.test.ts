@@ -270,7 +270,7 @@ describe('endTimeProblem checks the value, not only its presence', () => {
   const t0 = Date.parse('2026-10-29T12:00:00Z');
   const t1 = t0 + 2000;
   // The platform's Date header, read at the answer: the window is
-  // [12:00:02 + hours - 60 s - 2 s, 12:00:02 + hours + 60 s].
+  // [12:00:02 + hours - 2 s (duration) - 2 s, 12:00:02 + hours + 2 s].
   const T = { sentAt: t0, answeredAt: t1, durationMs: 2000, serverDate: t1 };
   it.each([
     [{ ends_at: ENDS }, ENDS],
@@ -278,8 +278,8 @@ describe('endTimeProblem checks the value, not only its presence', () => {
     [{ ends_at: '2026-11-01T20:00:00+02:00' }, ENDS],
     [{ ends_at: ENDS }, '2026-11-01T18:00:01Z'],
     [{ ends_in_hours: 2 }, '2026-10-29T14:00:00Z'],
-    [{ ends_in_hours: 2 }, '2026-10-29T13:59:00Z'],
-    [{ ends_in_hours: 2 }, '2026-10-29T14:01:02Z'],
+    [{ ends_in_hours: 2 }, '2026-10-29T13:59:58Z'],
+    [{ ends_in_hours: 2 }, '2026-10-29T14:00:04Z'],
     [{ ends_in_hours: 0.5 }, '2026-10-29T12:30:01Z'],
     [{ ends_at: null }, undefined],
     [{ ends_in_hours: null }, undefined],
@@ -297,8 +297,10 @@ describe('endTimeProblem checks the value, not only its presence', () => {
     // An unchanged earlier end time is not the one asked for.
     [{ ends_at: ENDS }, '2026-10-30T09:00:00Z', 'is not the'],
     [{ ends_at: ENDS }, '2026-11-01T18:00:02Z', 'is not the'],
-    [{ ends_in_hours: 2 }, '2026-10-29T13:58:59Z', 'not 2 hours'],
-    [{ ends_in_hours: 2 }, '2026-10-29T14:01:03Z', 'not 2 hours'],
+    [{ ends_in_hours: 2 }, '2026-10-29T13:59:57Z', 'not 2 hours'],
+    [{ ends_in_hours: 2 }, '2026-10-29T14:00:05Z', 'not 2 hours'],
+    // A minute asked for, and the answer only five seconds away.
+    [{ ends_in_hours: 1 / 60 }, '2026-10-29T12:00:07Z', 'hours from the request'],
     [{ ends_in_hours: 2 }, ENDS, 'not 2 hours'],
     [{ ends_at: null }, ENDS, 'still carries ends_at'],
     [{ ends_in_hours: null }, ENDS, 'still carries ends_at'],
@@ -498,6 +500,54 @@ describe('a relative end time against the platform clock', () => {
     }
   });
 
+  it('refuses a minute asked for whose answer is only 5 seconds away, with a Date header', async () => {
+    for (const tool of ['create_computer', 'update_computer'] as const) {
+      await platform(
+        () => {
+          const now = Date.now();
+          const endsAt = new Date(Math.floor((now + 5000) / 1000) * 1000)
+            .toISOString()
+            .replace('.000Z', 'Z');
+          return [
+            tool === 'create_computer' ? 201 : 200,
+            box({ ends_at: endsAt }),
+            { Date: new Date(now).toUTCString() },
+          ];
+        },
+        async () => {
+          const { call, close } = await connect(
+            tool === 'create_computer' ? { computerId: undefined } : {},
+          );
+          const r = await call(
+            tool,
+            tool === 'create_computer'
+              ? { template: 'base', ends_in_hours: 1 / 60 }
+              : { ends_in_hours: 1 / 60 },
+          );
+          await close();
+          expect(r.isError, tool).toBe(true);
+          expect(textOf(r)).toContain('vm-1');
+        },
+      );
+    }
+  });
+
+  it('confirms a fresh answer with a Date header without an UNCONFIRMED line', async () => {
+    await platform(
+      () => {
+        const { endsAt, date } = answer(0, 2);
+        return [200, box({ ends_at: endsAt }), { Date: date }];
+      },
+      async () => {
+        const { call, close } = await connect();
+        const r = await call('update_computer', { ends_in_hours: 2 });
+        await close();
+        expect(r.isError, textOf(r)).toBeFalsy();
+        expect(textOf(r)).not.toContain('UNCONFIRMED');
+      },
+    );
+  });
+
   it('refuses a clearly wrong end time even with a Date header', async () => {
     await platform(
       () => {
@@ -514,7 +564,7 @@ describe('a relative end time against the platform clock', () => {
     );
   });
 
-  it('accepts this clock 2 minutes behind with no Date header, inside the wider window', async () => {
+  it('accepts this clock 2 minutes behind with no Date header, UNCONFIRMED', async () => {
     await platform(
       () => [200, box({ ends_at: answer(120_000, 2).endsAt })],
       async () => {
@@ -522,6 +572,7 @@ describe('a relative end time against the platform clock', () => {
         const r = await call('update_computer', { ends_in_hours: 2 });
         await close();
         expect(r.isError, textOf(r)).toBeFalsy();
+        expect(textOf(r)).toContain('END TIME UNCONFIRMED: the answer carried no Date header');
       },
     );
   });
