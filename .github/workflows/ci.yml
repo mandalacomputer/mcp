@@ -97,6 +97,46 @@ jobs:
             | timeout 30 node dist/cli.js > out.jsonl
           node scripts/check-stdio-smoke.mjs out.jsonl
 
+  # Every other job installs from package-lock.json, and a user never does:
+  # `npx mandala-computer-mcp` resolves the dependency ranges fresh. On
+  # 2026-10-23 that resolved an SDK patch release which broke tool listing,
+  # and every check here stayed green because the lockfile still held the
+  # older one (OPL-6241). So install the packed tarball the way a user does,
+  # with no lockfile, and ask it for its tools over stdio.
+  fresh-install:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      # dist/ is not committed, and `npm pack` does not run prepublishOnly.
+      - run: npm run build
+      - run: npm pack --pack-destination "$RUNNER_TEMP"
+      - name: Install the tarball with no lockfile
+        run: |
+          mkdir "$RUNNER_TEMP/user" && cd "$RUNNER_TEMP/user"
+          npm init -y > /dev/null
+          npm install --no-package-lock --ignore-scripts "$RUNNER_TEMP"/mandala-computer-mcp-*.tgz
+          npm ls @modelcontextprotocol/sdk
+      - name: The installed server lists its tools
+        env:
+          MANDALA_API_KEY: com_placeholder
+        run: |
+          printf '%s\n' \
+            '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"ci","version":"1"}}}' \
+            '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
+            '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' \
+            | (cd "$RUNNER_TEMP/user" && timeout 30 npx --no-install mandala-computer-mcp) > out.jsonl
+          node scripts/check-stdio-smoke.mjs out.jsonl
+
   # There is no `surface:` job here any more. It checked the platform out and
   # ran scripts/check-surface.mjs, and for the whole of its life PLATFORM_REPO_TOKEN
   # was never set on this repository — so the checkout failed, continue-on-error
