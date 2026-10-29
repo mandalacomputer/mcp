@@ -213,6 +213,10 @@ export function endTimeProblem(
  * send time it would fail, and checked against no lower bound at all an
  * unchanged earlier end time would pass.
  *
+ * Per caller: each entry is keyed by a SHA-256 of the credential the request
+ * was sent with (never the credential), with the method, path and key, so two
+ * callers of a shared server never read each other's sends.
+ *
  * In this process only, and bounded: the newest 256 keys, each for an hour.
  * A replay whose first send is not here is reported as unconfirmed rather
  * than as confirmed.
@@ -1108,7 +1112,7 @@ export const registerComputers: Registrar = (server, session, opts) => {
         }
         const key = idempotencyKeyFor(idempotency_key);
         const sends = noteSend(
-          `PATCH ${P.computer(id)}`,
+          `${session.api.credentialFingerprint} PATCH ${P.computer(id)}`,
           key,
           typeof body.ends_in_hours === 'number',
         );
@@ -2185,7 +2189,11 @@ export const registerComputers: Registrar = (server, session, opts) => {
         let data: unknown;
         let replayed = false;
         let serverDate: number | undefined;
-        const sends = noteSend(`POST ${P.COMPUTERS}`, key, typeof args.ends_in_hours === 'number');
+        const sends = noteSend(
+          `${session.api.credentialFingerprint} POST ${P.COMPUTERS}`,
+          key,
+          typeof args.ends_in_hours === 'number',
+        );
         try {
           ({
             value: data,

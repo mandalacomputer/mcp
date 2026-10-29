@@ -377,6 +377,44 @@ describe('a replayed answer to a keyed request', () => {
     );
   });
 
+  // A shared (hosted) server serves many callers: one caller's send must
+  // never stand in for another's, even with the same key on the same path.
+  it('two credentials with the same key and path do not share a first send', async () => {
+    let lost = true;
+    await platform(
+      () => (lost ? 'lost' : [200, box({ ends_at: earlier(3) }), REPLAYED]),
+      async () => {
+        const a = await connect({ apiKey: 'com_tenant_a' });
+        const b = await connect({ apiKey: 'com_tenant_b' });
+        const args = { ends_in_hours: 3, idempotency_key: KEY };
+        expect((await a.call('update_computer', args)).isError).toBe(true);
+        lost = false;
+        // B never sent this key from here, so its replay is unconfirmed, not
+        // checked against A's send.
+        const fromB = await b.call('update_computer', args);
+        expect(fromB.isError, textOf(fromB)).toBeFalsy();
+        expect(textOf(fromB)).toContain(UNCONFIRMED);
+        // A's own replay is checked against A's send, and refused.
+        const fromA = await a.call('update_computer', args);
+        expect(fromA.isError).toBe(true);
+        expect(textOf(fromA)).not.toContain(UNCONFIRMED);
+        await a.close();
+        await b.close();
+      },
+    );
+  });
+
+  it('keys the first sends by a hash of the credential, never the credential', async () => {
+    const { Api } = await import('../src/api.js');
+    const { createHash } = await import('node:crypto');
+    const api = new Api('com_secret_value');
+    expect(api.credentialFingerprint).toBe(
+      createHash('sha256').update('com_secret_value').digest('hex'),
+    );
+    expect(api.credentialFingerprint).not.toContain('com_secret_value');
+    expect(new Api('com_other').credentialFingerprint).not.toBe(api.credentialFingerprint);
+  });
+
   // The response to the first send was lost; the retry with the same key is
   // answered from the platform's store, and this process knows when the first
   // send went, so the whole window holds.

@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { Agent, type Dispatcher, Headers as UndiciHeaders, fetch as undiciFetch } from 'undici';
 import {
   type APIError,
@@ -379,6 +379,14 @@ export class Api {
    * Bound per call rather than per session, because a session serves many calls
    * at once and one of them being abandoned says nothing about the others.
    */
+  /**
+   * A SHA-256 of the credential this client sends, as hex: something to key
+   * per-caller state by without keeping the credential itself.
+   */
+  get credentialFingerprint(): string {
+    return createHash('sha256').update(this.#apiKey).digest('hex');
+  }
+
   with(signal: AbortSignal | undefined): Api {
     if (!signal || signal === this.#signal) return this;
     return new Api(this.#apiKey, this.baseUrl, signal, this.#options);
