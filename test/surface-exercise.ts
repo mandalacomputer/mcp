@@ -207,6 +207,7 @@ export const EXERCISE: Record<string, Record<string, unknown>[]> = {
       origin: 'https://api.example.com',
       path_prefix: '/v1',
       methods: ['GET', 'POST'],
+      auth_header: 'x-api-key',
     },
   ],
   delete_credential_gateway_binding: [

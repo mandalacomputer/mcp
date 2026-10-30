@@ -3654,6 +3654,7 @@ describe('the tools our own prose tells a model to call', () => {
     // MANDALA_TAGS tag for the three tools (OPL-6246). Not tools.
     'base_url',
     'path_prefix',
+    'auth_header',
     'credential_gateway',
     // whoami and list_api_keys name it: the field saying whether a key may
     // manage API keys (OPL-5053). A response field, not a tool.

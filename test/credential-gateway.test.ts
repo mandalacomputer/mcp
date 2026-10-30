@@ -57,12 +57,53 @@ describe('credential gateway tools', () => {
     expect(res.isError).toBeFalsy();
     const text = textOf(res);
     expect(text).toContain(
-      `Created ${GATEWAY_BINDING.id} on vm-1: GET, POST to https://api.example.com/v1 and below, using secret csec-0123456789abcdef.`,
+      `Created ${GATEWAY_BINDING.id} on vm-1: GET, POST to https://api.example.com/v1 and below, using secret csec-0123456789abcdef sent as \`Authorization: Bearer\`.`,
     );
     expect(text).toContain(`${GATEWAY_BINDING.base_url}/v1…`);
-    expect(text).toContain('`Authorization: Bearer mandala-placeholder`');
+    expect(text).toContain(
+      '`Authorization: Bearer mandala-placeholder` or `x-api-key: mandala-placeholder`',
+    );
     expect(text).toContain('The secret never reaches the computer.');
+    expect(text).toContain('10 minutes per call');
+    expect(text).not.toContain('ANTHROPIC_BASE_URL');
     await close();
+  });
+
+  it('sends auth_header only when given, and says how Claude Code uses an x-api-key binding', async () => {
+    const { call, close } = await connect();
+    const res = await call('create_credential_gateway_binding', {
+      ...ARGS,
+      auth_header: 'x-api-key',
+    });
+    const sent = platform.calls.find((c) => c.method === 'POST');
+    expect(sent?.body).toEqual({ ...ARGS, auth_header: 'x-api-key' });
+    const text = textOf(res);
+    expect(text).toContain('using secret csec-0123456789abcdef sent as `x-api-key`.');
+    expect(text).toContain(
+      `ANTHROPIC_BASE_URL=${GATEWAY_BINDING.base_url} and ANTHROPIC_API_KEY=mandala-placeholder`,
+    );
+    await call('create_credential_gateway_binding', { ...ARGS, auth_header: 'authorization' });
+    expect(platform.calls.filter((c) => c.method === 'POST')[1]?.body).toEqual({
+      ...ARGS,
+      auth_header: 'authorization',
+    });
+    const bad = await call('create_credential_gateway_binding', { ...ARGS, auth_header: 'bearer' });
+    expect(bad.isError).toBe(true);
+    expect(platform.calls.filter((c) => c.method === 'POST')).toHaveLength(2);
+    await close();
+  });
+
+  it('reads a listing row without auth_header as a Bearer binding', async () => {
+    const { auth_header: _, ...old } = { ...GATEWAY_BINDING, auth_header: undefined };
+    const res = await over(
+      { bindings: [old, { ...GATEWAY_BINDING, auth_header: 'x-api-key' }] },
+      200,
+      'list_credential_gateway_bindings',
+      {},
+    );
+    const text = textOf(res);
+    expect(text).toContain('using secret csec-0123456789abcdef sent as `Authorization: Bearer`');
+    expect(text).toContain('using secret csec-0123456789abcdef sent as `x-api-key`');
   });
 
   it('sends the origin as the origin it parsed to, on another computer when named', async () => {
@@ -99,6 +140,7 @@ describe('credential gateway tools', () => {
       [{ methods: ['get'] }, /uppercase/],
       [{ methods: ['CONNECT'] }, /not "CONNECT"/],
       [{ methods: ['GET', 'GET'] }, /must not repeat/],
+      [{ auth_header: 'X-API-Key' } as never, /auth_header must be/],
     ];
     for (const [patch, why] of bad) {
       expect(() => credentialGatewayBody({ ...ARGS, ...patch })).toThrow(why);
