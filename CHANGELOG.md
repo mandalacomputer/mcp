@@ -43,6 +43,16 @@ are wording changes, and they are behaviour changes in the way that matters.
   (the only computers it may reach, `null` for every computer its scope
   reaches). An expired key is refused with 401 `API key expired`. Minting
   keys stays out of this server, as before.
+- **`auth_header` on `create_credential_gateway_binding`.** `x-api-key` has
+  the platform send the secret as `x-api-key: <secret>` rather than
+  `Authorization: Bearer <secret>`, which is what an Anthropic key needs; the
+  answer then says Claude Code inside the computer runs with
+  `ANTHROPIC_BASE_URL=<base_url>` and `ANTHROPIC_API_KEY=mandala-placeholder`.
+  Left out, nothing is sent and the default stays `authorization`. Listings
+  and the create say which header each binding uses (a binding with none
+  reported reads as `Authorization: Bearer`), and that the computer may send
+  the placeholder in either header. The described limits are now a 7 MiB
+  request, a 64 MiB answer and 10 minutes per call, with streamed answers.
 
 ## [0.20.0] - 2026-10-29
 

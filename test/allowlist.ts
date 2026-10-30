@@ -222,7 +222,7 @@ export const PARAMETERS: ReadonlyMap<string, readonly string[]> = new Map([
   ['DELETE computers/:id/credential-gateway/:binding', []],
   [
     'POST computers/:id/credential-gateway',
-    ['body:methods', 'body:origin', 'body:path_prefix', 'body:secret_id'],
+    ['body:auth_header', 'body:methods', 'body:origin', 'body:path_prefix', 'body:secret_id'],
   ],
   [
     'POST computers/:id/browser-connections',

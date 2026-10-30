@@ -1220,6 +1220,14 @@ export const CREDENTIAL_GATEWAY_METHODS = [
 export type CredentialGatewayMethod = (typeof CREDENTIAL_GATEWAY_METHODS)[number];
 
 /**
+ * Where a binding puts the secret upstream: `authorization` as
+ * `Authorization: Bearer <secret>`, `x-api-key` as `x-api-key: <secret>`
+ * (Anthropic's API). The platform's default is `authorization`.
+ */
+export const CREDENTIAL_GATEWAY_AUTH_HEADERS = ['authorization', 'x-api-key'] as const;
+export type CredentialGatewayAuthHeader = (typeof CREDENTIAL_GATEWAY_AUTH_HEADERS)[number];
+
+/**
  * The body for a credential gateway binding, with the platform's shape rules
  * mirrored where a call can only fail: an origin that is not a bare `https://`
  * host (no path, query, fragment, credentials or port), a path prefix that is
@@ -1234,6 +1242,7 @@ export function credentialGatewayBody(args: {
   origin: string;
   path_prefix: string;
   methods: string[];
+  auth_header?: string;
 }): Json {
   const secretId = args.secret_id.trim();
   if (!secretId) throw new Error('secret_id must not be empty');
@@ -1278,5 +1287,20 @@ export function credentialGatewayBody(args: {
     }
   }
   if (new Set(methods).size !== methods.length) throw new Error('methods must not repeat a method');
-  return { secret_id: secretId, origin: url.origin, path_prefix: prefix, methods: [...methods] };
+  const body: Json = {
+    secret_id: secretId,
+    origin: url.origin,
+    path_prefix: prefix,
+    methods: [...methods],
+  };
+  // Sent only when given: a platform without the field still takes the rest.
+  if (args.auth_header !== undefined) {
+    if (!(CREDENTIAL_GATEWAY_AUTH_HEADERS as readonly string[]).includes(args.auth_header)) {
+      throw new Error(
+        `auth_header must be "authorization" or "x-api-key", not ${JSON.stringify(args.auth_header)}`,
+      );
+    }
+    body.auth_header = args.auth_header;
+  }
+  return body;
 }

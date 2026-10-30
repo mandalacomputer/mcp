@@ -297,9 +297,17 @@ computer's own browser, where `open_url` cannot send headers, click Continue.
 `delete_credential_gateway_binding`. A binding names a secret from the
 account's store, an exact `https://` origin, a path prefix and the HTTP methods
 allowed. Programs inside the computer send requests to the binding's `base_url`
-followed by the provider path, with `Authorization: Bearer <placeholder>` (both
-are in the answer), and the platform sends them on with the secret in their
-place: **the secret never reaches the computer.** Up to 8 per computer; a
+followed by the provider path, with the placeholder as the API key —
+`Authorization: Bearer <placeholder>` or `x-api-key: <placeholder>` (both values
+are in the answer) — and the platform sends them on with the secret in their
+place: **the secret never reaches the computer.** The secret goes upstream as
+`Authorization: Bearer <secret>` by default, or as `x-api-key: <secret>` with
+`auth_header: "x-api-key"`. An Anthropic key binding uses `x-api-key` (origin
+`https://api.anthropic.com`, path prefix `/v1`), and Claude Code inside the
+computer then runs with `ANTHROPIC_BASE_URL=<base_url>` and
+`ANTHROPIC_API_KEY=mandala-placeholder`. Answers stream, server-sent events
+included; a request is limited to 7 MiB, an answer to 64 MiB and a call to 10
+minutes. Up to 8 per computer; a
 binding cannot be changed, only deleted and made again. Owners create and
 delete them; members can list them. Origins, paths and methods that can only
 be refused are refused before any request.

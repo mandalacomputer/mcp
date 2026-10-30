@@ -47,6 +47,8 @@ type Binding = {
   origin: string;
   path_prefix: string;
   methods: string[];
+  /** `authorization` or `x-api-key`; a platform that does not report it sends a Bearer token. */
+  auth_header: string;
   base_url: string;
   placeholder: string;
 };
@@ -79,6 +81,7 @@ function reachable(v: unknown): v is string {
 function bindingOf(v: unknown): Binding | undefined {
   if (!isRecord(v)) return undefined;
   const { id, computer_id, secret_id, origin, path_prefix, methods, base_url, placeholder } = v;
+  const auth_header = nonEmpty(v.auth_header) ? v.auth_header : 'authorization';
   if (!nonEmpty(id) || !nonEmpty(computer_id) || !nonEmpty(secret_id)) return undefined;
   if (!nonEmpty(origin) || !origin.startsWith('https://')) return undefined;
   if (!nonEmpty(path_prefix) || !path_prefix.startsWith('/')) return undefined;
@@ -91,6 +94,7 @@ function bindingOf(v: unknown): Binding | undefined {
     origin,
     path_prefix,
     methods: methods as string[],
+    auth_header,
     base_url,
     placeholder,
   };
@@ -101,14 +105,28 @@ const through = (b: Binding): string => `${b.base_url.replace(/\/+$/, '')}${b.pa
 
 /** What it allows, in one clause. */
 const scope = (b: Binding): string =>
-  `${b.methods.join(', ')} to ${b.origin}${b.path_prefix === '/' ? ' (any path)' : `${b.path_prefix} and below`}, using secret ${b.secret_id}`;
+  `${b.methods.join(', ')} to ${b.origin}${b.path_prefix === '/' ? ' (any path)' : `${b.path_prefix} and below`}, using secret ${b.secret_id} sent as ${upstream(b)}`;
+
+/** The header the secret travels in upstream. */
+const upstream = (b: Binding): string =>
+  b.auth_header === 'authorization' ? '`Authorization: Bearer`' : `\`${b.auth_header}\``;
+
+/** The placeholder as the guest sends it: either header works. */
+const asKey = (b: Binding): string =>
+  `\`Authorization: Bearer ${b.placeholder}\` or \`x-api-key: ${b.placeholder}\``;
 
 const line = (b: Binding): string =>
-  `${b.id}: ${scope(b)} — inside the computer call ${through(b)}… with \`Authorization: Bearer ${b.placeholder}\``;
+  `${b.id}: ${scope(b)} — inside the computer call ${through(b)}… with ${asKey(b)}`;
 
 /** How the guest uses a binding, said once in the create. */
 const HOW =
-  'Only non-browser HTTP clients work through it (curl, an SDK with its base URL set): no redirects, streaming, WebSocket upgrades or automatic retries; 1 MiB per request, 4 MiB per response, 30 seconds, two calls at a time. A call that fails after it was sent may still have done its work at the provider: check before retrying.';
+  'Only non-browser HTTP clients work through it (curl, an SDK with its base URL and API key set): no redirects, WebSocket upgrades or automatic retries. Answers stream as the provider sends them, server-sent events included; 7 MiB per request, 64 MiB per answer, 10 minutes per call. A call that fails after it was sent may still have done its work at the provider: check before retrying.';
+
+/** For an x-api-key binding: how Claude Code and the Anthropic SDKs use it. */
+const anthropicHint = (b: Binding): string =>
+  b.auth_header === 'x-api-key'
+    ? ` For an Anthropic key, Claude Code (and the Anthropic SDKs) inside the computer use it with ANTHROPIC_BASE_URL=${b.base_url} and ANTHROPIC_API_KEY=${b.placeholder}.`
+    : '';
 
 /**
  * A change whose answer could not be read: anything but an HTTP answer from
@@ -180,7 +198,7 @@ export const registerCredentialGateway: Registrar = (server, session) => {
     {
       title: 'Let a computer use a secret through the credential gateway',
       description:
-        'Let programs inside the computer call an HTTPS API with a secret from the account’s store (create_secret) WITHOUT the secret ever reaching the computer. The platform adds the secret as `Authorization: Bearer <secret>` to requests the computer sends to the answered `base_url` followed by the provider path, with `Authorization: Bearer <placeholder>` (the placeholder is in the answer), and only for the given exact `https://` origin (port 443, no path), path prefix (matched at segment boundaries) and methods. For example, origin `https://api.github.com`, path_prefix `/repos/acme/app` and methods `["GET"]` lets the computer GET `<base_url>/repos/acme/app/issues`. The platform uses the secret’s latest value on every call. Owners only; needs a paid or trial account with secrets enabled and a secret in the computer’s workspace or account. Up to 8 per computer (409 past that). A binding cannot be changed: delete it and create another. Clones do not inherit bindings; moving the computer to another workspace or owner removes them. Not idempotent: a retry after a lost answer makes a second binding — list_credential_gateway_bindings first. Use a narrowly scoped provider key: code inside the computer can make any request the binding allows.',
+        'Let programs inside the computer call an HTTPS API with a secret from the account’s store (create_secret) WITHOUT the secret ever reaching the computer. The platform adds the secret as `Authorization: Bearer <secret>` (or, with auth_header `x-api-key`, as `x-api-key: <secret>`) to requests the computer sends to the answered `base_url` followed by the provider path, with the placeholder as the API key — `Authorization: Bearer <placeholder>` or `x-api-key: <placeholder>` (the placeholder is in the answer) — and only for the given exact `https://` origin (port 443, no path), path prefix (matched at segment boundaries) and methods. For example, origin `https://api.github.com`, path_prefix `/repos/acme/app` and methods `["GET"]` lets the computer GET `<base_url>/repos/acme/app/issues`. For an Anthropic key: origin `https://api.anthropic.com`, path_prefix `/v1`, methods `["POST"]` and auth_header `x-api-key`; Claude Code inside the computer then runs with ANTHROPIC_BASE_URL=<base_url> and ANTHROPIC_API_KEY=mandala-placeholder. Answers stream (server-sent events work). The platform uses the secret’s latest value on every call. Owners only; needs a paid or trial account with secrets enabled and a secret in the computer’s workspace or account. Up to 8 per computer (409 past that). A binding cannot be changed: delete it and create another. Clones do not inherit bindings; moving the computer to another workspace or owner removes them. Not idempotent: a retry after a lost answer makes a second binding — list_credential_gateway_bindings first. Use a narrowly scoped provider key: code inside the computer can make any request the binding allows.',
       // Strict: a misspelled field stripped as unknown would be a binding made
       // without what the caller meant to say, or an argument the platform's
       // body allowlist refuses anyway.
@@ -206,11 +224,23 @@ export const registerCredentialGateway: Registrar = (server, session) => {
           .min(1)
           .max(P.CREDENTIAL_GATEWAY_METHODS.length)
           .describe('The HTTP methods allowed, each once: GET, HEAD, POST, PUT, PATCH, DELETE.'),
+        auth_header: z
+          .enum(P.CREDENTIAL_GATEWAY_AUTH_HEADERS)
+          .optional()
+          .describe(
+            'Where the platform puts the secret upstream: `authorization` (default) as `Authorization: Bearer <secret>`, or `x-api-key` as `x-api-key: <secret>` — use `x-api-key` for an Anthropic key. A host that cannot send `x-api-key` yet answers 409.',
+          ),
       }),
     },
-    ({ computer_id, secret_id, origin, path_prefix, methods }, extra) =>
+    ({ computer_id, secret_id, origin, path_prefix, methods, auth_header }, extra) =>
       guarded(async () => {
-        const sent = P.credentialGatewayBody({ secret_id, origin, path_prefix, methods });
+        const sent = P.credentialGatewayBody({
+          secret_id,
+          origin,
+          path_prefix,
+          methods,
+          auth_header,
+        });
         const id = session.resolve(computer_id);
         const path = P.credentialGateway(id);
         const got = await changed(
@@ -230,7 +260,7 @@ export const registerCredentialGateway: Registrar = (server, session) => {
           );
         }
         return said(
-          `Created ${b.id} on ${id}: ${scope(b)}. Inside the computer, send requests to ${through(b)}… (the base_url ${b.base_url} followed by the provider path) with \`Authorization: Bearer ${b.placeholder}\`; the platform replaces it with the secret. The secret never reaches the computer. ${HOW}`,
+          `Created ${b.id} on ${id}: ${scope(b)}. Inside the computer, send requests to ${through(b)}… (the base_url ${b.base_url} followed by the provider path) with ${asKey(b)}; the platform replaces it with the secret. The secret never reaches the computer.${anthropicHint(b)} ${HOW}`,
           body,
         );
       }),

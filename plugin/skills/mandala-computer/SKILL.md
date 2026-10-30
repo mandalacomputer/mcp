@@ -370,9 +370,13 @@ When code inside the computer needs an API key the user would rather it never
 held, store the key with `create_secret` and bind it with
 `create_credential_gateway_binding`: an exact `https://` origin, a path prefix
 and the methods allowed, as narrow as the task needs. The computer then calls
-the answered `base_url` followed by the provider path with
-`Authorization: Bearer <placeholder>`, and the platform adds the real key.
-Bindings cannot be edited: delete and create again. Up to 8 per computer.
+the answered `base_url` followed by the provider path with the placeholder as
+its API key (`Authorization: Bearer <placeholder>` or `x-api-key:
+<placeholder>`), and the platform adds the real key. For an Anthropic key, bind
+`https://api.anthropic.com`, path prefix `/v1`, with `auth_header: "x-api-key"`;
+Claude Code inside the computer then runs with `ANTHROPIC_BASE_URL=<base_url>`
+and `ANTHROPIC_API_KEY=mandala-placeholder`. Answers stream. Bindings cannot be
+edited: delete and create again. Up to 8 per computer.
 
 ## Showing an app: public URLs
 
