@@ -14,6 +14,8 @@ are wording changes, and they are behaviour changes in the way that matters.
 
 ## [Unreleased]
 
+## [0.21.0] - 2026-10-30
+
 ### Added
 
 - **A computer's end time: `ends_at` and `ends_in_hours` on `create_computer`
@@ -1526,7 +1528,8 @@ No effect on the tool surface, listed because it is most of the window.
 - Several parser fixes landed before that scanner was retired, each ported to
   and from the TypeScript SDK's byte-identical copy.
 
-[Unreleased]: https://github.com/mandalacomputer/mcp/compare/v0.20.0...HEAD
+[Unreleased]: https://github.com/mandalacomputer/mcp/compare/v0.21.0...HEAD
+[0.21.0]: https://github.com/mandalacomputer/mcp/compare/v0.20.0...v0.21.0
 [0.20.0]: https://github.com/mandalacomputer/mcp/compare/v0.19.1...v0.20.0
 [0.19.1]: https://github.com/mandalacomputer/mcp/compare/v0.19.0...v0.19.1
 [0.19.0]: https://github.com/mandalacomputer/mcp/compare/v0.18.0...v0.19.0
