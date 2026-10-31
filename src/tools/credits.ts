@@ -75,5 +75,12 @@ function paygLine(burn: number | null | undefined, runway: number | null | undef
   if (runway === 0)
     return `${cost}; the balance has run out, so nothing new can start until credits are added.`;
   if (runway === null || runway === undefined) return `${cost}.`;
-  return `${cost}; the balance lasts about ${Math.floor(runway / 3600)} h at that rate.`;
+  // Minutes under an hour: the last hour must not read as "0 h".
+  const left =
+    runway < 60
+      ? 'under a minute'
+      : runway < 3600
+        ? `about ${Math.floor(runway / 60)} min`
+        : `about ${Math.floor(runway / 3600)} h`;
+  return `${cost}; the balance lasts ${left} at that rate.`;
 }

@@ -82,6 +82,10 @@ describe('get_credits', () => {
       'cost $0.12 an hour now; the balance lasts about 75 h',
     ],
     [{ burn_micros_per_hour: 0, runway_seconds: null }, 'cost $0.00 an hour now.'],
+    [{ burn_micros_per_hour: 122_738, runway_seconds: 3599 }, 'the balance lasts about 59 min'],
+    [{ burn_micros_per_hour: 122_738, runway_seconds: 600 }, 'the balance lasts about 10 min'],
+    [{ burn_micros_per_hour: 122_738, runway_seconds: 1 }, 'the balance lasts under a minute'],
+    [{ burn_micros_per_hour: 122_738, runway_seconds: 3600 }, 'the balance lasts about 1 h'],
     [{ burn_micros_per_hour: 122_738, runway_seconds: 0 }, 'the balance has run out'],
     [{ burn_micros_per_hour: null, runway_seconds: null }, 'cannot be read right now'],
   ])(
