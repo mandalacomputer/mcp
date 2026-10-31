@@ -14,6 +14,18 @@ are wording changes, and they are behaviour changes in the way that matters.
 
 ## [Unreleased]
 
+### Added
+
+- Pay as you go. An account without a subscription can pay for computers from
+  prepaid credits, by the second while they run. `get_credits` now says how the
+  account is billed and, on pay as you go, what its computers cost an hour now
+  and how long the balance lasts at that rate. A platform that does not send
+  these fields is read as before.
+- A refusal for a pay-as-you-go balance too low to start something (a 402 with
+  `code` `INSUFFICIENT_BALANCE`) now tells the model that nothing was started,
+  that retrying does not help, and that credits need adding on the Billing
+  page. It does not report a plan limit.
+
 ## [0.21.0] - 2026-10-30
 
 ### Added

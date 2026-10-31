@@ -28,6 +28,10 @@ export const creditsSchema = z.object({
   held_micros: amount,
   debt_micros: amount,
   frozen: z.boolean(),
+  // Pay as you go (OPL-6261). Optional: a platform that predates it sends none.
+  billing_mode: z.string().min(1).optional(),
+  burn_micros_per_hour: amount.nullable().optional(),
+  runway_seconds: amount.nullable().optional(),
   grant: z
     .object({
       period_start: instant,

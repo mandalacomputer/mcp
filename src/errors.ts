@@ -321,6 +321,9 @@ export function codeAdvice(err: APIError): string | undefined {
       return 'this trial has launched every computer it can, and deleting one does not give a launch back. Nothing was created, and waiting does not change it: use the computer the trial already has (list_computers), or say that a plan is needed to launch another';
     case 'PLAN_REQUIRED':
       return 'this account has no plan that covers this: a trial whose time is over, or no plan at all. Nothing was done, and neither retrying nor waiting changes it: say that a plan is needed';
+    case 'INSUFFICIENT_BALANCE':
+      // Pay as you go (OPL-6261): the account's prepaid balance, not its plan.
+      return 'this account pays as it goes from prepaid credits, and its balance is too low to start this (it must cover a quarter of an hour of what is started, and at least $0.25). Nothing was started, and neither retrying nor waiting changes it: say that credits need adding on the Billing page, and call get_credits for the balance';
     case 'TRIAL_CREATE_PENDING':
       // The earlier create can be absent from list_computers while it is under
       // way (the platform refuses on it before it is listed), so the recovery
@@ -353,6 +356,7 @@ const CODE_STATUS: Readonly<Record<string, number>> = {
   TRIAL_LIMIT: 402,
   TRIAL_CREATES_USED: 402,
   PLAN_REQUIRED: 402,
+  INSUFFICIENT_BALANCE: 402,
   TRIAL_CREATE_PENDING: 409,
 };
 
