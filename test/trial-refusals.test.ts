@@ -150,6 +150,7 @@ describe('what a trial is not allowed', () => {
     ['TRIAL_LIMIT', 402, 'the trial does not include this'],
     ['TRIAL_CREATES_USED', 402, 'launched every computer it can'],
     ['PLAN_REQUIRED', 402, 'no plan that covers this'],
+    ['INSUFFICIENT_BALANCE', 402, 'credits need adding on the Billing page'],
     ['TRIAL_CREATE_PENDING', 409, 'earlier create is still under way'],
   ])('%s says what to do instead, and is final', (code, status, words) => {
     const err = post(status, { error: 'x', code });

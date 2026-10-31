@@ -75,6 +75,36 @@ describe('get_credits', () => {
     expect(said).toContain('"granted_micros": 5000000');
   });
 
+  // OPL-6261: pay as you go spends the same balance on computers.
+  it.each([
+    [
+      { burn_micros_per_hour: 122_738, runway_seconds: 272_189 },
+      'cost $0.12 an hour now; the balance lasts about 75 h',
+    ],
+    [{ burn_micros_per_hour: 0, runway_seconds: null }, 'cost $0.00 an hour now.'],
+    [{ burn_micros_per_hour: 122_738, runway_seconds: 3599 }, 'the balance lasts about 59 min'],
+    [{ burn_micros_per_hour: 122_738, runway_seconds: 600 }, 'the balance lasts about 10 min'],
+    [{ burn_micros_per_hour: 122_738, runway_seconds: 1 }, 'the balance lasts under a minute'],
+    [{ burn_micros_per_hour: 122_738, runway_seconds: 3600 }, 'the balance lasts about 1 h'],
+    [{ burn_micros_per_hour: 122_738, runway_seconds: 0 }, 'the balance has run out'],
+    [{ burn_micros_per_hour: null, runway_seconds: null }, 'cannot be read right now'],
+  ])(
+    'on pay as you go, says what the computers cost and how long it lasts: %o',
+    async (fields, words) => {
+      platform.state.credits = { ...FUNDED_CREDITS, billing_mode: 'payg', ...fields };
+      const { call } = await open();
+      expect(textOf(await call('get_credits')).split('\n')[0]).toContain(words);
+    },
+  );
+
+  it('says nothing of pay as you go to a subscriber, or on a platform that predates it', async () => {
+    for (const credits of [{ ...FUNDED_CREDITS, billing_mode: 'subscription' }, FUNDED_CREDITS]) {
+      platform.state.credits = credits;
+      const { call } = await open();
+      expect(textOf(await call('get_credits'))).not.toContain('Pay as you go');
+    }
+  });
+
   it('says a frozen account cannot spend what it holds', async () => {
     platform.state.credits = { ...FUNDED_CREDITS, available_micros: 0, frozen: true };
     const { call } = await open();
