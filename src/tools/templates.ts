@@ -1,6 +1,14 @@
 import { z } from 'zod';
-import { CancelledError, errorForStatus, isTransientForPoll } from '../errors.js';
-import { guarded, incompleteWarning, json, refused, said } from '../format.js';
+import { CancelledError, errorForStatus, FileExistsError, isTransientForPoll } from '../errors.js';
+import {
+  apiErrorMessage,
+  guarded,
+  incompleteWarning,
+  json,
+  refused,
+  said,
+  withErrorMetadata,
+} from '../format.js';
 import * as P from '../paths.js';
 import type { Registrar } from './types.js';
 
@@ -122,11 +130,26 @@ export const registerTemplates: Registrar = (server, session, opts) => {
     },
     ({ document }, extra) =>
       guarded(async () => {
-        const body = await session.api
-          .with(extra.signal)
-          .json<Record<string, unknown>>('POST', P.TEMPLATES, {
-            raw: P.templateDocument(document),
-          });
+        let body: Record<string, unknown>;
+        try {
+          body = await session.api
+            .with(extra.signal)
+            .json<Record<string, unknown>>('POST', P.TEMPLATES, {
+              raw: P.templateDocument(document),
+            });
+        } catch (err) {
+          // On this route `exists` is a ref, not a file: it stays taken for
+          // good, and a new version is the only way to publish.
+          if (err instanceof FileExistsError) {
+            return withErrorMetadata(
+              refused(
+                `${apiErrorMessage(err)}\n\nThis ref is already taken and nothing was published. A ref never comes free, so waiting or sending the same document again does not change this: bump metadata.version and publish again.`,
+              ),
+              err,
+            );
+          }
+          throw err;
+        }
         // The ref, checked rather than interpolated. This is a WRITE, so a
         // malformed 2xx is the one answer that cannot be shrugged off:
         // `Published undefined` reads as a success and names a ref nothing can

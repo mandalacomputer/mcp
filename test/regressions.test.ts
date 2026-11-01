@@ -6553,7 +6553,7 @@ describe('a refusal that is about the caller rather than the computer', () => {
     // The platform's own sentence survives — it is the half that says WHAT was
     // refused — and the advice is added to it.
     expect(forbidden).toMatch(/This requires member access to this account\./);
-    expect(forbidden).toMatch(/role that changed or an account suspended/);
+    expect(forbidden).toMatch(/a role too low/);
     expect(forbidden).not.toMatch(/worth sending again/);
 
     // A plan limit is not a fault on the machine, and it is the same answer

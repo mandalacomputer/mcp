@@ -23,6 +23,7 @@ import {
   withErrorMetadata,
   withoutCredentials,
 } from '../format.js';
+import { EXPIRING_KEY_NO_DESKTOP, keyExpires } from '../key-expiry.js';
 import * as P from '../paths.js';
 import { heartbeat, POLL_MS, pollDelay, rampDelay, sleep } from '../poll.js';
 import {
@@ -1003,7 +1004,7 @@ export const registerComputers: Registrar = (server, session, opts) => {
           .nullable()
           .optional()
           .describe(
-            `${END_TIME_ABOUT} An RFC 3339 time in the future, replacing any end time it has; null clears it. Send this ON ITS OWN, and not beside ends_in_hours.`,
+            `${END_TIME_ABOUT} An RFC 3339 time in the future, replacing any end time it has; null clears it. Send this ON ITS OWN, and not beside ends_in_hours. Refused with a 409 that names no reason while the computer is being stopped for its current end time: that one clears, so set a new end time once it has stopped.`,
           ),
         ends_in_hours: endsInHoursArg
           .nullable()
@@ -1416,7 +1417,7 @@ export const registerComputers: Registrar = (server, session, opts) => {
     {
       title: 'Read what this account has used',
       description:
-        'What this account has used: running hours weighted by cores and memory, the storage it holds, and the per-computer breakdown behind the totals. Read it before and after a batch to monitor resource use. These measurements do not add a usage charge to the monthly subscription; AI-credit usage is separate. Defaults to the current billing period. READ THE FIRST LINE OF THE ANSWER: a hypervisor that could not be reached makes every total too LOW rather than absent, and that line is the only thing that says so.',
+        'What this account has used: running hours weighted by cores and memory, the storage it holds, and the per-computer breakdown behind the totals. Read it before and after a batch to monitor resource use. These measurements do not add a runtime charge to a monthly subscription, and AI-credit usage is separate; on pay as you go compute and disk are priced from them, get_credits is the record of what was charged, and the two need not match. Defaults to the current billing period (on pay as you go, the calendar month). READ THE FIRST LINE OF THE ANSWER: a hypervisor that could not be reached makes every total too LOW rather than absent, and that line is the only thing that says so.',
       inputSchema: {
         from: z
           .string()
@@ -1907,8 +1908,11 @@ export const registerComputers: Registrar = (server, session, opts) => {
           // success, an orchestrator reading `isError` cannot tell a link from
           // the absence of one, and hands the next step a sentence where it
           // expected an address.
+          const expires = await keyExpires(session.api, extra.signal);
           return refused(
-            `No desktop credentials on ${id} right now. The platform omits them when the computer is not running, or when its hypervisor could not be reached — a URL built over nothing looks exactly like a working one until it is used.`,
+            expires
+              ? `No desktop credentials on ${id}: ${EXPIRING_KEY_NO_DESKTOP}`
+              : `No desktop credentials on ${id} right now. The platform omits them when the computer is not running, when its hypervisor could not be reached, or from an API key that expires — a URL built over nothing looks exactly like a working one until it is used.`,
           );
         }
         // A `vnc` object that is missing the requested key is the same answer as

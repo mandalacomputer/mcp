@@ -444,7 +444,7 @@ describe('a create-only upload onto a taken path (OPL-4994)', () => {
     expect(reasonKind('exists')).toBe('permanent');
     expect(reasonAdvice('exists')).toContain('this attempt wrote nothing');
     expect(reasonAdvice('exists')).toContain(
-      'If an earlier attempt\u2019s outcome was unknown, the file may be yours',
+      'If an earlier attempt\u2019s outcome was unknown, what is there may be yours',
     );
   });
 

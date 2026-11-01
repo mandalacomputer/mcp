@@ -8,7 +8,7 @@ import * as P from './paths.js';
  *
  * Without a model key the platform runs an agent on the account's own Mandala
  * AI credits. It admits such a run only when the account is not frozen and has
- * at least $0.25 available for the first model call, and refuses it otherwise
+ * at least $0.02 available for the first model call, and refuses it otherwise
  * with a 402 before anything runs. A tool a model can see is a tool it will try,
  * so `run_agent` is registered for a key-less session only when `GET /credits`
  * says that first call would be admitted — and not when the read fails, is
@@ -68,11 +68,12 @@ export const creditsSchema = z.object({
 export type Credits = z.infer<typeof creditsSchema>;
 
 /**
- * What a funded run needs available before its first model call: $0.25, in
- * micros. The platform reserves this much per model call and refuses a run it
- * cannot reserve for with a 402; it is also the smallest `max_cost_usd`.
+ * What a funded run needs available before its first model call: $0.02, in
+ * micros. The platform reserves $0.25 per model call, or all that is left when
+ * less, down to this, and refuses a run it cannot reserve for with a 402. Not
+ * the smallest `max_cost_usd`, which is a separate number: $0.25.
  */
-export const FUNDED_RUN_MINIMUM_MICROS = 250_000;
+export const FUNDED_RUN_MINIMUM_MICROS = 20_000;
 
 /**
  * How long the check may hold up a session's start. It runs before the

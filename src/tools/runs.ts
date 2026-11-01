@@ -432,7 +432,7 @@ export const registerRuns: Registrar = (server, session) => {
     {
       title: 'Cancel a background agent run',
       description:
-        'Stop a background agent run where it is: the model call in flight is abandoned and no further action is taken. What it already did to the desktop stands, and so does what it cost: take a screenshot before deciding what is left. Cancelling a run that has already ended changes nothing and answers it as it is. A run this key cannot see is not found.',
+        'Stop a background agent run where it is: no further action is taken. A model call on your own key is abandoned; one on AI credits already in flight is left to finish and is charged, and nothing of its reply is acted on, so its cost can change after this answers: read it again with get_agent_run for the final cost. What it already did to the desktop stands, and so does what it cost: take a screenshot before deciding what is left. Cancelling a run that has already ended changes nothing and answers it as it is. A run this key cannot see is not found.',
       inputSchema: { run_id: runIdArg },
       annotations: { destructiveHint: true, idempotentHint: true },
     },

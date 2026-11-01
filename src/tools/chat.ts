@@ -273,7 +273,7 @@ export const registerChat: Registrar = (server, session) => {
           .enum(['anthropic', 'openai'])
           .optional()
           .describe(
-            'Inferred from model when omitted. Select openai to use gpt-6.1-sol by default. The configured MANDALA_MODEL_KEY must match the provider.',
+            'Inferred from model when omitted. Select openai to use gpt-6.1-sol by default. The configured model key must match the provider.',
           ),
         model: z
           .string()
@@ -286,7 +286,7 @@ export const registerChat: Registrar = (server, session) => {
           .max(P.AGENT_MAX_STEPS)
           .default(20)
           .describe(
-            'Maximum desktop actions, 1 to 100 (default 20). All agent runs have a fixed 60-minute wall-clock limit, ending with stop time_limit.',
+            `Maximum desktop actions, 1 to ${P.AGENT_MAX_STEPS} (default 20). All agent runs have a fixed ${P.AGENT_RUN_TIMEOUT_MIN}-minute wall-clock limit, ending with stop time_limit.`,
           ),
         thread_id: threadIdArg,
         store: storeArg,

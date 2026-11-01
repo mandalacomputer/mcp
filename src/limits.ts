@@ -9,12 +9,14 @@
  * would have taken. The named constants beside each caller derive from here, so
  * the number is written once and the reason for it stays where it is used.
  *
- * Every manifest limit on a route this server calls is here. The `browser.*`
+ * Every manifest limit on a route this server calls is here, the run timeout too. The `browser.*`
  * ones are not: their routes are deliberately not exposed as tools.
  */
 export const LIMITS = {
   'agent.maxSteps': 100,
   'agent.maxBackgroundSteps': 500,
+  /** The wall-clock limit on every agent run. */
+  'agent.runTimeoutSeconds': 3600,
   'clipboard.writeMaxBytes': 64 * 1024,
   /** Entries in one exec's `env`. */
   'exec.maxEnvEntries': 64,

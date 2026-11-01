@@ -375,7 +375,7 @@ describe('flat and nested chat failures', () => {
     );
     const result = await connection.call('run_agent_chat', task);
     expect(result.isError).toBe(true);
-    expect(text(result)).toContain('a role that changed');
+    expect(text(result)).toContain('a role too low');
     expect(text(result)).toContain('Retrying does not help');
     expect(text(result)).not.toContain('permission_error');
     expect(text(result)).not.toContain('model-provider account');
@@ -557,7 +557,7 @@ describe('flat and nested chat failures', () => {
     expect(result.isError).toBe(true);
     expect(text(result)).toContain('The edge refused this request');
     expect(text(result)).not.toContain('without a usable error message');
-    expect(text(result)).toContain('a role that changed');
+    expect(text(result)).toContain('a role too low');
     expect(text(result)).toContain('Retrying does not help');
     expect(text(result)).not.toContain('permission_error');
   });

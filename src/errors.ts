@@ -2,8 +2,8 @@
  * What the platform's status codes mean, as types.
  *
  * The distinctions here are the ones an agent has to act on and cannot infer
- * from prose. A 400 never clears and retrying it burns a turn. A 402 is a plan
- * limit, which no amount of waiting fixes and which the user — not the model —
+ * from prose. A 400 rarely clears and retrying it burns a turn. A 402 is a plan
+ * limit or a short balance, which no amount of waiting fixes and which the user — not the model —
  * has to resolve. A 409 is the one that is not uniform: some of them are a
  * passing state and worth retrying, which the platform says with a `reason`,
  * and the rest are a decision about the request that no retry turns into a
@@ -234,7 +234,7 @@ export function reasonAdvice(reason: string | undefined): string | undefined {
       // Only THIS attempt is known to have written nothing: a create-only
       // write whose earlier attempt lost its answer may have written the file
       // itself, and the retry meets that file here.
-      return 'something is already at that path and this attempt wrote nothing. This does not clear by waiting. If an earlier attempt\u2019s outcome was unknown, the file may be yours: read it and compare before choosing another path or overwriting (without overwrite: false, a write replaces it)';
+      return 'what this names is already taken and this attempt wrote nothing. This does not clear by waiting. If an earlier attempt\u2019s outcome was unknown, what is there may be yours: read it and compare before choosing something else or replacing it';
     case 'running':
       // The mirror of `unavailable`, with the opposite fix. The last clause is
       // there because stop_computer is a thing a model can do on its own
@@ -323,7 +323,7 @@ export function codeAdvice(err: APIError): string | undefined {
       return 'this account has no plan that covers this: a trial whose time is over, or no plan at all. Nothing was done, and neither retrying nor waiting changes it: say that a plan is needed';
     case 'INSUFFICIENT_BALANCE':
       // Pay as you go (OPL-6261): the account's prepaid balance, not its plan.
-      return 'this account pays as it goes from prepaid credits, and its balance is too low to start this (it must cover a quarter of an hour of what is started, and at least $0.25). Nothing was started, and neither retrying nor waiting changes it: say that credits need adding on the Billing page, and call get_credits for the balance';
+      return `this account pays as it goes from prepaid credits, and its balance is too low to start this (it must cover a quarter of an hour of what is started, and at least $0.25)${shortfall(err)}. Nothing was started, and neither retrying nor waiting changes it: say that credits need adding on the Billing page, and call get_credits for the balance`;
     case 'TRIAL_CREATE_PENDING':
       // The earlier create can be absent from list_computers while it is under
       // way (the platform refuses on it before it is listed), so the recovery
@@ -343,6 +343,28 @@ export function codeAdvice(err: APIError): string | undefined {
     default:
       return undefined;
   }
+}
+
+/** A figure off a refusal body, in micros, or `undefined` for anything but a safe integer. */
+function micros(body: unknown, field: string): number | undefined {
+  const value = record(body) ? body[field] : undefined;
+  return typeof value === 'number' && Number.isSafeInteger(value) ? value : undefined;
+}
+
+const usd = (value: number): string =>
+  `${value < 0 ? '-' : ''}$${(Math.abs(value) / 1_000_000).toFixed(2)}`;
+
+/**
+ * What an `INSUFFICIENT_BALANCE` refusal says about the gap, as a clause, or
+ * nothing where the platform did not send both figures. `projected_micros` is
+ * what counts toward the start, which after a balance has run out is only the
+ * credit added since, so it need not match get_credits. It can be negative.
+ */
+function shortfall(err: APIError): string {
+  const has = micros(err.body, 'projected_micros');
+  const needs = micros(err.body, 'required_micros');
+  if (has === undefined || needs === undefined) return '';
+  return `: ${usd(has)} counts toward this start and it needs ${usd(needs)}`;
 }
 
 /** The status each code in {@link codeAdvice} arrives with. */
@@ -662,7 +684,9 @@ export function statusAdvice(status: number | undefined, reason?: string): strin
     case 405:
       return 'check the request method against the received Allow metadata, when present. Do not automatically switch methods or replay this request';
     case 403:
-      return 'this account does not permit this — a role that changed or an account suspended, rather than anything wrong with the computer. Retrying does not help, and it can be decided partway through a call, so check what already took effect before repeating anything that writes';
+      return reason === 'revoked'
+        ? 'this account does not permit this — a role that changed or an account suspended, rather than anything wrong with the computer. Retrying does not help, and it can be decided partway through a call, so check what already took effect before repeating anything that writes'
+        : 'this credential may not do this, and the sentence above says why: a role too low for it, an API key limited to a workspace, to some computers or by an expiry, an email address not verified yet, or an account suspended. It is nothing wrong with the computer. Retrying does not help, and it can be decided partway through a call, so check what already took effect before repeating anything that writes';
     case 402:
       return 'the plan on this account, as it stands now, does not cover what was asked for. Not a fault on the computer and not something waiting fixes — say what was refused';
     default:

@@ -171,7 +171,8 @@ describe('what a model is told', () => {
     expect(text).toContain('turned public URLs off');
     expect(text).not.toContain('a role that changed or an account suspended');
     // An ordinary 403 keeps the status's own sentence.
-    expect(textOf(failed(err(403, { error: 'x' })))).toContain(
+    expect(textOf(failed(err(403, { error: 'x' })))).toContain('a role too low');
+    expect(textOf(failed(err(403, { error: 'x', reason: 'revoked' })))).toContain(
       'a role that changed or an account suspended',
     );
   });

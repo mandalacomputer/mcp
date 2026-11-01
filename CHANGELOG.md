@@ -24,7 +24,39 @@ are wording changes, and they are behaviour changes in the way that matters.
 - A refusal for a pay-as-you-go balance too low to start something (a 402 with
   `code` `INSUFFICIENT_BALANCE`) now tells the model that nothing was started,
   that retrying does not help, and that credits need adding on the Billing
-  page. It does not report a plan limit.
+  page. It does not report a plan limit. The answer says how far short the
+  balance is, and carries `projected_micros` and `required_micros`.
+
+### Changed
+
+- `run_agent` and `start_agent_run` are offered from $0.02 of available AI
+  credits, the least the platform admits, rather than $0.25. `max_cost_usd` still
+  starts at 0.25.
+
+### Fixed
+
+- An API key that expires is never given a computer's desktop credentials, and
+  `wait_for_event`, `poll_events` and `wait_for_file_change` went on reporting a
+  stream that was reconnecting, forever. They now end with an answer that names
+  the key and says one without an expiry is needed, and `get_desktop_url` names
+  the same cause. A computer with no desktop credentials under any other key
+  keeps retrying as before.
+- `publish_template` refused because a ref is taken now says to bump
+  `metadata.version`, not to read a path. The advice for `exists` on any other
+  route no longer assumes a file.
+- A `403` without `reason: "revoked"` is no longer put down to a changed role or
+  a suspended account. It names what it can be: a role too low, a key limited by
+  workspace, computers or expiry, or an unverified email address.
+- `write_file` no longer says incomplete contents are never published. That holds
+  only with `overwrite: false`: a default write goes straight to the path, so a
+  failed one can leave part of the new file, with the old one gone.
+- Tool descriptions, the skill and the README now say what the API reference
+  says about pay as you go, a file tool's `400` on a stopped computer, a funded
+  call in flight when a run is cancelled, gateway secret values, `gap` and final
+  webhook deliveries and suspended accounts, background handles that expire, and
+  the `409` for an end time changed during its own stop. The skill lists the
+  `account` tag and the hosted endpoint. The `provider` argument no longer names
+  a variable a hosted session does not use.
 
 ## [0.21.0] - 2026-10-30
 

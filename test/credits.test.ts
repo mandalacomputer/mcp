@@ -147,8 +147,8 @@ describe('deciding whether the account is funded', () => {
   it('is funded only when not frozen and a first model call can be reserved', async () => {
     for (const [credits, expected] of [
       [FUNDED_CREDITS, true],
-      [{ ...FUNDED_CREDITS, available_micros: 250_000 }, true],
-      [{ ...FUNDED_CREDITS, available_micros: 249_999 }, false],
+      [{ ...FUNDED_CREDITS, available_micros: 20_000 }, true],
+      [{ ...FUNDED_CREDITS, available_micros: 19_999 }, false],
       [{ ...FUNDED_CREDITS, available_micros: -1_000_000 }, false],
       [{ ...FUNDED_CREDITS, frozen: true }, false],
       [CREDITS, false],
