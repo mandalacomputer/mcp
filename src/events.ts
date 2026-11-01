@@ -34,6 +34,7 @@ import { WebSocket as UndiciWebSocket } from 'undici';
 import type { Api } from './api.js';
 import { isTransientForPoll, MandalaError } from './errors.js';
 import { type Computer, nothingAdmitted, unwrapComputer } from './format.js';
+import { EXPIRING_KEY_NO_EVENTS, keyExpires } from './key-expiry.js';
 import * as P from './paths.js';
 
 /**
@@ -476,6 +477,8 @@ export class Subscription {
   #wake = new Set<() => void>();
   #socket?: EventSocket;
   #abort = new AbortController();
+  /** Whether this key expires, once the platform has said. See {@link keyExpires}. */
+  #keyExpires: boolean | undefined;
   #lastUsed = Date.now();
   #running = false;
 
@@ -1434,9 +1437,15 @@ export class Subscription {
       return url;
     }
     if (!vnc) {
-      // The platform could not reach the host holding this computer, so it sent
-      // no connect surface at all. Weather, and the backoff is the right
-      // response to it — deliberately not settled.
+      // The answer alone cannot say why it is missing. A host that did not
+      // supply credentials is weather, and the backoff is the right response.
+      // An API key that expires is never given them, on any computer, so that
+      // one case settles. Only a positive answer decides: a read that fails
+      // says nothing, and is asked again on the next turn.
+      this.#keyExpires ??= await keyExpires(this.#api, this.#abort.signal);
+      if (this.#keyExpires) {
+        throw new SettledError(`${this.computerId}: ${EXPIRING_KEY_NO_EVENTS}`);
+      }
       throw new MandalaError(
         `the platform returned no connect surface for ${this.computerId}; its host may be unreachable`,
       );

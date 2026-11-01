@@ -56,7 +56,7 @@ export const STORE_WITH_THREAD =
  */
 export function stopVerdict(stop: string, steps: unknown): string {
   if (stop === 'time_limit')
-    return 'REACHED THE 60-MINUTE WALL-CLOCK LIMIT — the task is unfinished';
+    return `REACHED THE ${P.AGENT_RUN_TIMEOUT_MIN}-MINUTE WALL-CLOCK LIMIT — the task is unfinished`;
   return stop === 'end_turn'
     ? 'finished'
     : stop === 'max_steps'

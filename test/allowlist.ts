@@ -634,7 +634,9 @@ export const UNSENT_BODY_FORMS: ReadonlyMap<string, 'array'> = new Map([
   // computer actions, run as one batch and answered once. The input tools
   // speak the Anthropic action vocabulary, one action per call, so a model
   // sees each answer before it chooses the next action; a batch would act on
-  // a screen nobody has looked at since its first action.
+  // a screen nobody has looked at since its first action. That excludes the
+  // batch `wait_for` check too, which exists only inside a batch: wait_for_event,
+  // wait_for_computer and a screenshot are how a model waits here.
   ['POST computers/:id/input', 'array'],
 ]);
 

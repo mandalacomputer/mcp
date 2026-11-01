@@ -203,12 +203,16 @@ the platform's reason beside the windows.
 `list_windows`, `window_action`, `read_clipboard`, `write_clipboard`,
 `read_file`, `write_file`, `write_file_chunk`, `get_file_upload`, `cancel_file_upload`, `list_directory`
 
-`write_file` replaces a file already at the path. With `overwrite: false` it
-creates the file only if nothing is there, and a path that is taken is refused
-without that attempt writing anything (Linux computers only). Incomplete
-contents are never published at the path, but a failure while publishing or
-answering can leave the complete file there, so after any error read the path
-before retrying or overwriting. `read_file` and `write_file` take `no_wake: true`
+`write_file` writes straight to the path by default: a file already there is
+truncated as the upload starts, so a failed or cut-off write can leave only part
+of the new contents, with the old ones gone. With `overwrite: false` it creates
+the file only if nothing is there, and a path that is taken is refused without
+that attempt writing anything (Linux computers only). Those contents are written
+beside the path and published only once complete, so incomplete contents never
+appear at it, but a failure while publishing or answering can leave the complete
+file there. After any error read the path before retrying or overwriting. When a
+partial file must never appear at the path, use `overwrite: false` or
+`write_file_chunk`. `read_file` and `write_file` take `no_wake: true`
 to refuse (409) rather than resume a computer that is not running. For
 embedders, the `Api` raises that refusal as `FileExistsError`, and a
 create-only 409 whose reason could not be read as `CreateOnlyConflictError`,
@@ -243,7 +247,15 @@ credential in a model's context: minting and revoking API keys (above), and the
 three browser-connection routes (create, renew and revoke). A browser
 connection is a raw capability to drive the guest's browser; the TypeScript
 and Python SDKs' browser drivers create, renew and revoke it and keep it to
-themselves. Every other API operation has a tool.
+themselves. Every other API operation has a tool. One body form is left out as
+well: the input route's batch, and with it the batch `wait_for` check, which
+exists only inside one. The input tools take one action per call, so a model
+sees each answer before it chooses the next.
+
+**A key that expires has no desktop or event stream.** The platform withholds a
+computer's desktop credentials from such a key, so `get_desktop_url`,
+`wait_for_event`, `poll_events` and `wait_for_file_change` answer that a key
+without an expiry is needed, once the key's own record confirms it expires.
 
 **Every tool refuses an argument it does not declare.** A misspelt or unknown
 key is an input error naming the key, and nothing is sent — so a misspelt flag
@@ -1567,8 +1579,9 @@ API budget before it begins. Partial failures stop the run without replaying inp
 
 Without a model key, `run_agent` can run on the account's Mandala AI credits.
 The server reads `GET /credits` on the session's own API key and registers
-`run_agent` only when the account is not frozen and has at least $0.25
-available, which is what a run's first model call reserves. On stdio that read
+`run_agent` only when the account is not frozen and has at least $0.02
+available, the least a run's first model call can reserve (it reserves $0.25, or
+all that is left when less). On stdio that read
 happens once, at startup. Over HTTP it happens per session, at initialize, with
 that caller's bearer token; a caller who sends `X-Model-Key` is not asked, and no
 operator key or setting is ever used. Any failure of the read — a refusal (a
@@ -1597,7 +1610,18 @@ without a model key: the platform runs that route only on the caller's own key.
 `get_credits` reads the ledger: available, balance, held, debt, whether the
 account is frozen, this period's plan grant, the unexpired lots and one page of
 the journal, newest first (`before` and `limit` page through it). Amounts are
-integer USD micros. It needs an account-wide key.
+integer USD micros. It needs an account-wide key. It also says how the account
+pays for computers (`billing_mode`) and, on pay as you go, what they cost an hour
+now and how long the balance lasts at that rate.
+
+Refusals about paying carry a `code`, shown with the answer. `PLAN_REQUIRED` is
+no plan, or a trial that has ended. `TRIAL_LIMIT` is something a trial does not
+include, and `TRIAL_CREATES_USED` a trial out of launches. `TRIAL_CREATE_PENDING`
+is the trial's computer still being made: wait for it rather than create again.
+`TRIAL_FULL` and `TRIAL_UNAVAILABLE` are `503`s that used nothing up. On pay as
+you go, `INSUFFICIENT_BALANCE` is a balance too low to start something; the
+answer gives `projected_micros`, what counts toward the start, and
+`required_micros`, what it needs. A positive runway does not promise a start.
 
 ### Passive directories, activity history and signals
 

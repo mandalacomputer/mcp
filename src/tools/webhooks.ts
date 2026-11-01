@@ -198,7 +198,7 @@ function health(w: Webhook): string {
       case 'failing':
         return 'DISABLED BY THE PLATFORM after a day of failures — update_webhook with enabled: true to start it again';
       case 'plan':
-        return "DISABLED BY THE PLATFORM because the account's plan does not include webhooks — it is enabled again automatically (oldest first, up to the plan's allowance) when a plan with webhooks is chosen; update_webhook with enabled: true is refused (402) until then";
+        return "DISABLED BY THE PLATFORM because the account's plan does not include webhooks — for the first 24 hours it still receives computer.stopped, and it is enabled again automatically (oldest first, up to the plan's allowance) when a plan with webhooks is chosen; update_webhook with enabled: true is refused (402) until then";
       case 'customer':
         return 'disabled by you';
       default:
@@ -322,7 +322,7 @@ export const registerWebhooks: Registrar = (server, session) => {
     'create_webhook',
     {
       title: 'Subscribe an endpoint to this account’s events',
-      description: `Subscribe an HTTPS endpoint to this account’s events. THE ANSWER CARRIES THE SIGNING SECRET ONCE — it is not readable again, so store it or hand it over before doing anything else. Each event is POSTed as the same JSON object wait_for_event hands you, byte for byte, signed with Standard Webhooks v1 headers (webhook-id, webhook-timestamp, webhook-signature); the receiver should verify the raw body, acknowledge with a 2xx before doing the work, and refuse a timestamp more than ${P.WEBHOOK_REPLAY_WINDOW_S} seconds off. A failing delivery gets eight attempts (seven retries) over about fourteen hours; an endpoint that keeps failing for a day is disabled. The url must be https, at most ${P.WEBHOOK_URL_MAX} characters, must not carry a username or password, and must resolve to a public address — a private or loopback address is refused. Paid plans allow ten subscriptions; an account with no plan allows none.`,
+      description: `Subscribe an HTTPS endpoint to this account’s events. THE ANSWER CARRIES THE SIGNING SECRET ONCE — it is not readable again, so store it or hand it over before doing anything else. Each event is POSTed as the same JSON object wait_for_event hands you, byte for byte, signed with Standard Webhooks v1 headers (webhook-id, webhook-timestamp, webhook-signature); the receiver should verify the raw body, acknowledge with a 2xx before doing the work, and refuse a timestamp more than ${P.WEBHOOK_REPLAY_WINDOW_S} seconds off. A failing delivery gets eight attempts (seven retries) over about fourteen hours; an endpoint that keeps failing for a day is disabled. The url must be https, at most ${P.WEBHOOK_URL_MAX} characters, must not carry a username or password, and must resolve to a public address — a private or loopback address is refused. Paid plans allow ten subscriptions; an account with no plan allows none. Two bodies are not events: a gap delivery, sent whatever events filters on, says events were lost and the receiver should reconcile with a listing, and a test delivery has type webhook.test. While the account is suspended nothing is queued or sent, and events in that time are skipped for good, with no gap standing in for them. When a plan without webhooks ends a subscription it still receives computer.stopped for 24 hours.`,
       inputSchema: {
         url: z
           .string()

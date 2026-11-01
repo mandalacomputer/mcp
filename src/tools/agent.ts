@@ -66,7 +66,7 @@ export const maxSteps = (bill: string, bound: string, cap: number = P.AGENT_MAX_
     .max(cap)
     .default(20)
     .describe(
-      `How many ACTIONS the loop may take on the desktop. Not a count of model calls and not a proxy for ${bill}: one model reply can ask for several actions and spends a step on each, a paused turn is resubmitted for tokens and no step, and a bash call or a cursor read takes no screenshot. So a run can make more model calls than steps AND more steps than screenshots — bound the work with this, and ${bound}. Defaults to 20; accepts 1 to ${cap}. All agent runs have a fixed 60-minute wall-clock limit and end with stop time_limit when it is reached.`,
+      `How many ACTIONS the loop may take on the desktop. Not a count of model calls and not a proxy for ${bill}: one model reply can ask for several actions and spends a step on each, a paused turn is resubmitted for tokens and no step, and a bash call or a cursor read takes no screenshot. So a run can make more model calls than steps AND more steps than screenshots — bound the work with this, and ${bound}. Defaults to 20; accepts 1 to ${cap}. All agent runs have a fixed ${P.AGENT_RUN_TIMEOUT_MIN}-minute wall-clock limit and end with stop time_limit when it is reached.`,
     );
 
 type RunArgs = {
@@ -137,7 +137,7 @@ export const BYOK_BILLING =
   'Runs on the Anthropic or OpenAI key this server was configured with, and bills that key for every step.';
 /** Who pays for a run on AI credits. */
 export const FUNDED_BILLING =
-  "Runs on this account's Mandala AI credits, because no model key is configured: each model call reserves $0.25 and is charged for its usage, max_cost_usd caps what one run may start, and get_credits reads the balance.";
+  "Runs on this account's Mandala AI credits, because no model key is configured: each model call reserves $0.25, or all that is left down to $0.02, and is charged for its usage, max_cost_usd caps what one run may start, and get_credits reads the balance.";
 
 /**
  * What a run on a model key takes, shared by run_agent and start_agent_run: the
@@ -152,7 +152,7 @@ export const BYOK_RUN_ARGS = {
     .enum(['anthropic', 'openai'])
     .optional()
     .describe(
-      'Inferred from model when omitted. Select openai to use gpt-6.1-sol by default. The configured MANDALA_MODEL_KEY must match the provider.',
+      'Inferred from model when omitted. Select openai to use gpt-6.1-sol by default. The configured model key must match the provider.',
     ),
   model: nonblankModel
     .optional()

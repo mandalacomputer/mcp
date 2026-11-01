@@ -98,6 +98,9 @@ export function image(bytes: Uint8Array, mimeType: string, note?: string): CallT
   return { content };
 }
 
+const record = (value: unknown): value is Record<string, unknown> =>
+  value !== null && typeof value === 'object' && !Array.isArray(value);
+
 /** Only bounded diagnostic scalars enter a tool result; full evidence stays on APIError. */
 export function errorMetadata(source: APIError | Record<string, unknown>): {
   fields: Record<string, string | number>;
@@ -115,6 +118,12 @@ export function errorMetadata(source: APIError | Record<string, unknown>): {
           allow: source.allow,
           www_authenticate: source.wwwAuthenticate,
           retry_after_ms: source.retryAfterMs,
+          ...(source.code === 'INSUFFICIENT_BALANCE' && record(source.body)
+            ? {
+                projected_micros: source.body.projected_micros,
+                required_micros: source.body.required_micros,
+              }
+            : {}),
         }
       : source;
   const fields: Record<string, string | number> = {};
@@ -137,6 +146,11 @@ export function errorMetadata(source: APIError | Record<string, unknown>): {
   for (const name of ['status', 'retry_after_ms']) {
     const value = data[name];
     if (typeof value === 'number' && Number.isFinite(value) && value >= 0) fields[name] = value;
+  }
+  // Signed: what counts toward a start can be below zero.
+  for (const name of ['projected_micros', 'required_micros']) {
+    const value = data[name];
+    if (Number.isSafeInteger(value)) fields[name] = value as number;
   }
   return { fields, omitted };
 }

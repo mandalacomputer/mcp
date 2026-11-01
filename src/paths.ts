@@ -1141,6 +1141,8 @@ export const signals = (id: string) => `${computer(id)}/signals`;
  * `max_steps` is a 400 there, so it is refused here before the call.
  */
 export const AGENT_MAX_STEPS = LIMITS['agent.maxSteps'];
+/** The wall-clock limit on every agent run, in minutes, for what tools say about it. */
+export const AGENT_RUN_TIMEOUT_MIN = LIMITS['agent.runTimeoutSeconds'] / 60;
 export const AGENT_MAX_BACKGROUND_STEPS = LIMITS['agent.maxBackgroundSteps'];
 export const CHAT_COMPLETIONS = 'chat/completions';
 export function chatBody(args: {

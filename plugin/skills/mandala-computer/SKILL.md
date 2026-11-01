@@ -22,9 +22,10 @@ application, a file that has to be seen rendered, or a machine that must not be
 this one — untrusted code, a clean OS, a second network position.
 
 Use local execution when a shell command needs no remote desktop or isolated
-environment. A running Mandala computer consumes running capacity; runtime and
-individual exec calls do not add a charge to the monthly subscription. AI-credit
-usage is charged separately. Use `exec` when the task belongs on the remote computer.
+environment. A running Mandala computer consumes running capacity. On a plan,
+runtime and individual exec calls do not add a charge to the monthly
+subscription; on pay as you go, running time is charged from the credit balance.
+AI-credit usage is charged separately. Use `exec` when the task belongs on the remote computer.
 
 ## Setup, once
 
@@ -97,7 +98,7 @@ Optional configuration:
   Mixed tools such as `wait_for_computer` and `snapshot_schedule` are also
   withheld. `screenshot`, `read_clipboard` and `list_windows` keep the hint.
 - `MANDALA_TAGS=input,guest` — select a union of lowercase tool tags:
-  `activities`, `agent`, `artifacts`, `computers`, `credential_gateway`, `events`,
+  `account`, `activities`, `agent`, `artifacts`, `computers`, `credential_gateway`, `events`,
   `executions`, `files`, `guest`, `input`, `lifecycle`, `public_urls`, `results`, `secrets`,
   `signals`, `snapshots`, `ssh`, `templates`, `usage`, `webhooks`.
   Entries are comma-separated, trimmed and deduplicated; empty entries are
@@ -154,6 +155,10 @@ that session only if they did and the filters permit it. Without that header,
 `run_agent` and `start_agent_run` are registered when the caller's own account's AI credits can
 pay, checked when the session starts.
 
+The endpoint at `https://app.mandala.computer/mcp` is this HTTP server, hosted:
+nothing to install, and it signs in through the browser with OAuth rather than a
+key (`claude mcp add --transport http mandala https://app.mandala.computer/mcp`).
+
 ## The shape of a session
 
 ```
@@ -177,7 +182,8 @@ suspend_computer()  or  stop_computer()   ALWAYS, before you say you are done
 4. **Do the work** — see the next two sections.
 5. **Release running capacity when finished.** A forgotten computer occupies
    capacity until idle suspend catches it after 30 minutes. Suspending frees
-   capacity without reducing the monthly subscription charge. `suspend_computer` is a pause (RAM to disk, resume in a
+   capacity; on a plan it does not reduce the monthly subscription charge, and on
+pay as you go it stops compute being charged. `suspend_computer` is a pause (RAM to disk, resume in a
    second, same session); `stop_computer` is a shutdown (disk kept, session
    gone). Say which you did and why in your final message, and name the
    computer so the user can find it. `delete_computer` only when the user asked
@@ -367,8 +373,9 @@ starting, so remove the binding first. Never repeat a value back to the user.
 ## Calling an API without giving the computer the key
 
 When code inside the computer needs an API key the user would rather it never
-held, store the key with `create_secret` and bind it with
-`create_credential_gateway_binding`: an exact `https://` origin, a path prefix
+held, store the key with `create_secret` (its value must be printable ASCII with no
+spaces or line breaks, or every call through the binding answers 503) and bind
+it with `create_credential_gateway_binding`: an exact `https://` origin, a path prefix
 and the methods allowed, as narrow as the task needs. The computer then calls
 the answered `base_url` followed by the provider path with the placeholder as
 its API key (`Authorization: Bearer <placeholder>` or `x-api-key:
@@ -449,7 +456,9 @@ application — stops being something you redo.
 The server renders every failure as one sentence, and the sentence usually
 says what to do. The judgement it cannot make for you:
 
-- **A 400 never clears.** Do not resend it. Change the request or stop.
+- **A 400 does not clear on its own.** Do not resend it. Change the request or
+  stop. The exception is a file tool on a stopped computer: `start_computer`,
+  then send it again.
 - **A 401 or a 403 is about you, not the computer, and either can arrive
   mid-request.** Who you are is checked again while a call is in flight, before
   anything further is done — so a revoked key, a role that changed or an account
@@ -461,8 +470,13 @@ says what to do. The judgement it cannot make for you:
   retrying.
 - **A 402 is a plan limit** (except from an agent run, where it is the model
   provider's billing error, or the account's AI credits running out when it
-  names a top-up page — see above). Waiting does not fix it and
-  neither do you — tell the user what was refused and leave it there. One that
+  names a top-up page — see above). `PLAN_REQUIRED` is no plan, or a trial that
+  has ended; `TRIAL_LIMIT` is something a trial does not include;
+  `TRIAL_CREATES_USED` is a trial out of launches. On pay as you go,
+  `INSUFFICIENT_BALANCE` is a balance too low to start this, and the answer says
+  how far short: credits need adding on the Billing page. Waiting does not fix
+  any of these and neither do you — tell the user what was refused and leave it
+  there. One that
   arrives after a long wait means the same thing rather than something going
   wrong on the machine: the plan, as it stands now, does not cover the work.
 - **A 404 is not proof the computer is gone.** An API key can be scoped to a
@@ -562,5 +576,6 @@ off a listing that said `INCOMPLETE`.
   reading `snapshot_holdings` first and passing its fingerprint as `expect`.
 - Use `get_usage` to answer how many resources the computers used. Its first
   line says if a hypervisor could not be reached and the figure is low. It does
-  not report monetary cost; runtime does not add a subscription charge, and
+  not report monetary cost. On a plan runtime does not add a subscription
+  charge; on pay as you go `get_credits` is the record of what was charged.
   AI-credit usage is separate.

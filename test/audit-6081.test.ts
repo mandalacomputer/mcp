@@ -315,6 +315,7 @@ describe('the manifest limits this server checks before sending (M1)', () => {
       [
         'agent.maxSteps',
         'agent.maxBackgroundSteps',
+        'agent.runTimeoutSeconds',
         'clipboard.writeMaxBytes',
         'exec.maxEnvEntries',
         'exec.maxEnvEntryBytes',
