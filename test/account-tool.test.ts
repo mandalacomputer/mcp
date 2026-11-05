@@ -312,6 +312,21 @@ describe('complete aggregate consistency', () => {
   });
 });
 
+it('reads an absent macos capability as false and passes a granted one through', async () => {
+  const older = structuredClone(ACCOUNT_QUOTA) as Record<string, unknown>;
+  older.capabilities = { windows: true };
+  respond(older);
+  const before = await (await open()).call('get_account');
+  expect(before.isError).not.toBe(true);
+  expect(data(before).capabilities).toEqual({ windows: true, macos: false });
+  const granted = structuredClone(ACCOUNT_QUOTA);
+  granted.capabilities = { windows: false, macos: true };
+  respond(granted);
+  const after = await (await open()).call('get_account');
+  expect(after.isError).not.toBe(true);
+  expect(data(after).capabilities).toEqual({ windows: false, macos: true });
+});
+
 const malformedFields: [string, unknown][] = [
   ['scope', 'workspace'],
   ['advisory', false],
@@ -322,6 +337,8 @@ const malformedFields: [string, unknown][] = [
   ['complete.computers', 'true'],
   ['complete.snapshots', undefined],
   ['capabilities.windows', 0],
+  ['capabilities.macos', 'true'],
+  ['capabilities.macos', null],
   ['limits.vcpu_pool', -1],
   ['limits.ram_pool_mb', '4096'],
   ['limits.disk_pool_gb', 0.5],

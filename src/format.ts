@@ -403,6 +403,7 @@ export type Computer = {
    * that answers is live and carries no state at all.
    */
   state?: string;
+  /** `linux`, `windows` or `macos`; an open set. */
   os?: string;
   template?: string;
   cpu?: number;

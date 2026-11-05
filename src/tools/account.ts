@@ -22,7 +22,8 @@ const report = z
       snapshot_storage_bytes: count,
     }),
     per_computer: z.object({ max_vcpu: count, max_ram_mb: count, max_disk_gb: count }),
-    capabilities: z.object({ windows: z.boolean() }),
+    // `macos` is absent from platforms that predate macOS computers; it reads false there.
+    capabilities: z.object({ windows: z.boolean(), macos: z.boolean().default(false) }),
     complete: z.object({ computers: z.boolean(), snapshots: z.boolean() }),
     usage: z.object({
       kept_computers: count.nullable(),
@@ -387,7 +388,7 @@ export const registerAccount: Registrar = (server, session) => {
     {
       title: 'Read current account quota',
       description:
-        'Read account-wide plan ceilings, per-computer maxima, current consumption and advisory remaining quota. Viewer or stronger; workspace-scoped keys receive aggregates without resource identities. No arguments, selected computer or model key. Incomplete computer/snapshot groups have null consumption and remaining values, meaning unknown. Snapshot headroom covers indexed stored bytes, excludes in-flight capture reservations and cannot promise that a capture will fit. This observation reserves nothing; later mutations still enforce quota.',
+        'Read account-wide plan ceilings, per-computer maxima, capabilities (capabilities.windows: the plan permits Windows computers; capabilities.macos: this account may create macOS computers, available on request), current consumption and advisory remaining quota. Viewer or stronger; workspace-scoped keys receive aggregates without resource identities. No arguments, selected computer or model key. Incomplete computer/snapshot groups have null consumption and remaining values, meaning unknown. Snapshot headroom covers indexed stored bytes, excludes in-flight capture reservations and cannot promise that a capture will fit. This observation reserves nothing; later mutations still enforce quota.',
       inputSchema: z.strictObject({}),
       annotations: readAnnotations,
     },
