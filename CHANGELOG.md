@@ -14,6 +14,14 @@ are wording changes, and they are behaviour changes in the way that matters.
 
 ## [Unreleased]
 
+### Added
+
+- macOS computers, available on request. `get_account` reports
+  `capabilities.macos`: `true` only when this account may create macOS
+  computers. Against a platform that does not send it, it reads `false`, and
+  the tool's description now says what both capabilities mean. A computer's or
+  template's `os` can now be `macos` as well as `linux` and `windows`.
+
 ## [0.22.0] - 2026-11-01
 
 ### Added

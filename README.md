@@ -610,7 +610,11 @@ and remains available with read-only and no-lifecycle filters. Select the
 `account` tag to expose it on its own.
 
 The report includes the effective plan, pool ceilings, per-computer maxima,
-Windows capability, current consumption and remaining quota. Configured CPU and
+capabilities, current consumption and remaining quota. `capabilities.windows`
+says whether the plan permits Windows computers; `capabilities.macos` says
+whether this account may create macOS computers (`os: "macos"`), which are
+available on request rather than with a plan, and reads `false` against a
+platform that does not send it. Configured CPU and
 disk include kept computers regardless of power state; running or reserved RAM
 includes current reservations. CPU, MB, GB and snapshot bytes retain the API's
 units. `get_usage` separately reports historical metered consumption over time.
