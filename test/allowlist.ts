@@ -517,7 +517,7 @@ export const PARAMETERS: ReadonlyMap<string, readonly string[]> = new Map([
   // hundred, always.
   ['POST webhooks/:id/rotate', []],
   ['POST webhooks/:id/test', []],
-  ['GET webhooks/:id/deliveries', []],
+  ['GET webhooks/:id/deliveries', ['query:before', 'query:limit', 'query:state']],
 
   // A key is one OpenSSH public key line; `name` is optional.
   ['GET ssh-keys', []],
@@ -620,6 +620,14 @@ export const UNIMPLEMENTED_PARAMETERS: ReadonlySet<string> = new Set([
   // platform refuses `store: false` on it, and `true` is the default, so there
   // is nothing worth sending.
   'POST computers/:id/agent/runs  body:store',
+
+  // Not yet sent (platform OPL-6466): the deliveries listing gained paging
+  // (`before`, `limit`) and a `state` filter. This SDK still reads the first
+  // page only, which is the newest deliveries, as before. A gap to close, not a
+  // decision: remove these three when the listing takes them.
+  'GET webhooks/:id/deliveries  query:before',
+  'GET webhooks/:id/deliveries  query:limit',
+  'GET webhooks/:id/deliveries  query:state',
 ]);
 
 /**
