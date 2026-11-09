@@ -76,9 +76,11 @@ export const V1_ROUTES: Route[] = [
   r('GET', 'computers/:id/executions/:executionId'),
   r('GET', 'computers/:id/executions/:executionId/output'),
   r('POST', 'computers/:id/executions/:executionId/retained-output'),
+  r('GET', 'computers/:id/results'),
   r('GET', 'computers/:id/results/:resultId'),
   r('GET', 'computers/:id/results/:resultId/output'),
   r('DELETE', 'computers/:id/results/:resultId'),
+  r('GET', 'computers/:id/artifacts'),
   r('POST', 'computers/:id/artifacts'),
   r('GET', 'computers/:id/artifacts/:artifactId'),
   r('GET', 'computers/:id/artifacts/:artifactId/download'),
@@ -381,9 +383,11 @@ export const PARAMETERS: ReadonlyMap<string, readonly string[]> = new Map([
     'POST computers/:id/executions/:executionId/retained-output',
     ['body:max_bytes_per_stream', 'body:retention_seconds'],
   ],
+  ['GET computers/:id/results', []],
   ['GET computers/:id/results/:resultId', []],
   ['GET computers/:id/results/:resultId/output', ['query:stream', 'query:offset', 'query:limit']],
   ['DELETE computers/:id/results/:resultId', []],
+  ['GET computers/:id/artifacts', []],
   [
     'POST computers/:id/artifacts',
     [
@@ -679,6 +683,13 @@ export const UNIMPLEMENTED = new Set<string>([
   // Agent threads and background runs left this list in OPL-6085, reached by
   // list_agent_threads, get_agent_thread, delete_agent_thread,
   // start_agent_run, get_agent_run, list_agent_runs and cancel_agent_run.
+
+  // Not yet wrapped (platform OPL-6465): the platform now lists a computer's
+  // retained artifacts and retained results, each with the computer's and the
+  // account's quota usage. Neither takes a parameter. A gap to close, not a
+  // decision: remove these two when a tool lists them.
+  'GET computers/:id/artifacts',
+  'GET computers/:id/results',
 ]);
 
 /**
