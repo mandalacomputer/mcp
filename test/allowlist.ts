@@ -161,6 +161,7 @@ export const V1_ROUTES: Route[] = [
   // than the account, and whether SSH is on for one computer.
   r('GET', 'ssh-keys'),
   r('POST', 'ssh-keys'),
+  r('POST', 'ssh-keys/challenge'),
   r('DELETE', 'ssh-keys/:id'),
   r('GET', 'computers/:id/ssh'),
   r('PUT', 'computers/:id/ssh'),
@@ -525,7 +526,8 @@ export const PARAMETERS: ReadonlyMap<string, readonly string[]> = new Map([
 
   // A key is one OpenSSH public key line; `name` is optional.
   ['GET ssh-keys', []],
-  ['POST ssh-keys', ['body:public_key', 'body:name']],
+  ['POST ssh-keys', ['body:public_key', 'body:name', 'body:challenge', 'body:signature']],
+  ['POST ssh-keys/challenge', []],
   ['DELETE ssh-keys/:id', []],
   ['GET computers/:id/ssh', []],
   ['PUT computers/:id/ssh', ['body:enabled']],
@@ -632,6 +634,14 @@ export const UNIMPLEMENTED_PARAMETERS: ReadonlySet<string> = new Set([
   'GET webhooks/:id/deliveries  query:before',
   'GET webhooks/:id/deliveries  query:limit',
   'GET webhooks/:id/deliveries  query:state',
+
+  // Not yet sent (platform OPL-6531): adding a key can carry a signature over a
+  // challenge from `POST ssh-keys/challenge`, proving the caller holds the
+  // private half. A key added without one still registers, as before, and
+  // connects to a computer named by its id. A gap to close, not a decision:
+  // remove these two when the key tool takes them.
+  'POST ssh-keys  body:challenge',
+  'POST ssh-keys  body:signature',
 ]);
 
 /**
@@ -690,6 +700,11 @@ export const UNIMPLEMENTED = new Set<string>([
   // decision: remove these two when a tool lists them.
   'GET computers/:id/artifacts',
   'GET computers/:id/results',
+  //
+  // No tool yet (platform OPL-6531): issues the challenge a caller signs to
+  // prove it holds an SSH key's private half before adding it. Leaves this set
+  // in the change that adds the tool.
+  'POST ssh-keys/challenge',
 ]);
 
 /**
@@ -713,7 +728,9 @@ export function patternFor(path: string): string {
         parent === 'snapshots' ||
         parent === 'builds' ||
         parent === 'webhooks' ||
-        parent === 'ssh-keys' ||
+        // `challenge` is a literal after `ssh-keys` (platform OPL-6531); no
+        // key id is one, since every key id starts `sshk-`.
+        (parent === 'ssh-keys' && seg !== 'challenge') ||
         parent === 'api-keys' ||
         // The secret store (OPL-4984), pinned to the second segment as the
         // platform pins it: `computers/:id/secrets` has no child to reduce.
