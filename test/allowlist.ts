@@ -35,6 +35,7 @@ export const V1_ROUTES: Route[] = [
   r('POST', 'builds'),
   r('GET', 'builds'),
   r('GET', 'builds/:id'),
+  r('POST', 'builds/:id/cancel'),
   r('GET', 'builds/:id/progress'),
   r('GET', 'builds/:id/events'),
   r('GET', 'sizes'),
@@ -254,6 +255,7 @@ export const PARAMETERS: ReadonlyMap<string, readonly string[]> = new Map([
   // and only documented the way out of it in OPL-3840.
   ['GET builds', ['query:allow_partial']],
   ['GET builds/:id', []],
+  ['POST builds/:id/cancel', []],
   ['GET builds/:id/progress', []],
   ['GET builds/:id/events', []],
   ['GET sizes', []],
@@ -705,6 +707,10 @@ export const UNIMPLEMENTED = new Set<string>([
   // prove it holds an SSH key's private half before adding it. Leaves this set
   // in the change that adds the tool.
   'POST ssh-keys/challenge',
+  //
+  // No tool yet (platform OPL-6467): stops one of the account's running
+  // builds. Leaves this set in the change that adds the tool.
+  'POST builds/:id/cancel',
 ]);
 
 /**
