@@ -469,7 +469,7 @@ export const registerWebhooks: Registrar = (server, session) => {
           return said(
             `The test delivery ${d.id ?? ''} to ${webhook_id} was NOT sent: it was recorded as dropped${d.last_error ? ` (${d.last_error})` : ''}. ` +
               `${d.last_error === 'queue full' ? 'The subscription already holds 10,000 deliveries not yet finished, so its queue is full, and' : 'If its queue is full,'} new events are being dropped the same way until the backlog drains; what was already queued is kept. ` +
-              `list_webhook_deliveries for ${webhook_id} with state: "dropped" lists what was dropped. Missed events can still be replayed from each computer's own event stream (its events_url, shown by get_computer) while the platform holds them: connect to that socket with since set to the cursor of the last delivery that arrived. Do not resend the test until the backlog has drained.`,
+              `list_webhook_deliveries for ${webhook_id} with state: "dropped" lists what was dropped. Missed events can still be replayed from each computer's own event stream while the platform holds them: a client outside this MCP server, holding the account key, reads vnc.events_url from the REST GET /computers/{id} response and connects to that WebSocket with since set to the cursor of the last delivery that arrived. This MCP server does not hand out that URL, because it carries a desktop credential. Do not resend the test until the backlog has drained.`,
             d,
           );
         }

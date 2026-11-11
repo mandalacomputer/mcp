@@ -123,9 +123,12 @@ describe('webhooks', () => {
     expect(text).toContain('was NOT sent');
     expect(text).toContain('queue full');
     expect(text).toMatch(/new events are being dropped/);
-    expect(text).toMatch(/events_url, shown by get_computer/);
+    expect(text).not.toContain('shown by get_computer');
+    expect(text).toContain('GET /computers/{id}');
+    expect(text).toContain('vnc.events_url');
+    expect(text).toMatch(/does not hand out that URL/);
     expect(text).toMatch(
-      /connect to that socket with since set to the cursor of the last delivery/,
+      /connects to that WebSocket with since set to the cursor of the last delivery/,
     );
     expect(text).not.toContain('poll_events');
     expect(text).toContain('state: "dropped"');
