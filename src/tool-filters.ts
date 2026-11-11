@@ -26,7 +26,13 @@ export const TOOL_TAGS = {
   ],
   activities: ['list_activities', 'get_activity', 'get_activity_results'],
   signals: ['read_signals'],
-  artifacts: ['publish_artifact', 'get_artifact', 'read_artifact', 'delete_artifact'],
+  artifacts: [
+    'publish_artifact',
+    'list_artifacts',
+    'get_artifact',
+    'read_artifact',
+    'delete_artifact',
+  ],
   computers: [
     'list_computers',
     'get_computer',
@@ -88,6 +94,7 @@ export const TOOL_TAGS = {
   results: [
     'get_activity_results',
     'retain_execution_output',
+    'list_results',
     'get_result',
     'read_result_output',
     'delete_result',
@@ -113,6 +120,7 @@ export const TOOL_TAGS = {
     'list_builds',
     'get_build',
     'watch_build',
+    'cancel_build',
   ],
   secrets: [
     'get_computer_secrets',
@@ -124,7 +132,14 @@ export const TOOL_TAGS = {
     'replace_secret',
     'delete_secret',
   ],
-  ssh: ['list_ssh_keys', 'add_ssh_key', 'remove_ssh_key', 'get_computer_ssh', 'set_computer_ssh'],
+  ssh: [
+    'list_ssh_keys',
+    'ssh_key_challenge',
+    'add_ssh_key',
+    'remove_ssh_key',
+    'get_computer_ssh',
+    'set_computer_ssh',
+  ],
   public_urls: ['list_public_urls', 'create_public_url', 'update_public_url', 'delete_public_url'],
   credential_gateway: [
     'list_credential_gateway_bindings',

@@ -1,12 +1,20 @@
 import { z } from 'zod';
-import { artifactContent, artifactMetadata, artifactOptions } from '../artifacts.js';
+import {
+  artifactContent,
+  artifactListing,
+  artifactMetadata,
+  artifactOptions,
+} from '../artifacts.js';
 import { refused, said } from '../format.js';
 import * as P from '../paths.js';
 import {
   PRESENTATION_DEFAULT,
   PRESENTATION_MAX,
+  RETAINED_LISTING_MAX,
+  RETAINED_LISTING_SHOWN,
   requireValue,
   retainedCall,
+  retainedListingLine,
   scopeId,
 } from '../results.js';
 import {
@@ -30,7 +38,7 @@ export const registerArtifacts: Registrar = (server, session) => {
     {
       title: 'Publish a nominated immutable file version',
       description:
-        'Explicitly capture a caller-nominated absolute Linux, Windows drive or UNC file path with expected_size and lowercase expected_sha256 already supplied. One guest file read, no preflight stat/list/hash/exec. Optional execution_id is verified caller-selected association, not proof of authorship. Default 8 MiB/max 64 MiB capture cap; default 86400s/max 604800s retention. New version per call; a lost response leaves publication unconfirmed.',
+        'Explicitly capture a caller-nominated absolute Linux, Windows drive or UNC file path with expected_size and lowercase expected_sha256 already supplied. One guest file read, no preflight stat/list/hash/exec. Optional execution_id is verified caller-selected association, not proof of authorship. Default 8 MiB/max 64 MiB capture cap; default 86400s/max 604800s retention. New version per call; a lost response leaves publication unconfirmed, and list_artifacts shows what the computer holds. A full computer or account retained quota (shared with retained output) is refused with 409 result_quota_exhausted and nothing published: it clears only as objects expire or are deleted, so call list_artifacts and list_results and delete what is no longer needed rather than retry.',
       inputSchema: {
         computer_id: computerSchema,
         path: z.string().min(1),
@@ -72,6 +80,30 @@ export const registerArtifacts: Registrar = (server, session) => {
           'Immutable nominated file version; association records caller selection.',
           artifactMetadata(data, id, undefined, body),
         );
+      }),
+  );
+  server.registerTool(
+    'list_artifacts',
+    {
+      title: 'List retained artifacts and quota usage',
+      description:
+        "The computer's published, unexpired artifacts, oldest first, each with its artifact_id, size, workspace_id, execution_id, start and expiry, and how full the computer's and the account's retained quotas are (shared with retained output). How to find an artifact whose publication answer was lost, and what to delete when a publication is refused with result_quota_exhausted. No guest call, wake or capture. A workspace-scoped key sees only artifacts recorded in its workspace.",
+      inputSchema: { computer_id: computerSchema },
+      annotations: readAnnotations,
+    },
+    ({ computer_id }, extra) =>
+      retainedCall(extra.signal, false, async (signal) => {
+        const id = session.resolve(computer_id);
+        requireValue(scopeId(id));
+        const listing = artifactListing(
+          await session.api
+            .with(signal)
+            .boundedJson('GET', P.artifacts(id), RETAINED_LISTING_MAX, 200),
+        );
+        return said(retainedListingLine('artifact', id, listing.artifacts.length, listing.usage), {
+          artifacts: listing.artifacts.slice(0, RETAINED_LISTING_SHOWN),
+          usage: listing.usage,
+        });
       }),
   );
   server.registerTool(

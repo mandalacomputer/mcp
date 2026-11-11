@@ -152,6 +152,9 @@ const REASON_PERMANENT: ReadonlySet<string> = new Set([
   'stale_revision',
   // An evicted screenshot cannot be recovered by replaying its capture name.
   'stale_capture',
+  // The computer runs macOS, which does not offer the feature asked for (SSH,
+  // public URLs, a memory snapshot). Nothing a wait or a retry changes.
+  'unsupported_on_macos',
 ]);
 
 /** Whether waiting can change a classified refusal's answer. */
@@ -248,6 +251,8 @@ export function reasonAdvice(reason: string | undefined): string | undefined {
       // Only the screenshot route sends it today, and that tool words it
       // itself; this is the sentence for any other call that meets it.
       return 'the capture this named is no longer held — a newer screenshot replaced it, or the computer restarted or moved. This does not clear by waiting: take a new screenshot and use the capture it names';
+    case 'unsupported_on_macos':
+      return 'the computer runs macOS, which does not offer this feature (SSH, public URLs or a memory snapshot, for example). Nothing was done, and neither waiting nor sending it again changes that: say that macOS computers do not support it, or use a Linux computer';
     case 'revoked':
       // Reached only on a status statusAdvice has no sentence for, because the
       // formatter asks that one first and the platform sends this word on 401 and
@@ -324,6 +329,12 @@ export function codeAdvice(err: APIError): string | undefined {
     case 'INSUFFICIENT_BALANCE':
       // Pay as you go (OPL-6261): the account's prepaid balance, not its plan.
       return `this account pays as it goes from prepaid credits, and its balance is too low to start this (it must cover a quarter of an hour of what is started, and at least $0.25)${shortfall(err)}. Nothing was started, and neither retrying nor waiting changes it: say that credits need adding on the Billing page, and call get_credits for the balance`;
+    case 'STORAGE_OVER_PLAN':
+      return 'this account moved to a plan that includes less storage, the notice period after that change has ended, and it still stores more than the plan includes, in computer disks and template builds or in snapshots. Nothing was done, and neither retrying nor waiting changes it until what it stores fits: say that computers or snapshots it no longer needs must be deleted, or a larger plan chosen';
+    case 'MACOS_LICENCE_REQUIRED':
+      return 'this computer runs macOS and the account has not accepted Apple\u2019s macOS licence. Nothing was done, and sending it again answers the same until then: say that an owner of the account accepts the licence on the Billing page';
+    case 'result_quota_exhausted':
+      return `the computer\u2019s or the account\u2019s retained quota is full (${err.reason === 'account_quota' ? 'the account\u2019s' : err.reason === 'computer_quota' ? 'the computer\u2019s' : 'which one is in reason'}). Nothing was captured, and retrying does not help: it clears only when retained objects expire or are deleted. Call list_artifacts and list_results to see what is held, and delete_artifact or delete_result what is no longer needed`;
     case 'TRIAL_CREATE_PENDING':
       // The earlier create can be absent from list_computers while it is under
       // way (the platform refuses on it before it is listed), so the recovery
@@ -380,6 +391,9 @@ const CODE_STATUS: Readonly<Record<string, number>> = {
   PLAN_REQUIRED: 402,
   INSUFFICIENT_BALANCE: 402,
   TRIAL_CREATE_PENDING: 409,
+  STORAGE_OVER_PLAN: 402,
+  MACOS_LICENCE_REQUIRED: 403,
+  result_quota_exhausted: 409,
 };
 
 /**

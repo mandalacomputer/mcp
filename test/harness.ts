@@ -217,6 +217,48 @@ export const SSH_KEY = {
   reach: 'everywhere',
 };
 
+/** A challenge to sign before adding an SSH key, as the platform issues it. */
+export const SSH_KEY_CHALLENGE = {
+  challenge: `sshkc-${'ab'.repeat(32)}`,
+  namespace: 'ssh-key-registration@mandala.computer',
+  expires_at: '2026-09-16T12:10:00Z',
+  sign_command: `printf '%s' 'sshkc-${'ab'.repeat(32)}' | ssh-keygen -Y sign -n ssh-key-registration@mandala.computer -f ~/.ssh/id_ed25519`,
+};
+
+const RETAINED_USAGE = {
+  computer: { objects: 2, bytes: 2051, max_objects: 256, max_bytes: 134217728 },
+  account: { objects: 3, bytes: 4099, max_objects: 2000, max_bytes: 536870912 },
+};
+/** GET computers/:id/artifacts: what the computer holds, and both quotas. */
+export const ARTIFACT_LISTING = {
+  artifacts: [
+    {
+      artifact_id: ARTIFACT_ID,
+      size: 3,
+      workspace_id: null,
+      execution_id: null,
+      started_at: '2026-09-16T12:00:00.000Z',
+      expires_at: '2026-09-17T12:00:00.000Z',
+    },
+  ],
+  usage: RETAINED_USAGE,
+};
+/** GET computers/:id/results, the same way. */
+export const RESULT_LISTING = {
+  results: [
+    {
+      result_id: RETAINED_ID,
+      kind: 'background-output',
+      bytes: 2048,
+      workspace_id: null,
+      execution_id: 'exec_0123456789abcdef0123456789abcdef',
+      started_at: '2026-09-16T12:00:00.000Z',
+      expires_at: '2026-09-17T12:00:00.000Z',
+    },
+  ],
+  usage: RETAINED_USAGE,
+};
+
 /** One computer's SSH setting, as a read and a write both answer it. */
 export const SSH_SETTING = {
   computer: 'vm-1',
@@ -867,6 +909,8 @@ function respond(
     });
   }
   if (path.endsWith('/artifacts') && method === 'POST') return json(ARTIFACT_MANIFEST, 201);
+  if (path.endsWith('/artifacts') && method === 'GET') return json(ARTIFACT_LISTING);
+  if (/^\/computers\/[^/]+\/results$/.test(path) && method === 'GET') return json(RESULT_LISTING);
   if (path.endsWith(`/artifacts/${ARTIFACT_ID}`))
     return method === 'DELETE' ? new Response(null, { status: 204 }) : json(ARTIFACT_MANIFEST);
   if (path.endsWith(`/artifacts/${ARTIFACT_ID}/download`))
@@ -950,6 +994,8 @@ function respond(
   if (path === '/builds')
     return json(method === 'GET' ? [TEMPLATE_BUILD] : TEMPLATE_BUILD, method === 'GET' ? 200 : 202);
   if (/^\/builds\/[^/]+$/.test(path)) return json(TEMPLATE_BUILD);
+  if (/^\/builds\/[^/]+\/cancel$/.test(path) && method === 'POST')
+    return json({ ...TEMPLATE_BUILD, status: 'running' }, 202);
   // The store's ref route is THREE segments and is therefore not `/templates`.
   // DELETE and GET answer different shapes, which is the point: a retire has no
   // document left to hand back.
@@ -1026,6 +1072,7 @@ function respond(
     return json(method === 'DELETE' ? { ok: true, revoked_keys: 2 } : WORKSPACE);
   if (path === '/ssh-keys')
     return json(method === 'GET' ? [SSH_KEY] : SSH_KEY, method === 'GET' ? 200 : 201);
+  if (path === '/ssh-keys/challenge' && method === 'POST') return json(SSH_KEY_CHALLENGE, 201);
   if (path.startsWith('/ssh-keys/')) return json({ ok: true });
   // The computer is the one in the path and a write answers what it was sent,
   // so a tool that ignored either would be caught rather than echoed a fixture.

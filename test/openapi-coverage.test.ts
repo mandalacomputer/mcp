@@ -144,6 +144,25 @@ it('requires exact registered/exercise inventory in both directions', () => {
   );
 });
 
+it('lets a tool reach an operation the publication does not list yet', () => {
+  // A mirror lands before its API publishes: the tool's request matches nothing
+  // published, which is neither coverage nor a failure, and needs no exemption.
+  const old = parseOperations(document({ '/one': { get: operation() } }));
+  const observed: Evidence = [
+    { tool: 'actual_tool', requests: [{ method: 'GET', path: '/api/v1/one' }] },
+    { tool: 'early_tool', requests: [{ method: 'POST', path: '/api/v1/future/abc' }] },
+  ];
+  const summary = compareCoverage(old, observed, { unsent: [] });
+  expect(summary.unsent).toEqual([]);
+  expect(summary.awaitingPublication).toEqual([]);
+  expect(() =>
+    compareCoverage(old, observed, {
+      unsent: [],
+      prepublication: [{ operation: 'POST future/:id', expiresAt: '2026-12-01T00:00:00.000Z' }],
+    }),
+  ).toThrow('must name an unsent operation');
+});
+
 it('reports only explicit prepublication gaps and enforces their deadline', () => {
   vi.useFakeTimers();
   vi.setSystemTime(new Date('2026-10-09T00:00:00.000Z'));

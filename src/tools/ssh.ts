@@ -51,9 +51,25 @@ const reachNote = (reach: unknown): string => {
   return typeof reach === 'string' && reach ? `  [reach: ${reach}]` : '';
 };
 
+/**
+ * Whether the registrant proved they hold the private half: `proven` and
+ * `legacy` connect to a computer by id or by name, `unproven` by id only.
+ * Absent from a platform that predates it, and then not shown.
+ */
+const possessionNote = (possession: unknown): string => {
+  if (possession === 'proven') return '  [proven]';
+  if (possession === 'legacy') return '  [legacy: by id or name]';
+  if (possession === 'unproven') return '  [UNPROVEN: connects by computer id only]';
+  return typeof possession === 'string' && possession ? `  [possession: ${possession}]` : '';
+};
+
 /** One key in a line: what a person recognises it by, and where it works. */
 const keyLine = (k: Record<string, unknown>): string =>
-  `${`${text(k.id) ?? '?'}  ${text(k.key_type) ?? '?'}  ${text(k.fingerprint) ?? '?'}  ${text(k.name) ?? ''}`.trimEnd()}${reachNote(k.reach)}`;
+  `${`${text(k.id) ?? '?'}  ${text(k.key_type) ?? '?'}  ${text(k.fingerprint) ?? '?'}  ${text(k.name) ?? ''}`.trimEnd()}${reachNote(k.reach)}${possessionNote(k.possession)}`;
+
+/** What a model is told about an unproven key, wherever one is shown. */
+const UNPROVEN =
+  'A key marked UNPROVEN was added without proof that its registrant holds the private half: it connects to a computer named by its id in the ssh command, and a computer named by its name is refused. To make it proven, add it again with a challenge from ssh_key_challenge and the signature over it.';
 
 /**
  * What a model is told when a listed key is bound to another account: it is
@@ -147,7 +163,7 @@ export const registerSSH: Registrar = (server, session) => {
     {
       title: 'List your SSH keys',
       description:
-        "The SSH public keys registered to the person this API key belongs to — the same list whichever account the key acts on. A key added from the dashboard is accepted by every computer with SSH on, on every account where that person is an owner or member; one added through an API key or connected app (add_ssh_key) only on the account that credential acts on, until the credential is revoked. Shows id, type, SHA256 fingerprint, name and reach: every account, this account only, or another account only (refused on this account's computers; which account is not said).",
+        "The SSH public keys registered to the person this API key belongs to — the same list whichever account the key acts on. A key added from the dashboard is accepted by every computer with SSH on, on every account where that person is an owner or member; one added through an API key or connected app (add_ssh_key) only on the account that credential acts on, until the credential is revoked. Shows id, type, SHA256 fingerprint, name, reach (every account, this account only, or another account only: refused on this account's computers; which account is not said) and possession: proven or legacy keys connect to a computer by id or by name, an unproven key (added without a signature) by computer id only.",
       inputSchema: {},
       annotations: { readOnlyHint: true },
     },
@@ -172,8 +188,9 @@ export const registerSSH: Registrar = (server, session) => {
         if (!rows.length)
           return said('No SSH keys are registered to you. add_ssh_key adds one.', body);
         const elsewhere = rows.some((k) => k.reach === 'another_account');
+        const unproven = rows.some((k) => k.possession === 'unproven');
         return said(
-          `${rows.length} SSH key${rows.length === 1 ? '' : 's'}, oldest first:\n${rows.map(keyLine).join('\n')}${elsewhere ? `\n${ELSEWHERE}` : ''}`,
+          `${rows.length} SSH key${rows.length === 1 ? '' : 's'}, oldest first:\n${rows.map(keyLine).join('\n')}${elsewhere ? `\n${ELSEWHERE}` : ''}${unproven ? `\n${UNPROVEN}` : ''}`,
           body,
         );
       }),
@@ -184,7 +201,7 @@ export const registerSSH: Registrar = (server, session) => {
     {
       title: 'Add an SSH public key',
       description:
-        'Register an OpenSSH public key to the person this API key belongs to. It is accepted only by computers with SSH on in the account this credential acts on, and is removed when the credential is revoked. Accepted: Ed25519, ECDSA (P-256, P-384, P-521), their security-key forms, and RSA of at least 3072 bits. Refused: DSA, shorter RSA, certificates, a line with SSH options in front of the key, and anything but one key on one line. A key can belong to one person only, and each person may hold eight. Never send a PRIVATE key.',
+        'Register an OpenSSH public key to the person this API key belongs to. It is accepted only by computers with SSH on in the account this credential acts on, and is removed when the credential is revoked. Accepted: Ed25519, ECDSA (P-256, P-384, P-521), their security-key forms, and RSA of at least 3072 bits. Refused: DSA, shorter RSA, certificates, a line with SSH options in front of the key, and anything but one key on one line. A key can belong to one person only, and each person may hold eight. Never send a PRIVATE key. PROOF: without challenge and signature the key is UNPROVEN and connects to a computer named by its id only (a computer named by its name is refused). To make it proven, call ssh_key_challenge, have the person run its sign_command with their private key file, and send the challenge and the signature it prints here; a key already registered without proof, to anyone, is then replaced and registered to this person.',
       inputSchema: {
         public_key: z
           .string()
@@ -195,9 +212,21 @@ export const registerSSH: Registrar = (server, session) => {
           .string()
           .optional()
           .describe('A label, up to 60 characters. Defaults to the comment on the line.'),
+        challenge: z
+          .string()
+          .optional()
+          .describe(
+            'A challenge from ssh_key_challenge, exactly as issued (sshkc-…). Send it with signature, or leave both out. A challenge is not a credential: it is single-use and only for this person.',
+          ),
+        signature: z
+          .string()
+          .optional()
+          .describe(
+            "The armored signature the challenge's sign_command printed, from -----BEGIN SSH SIGNATURE----- to -----END SSH SIGNATURE-----, made with this key. Send it with challenge, or leave both out.",
+          ),
       },
     },
-    ({ public_key, name }, extra) =>
+    ({ public_key, name, challenge, signature }, extra) =>
       guarded(async () => {
         // The platform refuses any \r or \n in public_key before it trims, so
         // the newline a .pub file ends in is dropped here, as both SDKs do. An
@@ -213,8 +242,17 @@ export const registerSSH: Registrar = (server, session) => {
             'public_key must not be empty. Nothing was sent. Send the contents of a .pub file.',
           );
         }
+        if ((challenge === undefined) !== (signature === undefined)) {
+          return refused(
+            'challenge and signature go together: send both to prove the key is yours, or neither. Nothing was sent.',
+          );
+        }
         const body = await session.api.with(extra.signal).json<unknown>('POST', P.SSH_KEYS, {
-          body: { public_key: key, ...(name === undefined ? {} : { name }) },
+          body: {
+            public_key: key,
+            ...(name === undefined ? {} : { name }),
+            ...(challenge === undefined ? {} : { challenge, signature }),
+          },
         });
         if (!isRecord(body) || !text(body.id)) {
           return refused(
@@ -222,8 +260,37 @@ export const registerSSH: Registrar = (server, session) => {
             body,
           );
         }
+        // Read off the answer: a platform that predates proof sends no
+        // `possession`, and its keys connect by name as they always did.
+        const unproven = body.possession === 'unproven';
         return said(
-          `Added ${keyLine(body)}. Computers with SSH on accept it within moments.`,
+          `Added ${keyLine(body)}. Computers with SSH on accept it within moments.${unproven ? " It is UNPROVEN: it connects to a computer named by its id only, so give the computer id, not its name, in the ssh command (a name is refused). Add it again with ssh_key_challenge's challenge and the signature over it to make it proven." : ''}`,
+          body,
+        );
+      }),
+  );
+
+  server.registerTool(
+    'ssh_key_challenge',
+    {
+      title: 'Get a challenge to prove an SSH key is yours',
+      description:
+        'Issue a challenge to sign with the private half of a key about to be added, so add_ssh_key registers it as proven: a proven key connects to a computer by id or by name, an unproven one by id only. The answer carries the challenge, its namespace, when it expires, and sign_command: a shell command the PERSON runs on their own machine, replacing the key file it names with their private key file. Never ask for or handle the private key yourself. Send the challenge and the signature it prints to add_ssh_key. A challenge is not a credential: it belongs to this person alone, works once, expires within minutes, and asking for more than eight at once drops the oldest. Refused (403) where adding a key is: a key confined to a workspace, one that expires or is limited to computers, or a holder whose email is not verified.',
+      inputSchema: {},
+    },
+    (_args, extra) =>
+      guarded(async () => {
+        const body = await session.api
+          .with(extra.signal)
+          .json<unknown>('POST', P.sshKeyChallenge());
+        if (!isRecord(body) || !text(body.challenge) || !text(body.sign_command)) {
+          return refused(
+            `POST /ssh-keys/challenge answered with ${shapeOf(body)} and no challenge or sign_command, so there is nothing to sign. Ask for another.`,
+            body,
+          );
+        }
+        return said(
+          `Challenge ${body.challenge}${text(body.expires_at) ? `, valid until ${body.expires_at}` : ''}. Have the person run this with their private key file in place of the one it names:\n\n${body.sign_command}\n\nthen call add_ssh_key with public_key, challenge and the signature it prints.`,
           body,
         );
       }),

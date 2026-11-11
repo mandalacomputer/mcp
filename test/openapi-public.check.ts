@@ -14,15 +14,7 @@ it('covers every operation in the anonymously published OpenAPI contract', async
   const summary = compareCoverage(
     publication.contract,
     operationEvidence(await collectExercises()),
-    {
-      unsent: UNIMPLEMENTED,
-      // The retained-object listings land in this mirror before the platform
-      // publishes them (OPL-6465). Keep the missing publication visible and
-      // time-bounded rather than silently skip it.
-      prepublication: ['GET computers/:id/artifacts', 'GET computers/:id/results'].map(
-        (operation) => ({ operation, expiresAt: '2026-11-30T00:00:00.000Z' }),
-      ),
-    },
+    { unsent: UNIMPLEMENTED },
   );
   console.info(
     JSON.stringify({

@@ -90,6 +90,8 @@ export const OPERATIONS = 'operations';
 export const WORKSPACES = 'workspaces';
 
 /** One SSH key. The id is `sshk-`-shaped. */
+/** The route that issues a challenge to prove an SSH key is yours. */
+export const sshKeyChallenge = () => `${SSH_KEYS}/challenge`;
 export const sshKey = (id: string) => `${SSH_KEYS}/${segment('key_id', id)}`;
 /** One lifecycle operation. The id is `op_`-shaped. */
 export const operation = (id: string) => `${OPERATIONS}/${segment('operation_id', id)}`;
@@ -1117,6 +1119,8 @@ export const result = (id: string, resultID: string) => {
   if (!resultId(resultID)) throw Error('Invalid result_id');
   return `${computer(id)}/results/${resultID}`;
 };
+/** A computer's retained results, listed (GET only). */
+export const results = (id: string) => `${computer(id)}/results`;
 export const resultOutput = (id: string, resultID: string) => `${result(id, resultID)}/output`;
 export const artifacts = (id: string) => `${computer(id)}/artifacts`;
 export const artifact = (id: string, artifactID: string) => {

@@ -16,11 +16,54 @@ are wording changes, and they are behaviour changes in the way that matters.
 
 ### Added
 
+- `cancel_build` stops one of the account's running builds. Its answer still
+  reads `running` until the build has ended, so it says to follow with
+  `get_build` or `watch_build`.
+- `list_artifacts` and `list_results` list what a computer holds, oldest first,
+  with how full the computer's and the account's retained quotas are.
+- `ssh_key_challenge` issues a challenge to prove an SSH key is yours, and
+  `add_ssh_key` takes `challenge` and `signature` (both or neither; one alone is
+  refused before anything is sent). A key added with them is proven and
+  connects to a computer by id or by name.
+- `list_webhook_deliveries` takes `state`, `limit` (1 to 100) and `before`. A
+  full page says older deliveries may exist and gives the `before` to read on
+  with.
+
 - macOS computers, available on request. `get_account` reports
   `capabilities.macos`: `true` only when this account may create macOS
   computers. Against a platform that does not send it, it reads `false`, and
   the tool's description now says what both capabilities mean. A computer's or
   template's `os` can now be `macos` as well as `linux` and `windows`.
+
+### Changed
+
+- `build_template` no longer says a `409` about a secret's value, or a `503`,
+  is worth retrying. A secret `409` (reason `unsupported`) is final until the
+  secret is replaced; a `503` is an unknown outcome, so it says to call
+  `list_builds` before building again. It now describes the one-build-per-account
+  `429` and points to `cancel_build`.
+- `test_webhook` says a test the platform recorded as `dropped` (its queue is
+  full) was never sent, and that new events are being dropped too, instead of
+  saying to wait for the endpoint's answer. For replaying missed events it
+  points to the computer's own event stream: a client holding the account key
+  reads `vnc.events_url` from the REST `GET /computers/{id}` response and
+  connects with `since` set to the last delivered cursor. This server does not
+  hand out that URL, because it carries a desktop credential.
+- An SSH key the platform marks `unproven` is said to connect by computer id
+  only, on `add_ssh_key` and in `list_ssh_keys`, which now shows each key's
+  possession.
+- `get_computer` and the computer listings say when a running computer is held
+  paused by its host for disk space, and not to stop or restart it.
+- `delete_secret` says that a suspended computer's saved session and memory
+  snapshots holding the secret are lost whatever the computer is bound to by
+  then, and how to rotate without losing them.
+- A capture refused because a retained quota is full (`409`
+  `result_quota_exhausted`) says nothing was captured and names the listing and
+  delete tools, instead of saying the capture may have committed.
+  `publish_artifact` and `retain_execution_output` describe that refusal.
+- New refusal words: reason `unsupported_on_macos` is final, and the codes
+  `STORAGE_OVER_PLAN` (`402`) and `MACOS_LICENCE_REQUIRED` (`403`) each say what
+  clears them.
 
 ## [0.22.0] - 2026-11-01
 

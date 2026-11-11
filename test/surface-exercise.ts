@@ -9,6 +9,7 @@ import {
   RETAINED_ID,
   type Recorded,
   RUN_ID,
+  SSH_KEY_CHALLENGE,
   SSH_PUBLIC_KEY,
   THREAD_ID,
 } from './harness.js';
@@ -47,6 +48,8 @@ export const EXERCISE: Record<string, Record<string, unknown>[]> = {
   get_artifact: [{ artifact_id: ARTIFACT_ID }],
   read_artifact: [{ artifact_id: ARTIFACT_ID, max_bytes: 4096 }],
   delete_artifact: [{ artifact_id: ARTIFACT_ID }],
+  list_artifacts: [{}],
+  list_results: [{}],
   list_templates: [{}],
   // The document format, and the store on top of it (OPL-3568,
   // OPL-3789, OPL-3830). Both spellings of the ref tools, because `version` is a
@@ -74,6 +77,7 @@ export const EXERCISE: Record<string, Record<string, unknown>[]> = {
   // what made the way out of it something a client can send.
   list_builds: [{}, { allow_partial: true }],
   get_build: [{ build_id: 'bld-1' }],
+  cancel_build: [{ build_id: 'bld-1' }],
   watch_build: [{ build_id: 'bld-1' }],
   list_sizes: [{}],
   // The third shape is `state` (OPL-4554): a filter the control plane
@@ -162,7 +166,15 @@ export const EXERCISE: Record<string, Record<string, unknown>[]> = {
   ],
   rotate_webhook_secret: [{ webhook_id: 'whk-9f3c1a7e5b2d4c80' }],
   test_webhook: [{ webhook_id: 'whk-9f3c1a7e5b2d4c80' }],
-  list_webhook_deliveries: [{ webhook_id: 'whk-9f3c1a7e5b2d4c80' }],
+  list_webhook_deliveries: [
+    { webhook_id: 'whk-9f3c1a7e5b2d4c80' },
+    {
+      webhook_id: 'whk-9f3c1a7e5b2d4c80',
+      state: 'exhausted',
+      limit: 50,
+      before: 'whd-0123456789abcdef',
+    },
+  ],
   delete_webhook: [{ webhook_id: 'whk-9f3c1a7e5b2d4c80', confirm: true }],
   // SSH: the caller's keys, and one computer's switch. The name is sent on one
   // of the two adds, because the parameter sweep is what proves it can be.
@@ -186,7 +198,16 @@ export const EXERCISE: Record<string, Record<string, unknown>[]> = {
     { idempotency_key: 'create-7f3a' },
   ],
   wait_for_operation: [{ operation_id: 'op_0123456789abcdef01234567', timeout_s: 5 }],
-  add_ssh_key: [{ public_key: SSH_PUBLIC_KEY }, { public_key: SSH_PUBLIC_KEY, name: 'laptop' }],
+  add_ssh_key: [
+    { public_key: SSH_PUBLIC_KEY },
+    { public_key: SSH_PUBLIC_KEY, name: 'laptop' },
+    {
+      public_key: SSH_PUBLIC_KEY,
+      challenge: SSH_KEY_CHALLENGE.challenge,
+      signature: '-----BEGIN SSH SIGNATURE-----\nU1NIU0lH\n-----END SSH SIGNATURE-----',
+    },
+  ],
+  ssh_key_challenge: [{}],
   remove_ssh_key: [{ key_id: 'sshk-3c9a51d07be2f846', confirm: true }],
   get_computer_ssh: [{}],
   set_computer_ssh: [{ enabled: true }, { enabled: false }],

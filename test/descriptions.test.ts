@@ -47,7 +47,7 @@ describe('descriptions corrected for 0.8.0', () => {
     expect(build).toContain('never by value');
     expect(build).toContain('at most 32');
     expect(build).toContain('not worth retrying');
-    expect(build).toContain('a 409 saying a secret');
+    expect(build).toContain('a 409 with reason unsupported');
     const check = tool('check_template')?.description ?? '';
     expect(check).toContain('system/... template');
     expect(check).toContain('cap of 32 references');

@@ -32,17 +32,17 @@ const GROUPS = {
   signals: 'read_signals',
   executions: 'get_execution read_execution_output',
   results:
-    'get_activity_results retain_execution_output get_result read_result_output delete_result',
-  artifacts: 'publish_artifact get_artifact read_artifact delete_artifact',
+    'get_activity_results retain_execution_output list_results get_result read_result_output delete_result',
+  artifacts: 'publish_artifact list_artifacts get_artifact read_artifact delete_artifact',
   snapshots:
     'list_snapshots snapshot_holdings create_snapshot restore_snapshot clone_snapshot snapshot_schedule get_retention delete_snapshot',
   templates:
-    'list_templates get_template_schema check_template publish_template get_template retire_template build_template list_builds get_build watch_build',
+    'list_templates get_template_schema check_template publish_template get_template retire_template build_template list_builds get_build watch_build cancel_build',
   events: 'wait_for_event poll_events wait_for_file_change',
   usage: 'get_usage get_credits',
   secrets:
     'get_computer_secrets set_computer_secrets list_secrets get_secret create_secret set_secret replace_secret delete_secret',
-  ssh: 'list_ssh_keys add_ssh_key remove_ssh_key get_computer_ssh set_computer_ssh',
+  ssh: 'list_ssh_keys ssh_key_challenge add_ssh_key remove_ssh_key get_computer_ssh set_computer_ssh',
   public_urls: 'list_public_urls create_public_url update_public_url delete_public_url',
   credential_gateway:
     'list_credential_gateway_bindings create_credential_gateway_binding delete_credential_gateway_binding',
