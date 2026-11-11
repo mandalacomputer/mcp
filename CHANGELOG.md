@@ -44,7 +44,9 @@ are wording changes, and they are behaviour changes in the way that matters.
   `429` and points to `cancel_build`.
 - `test_webhook` says a test the platform recorded as `dropped` (its queue is
   full) was never sent, and that new events are being dropped too, instead of
-  saying to wait for the endpoint's answer.
+  saying to wait for the endpoint's answer. It points to the computer's own
+  event stream (`events_url`, with `since` set to the last delivered cursor) for
+  replaying missed events.
 - An SSH key the platform marks `unproven` is said to connect by computer id
   only, on `add_ssh_key` and in `list_ssh_keys`, which now shows each key's
   possession.
