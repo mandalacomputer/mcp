@@ -4,11 +4,15 @@ import * as P from '../paths.js';
 import {
   PRESENTATION_DEFAULT,
   PRESENTATION_MAX,
+  RETAINED_LISTING_MAX,
+  RETAINED_LISTING_SHOWN,
   requireValue,
+  resultListing,
   resultMetadata,
   resultPage,
   resultQuery,
   retainedCall,
+  retainedListingLine,
   retainOptions,
   scopeId,
 } from '../results.js';
@@ -52,7 +56,7 @@ export const registerResults: Registrar = (server, session) => {
     {
       title: 'Retain an explicit execution output version',
       description:
-        'Capture one immutable prefix version from volatile guest output by stable execution_id. Explicit guest I/O; never resumes, retries or replays a command. Each call creates a separate version. Capture may commit even if its response is lost. Default 1 MiB per stream/max 4 MiB and default 86400s/max 604800s retention; diagnostics separately capped 64 KiB.',
+        'Capture one immutable prefix version from volatile guest output by stable execution_id. Explicit guest I/O; never resumes, retries or replays a command. Each call creates a separate version. Capture may commit even if its response is lost. Default 1 MiB per stream/max 4 MiB and default 86400s/max 604800s retention; diagnostics separately capped 64 KiB. A full computer or account retained quota (shared with artifacts) is refused with 409 result_quota_exhausted and nothing captured: it clears only as objects expire or are deleted, so call list_results and list_artifacts and delete what is no longer needed rather than retry.',
       inputSchema: {
         computer_id: computerSchema,
         execution_id: z
@@ -78,6 +82,30 @@ export const registerResults: Registrar = (server, session) => {
           'Immutable retained version; readiness does not establish command success or complete guest output.',
           resultMetadata(data, id, undefined, execution_id, body),
         );
+      }),
+  );
+  server.registerTool(
+    'list_results',
+    {
+      title: 'List retained output versions and quota usage',
+      description:
+        "The computer's published, unexpired retained results, oldest first, each with its result_id, kind, bytes charged, workspace_id, execution_id, start and expiry, and how full the computer's and the account's retained quotas are (shared with artifacts). How to find a result whose id was lost, and what to delete when a capture is refused with result_quota_exhausted. No guest call, wake or capture. A workspace-scoped key sees only results recorded in its workspace.",
+      inputSchema: { computer_id: computerSchema },
+      annotations: readAnnotations,
+    },
+    ({ computer_id }, extra) =>
+      retainedCall(extra.signal, false, async (signal) => {
+        const id = session.resolve(computer_id);
+        requireValue(scopeId(id));
+        const listing = resultListing(
+          await session.api
+            .with(signal)
+            .boundedJson('GET', P.results(id), RETAINED_LISTING_MAX, 200),
+        );
+        return said(retainedListingLine('result', id, listing.results.length, listing.usage), {
+          results: listing.results.slice(0, RETAINED_LISTING_SHOWN),
+          usage: listing.usage,
+        });
       }),
   );
   server.registerTool(

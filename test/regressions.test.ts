@@ -3756,6 +3756,13 @@ describe('the tools our own prose tells a model to call', () => {
     'rate_limited',
     // get_agent_thread's paging parameter.
     'before_turn',
+    // OPL-6587: the retained store's quota refusal code, an artifact listing
+    // row's id, a webhook delivery's newest error, and the field of an SSH key
+    // challenge holding the command that signs it. Codes and response fields.
+    'result_quota_exhausted',
+    'artifact_id',
+    'last_error',
+    'sign_command',
   ]);
 
   it('names only tools that exist', async () => {
@@ -5410,6 +5417,9 @@ describe('the event tools and what their annotations claim', () => {
           'get_operation',
           'get_result',
           'list_activities',
+          // Read the retained store's rows and quota usage only (OPL-6587).
+          'list_artifacts',
+          'list_results',
           // Reads only; never a raw key (OPL-5053).
           'list_api_keys',
           // Reads only (OPL-5124).

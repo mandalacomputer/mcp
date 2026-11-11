@@ -218,8 +218,9 @@ embedders, the `Api` raises that refusal as `FileExistsError`, and a
 create-only 409 whose reason could not be read as `CreateOnlyConflictError`,
 which says nothing about the path; `isTransient` is false for both.
 
-**Retained versions** — `retain_execution_output`, `get_result`, `read_result_output`,
-`delete_result`, `publish_artifact`, `get_artifact`, `read_artifact`, `delete_artifact`
+**Retained versions** — `retain_execution_output`, `list_results`, `get_result`,
+`read_result_output`, `delete_result`, `publish_artifact`, `list_artifacts`,
+`get_artifact`, `read_artifact`, `delete_artifact`
 
 **Passive metadata** — `list_activities`, `get_activity`, `get_activity_results`, `read_signals`
 
@@ -233,7 +234,8 @@ which says nothing about the path; `isTransient` is false for both.
 **Your own templates** — `get_template_schema`, `check_template`,
 `publish_template`, `get_template`, `retire_template`
 
-**Building one** — `build_template`, `list_builds`, `get_build`, `watch_build`
+**Building one** — `build_template`, `list_builds`, `get_build`, `watch_build`,
+`cancel_build`
 
 **Account quota** — `get_account`
 
@@ -267,8 +269,8 @@ can never be dropped and the call go ahead without it.
 `get_webhook`, `update_webhook`, `rotate_webhook_secret`, `test_webhook`,
 `list_webhook_deliveries`, `delete_webhook`
 
-**SSH access** — `list_ssh_keys`, `add_ssh_key`, `remove_ssh_key`,
-`get_computer_ssh`, `set_computer_ssh`. Keys belong to the person the API key
+**SSH access** — `list_ssh_keys`, `ssh_key_challenge`, `add_ssh_key`,
+`remove_ssh_key`, `get_computer_ssh`, `set_computer_ssh`. Keys belong to the person the API key
 was issued to, not to the account. A key added with `add_ssh_key` (an API key
 or connected app) is accepted only by computers with SSH on in the account that
 credential acts on, and is removed when the credential is revoked; a key added
@@ -280,7 +282,12 @@ bound to another account cannot be added again here. `remove_ssh_key` removes
 only a key marked this account only: one added from the dashboard (every
 account) or bound to another account answers as if there were no such key, and
 the person removes it from the dashboard. A workspace-scoped key can read keys
-but not add or remove them.
+but not add or remove them. A key added without proof is **unproven**: it
+connects to a computer named by its id, and a computer named by its name is
+refused. To make it proven, `ssh_key_challenge` issues a challenge whose
+`sign_command` the person runs with their private key file, and `add_ssh_key`
+takes the challenge and the signature it prints. `list_ssh_keys` shows each
+key's possession.
 
 **Showing an app on the internet** — `list_public_urls`, `create_public_url`,
 `update_public_url`, `delete_public_url`. A port inside a computer served at
@@ -345,7 +352,12 @@ moment (programs already running keep the old value until a restart).
 `replace_secret`
 and `delete_secret` need the current `revision_id`, and a stale one is a 409.
 `delete_secret` also needs `confirm: true`: a computer still bound to a deleted
-secret cannot start again until that binding is removed. A bound computer runs,
+secret cannot start again until that binding is removed. Saved memory holding a
+deleted secret is lost whatever the computer is bound to by then: a suspended
+computer's saved session, or a memory snapshot, saved while it was bound cannot
+be resumed or restored, and rebinding first does not help. To rotate without
+losing one, resume the computer before the delete, bind it to the new secret,
+then restart it. A bound computer runs,
 and its guest answers, a few seconds before its secrets land, so
 `wait_for_computer(until="guest")` on one also waits until they have;
 `get_computer` shows the gap as "its secrets are still on their way in".
@@ -374,6 +386,13 @@ before a request is sent — replaces the setting whole, and `null` removes it.
 `get_computer` names the proxy and, while the host waits for its credentials,
 says "its egress proxy is waiting for credentials; connections are closed until
 they arrive".
+
+**A computer its host holds paused** — a running computer can be paused by its
+host to recover disk space while its status stays `running`. `get_computer` and
+the listings then say "PAUSED BY ITS HOST", with the reason and since when:
+screenshots, input and commands stall or fail meanwhile, and it resumes by
+itself. Do not stop or restart it: a stop discards the paused session, and a
+start is refused with `503` while the host is still low on disk.
 
 **An end time** — `ends_at` (an RFC 3339 time) or `ends_in_hours` (hours from
 now, fractions allowed) on `create_computer` and `update_computer` makes the
@@ -432,8 +451,8 @@ with an error listing all valid tags.
 | `guest` | `exec`, `exec_poll`, `exec_kill`, `open_url`, `list_windows`, `window_action`, `read_clipboard`, `write_clipboard` |
 | `files` | `list_directory`, `read_file`, `write_file`, `write_file_chunk`, `get_file_upload`, `cancel_file_upload`, `wait_for_file_change` |
 | `executions` | `get_execution`, `read_execution_output` |
-| `results` | `get_activity_results`, `retain_execution_output`, `get_result`, `read_result_output`, `delete_result` |
-| `artifacts` | `publish_artifact`, `get_artifact`, `read_artifact`, `delete_artifact` |
+| `results` | `get_activity_results`, `retain_execution_output`, `list_results`, `get_result`, `read_result_output`, `delete_result` |
+| `artifacts` | `publish_artifact`, `list_artifacts`, `get_artifact`, `read_artifact`, `delete_artifact` |
 | `snapshots` | All snapshot tools listed above, including `get_retention` |
 | `templates` | `list_templates`, all your-own-template tools and all build tools listed above |
 | `events` | `wait_for_event`, `poll_events`, `wait_for_file_change` |
@@ -823,7 +842,14 @@ again, which is why the first line of that answer says so; `rotate_webhook_secre
 is the only way to another. This server only sets webhooks up and reads how
 they are doing — it does not receive them and has no `verify`, because a
 server with no endpoint has nothing to verify. `list_webhook_deliveries` is
-where a delivery that ran out of retries shows up; nothing is dropped silently.
+where a delivery that ran out of retries, or was dropped because the queue was
+full, shows up; nothing is dropped without a record. It reads the newest hundred
+by default: `state` filters (`exhausted`, `dropped` and so on), `limit` takes
+1 to 100, and `before` pages back from a delivery id. A delivery exhausts about
+fourteen hours after it was queued, so on a busy subscription ask for
+`state: "exhausted"` rather than reading the newest page. A test sent while the
+subscription holds 10,000 unfinished deliveries is recorded as dropped and never
+sent, and `test_webhook` says so.
 
 **A capture outlives the request that starts it.** `POST /computers/:id/snapshots`
 answers `202` with a placeholder row and copies the disk afterwards, which takes
@@ -1009,7 +1035,15 @@ Verified content uses the same lossless `text`/`base64` presentation.
 `delete_artifact` deletes only that stored version, not the guest file; repeat
 404s remain truthful failures.
 
-All eight retained tools resolve the computer selection once. Reads are passive
+`list_artifacts` and `list_results` list what a computer holds, oldest first,
+with how full the computer's and the account's retained quotas are. The two
+kinds share those quotas, and usage also counts captures in progress and deleted
+objects not yet cleaned up. A full quota refuses a capture with `409`
+`result_quota_exhausted` and nothing captured; it clears only as objects expire
+or are deleted, so list and delete rather than retry. The listings are also how
+to find a version whose capture answer was lost.
+
+All ten retained tools resolve the computer selection once. Reads are passive
 but require current authorization and scope availability; retained bytes can be
 unavailable when the host cannot verify access, after expiry or deletion, or
 when storage is unavailable. They never wake a guest or substitute live output.
@@ -1130,7 +1164,8 @@ about storage instead.
 the platform's `reason` word, and each tool's answer says what it means:
 `contention` (something was in flight) and `starting` (the guest agent is still
 inside its boot window) clear, so the same call works in a moment;
-`unavailable`, `running`, `unsupported`, `exists` and `revoked` do not. A 409
+`unavailable`, `running`, `unsupported`, `unsupported_on_macos` (a feature
+macOS computers do not offer), `exists` and `revoked` do not. A 409
 does not mean "wait": `exec`, input and the clipboard on a stopped computer
 answer 409 `unavailable`, and `start_computer` is what fixes that, while
 `running` needs the computer stopped first. A 409 with no `reason` is
@@ -1276,6 +1311,15 @@ platform answers `400` for it now; this server will not send one at all.
 returns immediately with a job; watching it streams the platform's own progress,
 emitting both a progress notification and a log line for each step, so a long
 build is visibly alive rather than indistinguishable from a hang.
+
+**One build runs per account at a time.** While one is running, another
+`build_template` is a `429` naming it. Wait for it, or stop it with
+`cancel_build`: the answer still reads `running` until the build has ended,
+usually within seconds, so follow with `get_build` or `watch_build`. A `503`
+from `build_template` is an outcome nobody knows, and may have started a build
+that counts as running for up to an hour: call `list_builds` before building
+again. A `409` with reason `unsupported` about a secret is final until the
+secret is replaced.
 
 **Set `resetTimeoutOnProgress` if you intend to watch a real build.** The MCP
 default request timeout is 60 seconds and only a progress notification can reset
@@ -1626,6 +1670,12 @@ is the trial's computer still being made: wait for it rather than create again.
 you go, `INSUFFICIENT_BALANCE` is a balance too low to start something; the
 answer gives `projected_micros`, what counts toward the start, and
 `required_micros`, what it needs. A positive runway does not promise a start.
+`STORAGE_OVER_PLAN` (`402`) is an account that moved to a plan with less
+storage and still stores more than it includes once the notice period has
+ended: nothing is created, started or resumed until computers or snapshots are
+deleted or a larger plan chosen. `MACOS_LICENCE_REQUIRED` (`403`) is a macOS
+computer on an account that has not accepted Apple's licence; an owner accepts
+it on the Billing page. Neither clears by sending it again.
 
 ### Passive directories, activity history and signals
 

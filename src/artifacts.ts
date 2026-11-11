@@ -7,6 +7,7 @@ import {
   integer,
   record,
   requireValue,
+  retainedUsage,
   scopeId,
   time,
 } from './results.js';
@@ -115,4 +116,28 @@ export function artifactContent(v: BoundedBytes, manifest: ReturnType<typeof art
   );
   requireValue(createHash('sha256').update(v.bytes).digest('hex') === manifest.sha256);
   return { ...manifest, verified: true, ...binaryContent(v.bytes) };
+}
+
+/** GET computers/:id/artifacts, checked row by row. */
+export function artifactListing(v: unknown) {
+  requireValue(record(v) && Array.isArray(v.artifacts));
+  const rows = v.artifacts.map((r: unknown) => {
+    requireValue(
+      record(r) &&
+        artifactId(r.artifact_id) &&
+        integer(r.size) &&
+        (r.workspace_id === null || scopeId(r.workspace_id)) &&
+        (r.execution_id === null || executionId(r.execution_id)),
+    );
+    requireValue(time(r.expires_at) > time(r.started_at));
+    return {
+      artifact_id: r.artifact_id,
+      size: r.size,
+      workspace_id: r.workspace_id,
+      execution_id: r.execution_id,
+      started_at: r.started_at,
+      expires_at: r.expires_at,
+    };
+  });
+  return { artifacts: rows, usage: retainedUsage(v.usage) };
 }

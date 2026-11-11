@@ -1,6 +1,6 @@
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import type { BoundedBytes } from './api.js';
-import { APIError, CancelledError } from './errors.js';
+import { APIError, CancelledError, codeAdvice } from './errors.js';
 import { refused, withErrorMetadata } from './format.js';
 export const RETAINED_OPERATION_MS = 90000;
 export const PRESENTATION_DEFAULT = 4096,
@@ -276,6 +276,15 @@ export async function retainedCall(
       : ' No fallback or command replay was attempted.';
     if (signal.aborted || error instanceof CancelledError)
       return refused(`Retained operation cancelled.${suffix}`);
+    // A full retained quota is a refusal before anything was reserved, and it
+    // clears only by deleting or expiry, so the generic "may have committed"
+    // sentence would send a model looking for a capture that never happened.
+    const quota =
+      error instanceof APIError && error.code === 'result_quota_exhausted'
+        ? codeAdvice(error)
+        : undefined;
+    if (quota && error instanceof APIError)
+      return withErrorMetadata(refused(`Retained operation refused (HTTP 409): ${quota}.`), error);
     if (error instanceof APIError)
       return withErrorMetadata(
         refused(
@@ -329,4 +338,94 @@ export function synchronousResultId(v: unknown, status: number): string | undefi
     if ((data.length / 4) * 3 - pad > 16 * 1024 * 1024) return undefined;
   }
   return v.result_id;
+}
+
+/** Bytes a retained listing may answer with: the account's whole store fits well inside. */
+export const RETAINED_LISTING_MAX = 1024 * 1024;
+/** Rows a listing shows; the rest are counted, never silently dropped. */
+export const RETAINED_LISTING_SHOWN = 300;
+
+export type RetainedQuota = {
+  objects: number;
+  bytes: number;
+  max_objects: number;
+  max_bytes: number;
+};
+export type RetainedUsage = { computer: RetainedQuota; account: RetainedQuota };
+
+function retainedQuota(v: unknown): RetainedQuota {
+  requireValue(
+    record(v) &&
+      integer(v.objects) &&
+      integer(v.bytes) &&
+      integer(v.max_objects, 1) &&
+      integer(v.max_bytes, 1),
+  );
+  return {
+    objects: v.objects as number,
+    bytes: v.bytes as number,
+    max_objects: v.max_objects as number,
+    max_bytes: v.max_bytes as number,
+  };
+}
+
+/** The quota block of a retained listing, strictly: a quota that cannot be read is never room. */
+export function retainedUsage(v: unknown): RetainedUsage {
+  requireValue(record(v));
+  return { computer: retainedQuota(v.computer), account: retainedQuota(v.account) };
+}
+
+const quotaLine = (q: RetainedQuota) =>
+  `${q.objects} of ${q.max_objects} objects, ${q.bytes} of ${q.max_bytes} bytes`;
+
+/**
+ * The sentence in front of a retained listing: how many, how full each quota
+ * is, and what the usage counts that the rows do not.
+ */
+export function retainedListingLine(
+  noun: 'artifact' | 'result',
+  computer: string,
+  count: number,
+  usage: RetainedUsage,
+): string {
+  const full = (q: RetainedQuota) => q.objects >= q.max_objects || q.bytes >= q.max_bytes;
+  const shown =
+    count > RETAINED_LISTING_SHOWN
+      ? ` Only the oldest ${RETAINED_LISTING_SHOWN} are shown here; ${count - RETAINED_LISTING_SHOWN} newer ones are not.`
+      : '';
+  const tool = noun === 'artifact' ? 'delete_artifact' : 'delete_result';
+  return (
+    `${count} retained ${noun}${count === 1 ? '' : 's'} on ${computer}, oldest first.${shown} ` +
+    `Computer quota: ${quotaLine(usage.computer)}${full(usage.computer) ? ' (FULL)' : ''}. ` +
+    `Account quota: ${quotaLine(usage.account)}${full(usage.account) ? ' (FULL)' : ''}. ` +
+    'Artifacts and retained output share these quotas, and usage also counts captures in progress and deleted objects not yet cleaned up, which are not listed. ' +
+    `A full quota clears only as objects expire or are deleted (${tool}). ` +
+    "A row whose workspace_id differs from the computer's current workspace was recorded before a workspace move: nobody can read it, and only an account owner on an account-wide key can delete it."
+  );
+}
+
+/** GET computers/:id/results, checked row by row. */
+export function resultListing(v: unknown) {
+  requireValue(record(v) && Array.isArray(v.results));
+  const rows = v.results.map((r: unknown) => {
+    requireValue(
+      record(r) &&
+        resultId(r.result_id) &&
+        (r.kind === 'background-output' || r.kind === 'synchronous-output') &&
+        integer(r.bytes) &&
+        (r.workspace_id === null || scopeId(r.workspace_id)) &&
+        (r.execution_id === null || executionId(r.execution_id)),
+    );
+    requireValue(time(r.expires_at) > time(r.started_at));
+    return {
+      result_id: r.result_id,
+      kind: r.kind,
+      bytes: r.bytes,
+      workspace_id: r.workspace_id,
+      execution_id: r.execution_id,
+      started_at: r.started_at,
+      expires_at: r.expires_at,
+    };
+  });
+  return { results: rows, usage: retainedUsage(v.usage) };
 }

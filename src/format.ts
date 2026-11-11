@@ -492,6 +492,12 @@ export type Computer = {
    * does not hold yet; every connection is closed meanwhile. Absent otherwise.
    */
   egress_proxy_pending?: boolean;
+  /**
+   * Present only while a `running` computer is held paused by its host to
+   * recover disk space (`disk_low`, `disk_emergency`, `disk_full` or
+   * `disk_recovery`); its status stays `running`.
+   */
+  host_paused?: { reason?: string; since?: string } | null;
   vnc?: Record<string, unknown>;
 };
 
@@ -645,6 +651,20 @@ export function describe(c: Computer): string {
   if (c.suspended?.at) bits.push(`suspended ${c.suspended.at}`);
   if (typeof c.ends_at === 'string' && c.ends_at) bits.push(`stops by itself at ${c.ends_at}`);
   if (c.unreachable) bits.push('UNREACHABLE — its hypervisor could not be reached');
+  // Held paused by its host to recover disk space: status stays `running`, and
+  // without this a model reads stalled input as a fault and stops it, which
+  // discards the session the host would have resumed.
+  const paused = c.host_paused;
+  if (paused && typeof paused === 'object') {
+    const reason = typeof paused.reason === 'string' && paused.reason ? ` (${paused.reason}` : '';
+    const since =
+      typeof paused.since === 'string' && paused.since
+        ? `${reason ? ', ' : ' ('}since ${paused.since}`
+        : '';
+    bits.push(
+      `PAUSED BY ITS HOST to recover disk space${reason}${since}${reason || since ? ')' : ''}: screenshots, input and commands stall or fail meanwhile, and it resumes by itself once the host has space. Do not stop or restart it: a stop discards the paused session, and a start is refused (503) while the host is still low on disk`,
+    );
+  }
   // Secrets, only where there is something to say: `false` and absent say
   // nothing, and `null` is the platform saying it could not check — not that
   // nothing is pending.

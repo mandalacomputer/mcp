@@ -309,7 +309,7 @@ export const registerTemplates: Registrar = (server, session, opts) => {
     'build_template',
     {
       title: 'Compile a template document into an image',
-      description: `Compile a document that declares \`spec.build\` steps into a golden image. Returns IMMEDIATELY with a job — a build takes minutes, an agent image roughly fifteen — and watch_build is how you follow it. THE NAMESPACE AND THE FAMILY BOTH HAVE TO BE YOURS: \`spec.family\` is what the image is called on a hypervisor, in a directory shared with every computer on that machine, so a build may only write into \`golden-<your account id>\` or that and a \`-\` and a name of your choosing. A document with build steps must LAYER ONTO ONE OF OURS: \`spec.from\` has to name a \`system/...\` template (and spec.build or spec.env need a parent at all); anything else is a 400. \`spec.secrets\` names secrets by ID (csec-…) and the environment variable each appears as, never by value, and at most 32 of them — check_template does not check that cap. They resolve among the account-wide secrets. Its refusals: a 400 saying the document names a secret that does not exist is deliberately the same for a deleted secret, a missing one, a workspace's and another account's, and is not worth retrying, nor is a 400 for a malformed reference or more than 32; a 409 saying a secret's value cannot be read right now, and a 503, are worth retrying. A refusal saying a host is busy is not a problem with your document — one build runs per hypervisor — and is worth retrying. After a successful build, pass the published ref to ${launcher} as \`template\`. ${launcher} may still return image preparation instructions or a capacity refusal; follow that result rather than assuming the successful build made every destination ready. ACCOUNT-WIDE KEYS ONLY: builds are the account's, so a key confined to a workspace is refused (403) here and by list_builds, get_build and watch_build; such a key launches a published template by its ref instead.`,
+      description: `Compile a document that declares \`spec.build\` steps into a golden image. Returns IMMEDIATELY with a job — a build takes minutes, an agent image roughly fifteen — and watch_build is how you follow it. THE NAMESPACE AND THE FAMILY BOTH HAVE TO BE YOURS: \`spec.family\` is what the image is called on a hypervisor, in a directory shared with every computer on that machine, so a build may only write into \`golden-<your account id>\` or that and a \`-\` and a name of your choosing. A document with build steps must LAYER ONTO ONE OF OURS: \`spec.from\` has to name a \`system/...\` template (and spec.build or spec.env need a parent at all); anything else is a 400. \`spec.secrets\` names secrets by ID (csec-…) and the environment variable each appears as, never by value, and at most 32 of them — check_template does not check that cap. They resolve among the account-wide secrets. Its refusals: a 400 saying the document names a secret that does not exist is deliberately the same for a deleted secret, a missing one, a workspace's and another account's, and is not worth retrying, nor is a 400 for a malformed reference or more than 32; a 409 with reason unsupported (a secret's value cannot be read, is not text, or the secret was deleted or left scope) is final until the secret is replaced or the document names another. A 503 is an outcome nobody knows: the build may have started and counts as this account's running build for up to an hour, so call list_builds before building again, never resend blindly. ONE BUILD RUNS PER ACCOUNT AT A TIME: while one of this account's builds is running, another is a 429 that names it, with Retry-After; wait for it to finish (watch_build), or stop it with cancel_build, then build again. A 409 with reason contention is not a problem with your document — every host that can build is busy with another account's build (one build runs per hypervisor) or short of disk — and is worth retrying; a build can run for up to 45 minutes. After a successful build, pass the published ref to ${launcher} as \`template\`. ${launcher} may still return image preparation instructions or a capacity refusal; follow that result rather than assuming the successful build made every destination ready. ACCOUNT-WIDE KEYS ONLY: builds are the account's, so a key confined to a workspace is refused (403) here and by list_builds, get_build, watch_build and cancel_build; such a key launches a published template by its ref instead.`,
       inputSchema: {
         document: z
           .string()
@@ -526,6 +526,34 @@ export const registerTemplates: Registrar = (server, session, opts) => {
           merged.partial = 'the build record could not be read; ref and timestamps are missing';
         }
         return json(merged);
+      }),
+  );
+
+  server.registerTool(
+    'cancel_build',
+    {
+      title: 'Cancel a running build',
+      description:
+        "Stop one of this account's builds that is still running, such as a wrong or runaway one holding the account's one build slot. The answer still reads running: the build is stopped on its hypervisor and its record says what became of it once it has ended, usually within seconds, so follow with get_build or watch_build. A cancelled build ends failed, its error says it was cancelled, and nothing is published. Until it has ended it still counts as the account's running build, so build_template is refused until then. It counts against the daily build allowance like any failed build, unless it was stopped before its hypervisor began copying its base image. A build that has already finished is a 409: there is nothing to stop, so read it with get_build. Needs an account-wide key: a key confined to a workspace is refused (403).",
+      inputSchema: {
+        build_id: z.string().trim().describe('The id build_template or list_builds gave.'),
+      },
+      annotations: { destructiveHint: true, idempotentHint: true, openWorldHint: true },
+    },
+    ({ build_id }, extra) =>
+      guarded(async () => {
+        const body = await session.api
+          .with(extra.signal)
+          .json<unknown>('POST', P.buildAction(build_id, 'cancel'));
+        const build =
+          body !== null && typeof body === 'object' && !Array.isArray(body)
+            ? (body as Record<string, unknown>)
+            : undefined;
+        const status = typeof build?.status === 'string' ? build.status : undefined;
+        return said(
+          `Asked ${build_id} to stop${status ? `; it reads ${status} for now` : ''}. It has not necessarily ended yet: call get_build or watch_build with that id to see it end, before building again.`,
+          body,
+        );
       }),
   );
 

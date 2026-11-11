@@ -261,8 +261,10 @@ const carriesSecret = (w: Webhook): boolean =>
   typeof w.secret === 'string' && w.secret.trim() !== '';
 
 /** The states of a delivery listing, counted, so the line says what is stuck. */
-function deliveriesLine(id: string, list: Delivery[]): string {
+function deliveriesLine(id: string, list: Delivery[], state?: string, before?: string): string {
   if (!list.length) {
+    if (state || before)
+      return `No deliveries${state ? ` in state ${state}` : ''}${before ? ` queued before ${before}` : ''} for ${id}.`;
     return `No deliveries recorded for ${id}. Either nothing it subscribes to has happened, or it was created too recently — test_webhook queues one you can watch for here.`;
   }
   const counts = new Map<string, number>();
@@ -444,7 +446,7 @@ export const registerWebhooks: Registrar = (server, session) => {
     {
       title: 'Send a test delivery',
       description:
-        'Queue one signed delivery of a synthetic webhook.test event through the ordinary path, so it is signed, retried and recorded exactly as a real one. The answer is the delivery record, ACCEPTED rather than finished: the endpoint has not been called yet when this returns. Read what it said back with list_webhook_deliveries a little later — a first attempt goes out within seconds, and a failed one is retried after 30 seconds. A disabled subscription is refused; enable it first with update_webhook.',
+        'Queue one signed delivery of a synthetic webhook.test event through the ordinary path, so it is signed, retried and recorded exactly as a real one. The answer is the delivery record, ACCEPTED rather than finished: the endpoint has not been called yet when this returns. Read what it said back with list_webhook_deliveries a little later — a first attempt usually goes out within seconds, and a failed one is retried after 30 seconds. A disabled subscription is refused; enable it first with update_webhook. One exception: while the subscription already holds 10,000 deliveries not yet finished, its queue is full and the test is answered with state dropped and last_error "queue full", and is never sent. New events are being dropped the same way until the backlog drains.',
       inputSchema: webhookIdArg,
     },
     ({ webhook_id }, extra) =>
@@ -460,6 +462,17 @@ export const registerWebhooks: Registrar = (server, session) => {
           );
         }
         const d = record as Delivery;
+        if (d.state === 'dropped') {
+          // Answered 202 like any test, but never sent (platform: a full queue).
+          // "Call list_webhook_deliveries in a few seconds to read what it
+          // answered" would send a model to wait for an attempt that never comes.
+          return said(
+            `The test delivery ${d.id ?? ''} to ${webhook_id} was NOT sent: it was recorded as dropped${d.last_error ? ` (${d.last_error})` : ''}. ` +
+              `${d.last_error === 'queue full' ? 'The subscription already holds 10,000 deliveries not yet finished, so its queue is full, and' : 'If its queue is full,'} new events are being dropped the same way until the backlog drains; what was already queued is kept. ` +
+              `list_webhook_deliveries for ${webhook_id} with state: "dropped" lists what was dropped. Missed events can still be read from each computer's own event stream while it holds them: poll_events with since set to the cursor of the last delivery that arrived. Do not resend the test until the backlog has drained.`,
+            d,
+          );
+        }
         return said(
           `Queued test delivery ${d.id ?? ''} to ${webhook_id}. It is ${d.state ?? 'pending'}: the endpoint has not been called yet. Call list_webhook_deliveries for ${webhook_id} in a few seconds to read what it answered.`,
           d,
@@ -472,15 +485,38 @@ export const registerWebhooks: Registrar = (server, session) => {
     {
       title: 'List a webhook’s deliveries',
       description:
-        'The newest hundred deliveries to one subscription, newest first, each with its state (pending, in_flight, delivered, exhausted or dropped), its attempt count, and the HTTP status or one-line error of its newest attempt. This is where a delivery that ran out of attempts shows up — nothing is dropped silently. Finished deliveries are kept until seven days after they were queued; pending ones until they finish. The one-line error is an open set — `timeout`, `dns`, `refused`, `reset`, `unreachable`, `tls`, `redirect`, `address refused`, `status NNN` and others — and a dropped delivery says why it was dropped. Each carries the event’s cursor, which is what to pass as since to the socket to read on from that point.',
-      inputSchema: webhookIdArg,
+        'Deliveries to one subscription, newest first by when they were queued — the newest hundred unless limit says fewer — each with its state (pending, in_flight, delivered, exhausted or dropped), its attempt count, and the HTTP status or one-line error of its newest attempt. This is where a delivery that ran out of attempts, or was dropped because the queue was full, shows up — nothing is dropped without a record. A delivery exhausts about fourteen hours after it was queued, so on a busy subscription it is far from the newest: pass state: "exhausted" (or "dropped"), or page back with before. A page with as many rows as limit may have older ones behind it; a shorter page is the last. Finished deliveries are kept until seven days after they were queued; pending ones until they finish. The one-line error is an open set — `timeout`, `dns`, `refused`, `reset`, `unreachable`, `tls`, `redirect`, `address refused`, `status NNN` and others — and a dropped delivery says why it was dropped. Each carries the event’s cursor, which is what to pass as since to the socket to read on from that point.',
+      inputSchema: {
+        ...webhookIdArg,
+        state: z
+          .enum(['pending', 'in_flight', 'delivered', 'exhausted', 'dropped'])
+          .optional()
+          .describe('Only deliveries in this state. Omit for every state.'),
+        limit: z
+          .number()
+          .int()
+          .min(1)
+          .max(100)
+          .optional()
+          .describe('How many to return, 1 to 100. Defaults to 100.'),
+        before: z
+          .string()
+          .trim()
+          .min(1)
+          .optional()
+          .describe(
+            'The id (whd-…) of the last delivery of the previous page: this page is the deliveries queued before it. An id that is not a delivery to this subscription, or one pruned since, is refused.',
+          ),
+      },
       annotations: { readOnlyHint: true },
     },
-    ({ webhook_id }, extra) =>
+    ({ webhook_id, state, limit, before }, extra) =>
       guarded(async () => {
         const body = await session.api
           .with(extra.signal)
-          .json<unknown>('GET', P.webhookAction(webhook_id, 'deliveries'));
+          .json<unknown>('GET', P.webhookAction(webhook_id, 'deliveries'), {
+            query: { state, limit, before },
+          });
         const checked = rowsOf(body, deliveryRow);
         if (!checked) {
           return refused(
@@ -495,7 +531,12 @@ export const registerWebhooks: Registrar = (server, session) => {
           );
         }
         const list = checked.rows as Delivery[];
-        return said(deliveriesLine(webhook_id, list), body);
+        const page = limit ?? 100;
+        const more =
+          list.length >= page && list.length > 0
+            ? ` This page is full (${list.length}), so older deliveries${state ? ` in state ${state}` : ''} may exist: call again with before: "${list[list.length - 1].id}" to read on.`
+            : '';
+        return said(`${deliveriesLine(webhook_id, list, state, before)}${more}`, body);
       }),
   );
 

@@ -628,22 +628,6 @@ export const UNIMPLEMENTED_PARAMETERS: ReadonlySet<string> = new Set([
   // platform refuses `store: false` on it, and `true` is the default, so there
   // is nothing worth sending.
   'POST computers/:id/agent/runs  body:store',
-
-  // Not yet sent (platform OPL-6466): the deliveries listing gained paging
-  // (`before`, `limit`) and a `state` filter. This SDK still reads the first
-  // page only, which is the newest deliveries, as before. A gap to close, not a
-  // decision: remove these three when the listing takes them.
-  'GET webhooks/:id/deliveries  query:before',
-  'GET webhooks/:id/deliveries  query:limit',
-  'GET webhooks/:id/deliveries  query:state',
-
-  // Not yet sent (platform OPL-6531): adding a key can carry a signature over a
-  // challenge from `POST ssh-keys/challenge`, proving the caller holds the
-  // private half. A key added without one still registers, as before, and
-  // connects to a computer named by its id. A gap to close, not a decision:
-  // remove these two when the key tool takes them.
-  'POST ssh-keys  body:challenge',
-  'POST ssh-keys  body:signature',
 ]);
 
 /**
@@ -696,21 +680,9 @@ export const UNIMPLEMENTED = new Set<string>([
   // list_agent_threads, get_agent_thread, delete_agent_thread,
   // start_agent_run, get_agent_run, list_agent_runs and cancel_agent_run.
 
-  // Not yet wrapped (platform OPL-6465): the platform now lists a computer's
-  // retained artifacts and retained results, each with the computer's and the
-  // account's quota usage. Neither takes a parameter. A gap to close, not a
-  // decision: remove these two when a tool lists them.
-  'GET computers/:id/artifacts',
-  'GET computers/:id/results',
-  //
-  // No tool yet (platform OPL-6531): issues the challenge a caller signs to
-  // prove it holds an SSH key's private half before adding it. Leaves this set
-  // in the change that adds the tool.
-  'POST ssh-keys/challenge',
-  //
-  // No tool yet (platform OPL-6467): stops one of the account's running
-  // builds. Leaves this set in the change that adds the tool.
-  'POST builds/:id/cancel',
+  // The retained listings, the SSH key challenge and the build cancel left
+  // this list in OPL-6587, reached by list_artifacts, list_results,
+  // ssh_key_challenge and cancel_build.
 ]);
 
 /**
