@@ -1035,8 +1035,12 @@ Verified content uses the same lossless `text`/`base64` presentation.
 `delete_artifact` deletes only that stored version, not the guest file; repeat
 404s remain truthful failures.
 
-`list_artifacts` and `list_results` list what a computer holds, oldest first,
-with how full the computer's and the account's retained quotas are. The two
+`list_artifacts` and `list_results` list what a computer holds, newest first,
+with how full the computer's and the account's retained quotas are. Each call
+shows at most 300 rows; `offset` (default 0) skips that many of the newest, and
+when older rows exist the reply says the `offset` to read on with. A non-zero
+`offset` at or past the end is refused rather than answered as an empty
+listing. The two
 kinds share those quotas, and usage also counts captures in progress and deleted
 objects not yet cleaned up. A full quota refuses a capture with `409`
 `result_quota_exhausted` and nothing captured; it clears only as objects expire

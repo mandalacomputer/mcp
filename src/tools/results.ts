@@ -1,11 +1,10 @@
 import { z } from 'zod';
-import { said } from '../format.js';
+import { refused, said } from '../format.js';
 import * as P from '../paths.js';
 import {
   PRESENTATION_DEFAULT,
   PRESENTATION_MAX,
   RETAINED_LISTING_MAX,
-  RETAINED_LISTING_SHOWN,
   requireValue,
   resultListing,
   resultMetadata,
@@ -13,6 +12,8 @@ import {
   resultQuery,
   retainedCall,
   retainedListingLine,
+  retainedListingPage,
+  retainedListingPastEnd,
   retainOptions,
   scopeId,
 } from '../results.js';
@@ -32,6 +33,16 @@ export const computerSchema = z
   .max(100)
   .optional()
   .describe('Computer, or the current use_computer selection.');
+/** Where a retained listing's page starts, counting from the newest row. */
+export const listingOffsetSchema = z
+  .number()
+  .int()
+  .nonnegative()
+  .max(Number.MAX_SAFE_INTEGER)
+  .default(0)
+  .describe(
+    'Rows to skip, counting from the newest (default 0). A page shows at most 300; when older rows exist the reply gives the offset to read on with.',
+  );
 export const readAnnotations = { readOnlyHint: true, destructiveHint: false, idempotentHint: true };
 export const captureAnnotations = {
   readOnlyHint: false,
@@ -89,11 +100,11 @@ export const registerResults: Registrar = (server, session) => {
     {
       title: 'List retained output versions and quota usage',
       description:
-        "The computer's published, unexpired retained results, oldest first, each with its result_id, kind, bytes charged, workspace_id, execution_id, start and expiry, and how full the computer's and the account's retained quotas are (shared with artifacts). How to find a result whose id was lost, and what to delete when a capture is refused with result_quota_exhausted. No guest call, wake or capture. A workspace-scoped key sees only results recorded in its workspace.",
-      inputSchema: { computer_id: computerSchema },
+        "The computer's published, unexpired retained results, newest first, each with its result_id, kind, bytes charged, workspace_id, execution_id, start and expiry, and how full the computer's and the account's retained quotas are (shared with artifacts). How to find a result whose id was lost, and what to delete when a capture is refused with result_quota_exhausted. No guest call, wake or capture. A workspace-scoped key sees only results recorded in its workspace. At most 300 rows per call: offset skips that many of the newest, and a non-zero offset at or past the end is refused rather than answered as an empty listing.",
+      inputSchema: { computer_id: computerSchema, offset: listingOffsetSchema },
       annotations: readAnnotations,
     },
-    ({ computer_id }, extra) =>
+    ({ computer_id, offset }, extra) =>
       retainedCall(extra.signal, false, async (signal) => {
         const id = session.resolve(computer_id);
         requireValue(scopeId(id));
@@ -102,8 +113,11 @@ export const registerResults: Registrar = (server, session) => {
             .with(signal)
             .boundedJson('GET', P.results(id), RETAINED_LISTING_MAX, 200),
         );
-        return said(retainedListingLine('result', id, listing.results.length, listing.usage), {
-          results: listing.results.slice(0, RETAINED_LISTING_SHOWN),
+        const { page, count } = retainedListingPage(listing.results, offset);
+        if (offset > 0 && offset >= count)
+          return refused(retainedListingPastEnd('result', id, count, offset));
+        return said(retainedListingLine('result', id, count, listing.usage, offset), {
+          results: page,
           usage: listing.usage,
         });
       }),

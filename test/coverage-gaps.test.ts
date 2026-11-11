@@ -192,7 +192,8 @@ describe('retained listings', () => {
       platform.calls.some((x) => x.method === 'GET' && x.path === '/computers/vm-1/artifacts'),
     ).toBe(true);
     const text = textOf(res);
-    expect(text).toMatch(/^1 retained artifact on vm-1, oldest first/);
+    expect(text).toMatch(/^1 retained artifact on vm-1, newest first\./);
+    expect(text).not.toContain('not shown');
     expect(text).toContain('Computer quota: 2 of 256 objects');
     expect(text).toContain('Account quota: 3 of 2000 objects');
     expect(text).toContain(ARTIFACT_LISTING.artifacts[0].artifact_id);
@@ -206,6 +207,105 @@ describe('retained listings', () => {
       platform.calls.some((x) => x.method === 'GET' && x.path === '/computers/vm-1/results'),
     ).toBe(true);
     expect(textOf(res)).toContain(RESULT_LISTING.results[0].result_id);
+  });
+
+  // The platform answers every row, oldest first; past one page the newest are
+  // the rows a lost capture answer is among, so they come first.
+  const hex = (i: number) => i.toString(16).padStart(32, '0');
+  const manyResults = (n: number) =>
+    Array.from({ length: n }, (_, i) => ({
+      ...RESULT_LISTING.results[0],
+      result_id: `res_${hex(i)}`,
+      started_at: new Date(Date.UTC(2026, 8, 16) + i * 1000).toISOString(),
+      expires_at: '2026-09-30T12:00:00.000Z',
+    }));
+  const manyArtifacts = (n: number) =>
+    Array.from({ length: n }, (_, i) => ({
+      ...ARTIFACT_LISTING.artifacts[0],
+      artifact_id: `${ARTIFACT_LISTING.artifacts[0].artifact_id.slice(0, -6)}${i.toString(16).padStart(6, '0')}`,
+      started_at: new Date(Date.UTC(2026, 8, 16) + i * 1000).toISOString(),
+      expires_at: '2026-09-30T12:00:00.000Z',
+    }));
+  const rowsOf = (res: CallToolResult, key: string): string[] => {
+    const body = JSON.parse(textOf(res).slice(textOf(res).indexOf('\n\n{')));
+    return body[key].map((r: Record<string, string>) => r.result_id ?? r.artifact_id);
+  };
+
+  it('list_results shows the newest 300 first and says the offset to read on with', async () => {
+    const rows = manyResults(650);
+    const c = await open((method, path) =>
+      method === 'GET' && path.endsWith('/results')
+        ? Response.json({ ...RESULT_LISTING, results: rows })
+        : undefined,
+    );
+    const first = await c.call('list_results', { computer_id: 'vm-1' });
+    expect(first.isError).toBeFalsy();
+    const ids = rowsOf(first, 'results');
+    expect(ids).toHaveLength(300);
+    expect(ids[0]).toBe(rows[649].result_id);
+    expect(ids[299]).toBe(rows[350].result_id);
+    expect(textOf(first)).toMatch(/^650 retained results on vm-1, newest first\./);
+    expect(textOf(first)).toContain('Shown here: 1 to 300, counting from the newest.');
+    expect(textOf(first)).toContain(
+      '350 older ones are not shown: call list_results with offset: 300 to read on.',
+    );
+
+    const second = await c.call('list_results', { computer_id: 'vm-1', offset: 300 });
+    expect(rowsOf(second, 'results')).toEqual(
+      rows
+        .slice(50, 350)
+        .reverse()
+        .map((r) => r.result_id),
+    );
+    expect(textOf(second)).toContain('The 300 newer ones are not shown');
+    expect(textOf(second)).toContain('with offset: 600 to read on.');
+
+    const last = await c.call('list_results', { computer_id: 'vm-1', offset: 600 });
+    expect(rowsOf(last, 'results')).toEqual(
+      rows
+        .slice(0, 50)
+        .reverse()
+        .map((r) => r.result_id),
+    );
+    expect(textOf(last)).toContain('Shown here: 601 to 650');
+    expect(textOf(last)).not.toContain('older one');
+  });
+
+  it('list_artifacts pages the same way, newest first', async () => {
+    const rows = manyArtifacts(301);
+    const c = await open((method, path) =>
+      method === 'GET' && path.endsWith('/artifacts')
+        ? Response.json({ ...ARTIFACT_LISTING, artifacts: rows })
+        : undefined,
+    );
+    const first = await c.call('list_artifacts', { computer_id: 'vm-1' });
+    const ids = rowsOf(first, 'artifacts');
+    expect(ids).toHaveLength(300);
+    expect(ids[0]).toBe(rows[300].artifact_id);
+    expect(textOf(first)).toContain(
+      '1 older one is not shown: call list_artifacts with offset: 300 to read on.',
+    );
+    const rest = await c.call('list_artifacts', { computer_id: 'vm-1', offset: 300 });
+    expect(rowsOf(rest, 'artifacts')).toEqual([rows[0].artifact_id]);
+  });
+
+  it('refuses an offset past the end rather than answering an empty listing', async () => {
+    const rows = manyResults(3);
+    const c = await open((method, path) =>
+      method === 'GET' && path.endsWith('/results')
+        ? Response.json({ ...RESULT_LISTING, results: rows })
+        : undefined,
+    );
+    for (const offset of [3, 1000]) {
+      const res = await c.call('list_results', { computer_id: 'vm-1', offset });
+      expect(res.isError, String(offset)).toBe(true);
+      expect(textOf(res)).toContain(`offset ${offset} is past the end of the listing`);
+      expect(textOf(res)).toContain('vm-1 holds 3 retained results');
+    }
+    const zero = await c.call('list_artifacts', { computer_id: 'vm-1', offset: 0 });
+    expect(zero.isError).toBeFalsy();
+    const negative = await c.call('list_results', { computer_id: 'vm-1', offset: -1 });
+    expect(negative.isError).toBe(true);
   });
 
   it('marks a full quota FULL', async () => {

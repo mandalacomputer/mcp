@@ -11,16 +11,18 @@ import {
   PRESENTATION_DEFAULT,
   PRESENTATION_MAX,
   RETAINED_LISTING_MAX,
-  RETAINED_LISTING_SHOWN,
   requireValue,
   retainedCall,
   retainedListingLine,
+  retainedListingPage,
+  retainedListingPastEnd,
   scopeId,
 } from '../results.js';
 import {
   captureAnnotations,
   computerSchema,
   deleteAnnotations,
+  listingOffsetSchema,
   readAnnotations,
 } from './results.js';
 import type { Registrar } from './types.js';
@@ -87,11 +89,11 @@ export const registerArtifacts: Registrar = (server, session) => {
     {
       title: 'List retained artifacts and quota usage',
       description:
-        "The computer's published, unexpired artifacts, oldest first, each with its artifact_id, size, workspace_id, execution_id, start and expiry, and how full the computer's and the account's retained quotas are (shared with retained output). How to find an artifact whose publication answer was lost, and what to delete when a publication is refused with result_quota_exhausted. No guest call, wake or capture. A workspace-scoped key sees only artifacts recorded in its workspace.",
-      inputSchema: { computer_id: computerSchema },
+        "The computer's published, unexpired artifacts, newest first, each with its artifact_id, size, workspace_id, execution_id, start and expiry, and how full the computer's and the account's retained quotas are (shared with retained output). How to find an artifact whose publication answer was lost, and what to delete when a publication is refused with result_quota_exhausted. No guest call, wake or capture. A workspace-scoped key sees only artifacts recorded in its workspace. At most 300 rows per call: offset skips that many of the newest, and a non-zero offset at or past the end is refused rather than answered as an empty listing.",
+      inputSchema: { computer_id: computerSchema, offset: listingOffsetSchema },
       annotations: readAnnotations,
     },
-    ({ computer_id }, extra) =>
+    ({ computer_id, offset }, extra) =>
       retainedCall(extra.signal, false, async (signal) => {
         const id = session.resolve(computer_id);
         requireValue(scopeId(id));
@@ -100,8 +102,11 @@ export const registerArtifacts: Registrar = (server, session) => {
             .with(signal)
             .boundedJson('GET', P.artifacts(id), RETAINED_LISTING_MAX, 200),
         );
-        return said(retainedListingLine('artifact', id, listing.artifacts.length, listing.usage), {
-          artifacts: listing.artifacts.slice(0, RETAINED_LISTING_SHOWN),
+        const { page, count } = retainedListingPage(listing.artifacts, offset);
+        if (offset > 0 && offset >= count)
+          return refused(retainedListingPastEnd('artifact', id, count, offset));
+        return said(retainedListingLine('artifact', id, count, listing.usage, offset), {
+          artifacts: page,
           usage: listing.usage,
         });
       }),
