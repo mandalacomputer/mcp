@@ -379,23 +379,60 @@ const quotaLine = (q: RetainedQuota) =>
   `${q.objects} of ${q.max_objects} objects, ${q.bytes} of ${q.max_bytes} bytes`;
 
 /**
- * The sentence in front of a retained listing: how many, how full each quota
- * is, and what the usage counts that the rows do not.
+ * One page of a retained listing. The platform answers every row oldest
+ * first; a page counts from the newest, so the default one holds the rows a
+ * lost capture answer is most likely to be among.
+ */
+export function retainedListingPage<T>(rows: readonly T[], offset = 0) {
+  requireValue(integer(offset));
+  const page = rows
+    .slice()
+    .reverse()
+    .slice(offset, offset + RETAINED_LISTING_SHOWN);
+  return { page, count: rows.length };
+}
+
+/** What a page past the end of a listing says, instead of an empty page that reads as "nothing held". */
+export function retainedListingPastEnd(
+  noun: 'artifact' | 'result',
+  computer: string,
+  count: number,
+  offset: number,
+): string {
+  const tool = noun === 'artifact' ? 'list_artifacts' : 'list_results';
+  return (
+    `offset ${offset} is past the end of the listing: ${computer} holds ${count} retained ${noun}${count === 1 ? '' : 's'}, ` +
+    `so offset must be ${count ? `below ${count} (call ${tool} without offset for the newest ${Math.min(count, RETAINED_LISTING_SHOWN)})` : '0'}.`
+  );
+}
+
+/**
+ * The sentence in front of a retained listing: how many, which of them this
+ * page shows and how to reach the rest, how full each quota is, and what the
+ * usage counts that the rows do not.
  */
 export function retainedListingLine(
   noun: 'artifact' | 'result',
   computer: string,
   count: number,
   usage: RetainedUsage,
+  offset = 0,
 ): string {
   const full = (q: RetainedQuota) => q.objects >= q.max_objects || q.bytes >= q.max_bytes;
-  const shown =
-    count > RETAINED_LISTING_SHOWN
-      ? ` Only the oldest ${RETAINED_LISTING_SHOWN} are shown here; ${count - RETAINED_LISTING_SHOWN} newer ones are not.`
-      : '';
+  const list = noun === 'artifact' ? 'list_artifacts' : 'list_results';
+  const end = Math.min(count, offset + RETAINED_LISTING_SHOWN),
+    older = count - end;
+  let shown = '';
+  if (offset > 0 || older > 0) {
+    shown = ` Shown here: ${offset + 1} to ${end}, counting from the newest.`;
+    if (offset > 0)
+      shown += ` The ${offset} newer one${offset === 1 ? ' is' : 's are'} not shown (${list} with a lower offset).`;
+    if (older > 0)
+      shown += ` ${older} older one${older === 1 ? ' is' : 's are'} not shown: call ${list} with offset: ${end} to read on.`;
+  }
   const tool = noun === 'artifact' ? 'delete_artifact' : 'delete_result';
   return (
-    `${count} retained ${noun}${count === 1 ? '' : 's'} on ${computer}, oldest first.${shown} ` +
+    `${count} retained ${noun}${count === 1 ? '' : 's'} on ${computer}, newest first.${shown} ` +
     `Computer quota: ${quotaLine(usage.computer)}${full(usage.computer) ? ' (FULL)' : ''}. ` +
     `Account quota: ${quotaLine(usage.account)}${full(usage.account) ? ' (FULL)' : ''}. ` +
     'Artifacts and retained output share these quotas, and usage also counts captures in progress and deleted objects not yet cleaned up, which are not listed. ' +

@@ -19,8 +19,11 @@ are wording changes, and they are behaviour changes in the way that matters.
 - `cancel_build` stops one of the account's running builds. Its answer still
   reads `running` until the build has ended, so it says to follow with
   `get_build` or `watch_build`.
-- `list_artifacts` and `list_results` list what a computer holds, oldest first,
-  with how full the computer's and the account's retained quotas are.
+- `list_artifacts` and `list_results` list what a computer holds, newest first,
+  with how full the computer's and the account's retained quotas are. Each call
+  shows at most 300 rows; `offset` (default 0) skips that many of the newest,
+  and when older rows exist the reply gives the `offset` to read on with. A
+  non-zero `offset` at or past the end is refused.
 - `ssh_key_challenge` issues a challenge to prove an SSH key is yours, and
   `add_ssh_key` takes `challenge` and `signature` (both or neither; one alone is
   refused before anything is sent). A key added with them is proven and

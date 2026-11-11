@@ -681,7 +681,7 @@ export const UNIMPLEMENTED = new Set<string>([
   // start_agent_run, get_agent_run, list_agent_runs and cancel_agent_run.
 
   // The retained listings, the SSH key challenge and the build cancel left
-  // this list in OPL-6587, reached by list_artifacts, list_results,
+  // this list once tools reached them: list_artifacts, list_results,
   // ssh_key_challenge and cancel_build.
 ]);
 
