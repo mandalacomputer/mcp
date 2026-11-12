@@ -528,7 +528,10 @@ export const PARAMETERS: ReadonlyMap<string, readonly string[]> = new Map([
 
   // A key is one OpenSSH public key line; `name` is optional.
   ['GET ssh-keys', []],
-  ['POST ssh-keys', ['body:public_key', 'body:name', 'body:challenge', 'body:signature']],
+  [
+    'POST ssh-keys',
+    ['body:public_key', 'body:name', 'body:challenge', 'body:signature', 'body:replaces'],
+  ],
   ['POST ssh-keys/challenge', []],
   ['DELETE ssh-keys/:id', []],
   ['GET computers/:id/ssh', []],
