@@ -14,6 +14,13 @@ are wording changes, and they are behaviour changes in the way that matters.
 
 ## [Unreleased]
 
+### Added
+
+- `add_ssh_key` takes `replaces`: the id of the person's registration of the
+  key that the add may replace, or `null` when they hold none. If theirs has
+  changed by the time the add runs, the add is refused as a conflict and
+  nothing is replaced. Left out, the add is unconditional, as before.
+
 ## [0.23.0] - 2026-11-11
 
 ### Added

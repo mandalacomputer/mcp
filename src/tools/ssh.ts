@@ -224,9 +224,16 @@ export const registerSSH: Registrar = (server, session) => {
           .describe(
             "The armored signature the challenge's sign_command printed, from -----BEGIN SSH SIGNATURE----- to -----END SSH SIGNATURE-----, made with this key. Send it with challenge, or leave both out.",
           ),
+        replaces: z
+          .string()
+          .nullable()
+          .optional()
+          .describe(
+            "Makes the add conditional on what list_ssh_keys showed: the id of this person's registration of this key that the add may replace, or null when they hold none. If theirs has changed by the time the add runs (registered meanwhile, say through another account, or removed), the add is refused as a conflict (its code says the registration changed) and nothing changes; list the keys again before deciding. Leave it out for an unconditional add. Mainly for an add with a signature, which replaces an unproven registration.",
+          ),
       },
     },
-    ({ public_key, name, challenge, signature }, extra) =>
+    ({ public_key, name, challenge, signature, replaces }, extra) =>
       guarded(async () => {
         // The platform refuses any \r or \n in public_key before it trims, so
         // the newline a .pub file ends in is dropped here, as both SDKs do. An
@@ -252,6 +259,8 @@ export const registerSSH: Registrar = (server, session) => {
             public_key: key,
             ...(name === undefined ? {} : { name }),
             ...(challenge === undefined ? {} : { challenge, signature }),
+            // null is sent: it means "no registration of this key is theirs".
+            ...(replaces === undefined ? {} : { replaces }),
           },
         });
         if (!isRecord(body) || !text(body.id)) {

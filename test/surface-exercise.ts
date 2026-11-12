@@ -205,6 +205,7 @@ export const EXERCISE: Record<string, Record<string, unknown>[]> = {
       public_key: SSH_PUBLIC_KEY,
       challenge: SSH_KEY_CHALLENGE.challenge,
       signature: '-----BEGIN SSH SIGNATURE-----\nU1NIU0lH\n-----END SSH SIGNATURE-----',
+      replaces: null,
     },
   ],
   ssh_key_challenge: [{}],

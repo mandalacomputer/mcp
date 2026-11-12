@@ -407,6 +407,23 @@ describe('SSH key proof', () => {
     });
   });
 
+  it('add_ssh_key sends replaces as given, null included, and leaves it out otherwise', async () => {
+    const c = await open();
+    const sent = () =>
+      platform.calls.filter((x) => x.method === 'POST' && x.path === '/ssh-keys').at(-1)?.body;
+    const signed = {
+      public_key: SSH_PUBLIC_KEY,
+      challenge: SSH_KEY_CHALLENGE.challenge,
+      signature: 'SIG',
+    };
+    await c.call('add_ssh_key', { ...signed, replaces: null });
+    expect(sent()).toEqual({ ...signed, replaces: null });
+    await c.call('add_ssh_key', { ...signed, replaces: 'sshk-3c9a51d07be2f846' });
+    expect(sent()).toEqual({ ...signed, replaces: 'sshk-3c9a51d07be2f846' });
+    await c.call('add_ssh_key', signed);
+    expect(sent()).toEqual(signed);
+  });
+
   it('add_ssh_key refuses one of the pair without the other, sending nothing', async () => {
     const c = await open();
     for (const half of [{ challenge: SSH_KEY_CHALLENGE.challenge }, { signature: 'SIG' }]) {
