@@ -168,6 +168,43 @@ describe('the webhooks CRUD', () => {
     expect(await disabled('customer')).toContain('disabled by you');
   });
 
+  it.each([
+    [
+      'creator_removed',
+      /person who created it was removed from the account, left it, or was made a viewer/,
+    ],
+    ['key_revoked', /API key that created it was revoked as leaked/],
+    [
+      'session_revoked',
+      /dashboard session it was created, retargeted or re-enabled from was signed out as leaked/,
+    ],
+  ])('explains a %s disable and who may re-enable it', async (reason, cause) => {
+    const text = await over(
+      { ...WEBHOOK, enabled: false, disabled_reason: reason, disabled_at: WEBHOOK.updated_at },
+      200,
+      'get_webhook',
+      { webhook_id: WEBHOOK.id },
+    ).then(textOf);
+    expect(text).toMatch(/DISABLED BY THE PLATFORM/);
+    expect(text).toMatch(cause);
+    expect(text).toContain('never comes back on its own');
+    expect(text).toContain(
+      'an owner or member may re-enable it with update_webhook and enabled: true',
+    );
+    expect(text).not.toContain(`disabled (reason: ${reason})`);
+    expect(text).not.toContain('disabled by you');
+  });
+
+  it('tells a receiver which guest events webhooks limit or leave out', async () => {
+    const { client, close } = await connect();
+    const tool = (await client.listTools()).tools.find((t) => t.name === 'create_webhook');
+    await close();
+    expect(tool?.description).toContain(
+      'reach webhooks at a limited rate per computer, and one whose data is over 16 KiB of JSON is not sent at all',
+    );
+    expect(tool?.description).toContain('Window titles arrive cut to 1 KiB');
+  });
+
   it('orders the last success and the last failure by the clock, not by the string', async () => {
     // A success on the second and a failure 100 ms later, spelled the way two
     // timestamps from one platform can be: one without fractional seconds and

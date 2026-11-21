@@ -3614,6 +3614,9 @@ describe('the tools our own prose tells a model to call', () => {
     'allow_partial',
     'ram_mb',
     'disk_gb',
+    // get_account's disk pool fields, named in its description.
+    'configured_disk_gb',
+    'kept_build_gb',
     'idle_suspend_min',
     // A computer's end time, in its two spellings: parameters of
     // create_computer and update_computer, and a field get_computer answers.

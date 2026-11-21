@@ -184,6 +184,10 @@ const malformedRows = (noun: string, n: number): string =>
 const recordOf = (body: unknown): Record<string, unknown> | undefined =>
   isRecord(body) ? body : undefined;
 
+/** What ends each security disable's clause in {@link health}. */
+const SECURITY_REENABLE =
+  'it never comes back on its own; an owner or member may re-enable it with update_webhook and enabled: true, but check its url with the person first, since a leaked credential may have pointed it somewhere they do not control';
+
 /**
  * One subscription's health in a clause, for the sentence in front of a
  * listing or a read. Says the thing a model acts on — whether deliveries are
@@ -201,6 +205,15 @@ function health(w: Webhook): string {
         return "DISABLED BY THE PLATFORM because the account's plan does not include webhooks — for the first 24 hours it still receives computer.stopped, and it is enabled again automatically (oldest first, up to the plan's allowance) when a plan with webhooks is chosen; update_webhook with enabled: true is refused (402) until then";
       case 'customer':
         return 'disabled by you';
+      // Security disables: they never clear by themselves, and the endpoint
+      // may be one a leaked credential pointed it at, so re-enabling one is a
+      // person's deliberate choice rather than a fix to apply automatically.
+      case 'creator_removed':
+        return `DISABLED BY THE PLATFORM because the person who created it was removed from the account, left it, or was made a viewer — ${SECURITY_REENABLE}`;
+      case 'key_revoked':
+        return `DISABLED BY THE PLATFORM because the API key that created it was revoked as leaked — ${SECURITY_REENABLE}`;
+      case 'session_revoked':
+        return `DISABLED BY THE PLATFORM because the dashboard session it was created, retargeted or re-enabled from was signed out as leaked — ${SECURITY_REENABLE}`;
       default:
         return `disabled (reason: ${w.disabled_reason ?? 'not given'})`;
     }
@@ -324,7 +337,7 @@ export const registerWebhooks: Registrar = (server, session) => {
     'create_webhook',
     {
       title: 'Subscribe an endpoint to this account’s events',
-      description: `Subscribe an HTTPS endpoint to this account’s events. THE ANSWER CARRIES THE SIGNING SECRET ONCE — it is not readable again, so store it or hand it over before doing anything else. Each event is POSTed as the same JSON object wait_for_event hands you, byte for byte, signed with Standard Webhooks v1 headers (webhook-id, webhook-timestamp, webhook-signature); the receiver should verify the raw body, acknowledge with a 2xx before doing the work, and refuse a timestamp more than ${P.WEBHOOK_REPLAY_WINDOW_S} seconds off. A failing delivery gets eight attempts (seven retries) over about fourteen hours; an endpoint that keeps failing for a day is disabled. The url must be https, at most ${P.WEBHOOK_URL_MAX} characters, must not carry a username or password, and must resolve to a public address — a private or loopback address is refused. Paid plans allow ten subscriptions; an account with no plan allows none. Two bodies are not events: a gap delivery, sent whatever events filters on, says events were lost and the receiver should reconcile with a listing, and a test delivery has type webhook.test. While the account is suspended nothing is queued or sent, and events in that time are skipped for good, with no gap standing in for them. When a plan without webhooks ends a subscription it still receives computer.stopped for 24 hours.`,
+      description: `Subscribe an HTTPS endpoint to this account’s events. THE ANSWER CARRIES THE SIGNING SECRET ONCE — it is not readable again, so store it or hand it over before doing anything else. Each event is POSTed as the same JSON object wait_for_event hands you, byte for byte, signed with Standard Webhooks v1 headers (webhook-id, webhook-timestamp, webhook-signature); the receiver should verify the raw body, acknowledge with a 2xx before doing the work, and refuse a timestamp more than ${P.WEBHOOK_REPLAY_WINDOW_S} seconds off. A failing delivery gets eight attempts (seven retries) over about fourteen hours; an endpoint that keeps failing for a day is disabled. The url must be https, at most ${P.WEBHOOK_URL_MAX} characters, must not carry a username or password, and must resolve to a public address — a private or loopback address is refused. Paid plans allow ten subscriptions; an account with no plan allows none. Two bodies are not events: a gap delivery, sent whatever events filters on, says events were lost and the receiver should reconcile with a listing, and a test delivery has type webhook.test. While the account is suspended nothing is queued or sent, and events in that time are skipped for good, with no gap standing in for them. When a plan without webhooks ends a subscription it still receives computer.stopped for 24 hours. Events with source: "guest" (such as window.*, clipboard.changed and file.changed) reach webhooks at a limited rate per computer, and one whose data is over 16 KiB of JSON is not sent at all; both still reach wait_for_event. Window titles arrive cut to 1 KiB and window classes to 256 bytes, and a window.focused for the window that already has focus is not sent.`,
       inputSchema: {
         url: z
           .string()

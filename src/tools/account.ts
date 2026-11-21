@@ -33,6 +33,11 @@ const report = z
       running_or_reserved_vcpu: count.nullable(),
       running_or_reserved_ram_mb: count.nullable(),
       snapshot_storage_bytes: count.nullable(),
+      // Nominal GB of the template builds the account keeps. They share the disk
+      // pool with configured_disk_gb, which leaves them out. Null while build
+      // history is unread, independently of `complete`; absent from platforms
+      // that predate it.
+      kept_build_gb: count.nullable().optional(),
     }),
     remaining: z.object({
       kept_computers: count.nullable(),
@@ -45,6 +50,8 @@ const report = z
   .refine((data) => {
     for (const group of [data.usage, data.remaining]) {
       for (const [field, value] of Object.entries(group)) {
+        // Build history is read separately from the computer and snapshot groups.
+        if (field === 'kept_build_gb') continue;
         const complete =
           field === 'snapshot_storage_bytes' ? data.complete.snapshots : data.complete.computers;
         if (complete !== (value !== null)) return false;
@@ -388,7 +395,7 @@ export const registerAccount: Registrar = (server, session) => {
     {
       title: 'Read current account quota',
       description:
-        'Read account-wide plan ceilings, per-computer maxima, capabilities (capabilities.windows: the plan permits Windows computers; capabilities.macos: this account may create macOS computers, available on request), current consumption and advisory remaining quota. Viewer or stronger; workspace-scoped keys receive aggregates without resource identities. No arguments, selected computer or model key. Incomplete computer/snapshot groups have null consumption and remaining values, meaning unknown. Snapshot headroom covers indexed stored bytes, excludes in-flight capture reservations and cannot promise that a capture will fit. This observation reserves nothing; later mutations still enforce quota.',
+        'Read account-wide plan ceilings, per-computer maxima, capabilities (capabilities.windows: this account may create Windows computers, granted per account by an administrator, and no plan includes it; capabilities.macos: this account may create macOS computers, available on request), current consumption and advisory remaining quota. Kept template builds share the disk pool: usage.kept_build_gb is their nominal GB, remaining.configured_disk_gb leaves them out, and the room a create or disk resize has is remaining.configured_disk_gb minus usage.kept_build_gb. A null kept_build_gb means build history is unread, so that room is unknown and a create or disk growth can be refused with 503 until it is read. Viewer or stronger; workspace-scoped keys receive aggregates without resource identities. No arguments, selected computer or model key. Incomplete computer/snapshot groups have null consumption and remaining values, meaning unknown. Snapshot headroom covers indexed stored bytes, excludes in-flight capture reservations and cannot promise that a capture will fit. This observation reserves nothing; later mutations still enforce quota.',
       inputSchema: z.strictObject({}),
       annotations: readAnnotations,
     },
@@ -421,6 +428,16 @@ export const registerAccount: Registrar = (server, session) => {
           );
         }
         const data = metadata(report, raw);
+        const builds = data.usage.kept_build_gb;
+        const free = data.remaining.configured_disk_gb;
+        const diskRoom =
+          builds === undefined
+            ? ''
+            : builds === null
+              ? 'UNKNOWN disk room for a create or disk resize: kept template build storage is unread (null), and a create or disk growth can be refused with 503 until it is read. '
+              : free === null
+                ? `Kept template builds take ${builds} GB of the disk pool. `
+                : `Disk room for a create or disk resize: ${Math.max(0, free - builds)} GB (remaining.configured_disk_gb ${free} minus ${builds} GB of kept template builds, which share the pool). `;
         const unknown = [
           ...(!data.complete.computers ? ['computer'] : []),
           ...(!data.complete.snapshots ? ['snapshot'] : []),
@@ -432,6 +449,7 @@ export const registerAccount: Registrar = (server, session) => {
             'ADVISORY account observation; this reserves nothing and does not guarantee a later request will fit. ' +
             'Snapshot headroom is against indexed stored bytes only; in-flight capture reservations are not included. ' +
             'Configured CPU/disk cover kept computers; running or reserved RAM includes current reservations. ' +
+            diskRoom +
             'Units are CPU, MB, GB and snapshot bytes as named. Use get_usage for historical metered consumption.',
           data,
         );

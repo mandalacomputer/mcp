@@ -504,3 +504,66 @@ describe('incoming account operation evidence', () => {
     ).rejects.toThrow('Zero request coverage for tool get_account variant 1');
   });
 });
+
+describe('kept template builds in the disk pool', () => {
+  it('keeps usage.kept_build_gb and states the room a create or disk resize has', async () => {
+    const value = structuredClone(ACCOUNT_QUOTA) as typeof ACCOUNT_QUOTA & {
+      usage: { kept_build_gb: number | null };
+    };
+    value.usage.kept_build_gb = 30;
+    respond(value);
+    const result = await (await open()).call('get_account');
+    expect(result.isError).not.toBe(true);
+    expect(data(result).usage.kept_build_gb).toBe(30);
+    // remaining.configured_disk_gb is 140; the builds take 30 of it.
+    expect(text(result).split('\n\n')[0]).toContain(
+      'Disk room for a create or disk resize: 110 GB',
+    );
+  });
+
+  it('clamps that room at zero when the builds exceed what configured disk leaves', async () => {
+    const value = structuredClone(ACCOUNT_QUOTA) as typeof ACCOUNT_QUOTA & {
+      usage: { kept_build_gb: number | null };
+    };
+    value.usage.kept_build_gb = 150;
+    respond(value);
+    const result = await (await open()).call('get_account');
+    expect(text(result).split('\n\n')[0]).toContain('Disk room for a create or disk resize: 0 GB');
+  });
+
+  it('says the room is unknown when build history is unread, whatever complete says', async () => {
+    const value = structuredClone(ACCOUNT_QUOTA) as typeof ACCOUNT_QUOTA & {
+      usage: { kept_build_gb: number | null };
+    };
+    value.usage.kept_build_gb = null;
+    respond(value);
+    const result = await (await open()).call('get_account');
+    expect(result.isError).not.toBe(true);
+    expect(data(result).usage.kept_build_gb).toBeNull();
+    expect(text(result).split('\n\n')[0]).toContain('UNKNOWN disk room');
+    expect(text(result).split('\n\n')[0]).toContain('503');
+  });
+
+  it('accepts a known build figure beside incomplete computers', async () => {
+    const value = partial(false, true) as ReturnType<typeof partial> & {
+      usage: { kept_build_gb: number | null };
+    };
+    value.usage.kept_build_gb = 12;
+    respond(value);
+    const result = await (await open()).call('get_account');
+    expect(result.isError).not.toBe(true);
+    expect(data(result).usage.kept_build_gb).toBe(12);
+    expect(text(result).split('\n\n')[0]).toContain('Kept template builds take 12 GB');
+  });
+
+  it('tells the model builds share the pool and who grants Windows', async () => {
+    const tool = (await (await open()).client.listTools()).tools.find(
+      (t) => t.name === 'get_account',
+    );
+    expect(tool?.description).toContain('remaining.configured_disk_gb minus usage.kept_build_gb');
+    expect(tool?.description).toContain(
+      'capabilities.windows: this account may create Windows computers, granted per account by an administrator, and no plan includes it',
+    );
+    expect(tool?.description).not.toContain('the plan permits Windows');
+  });
+});
