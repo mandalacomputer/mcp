@@ -1975,16 +1975,18 @@ export function isTransient(err: unknown): boolean {
  *   `>= 500` bound rested on nothing. {@link RedirectError} is what a 3xx
  *   becomes now. Change one and this paragraph is wrong again.
  *
- * A 409 or a 400 is read by its WORD here as well, and that is where the
- * second half of OPL-3724 meets the first (OPL-6081). It used to be that every
- * 409 polled whatever it said, so a probe refused with `unsupported`,
- * `running` or `exists` — answers that never change — rode out the caller's
- * whole deadline, up to fifteen minutes, before reporting a timeout instead of
- * the refusal. Now, the same rule in all three clients:
+ * A 409 is read by its WORD here as well, and that is where the second half
+ * of OPL-3724 meets the first (OPL-6081). It used to be that every 409 polled
+ * whatever it said, so a probe refused with `unsupported`, `running` or
+ * `exists` — answers that never change — rode out the caller's whole deadline,
+ * up to fifteen minutes, before reporting a timeout instead of the refusal.
+ * Now, the same rule as the TypeScript and Python SDKs:
  *
- * - a word that clears (`contention`, `starting`), or a reasonless 409 whose
- *   code the platform documents as passing ({@link conflictCodeClears}),
- *   polls;
+ * - a 400 ends the wait whatever word it carries: it describes the request;
+ * - a word that clears (`contention`, `starting`) at the TOP level of the
+ *   body, or a reasonless 409 whose code the platform documents as passing
+ *   ({@link conflictCodeClears}), polls. A clearing word found only nested
+ *   under `error` is diagnostic (a run's own error, say) and grants nothing;
  * - a permanent word ends the wait with that refusal, and so do
  *   `idempotency_outcome_unknown` and `template_image_preparing`, which no
  *   amount of waiting turns into another answer;
@@ -2023,7 +2025,7 @@ export function isTransientForPoll(err: unknown, settles: PollSettles = {}): boo
   if (err instanceof OriginTLSError) return false;
   if (err instanceof APIError) {
     if (err.status === 524) return false;
-    if (err.status === 400 || err.status === 409) return refusalPolls(err, settles);
+    if (err.status === 409) return refusalPolls(err, settles);
     if (err.status === 408 || err.status === 429) return true;
     return err.status >= 500 && err.status < 600;
   }
@@ -2041,17 +2043,14 @@ export type PollSettles = {
   unavailable?: boolean;
 };
 
-/** A 400 or a 409 inside a poll: its word, its code, then what the route says. */
+/** A 409 inside a poll: its word, its code, then what the route says. */
 function refusalPolls(err: APIError, settles: PollSettles): boolean {
   const code = record(err.body) ? err.body.code : undefined;
   if (code === 'idempotency_outcome_unknown' || code === 'template_image_preparing') return false;
   const kind = reasonKind(err.reason);
-  if (kind === 'clears') return true;
-  if (kind === 'permanent') {
-    return err.status === 409 && err.reason === 'unavailable' && settles.unavailable === true;
-  }
-  // A 400 describes the request unless its word says otherwise.
-  if (err.status === 400) return false;
+  // Only a top-level word grants another poll, as in the SDKs.
+  if (kind === 'clears' && record(err.body) && typeof err.body.reason === 'string') return true;
+  if (kind === 'permanent') return err.reason === 'unavailable' && settles.unavailable === true;
   if (conflictCodeClears(err)) return true;
   return settles.reasonless409 === true;
 }

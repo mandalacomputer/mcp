@@ -630,12 +630,19 @@ and remains available with read-only and no-lifecycle filters. Select the
 
 The report includes the effective plan, pool ceilings, per-computer maxima,
 capabilities, current consumption and remaining quota. `capabilities.windows`
-says whether the plan permits Windows computers; `capabilities.macos` says
+says whether this account may create Windows computers, which an administrator
+grants per account and no plan includes; `capabilities.macos` says
 whether this account may create macOS computers (`os: "macos"`), which are
 available on request rather than with a plan, and reads `false` against a
 platform that does not send it. Configured CPU and
 disk include kept computers regardless of power state; running or reserved RAM
-includes current reservations. CPU, MB, GB and snapshot bytes retain the API's
+includes current reservations. Kept template builds share the disk pool:
+`usage.kept_build_gb` is their nominal GB, `remaining.configured_disk_gb` leaves
+them out, and the answer states the room a create or disk resize has
+(`remaining.configured_disk_gb` minus `usage.kept_build_gb`). A `null`
+`kept_build_gb` means build history is unread, so that room is unknown and a
+create or disk growth can be refused with 503 until it is read; the field is
+absent from a platform that predates it. CPU, MB, GB and snapshot bytes retain the API's
 units. `get_usage` separately reports historical metered consumption over time.
 
 Quota is **advisory**: `observed_at` is an observation time, not a reservation or

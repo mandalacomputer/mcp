@@ -75,13 +75,29 @@ describe('a 409 inside a wait (P7)', () => {
     },
   );
 
-  it('keeps polling a word that clears, on a 400 as well as a 409', () => {
-    for (const status of [400, 409]) {
-      for (const reason of ['contention', 'starting']) {
-        expect(isTransientForPoll(errorForStatus(status, 'x', { error: 'x', reason }))).toBe(true);
-      }
+  it('keeps polling a 409 whose top-level word clears, and ends on a 400 whatever it says', () => {
+    // The same fixture as the TypeScript and Python SDKs: only a 409 is read by
+    // its word, and a 400 describes the request.
+    for (const reason of ['contention', 'starting']) {
+      expect(isTransientForPoll(errorForStatus(409, 'x', { error: 'x', reason }))).toBe(true);
+      expect(isTransientForPoll(errorForStatus(400, 'x', { error: 'x', reason }))).toBe(false);
+      expect(
+        isTransientForPoll(errorForStatus(400, 'x', { error: 'x', reason }), {
+          reasonless409: true,
+          unavailable: true,
+        }),
+      ).toBe(false);
     }
     expect(isTransientForPoll(errorForStatus(400, 'x', { error: 'x' }))).toBe(false);
+  });
+
+  it('grants no poll on a clearing word found only nested under error', () => {
+    for (const reason of ['contention', 'starting']) {
+      const nested = conflict({ error: { message: 'x', reason } });
+      expect(isTransientForPoll(nested)).toBe(false);
+      // A nested word reads as no word: a route that settles on a bare 409 still polls.
+      expect(isTransientForPoll(nested, { reasonless409: true })).toBe(true);
+    }
   });
 
   it('keeps polling the codes the platform documents as passing', () => {

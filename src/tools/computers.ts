@@ -1004,7 +1004,7 @@ export const registerComputers: Registrar = (server, session, opts) => {
           .nullable()
           .optional()
           .describe(
-            `${END_TIME_ABOUT} An RFC 3339 time in the future, replacing any end time it has; null clears it. Send this ON ITS OWN, and not beside ends_in_hours. Refused with a 409 that names no reason while the computer is being stopped for its current end time: that one clears, so set a new end time once it has stopped.`,
+            `${END_TIME_ABOUT} An RFC 3339 time in the future, replacing any end time it has; null clears it. Send this ON ITS OWN, and not beside ends_in_hours. Refused with a 409 and reason contention while the computer is being stopped for its current end time: that one clears, so set a new end time once it has stopped.`,
           ),
         ends_in_hours: endsInHoursArg
           .nullable()
@@ -1989,13 +1989,13 @@ export const registerComputers: Registrar = (server, session, opts) => {
                 '(move_computer_to_workspace), which replaces the desktop and share credentials. A ' +
                 'stop and a start leave it working, so a restart is what revokes one that has leaked.\n\n' +
                 'TO MOVE TEXT, use read_clipboard and write_clipboard. They need nothing of the ' +
-                "hardware, but they require a Linux desktop image with its desktop's clipboard tool " +
+                "hardware, but on Linux they require a desktop image with its desktop's clipboard tool " +
                 'installed: xclip on X11, wl-clipboard (wl-paste/wl-copy) on Wayland images such as ' +
                 'Omarchy. An image without that tool gets a permanent 400 from both tools that names ' +
                 'it; changing runtime state or retrying cannot fix that image dependency. Where it is ' +
                 'present, prefer the ' +
-                'tools, and do not start by asking a person to paste into the desktop. They are ' +
-                'refused outright on Windows. Do NOT reach for xclip through exec instead: exec runs a login shell, so ' +
+                'tools, and do not start by asking a person to paste into the desktop. ' +
+                'They also work on Windows, through the signed-in desktop session. Do NOT reach for xclip through exec instead: exec runs a login shell, so ' +
                 "the guest user's profile prints onto the same output your command does, ahead of it, " +
                 'which corrupts a read you are trying to parse; and a write through exec has to leave ' +
                 'xclip resident, redirect its output, travel base64 to survive an apostrophe, and then ' +

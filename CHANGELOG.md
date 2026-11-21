@@ -14,6 +14,41 @@ are wording changes, and they are behaviour changes in the way that matters.
 
 ## [Unreleased]
 
+### Added
+
+- `get_account` keeps `usage.kept_build_gb`, the nominal GB of the template
+  builds the account keeps, which was dropped from the answer before. Builds
+  share the disk pool and `remaining.configured_disk_gb` leaves them out, so the
+  answer now states the room a create or disk resize has (that figure minus the
+  builds), or says it is unknown while build history is unread and a create or
+  disk growth may be refused with 503.
+
+### Changed
+
+- The polls behind `wait_for_computer`, operation, snapshot and build waits now
+  end on any 400, as the TypeScript and Python SDKs do. A 409 polls on a
+  clearing word (`contention`, `starting`) only when the word is at the top
+  level of the body; one nested under `error` no longer keeps a wait going to
+  its deadline.
+- `read_clipboard`, `write_clipboard` and `paste_text` no longer say Windows
+  computers are refused: the platform serves them there through the signed-in
+  desktop session. A session too busy or too new to run the request in time
+  answers a 409 with no reason, which the descriptions call worth a bounded
+  retry. `get_desktop_url`'s guidance says the same.
+- `get_account` describes `capabilities.windows` as a per-account grant from an
+  administrator, which no plan includes, rather than a plan permission.
+- `get_webhook` and `list_webhooks` explain the `creator_removed`,
+  `key_revoked` and `session_revoked` disables: who or what disabled the
+  subscription, that it never comes back on its own, and that an owner or
+  member may re-enable it with `update_webhook` and `enabled: true` after
+  checking its url.
+- `create_webhook` says events with `source: "guest"` reach webhooks at a
+  limited rate per computer, that one whose data is over 16 KiB of JSON is not
+  sent, and that window titles and classes arrive truncated.
+- `update_computer`'s `ends_at` says a change made while the computer is being
+  stopped for its current end time is a 409 with reason `contention`, as the
+  platform sends it.
+
 ## [0.24.0] - 2026-11-17
 
 ### Added

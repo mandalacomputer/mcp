@@ -88,6 +88,55 @@ describe('descriptions corrected for 0.8.0', () => {
   });
 });
 
+describe('clipboard, paste and end-time descriptions match what the platform serves', () => {
+  let platform: ReturnType<typeof installFakePlatform>;
+  let connection: Awaited<ReturnType<typeof connect>>;
+  let tools: Awaited<ReturnType<typeof connection.client.listTools>>['tools'];
+  beforeEach(async () => {
+    platform = installFakePlatform();
+    connection = await connect();
+    tools = (await connection.client.listTools()).tools;
+  });
+  afterEach(async () => {
+    await connection.close();
+    platform.restore();
+  });
+  const tool = (name: string) => tools.find((t) => t.name === name);
+
+  it.each(['read_clipboard', 'write_clipboard', 'paste_text'])(
+    '%s no longer says Windows is refused, and names the desktop-session 409',
+    (name) => {
+      const said = tool(name)?.description ?? '';
+      expect(said).not.toMatch(/refused on Windows|Windows and a guest|Linux desktops only/);
+      expect(said).toContain('runs in the signed-in desktop session');
+      expect(said).toContain('answers a 409 that names no reason');
+      expect(said).toContain('a bounded number of times');
+    },
+  );
+
+  it('does not tell get_desktop_url callers the clipboard tools are refused on Windows', async () => {
+    const res = await connection.call('get_desktop_url', { control: true });
+    const said = res.content.map((p) => (p.type === 'text' ? p.text : '')).join('\n');
+    expect(said).toContain('TO MOVE TEXT, use read_clipboard and write_clipboard');
+    expect(said).not.toContain('refused outright on Windows');
+    expect(said).toContain(
+      'paste into the desktop. They also work on Windows, through the signed-in desktop session.',
+    );
+  });
+
+  it('says an end time changed during its own stop is a 409 with reason contention', () => {
+    const props = tool('update_computer')?.inputSchema.properties as Record<
+      string,
+      { description?: string }
+    >;
+    const said = props.ends_at?.description ?? '';
+    expect(said).toContain(
+      'Refused with a 409 and reason contention while the computer is being stopped',
+    );
+    expect(said).not.toContain('409 that names no reason while');
+  });
+});
+
 describe('the docs agree with the agent tools on what a failure status means', () => {
   const read = (path: string) => readFileSync(new URL(`../${path}`, import.meta.url), 'utf8');
 
