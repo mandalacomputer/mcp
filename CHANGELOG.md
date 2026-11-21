@@ -14,6 +14,8 @@ are wording changes, and they are behaviour changes in the way that matters.
 
 ## [Unreleased]
 
+## [0.25.0] - 2026-11-21
+
 ### Added
 
 - `get_account` keeps `usage.kept_build_gb`, the nominal GB of the template
@@ -1674,7 +1676,8 @@ No effect on the tool surface, listed because it is most of the window.
 - Several parser fixes landed before that scanner was retired, each ported to
   and from the TypeScript SDK's byte-identical copy.
 
-[Unreleased]: https://github.com/mandalacomputer/mcp/compare/v0.24.0...HEAD
+[Unreleased]: https://github.com/mandalacomputer/mcp/compare/v0.25.0...HEAD
+[0.25.0]: https://github.com/mandalacomputer/mcp/compare/v0.24.0...v0.25.0
 [0.24.0]: https://github.com/mandalacomputer/mcp/compare/v0.23.0...v0.24.0
 [0.23.0]: https://github.com/mandalacomputer/mcp/compare/v0.22.0...v0.23.0
 [0.22.0]: https://github.com/mandalacomputer/mcp/compare/v0.21.0...v0.22.0
