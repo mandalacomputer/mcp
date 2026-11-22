@@ -1,7 +1,7 @@
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
 import { APIError, NotFoundError, neverSent } from '../errors.js';
-import { guarded, refused, said } from '../format.js';
+import { failed, guarded, refused, said } from '../format.js';
 import * as P from '../paths.js';
 import { safeResult } from './chat.js';
 import { count, label, metadata, metadataCall } from './directory.js';
@@ -71,6 +71,12 @@ const PAUSED: Record<string, string> = {
   failing: 'paused after five failed fires in a row',
   never_fires: 'paused because its cron expression matches no time in the next eight years',
 };
+
+/** A prompt's first line, short enough for a listing. */
+function title(prompt: string): string {
+  const first = prompt.split('\n', 1)[0].trim();
+  return first.length > 120 ? `${first.slice(0, 119)}…` : first;
+}
 
 function state(s: AgentSchedule): string {
   if (!s.paused) return `active; next fire ${s.next_fire_at ?? 'unknown'}`;
@@ -178,11 +184,42 @@ export const registerSchedules: Registrar = (server, session) => {
     ({ computer_id, ...fields }, extra) =>
       guarded(async () => {
         const id = session.resolve(computer_id);
-        const raw = await session.api.json('POST', P.agentSchedules(id), {
-          body: fields,
-          signal: extra.signal,
-        });
-        return answered(raw, `The schedule on ${id}`);
+        // Built before the request, so a path refused here is not mistaken
+        // for a create whose answer was lost.
+        const path = P.agentSchedules(id);
+        // A create is not idempotent: one whose answer was lost, or failed
+        // with a 5xx, may have made a schedule that spends credits on every
+        // fire, and making another would double it. The read that settles it
+        // is named where it is needed.
+        const recover = `Before making another, call list_agent_schedules with computer_id ${id}: a schedule made by this call is the newest there.`;
+        let raw: unknown;
+        try {
+          raw = await session.api.json('POST', path, { body: fields, signal: extra.signal });
+        } catch (err) {
+          if ((err instanceof APIError && err.status < 500) || neverSent(err)) throw err;
+          const result = failed(err);
+          result.content.push({
+            type: 'text',
+            text: `A SCHEDULE MAY HAVE BEEN MADE on ${id}. ${recover}`,
+          });
+          return result;
+        }
+        const parsed = agentSchedule.safeParse(raw);
+        if (!parsed.success) {
+          const made =
+            raw !== null &&
+            typeof raw === 'object' &&
+            typeof (raw as { id?: unknown }).id === 'string' &&
+            P.SCHEDULE_ID.test((raw as { id: string }).id)
+              ? (raw as { id: string }).id
+              : undefined;
+          return refused(
+            made
+              ? `The platform made the schedule on ${id} as ${made}, but the rest of its answer could not be read: read it with get_agent_schedule (schedule_id ${made}) rather than making another.`
+              : `The platform answered the create on ${id}, but its answer could not be read, so A SCHEDULE MAY HAVE BEEN MADE. ${recover}`,
+          );
+        }
+        return said(describe(parsed.data), parsed.data);
       }).then(out),
   );
 
@@ -264,7 +301,16 @@ export const registerSchedules: Registrar = (server, session) => {
             (more
               ? `\n\nMore: pass before=${page.schedules[page.schedules.length - 1].id} for the next page.`
               : ''),
-          page,
+          // Summaries only, as list_agent_runs gives: a prompt may be 64,000
+          // characters, and twenty of them whole would swamp a client's
+          // context. get_agent_schedule reads one whole.
+          {
+            schedules: page.schedules.map(({ recent_fires: _fires, prompt, ...rest }) => ({
+              ...rest,
+              prompt: title(prompt),
+            })),
+            has_more: page.has_more,
+          },
         );
       }).then(out),
   );
