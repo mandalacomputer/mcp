@@ -89,7 +89,7 @@ function state(s: AgentSchedule): string {
 function describe(s: AgentSchedule): string {
   const parts = [
     `${s.id}${s.name ? ` (${s.name})` : ''} on ${s.computer_id}: ${JSON.stringify(s.cron)} in ${s.timezone}, ${state(s)}.`,
-    `Each fire starts a background run with model ${s.model}, at most ${s.max_steps} step(s) and $${s.max_cost_usd} of AI credits${s.thread_id ? `, continuing thread ${s.thread_id}` : ', in a new thread'}.`,
+    `Each fire starts a background run with model ${s.model}, at most ${s.max_steps} step(s), and no model call starts once it has spent $${s.max_cost_usd} of AI credits (the last one can go over)${s.thread_id ? `, continuing thread ${s.thread_id}` : ', in a new thread'}.`,
     `Prompt: ${JSON.stringify(s.prompt)}`,
   ];
   if (s.recent_fires.length)
@@ -131,7 +131,9 @@ const FIELDS = {
     .min(0.25)
     .max(20)
     .optional()
-    .describe('The most each run may spend, in USD of AI credits. Default 2.'),
+    .describe(
+      'The AI-credit budget of each run, in USD, 0.25 to 20; default 2. No model call starts past it, but the last one can go over.',
+    ),
   name: z.string().max(100).nullable().optional().describe('A label of your choosing.'),
   provider: z
     .enum(['anthropic'])
@@ -148,7 +150,7 @@ export const registerSchedules: Registrar = (server, session) => {
     const parsed = agentSchedule.safeParse(raw);
     if (!parsed.success)
       return refused(
-        `${what} was answered, but the answer could not be read: get_agent_schedule reads it as it is.`,
+        `${what} was answered, but the answer could not be read: get_agent_schedule reads it as it is. Read it before sending a change again, since a change moves the next fire.`,
       );
     return said(describe(parsed.data), parsed.data);
   };
@@ -191,7 +193,7 @@ export const registerSchedules: Registrar = (server, session) => {
         // with a 5xx, may have made a schedule that spends credits on every
         // fire, and making another would double it. The read that settles it
         // is named where it is needed.
-        const recover = `Before making another, call list_agent_schedules with computer_id ${id}: a schedule made by this call is the newest there.`;
+        const recover = `Do not make another blind: call list_agent_schedules with computer_id ${id} and look for one with this cron expression, time zone and prompt created just now. Another client may have made one there too, so if more than one could be it, or none clearly is, ask the user rather than making another.`;
         let raw: unknown;
         try {
           raw = await session.api.json('POST', path, { body: fields, signal: extra.signal });
@@ -242,7 +244,9 @@ export const registerSchedules: Registrar = (server, session) => {
             "A thread of the schedule's computer to continue, or null for a new thread each time.",
           ),
       },
-      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true },
+      // Not idempotent: each change sets the next fire from now, so a retry
+      // after a fire time can move that fire to the next one (Codex round 2).
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
     },
     ({ schedule_id, ...fields }, extra) =>
       guarded(async () =>
@@ -346,7 +350,8 @@ export const registerSchedules: Registrar = (server, session) => {
           ? 'Pause a schedule: it starts no more runs until resumed. A run it already started goes on; cancel_agent_run stops one.'
           : "Resume a schedule, whatever paused it; its next fire is the first time after now, and it acts as this server's API key from then on. Its runs spend the account's AI credits, which must be available.",
         inputSchema: { schedule_id: scheduleIdArg },
-        annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
+        // A pause repeats harmlessly; a resume sets the next fire from now.
+        annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: paused },
       },
       ({ schedule_id }, extra) =>
         guarded(async () =>

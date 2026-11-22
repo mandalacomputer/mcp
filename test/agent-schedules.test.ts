@@ -84,6 +84,7 @@ describe('agent schedule tools', () => {
     expect(res.isError).toBe(true);
     expect(textOf(res)).toContain('A SCHEDULE MAY HAVE BEEN MADE on vm-7');
     expect(textOf(res)).toContain('list_agent_schedules with computer_id vm-7');
+    expect(textOf(res)).not.toContain('newest');
   });
 
   it('keeps the id of a schedule whose answer could not otherwise be read', async () => {
@@ -118,6 +119,15 @@ describe('agent schedule tools', () => {
     const res = await call('list_agent_schedules', {});
     expect(res.isError).toBeFalsy();
     expect(JSON.stringify(res).length).toBeLessThan(40_000);
+  });
+
+  it('marks a change and a resume as not safe to repeat, and a pause as safe (Codex round 2)', async () => {
+    const { client } = await open({});
+    const hint = async (name: string) =>
+      (await client.listTools()).tools.find((t) => t.name === name)?.annotations?.idempotentHint;
+    expect(await hint('update_agent_schedule')).toBe(false);
+    expect(await hint('resume_agent_schedule')).toBe(false);
+    expect(await hint('pause_agent_schedule')).toBe(true);
   });
 
   it('pauses, resumes and deletes by id', async () => {
