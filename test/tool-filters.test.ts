@@ -49,12 +49,13 @@ const GROUPS = {
   webhooks:
     'list_webhooks create_webhook get_webhook update_webhook rotate_webhook_secret test_webhook list_webhook_deliveries delete_webhook',
   agent:
-    'run_agent run_agent_chat start_agent_run get_agent_run list_agent_runs cancel_agent_run list_agent_threads get_agent_thread delete_agent_thread',
+    'run_agent run_agent_chat start_agent_run get_agent_run list_agent_runs cancel_agent_run create_agent_schedule update_agent_schedule list_agent_schedules get_agent_schedule pause_agent_schedule resume_agent_schedule delete_agent_schedule list_agent_threads get_agent_thread delete_agent_thread',
 };
-/** The agent tools offered whatever pays: reads of runs and threads, a cancel and a delete (OPL-6085). */
+/** The agent tools offered whatever pays: reads of runs and threads, a cancel and a delete (OPL-6085), and the schedule tools, whose runs credits pay for whatever this session pays with. */
 const AGENT_ALWAYS =
-  'get_agent_run list_agent_runs cancel_agent_run list_agent_threads get_agent_thread delete_agent_thread';
-const AGENT_READS = 'get_agent_run list_agent_runs list_agent_threads get_agent_thread';
+  'get_agent_run list_agent_runs cancel_agent_run create_agent_schedule update_agent_schedule list_agent_schedules get_agent_schedule pause_agent_schedule resume_agent_schedule delete_agent_schedule list_agent_threads get_agent_thread delete_agent_thread';
+const AGENT_READS =
+  'get_agent_run list_agent_runs list_agent_schedules get_agent_schedule list_agent_threads get_agent_thread';
 /** The agent tools something has to pay for: a model key, or AI credits. */
 const AGENT_PAID = 'run_agent run_agent_chat start_agent_run';
 const names = (tools: { name: string }[]) => tools.map((tool) => tool.name).sort();

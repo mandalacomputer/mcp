@@ -112,6 +112,12 @@ export const V1_ROUTES: Route[] = [
   r('GET', 'agent/runs'),
   r('GET', 'agent/runs/:run'),
   r('POST', 'agent/runs/:run/cancel'),
+  // Agent schedules: background runs started on a timetable.
+  r('POST', 'computers/:id/agent/schedules'),
+  r('GET', 'agent/schedules'),
+  r('GET', 'agent/schedules/:schedule'),
+  r('PATCH', 'agent/schedules/:schedule'),
+  r('DELETE', 'agent/schedules/:schedule'),
 
   // Files in and out of the guest.
   r('PUT', 'computers/:id/files'),
@@ -468,6 +474,39 @@ export const PARAMETERS: ReadonlyMap<string, readonly string[]> = new Map([
   ['GET agent/runs', ['query:computer_id', 'query:status', 'query:limit', 'query:before']],
   ['GET agent/runs/:run', []],
   ['POST agent/runs/:run/cancel', []],
+  [
+    'POST computers/:id/agent/schedules',
+    [
+      'body:cron',
+      'body:max_cost_usd',
+      'body:max_steps',
+      'body:model',
+      'body:name',
+      'body:paused',
+      'body:prompt',
+      'body:provider',
+      'body:thread_id',
+      'body:timezone',
+    ],
+  ],
+  ['GET agent/schedules', ['query:before', 'query:computer_id', 'query:limit']],
+  ['GET agent/schedules/:schedule', []],
+  [
+    'PATCH agent/schedules/:schedule',
+    [
+      'body:cron',
+      'body:max_cost_usd',
+      'body:max_steps',
+      'body:model',
+      'body:name',
+      'body:paused',
+      'body:prompt',
+      'body:provider',
+      'body:thread_id',
+      'body:timezone',
+    ],
+  ],
+  ['DELETE agent/schedules/:schedule', []],
 
   // The upload's body is the file, raw — there are no named fields to mirror.
   ['PUT computers/:id/files', ['query:path', 'query:no_wake', 'query:overwrite']],
@@ -746,6 +785,7 @@ export function patternFor(path: string): string {
       // `agent` only, as the platform pins them.
       if (i === 2 && parts[0] === 'agent' && parts[1] === 'threads') return ':thread';
       if (i === 2 && parts[0] === 'agent' && parts[1] === 'runs') return ':run';
+      if (i === 2 && parts[0] === 'agent' && parts[1] === 'schedules') return ':schedule';
       // A template ref's two halves, pinned to a THREE-segment path under
       // `templates` — which is what keeps the two-segment literals,
       // `templates/schema` and `templates/validate`, reducing to themselves. The

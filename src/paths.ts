@@ -1013,6 +1013,20 @@ export const agentRun = (id: string) => {
 };
 export const agentRunCancel = (id: string) => `${agentRun(id)}/cancel`;
 
+/**
+ * Agent schedules: a cron expression that starts a background run on one
+ * computer at each time it names. Made on a computer; read, changed and
+ * deleted by id under one account-wide collection.
+ */
+export const SCHEDULE_ID = /^sch_[0-9a-f]{24}$/;
+export const AGENT_SCHEDULES = 'agent/schedules';
+export const agentSchedules = (id: string) => `${computer(id)}/agent/schedules`;
+export const agentSchedule = (id: string) => {
+  if (!SCHEDULE_ID.test(id))
+    throw new Error('schedule_id must be sch_ followed by 24 lowercase hex');
+  return `${AGENT_SCHEDULES}/${id}`;
+};
+
 /** One webhook subscription. The id is `whk-`-shaped. */
 export const webhook = (id: string) => `${WEBHOOKS}/${segment('webhook_id', id)}`;
 

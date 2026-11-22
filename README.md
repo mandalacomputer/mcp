@@ -425,6 +425,26 @@ configured filters.
 registered whether or not anything can pay for a run, since a run or a thread can
 come from any client — see [Background runs and threads](#background-runs-and-threads)
 
+**Agent schedules** — `create_agent_schedule`, `update_agent_schedule`, `list_agent_schedules`, `get_agent_schedule`, `pause_agent_schedule`, `resume_agent_schedule`, `delete_agent_schedule`, always registered: every scheduled run spends the
+account's AI credits whatever this session pays its own runs with, and the
+platform says so if the account has none — see [Runs on a schedule](#runs-on-a-schedule)
+
+### Runs on a schedule
+
+`create_agent_schedule` runs the same task on a computer on a timetable: at each
+time a five-field `cron` expression names (`"0 9 * * MON-FRI"`), in its
+`timezone`, a background run starts with the schedule's `prompt`, exactly as
+`start_agent_run` would. Scheduled runs spend the account's AI credits — nothing
+is there to send a model key when one fires — and act as the API key this server
+uses. A fire is skipped while the previous run is still going or the computer is
+not running, and one the platform could not send within five minutes of its time
+is `missed`, never sent late; five failed fires in a row pause the schedule.
+`get_agent_schedule` shows when it next fires and its latest fires, each with
+the `run_id` it started for `get_agent_run`; `pause_agent_schedule` and
+`resume_agent_schedule` stop and restart it; `update_agent_schedule` changes it;
+`delete_agent_schedule` (with `confirm: true`) removes it. Runs it already
+started are untouched by any of these.
+
 ### Tool filters
 
 Set `MANDALA_READ_ONLY=1` to register only tools whose existing
@@ -462,7 +482,7 @@ with an error listing all valid tags.
 | `public_urls` | `list_public_urls`, `create_public_url`, `update_public_url`, `delete_public_url` |
 | `credential_gateway` | `list_credential_gateway_bindings`, `create_credential_gateway_binding`, `delete_credential_gateway_binding` |
 | `secrets` | `list_secrets`, `get_secret`, `create_secret`, `set_secret`, `replace_secret`, `delete_secret`, `get_computer_secrets`, `set_computer_secrets` |
-| `agent` | `run_agent`, `run_agent_chat`, `start_agent_run`, `get_agent_run`, `list_agent_runs`, `cancel_agent_run`, `list_agent_threads`, `get_agent_thread`, `delete_agent_thread` |
+| `agent` | `run_agent`, `run_agent_chat`, `start_agent_run`, `get_agent_run`, `list_agent_runs`, `cancel_agent_run`, `create_agent_schedule`, `update_agent_schedule`, `list_agent_schedules`, `get_agent_schedule`, `pause_agent_schedule`, `resume_agent_schedule`, `delete_agent_schedule`, `list_agent_threads`, `get_agent_thread`, `delete_agent_thread` |
 | `activities` | `list_activities`, `get_activity`, `get_activity_results` |
 | `signals` | `read_signals` |
 
@@ -471,9 +491,10 @@ lifecycle and model-key restrictions. `MANDALA_NO_LIFECYCLE=1` still withholds
 its five tools even when their tags are selected; selecting `agent` cannot
 enable `run_agent_chat` without a per-session model key, nor `run_agent` or
 `start_agent_run` without one or credits that can pay. The tools that start a
-run, `cancel_agent_run` and `delete_agent_thread` are withheld by read-only, but
-remain available with lifecycle disabled alone; an `agent` selection with
-read-only keeps the four reads of runs and threads.
+run, `cancel_agent_run`, `delete_agent_thread` and the schedule tools that change
+a schedule are withheld by read-only, but remain available with lifecycle
+disabled alone; an `agent` selection with read-only keeps the reads of runs,
+schedules and threads.
 `MANDALA_TAGS=files MANDALA_READ_ONLY=1` exposes only `list_directory`.
 `activities,results` includes `get_activity_results` once; `signals` is separate
 from the active `events` socket. Filters never grant API privileges: the API

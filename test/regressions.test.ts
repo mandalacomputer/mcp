@@ -3766,6 +3766,8 @@ describe('the tools our own prose tells a model to call', () => {
     'artifact_id',
     'last_error',
     'sign_command',
+    // Agent schedules: a schedule's id, a parameter of the tools that name one.
+    'schedule_id',
   ]);
 
   it('names only tools that exist', async () => {
@@ -5402,6 +5404,8 @@ describe('the event tools and what their annotations claim', () => {
         .sort();
       expect(nonDestructive).toEqual(
         [
+          // Agent schedules: the reads read, and a pause stops runs. A create
+          // or a resume lets runs act on the desktop, so neither is here.
           'create_computer',
           // Stores a new secret; replaces nothing (a taken name is a 409).
           'create_secret',
@@ -5410,6 +5414,7 @@ describe('the event tools and what their annotations claim', () => {
           'get_account',
           'get_activity',
           'get_activity_results',
+          'get_agent_schedule',
           'get_artifact',
           // Reads only (OPL-5866).
           'get_credits',
@@ -5420,6 +5425,7 @@ describe('the event tools and what their annotations claim', () => {
           'get_operation',
           'get_result',
           'list_activities',
+          'list_agent_schedules',
           // Read the retained store's rows and quota usage only (OPL-6587).
           'list_artifacts',
           'list_results',
@@ -5428,6 +5434,7 @@ describe('the event tools and what their annotations claim', () => {
           // Reads only (OPL-5124).
           'list_operations',
           'list_directory',
+          'pause_agent_schedule',
           'poll_events',
           'publish_artifact',
           'read_artifact',

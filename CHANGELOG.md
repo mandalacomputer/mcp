@@ -14,6 +14,15 @@ are wording changes, and they are behaviour changes in the way that matters.
 
 ## [Unreleased]
 
+### Added
+
+- Agent schedule tools: `create_agent_schedule`, `update_agent_schedule`,
+  `list_agent_schedules`, `get_agent_schedule`, `pause_agent_schedule`,
+  `resume_agent_schedule` and `delete_agent_schedule` (which takes
+  `confirm: true`). A schedule starts a background agent run on a computer at
+  each time a cron expression names, on the account's AI credits. Tagged
+  `agent`; the reads survive read-only.
+
 ## [0.25.0] - 2026-11-21
 
 ### Added
