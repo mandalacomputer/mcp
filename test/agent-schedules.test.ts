@@ -166,6 +166,15 @@ describe('agent schedule tools', () => {
     expect(textOf(gone)).toContain(`Deleted ${SCHEDULE_ID}`);
   });
 
+  it('does not call a 404 on delete a deletion (Codex round 4)', async () => {
+    const { call } = await open({});
+    answer({ error: 'schedule not found' }, 404);
+    const res = await call('delete_agent_schedule', { schedule_id: SCHEDULE_ID, confirm: true });
+    expect(res.isError).toBe(true);
+    expect(textOf(res)).toContain('whether');
+    expect(textOf(res)).not.toContain('the first call did it');
+  });
+
   it('refuses a malformed schedule id before any request', async () => {
     const { call } = await open({});
     const before = platform.calls.length;

@@ -413,8 +413,12 @@ export const registerSchedules: Registrar = (server, session) => {
             );
           }
           if (!(err instanceof NotFoundError)) throw err;
-          return said(
-            `Nothing was deleted: there is no schedule ${schedule_id} this key can see. Either it was already deleted — if this is a retry, the first call did it — or the id is wrong.`,
+          // Not a confirmed deletion (Codex, round 4): the platform answers the
+          // same 404 for a schedule this key cannot see — one in another
+          // workspace, or on a computer whose workspace is changing — and that
+          // one still fires.
+          return refused(
+            `Nothing was deleted, and whether ${schedule_id} is gone is not known: this key can see no schedule with that id. It may already have been deleted, the id may be wrong, or it may be one this key cannot reach (another workspace, or a computer changing workspace) and still firing. An account-wide key, or the dashboard, can say which.`,
           );
         }
         if (!z.object({ ok: z.literal(true) }).safeParse(res).success)
