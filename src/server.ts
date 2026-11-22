@@ -28,6 +28,7 @@ import { registerOperations } from './tools/operations.js';
 import { registerPublicUrls } from './tools/publicurls.js';
 import { registerResults } from './tools/results.js';
 import { registerRuns } from './tools/runs.js';
+import { registerSchedules } from './tools/schedules.js';
 import { registerSecrets } from './tools/secrets.js';
 import { registerSignals } from './tools/signals.js';
 import { registerSnapshots } from './tools/snapshots.js';
@@ -361,6 +362,7 @@ export function createServer(cfg: ServerConfig): McpServer {
   registerCredits(server, session, opts);
   registerAgent(server, session, opts);
   registerRuns(server, session, opts);
+  registerSchedules(server, session, opts);
   registerThreads(server, session, opts);
   registerDirectory(server, session, opts);
   registerActivities(server, session, opts);

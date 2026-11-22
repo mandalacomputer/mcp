@@ -560,6 +560,28 @@ export const CHAT_COMPLETION = {
 /** A background agent run (OPL-6085), as `GET agent/runs/:run` answers one that finished. */
 export const RUN_ID = 'run_89abcdef0123456789abcdef';
 export const THREAD_ID = 'thr_0123456789abcdef01234567';
+export const SCHEDULE_ID = 'sch_0123456789abcdef01234567';
+/** An agent schedule, as `GET agent/schedules/:schedule` answers it. */
+export const AGENT_SCHEDULE = {
+  id: SCHEDULE_ID,
+  computer_id: 'vm-1',
+  thread_id: null,
+  name: null,
+  cron: '0 9 * * *',
+  timezone: 'UTC',
+  prompt: 'check the build',
+  model: 'claude-sonnet-5-5',
+  max_steps: 20,
+  max_cost_usd: 2,
+  paused: false,
+  paused_reason: null,
+  next_fire_at: '2026-11-24T09:00:00.000Z',
+  last_fire_at: null,
+  last_run_id: null,
+  created_at: '2026-11-22T09:00:00.000Z',
+  updated_at: '2026-11-22T09:00:00.000Z',
+  recent_fires: [],
+};
 export const AGENT_RUN = {
   id: RUN_ID,
   computer_id: 'vm-1',
@@ -797,6 +819,16 @@ function respond(
   // Background agent runs and threads (OPL-6085). A create answers the run
   // running on the computer in its path, and a cancel the run cancelled, so a
   // tool that reads the wrong computer or the wrong status is caught.
+  // Agent schedules: a create answers the schedule on the computer in its path.
+  const schedules = /^\/computers\/([^/]+)\/agent\/schedules$/.exec(path);
+  if (schedules && method === 'POST')
+    return json({ ...AGENT_SCHEDULE, computer_id: decodeURIComponent(schedules[1]) }, 201);
+  if (path === '/agent/schedules' && method === 'GET')
+    return json({ schedules: [AGENT_SCHEDULE], has_more: false });
+  const schedule = /^\/agent\/schedules\/([^/]+)$/.exec(path);
+  if (schedule && method === 'DELETE') return json({ ok: true });
+  if (schedule && (method === 'GET' || method === 'PATCH'))
+    return json({ ...AGENT_SCHEDULE, id: schedule[1] });
   const runs = /^\/computers\/([^/]+)\/agent\/runs$/.exec(path);
   if (runs && method === 'POST')
     return json({ ...AGENT_RUN_STARTED, computer_id: decodeURIComponent(runs[1]) }, 202);
