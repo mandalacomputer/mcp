@@ -4,4 +4,4 @@
  * client. The release workflow checks a tag against this line and
  * `package.json`.
  */
-export const SERVER_VERSION = '0.25.0';
+export const SERVER_VERSION = '0.26.0';
