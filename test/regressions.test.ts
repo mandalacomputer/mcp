@@ -5404,9 +5404,8 @@ describe('the event tools and what their annotations claim', () => {
         .sort();
       expect(nonDestructive).toEqual(
         [
-          // Agent schedules: a new schedule replaces nothing, the reads read,
-          // and a pause or resume is undone by the other.
-          'create_agent_schedule',
+          // Agent schedules: the reads read, and a pause stops runs. A create
+          // or a resume lets runs act on the desktop, so neither is here.
           'create_computer',
           // Stores a new secret; replaces nothing (a taken name is a 409).
           'create_secret',
@@ -5443,7 +5442,6 @@ describe('the event tools and what their annotations claim', () => {
           'read_file',
           'read_result_output',
           'read_signals',
-          'resume_agent_schedule',
           'retain_execution_output',
           'use_computer',
           'wait_for_computer',

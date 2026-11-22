@@ -146,6 +146,30 @@ const ABOUT =
 
 export const registerSchedules: Registrar = (server, session) => {
   const out = (result: CallToolResult) => safeResult(result, session.modelKey);
+  /**
+   * Send a change. One refused with a 4xx, or never sent, changed nothing and
+   * is passed on as it is. Any other failure leaves open whether it took
+   * effect, and repeating a change moves the next fire again (Codex, round 3),
+   * so the read that settles it is named instead of a retry.
+   */
+  const change = async (
+    scheduleId: string,
+    body: Record<string, unknown>,
+    what: string,
+    signal: AbortSignal,
+  ): Promise<CallToolResult> => {
+    let raw: unknown;
+    try {
+      raw = await session.api.json('PATCH', P.agentSchedule(scheduleId), { body, signal });
+    } catch (err) {
+      if ((err instanceof APIError && err.status < 500) || neverSent(err)) throw err;
+      const why = err instanceof Error ? err.message : String(err);
+      return refused(
+        `${what} could not be confirmed (${why}). IT MAY HAVE TAKEN EFFECT: read the schedule with get_agent_schedule (schedule_id ${scheduleId}) before sending it again, since every change sets the next fire from now.`,
+      );
+    }
+    return answered(raw, what);
+  };
   const answered = (raw: unknown, what: string): CallToolResult => {
     const parsed = agentSchedule.safeParse(raw);
     if (!parsed.success)
@@ -181,7 +205,9 @@ export const registerSchedules: Registrar = (server, session) => {
           ),
         paused: z.boolean().optional().describe('Make it paused.'),
       },
-      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
+      // Every fire is an agent run free to act on the desktop, as
+      // start_agent_run's is (Codex, round 3).
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
     },
     ({ computer_id, ...fields }, extra) =>
       guarded(async () => {
@@ -249,15 +275,9 @@ export const registerSchedules: Registrar = (server, session) => {
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
     },
     ({ schedule_id, ...fields }, extra) =>
-      guarded(async () =>
-        answered(
-          await session.api.json('PATCH', P.agentSchedule(schedule_id), {
-            body: fields,
-            signal: extra.signal,
-          }),
-          `The change to ${schedule_id}`,
-        ),
-      ).then(out),
+      guarded(() => change(schedule_id, fields, `The change to ${schedule_id}`, extra.signal)).then(
+        out,
+      ),
   );
 
   server.registerTool(
@@ -351,16 +371,16 @@ export const registerSchedules: Registrar = (server, session) => {
           : "Resume a schedule, whatever paused it; its next fire is the first time after now, and it acts as this server's API key from then on. Its runs spend the account's AI credits, which must be available.",
         inputSchema: { schedule_id: scheduleIdArg },
         // A pause repeats harmlessly; a resume sets the next fire from now.
-        annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: paused },
+        // A resume lets its runs act on the desktop again; a pause stops them.
+        annotations: { readOnlyHint: false, destructiveHint: !paused, idempotentHint: paused },
       },
       ({ schedule_id }, extra) =>
-        guarded(async () =>
-          answered(
-            await session.api.json('PATCH', P.agentSchedule(schedule_id), {
-              body: { paused },
-              signal: extra.signal,
-            }),
+        guarded(() =>
+          change(
+            schedule_id,
+            { paused },
             `The ${paused ? 'pause' : 'resume'} of ${schedule_id}`,
+            extra.signal,
           ),
         ).then(out),
     );

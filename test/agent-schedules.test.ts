@@ -130,6 +130,28 @@ describe('agent schedule tools', () => {
     expect(await hint('pause_agent_schedule')).toBe(true);
   });
 
+  it.each([504, 'empty', 'garbled'] as const)(
+    'names the read to make when a change may have taken effect (%s, Codex round 3)',
+    async (kind) => {
+      const { call } = await open({});
+      if (kind === 504) answer({ error: 'gateway timeout' }, 504);
+      else answer(kind === 'empty' ? '' : '{"id":', 200);
+      const res = await call('resume_agent_schedule', { schedule_id: SCHEDULE_ID });
+      expect(res.isError).toBe(true);
+      expect(textOf(res)).toContain('get_agent_schedule');
+      expect(textOf(res)).not.toMatch(/send the same call again/i);
+    },
+  );
+
+  it('marks creating and resuming as destructive, and a pause as not', async () => {
+    const { client } = await open({});
+    const hint = async (name: string) =>
+      (await client.listTools()).tools.find((t) => t.name === name)?.annotations?.destructiveHint;
+    expect(await hint('create_agent_schedule')).toBe(true);
+    expect(await hint('resume_agent_schedule')).toBe(true);
+    expect(await hint('pause_agent_schedule')).toBe(false);
+  });
+
   it('pauses, resumes and deletes by id', async () => {
     const { call } = await open({});
     await call('pause_agent_schedule', { schedule_id: SCHEDULE_ID });
