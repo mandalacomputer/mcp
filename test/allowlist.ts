@@ -20,6 +20,8 @@ export const V1_ROUTES: Route[] = [
   r('GET', 'computers/:id/credential-gateway'),
   r('POST', 'computers/:id/credential-gateway'),
   r('DELETE', 'computers/:id/credential-gateway/:binding'),
+  r('GET', 'computers/:id/guest-token'),
+  r('PUT', 'computers/:id/guest-token'),
   r('GET', 'templates'),
   // The template document format (OPL-3568): the published JSON
   // Schema, and a check of a document against it that stores nothing.
@@ -223,6 +225,8 @@ export const V1_ROUTES: Route[] = [
  */
 export const PARAMETERS: ReadonlyMap<string, readonly string[]> = new Map([
   ['GET computers/:id/credential-gateway', []],
+  ['GET computers/:id/guest-token', []],
+  ['PUT computers/:id/guest-token', ['body:enabled']],
   ['DELETE computers/:id/credential-gateway/:binding', []],
   [
     'POST computers/:id/credential-gateway',
@@ -659,6 +663,11 @@ export const ALLOWED = new Set(V1_ROUTES.map(key));
  * be exercised; parameter exceptions stay separate.
  */
 export const UNIMPLEMENTED = new Set<string>([
+  // Guest identity tokens (OPL-6715). The token itself is fetched from inside
+  // a computer, which a tool here never is; the owner's switch is left to the
+  // dashboard and the SDKs, as minting keys is.
+  'GET computers/:id/guest-token',
+  'PUT computers/:id/guest-token',
   // The credential gateway left this list in OPL-6246, reached by
   // list_credential_gateway_bindings, create_credential_gateway_binding and
   // delete_credential_gateway_binding.
